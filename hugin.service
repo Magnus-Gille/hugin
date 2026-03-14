@@ -1,0 +1,22 @@
+[Unit]
+Description=Hugin Task Dispatcher
+After=network-online.target munin-memory.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=magnus
+WorkingDirectory=/home/magnus/hugin
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=10
+EnvironmentFile=/home/magnus/hugin/.env
+
+# Sandboxing
+ProtectSystem=strict
+ReadWritePaths=/home/magnus/hugin /home/magnus/workspace /tmp
+NoNewPrivileges=true
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target
