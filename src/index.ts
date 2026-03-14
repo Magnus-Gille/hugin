@@ -84,7 +84,7 @@ function spawnRuntime(
     const cmd =
       task.runtime === "codex"
         ? ["codex", ["exec", "--full-auto", task.prompt]]
-        : ["claude", ["-p", task.prompt, "--verbose"]];
+        : ["claude", ["-p", "--dangerously-skip-permissions", "--verbose", task.prompt]];
 
     const child = spawn(cmd[0] as string, cmd[1] as string[], {
       cwd: task.workingDir,

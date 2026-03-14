@@ -11,6 +11,7 @@ ExecStart=/usr/bin/node dist/index.js
 Restart=always
 RestartSec=10
 EnvironmentFile=/home/magnus/hugin/.env
+Environment=PATH=/home/magnus/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 
 # Sandboxing
 ProtectSystem=strict
