@@ -23,7 +23,7 @@ Three principles guide every decision:
 
 - **Sovereignty** — All data lives on Magnus's hardware. The Pis hold the database, the files, and the backups. Cloud AI services are stateless tools; they process but don't store.
 - **Privacy** — Writes to memory are scanned for secrets before storage. Auth is required at every layer. Sensitive documents get summaries in Munin but full text stays on the Pi.
-- **Simplicity** — Each service is a single-purpose Node.js/TypeScript application. No frameworks beyond Express for HTTP. No ORMs. No Kubernetes. SQLite for storage. systemd for process management. The entire system can be understood by reading three `src/index.ts` files.
+- **Simplicity** — Each service is a single-purpose Node.js/TypeScript application. No frameworks beyond Express for HTTP. No ORMs. No Kubernetes. SQLite for storage. systemd for process management. The core logic of each service lives in a single `src/index.ts` file, though operational behavior also depends on systemd units, deploy scripts, and transport clients.
 
 ---
 
@@ -83,7 +83,7 @@ graph TB
     Mimir -->|hourly rsync| TimeMachine
 
     %% Task flow
-    CC -->|submit task via Munin| Hugin
+    CC -->|submit task| Munin
     Hugin -->|spawn| Claude_Pi
 ```
 
@@ -369,7 +369,7 @@ Hugin parses this structured markdown, extracts the runtime, working directory, 
 - **Compare-and-swap claiming** — uses Munin's `expected_updated_at` to prevent double-claiming if multiple dispatchers ever run.
 - **Output capture** — ring buffer keeps the last 4,000 characters of combined stdout/stderr.
 - **Timeout handling** — SIGTERM after the configured timeout, SIGKILL after an additional 10 seconds.
-- **Stale task recovery** — on startup, Hugin scans for tasks stuck in `running` state beyond 2x their timeout and marks them as `failed`.
+- **Stale task recovery** — on startup, Hugin scans for tasks in `running` state. A task is considered stale if the elapsed time since its `Submitted at` timestamp exceeds 2x its configured timeout. Stale tasks are marked as `failed`. Note: this measures time since submission, not time since execution started — a task that sat pending for a long time before being claimed could be marked stale immediately after a restart. This is a known simplification.
 - **Graceful shutdown** — SIGTERM is forwarded to any running child process, with a 30-second grace period before SIGKILL.
 
 ### systemd sandboxing
@@ -453,11 +453,11 @@ This process produced concrete improvements to Munin's implementation: UPSERT se
 All three services follow the same deployment model:
 
 1. **Build locally** — `npm run build` compiles TypeScript to `dist/`
-2. **Deploy via script** — `scripts/deploy-*.sh` rsyncs the built output plus `package.json`, `package-lock.json`, `.env`, and the systemd unit file to the target Pi
+2. **Deploy via script** — `scripts/deploy-*.sh` rsyncs the repo tree to the target Pi, excluding `node_modules/`, `.git/`, `.env`, `tests/`, and `.DS_Store`. The `.env` file is preserved on the Pi and never overwritten by the deploy script. After syncing, the script runs `npm install --omit=dev` on the target, installs the systemd unit, and restarts the service.
 3. **systemd manages the process** — `Restart=always`, `RestartSec=10`, sandboxed
 4. **Health endpoints** — every service exposes `/health` for monitoring
 
-There is no CI/CD pipeline. Deploys are manual and intentional — run the script, SSH in to verify. This is appropriate for a two-service, single-operator system.
+There is no CI/CD pipeline. Deploys are manual and intentional — run the script, SSH in to verify. This is appropriate for a three-service, single-operator system.
 
 ### How the services compose
 
