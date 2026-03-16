@@ -98,6 +98,7 @@ describe("result format", () => {
       "- **Started at:** 2026-03-14T10:00:05Z",
       "- **Completed at:** 2026-03-14T10:03:22Z",
       "- **Duration:** 197s",
+      "- **Log file:** ~/.hugin/logs/20260314-100000-test-task.log",
       "",
       "### Output",
       "```",
@@ -107,6 +108,27 @@ describe("result format", () => {
 
     expect(result).toContain("**Exit code:** 0");
     expect(result).toContain("**Duration:** 197s");
+    expect(result).toContain("**Log file:**");
     expect(result).toContain("Hello world");
+  });
+
+  it("should produce timeout result structure", () => {
+    const result = [
+      "## Result (task timed out)\n",
+      "- **Exit code:** TIMEOUT",
+      "- **Started at:** 2026-03-14T10:00:05Z",
+      "- **Completed at:** 2026-03-14T10:03:22Z",
+      "- **Duration:** 197s",
+      "- **Log file:** ~/.hugin/logs/20260314-100000-test-task.log",
+      "",
+      "### Output",
+      "```",
+      "(no output)",
+      "```",
+    ].join("\n");
+
+    expect(result).toContain("task timed out");
+    expect(result).toContain("**Exit code:** TIMEOUT");
+    expect(result).toContain("**Log file:**");
   });
 });

@@ -1,6 +1,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import express from "express";
 import { MuninClient } from "./munin-client.js";
+
+const LOG_DIR = path.join(
+  process.env.HOME || "/home/magnus",
+  ".hugin",
+  "logs"
+);
 
 // --- Configuration ---
 
@@ -12,7 +20,7 @@ const config = {
   pollIntervalMs: parseInt(process.env.HUGIN_POLL_INTERVAL_MS || "30000"),
   defaultTimeoutMs: parseInt(process.env.HUGIN_DEFAULT_TIMEOUT_MS || "300000"),
   workspace: process.env.HUGIN_WORKSPACE || "/home/magnus/workspace",
-  maxOutputChars: parseInt(process.env.HUGIN_MAX_OUTPUT_CHARS || "4000"),
+  maxOutputChars: parseInt(process.env.HUGIN_MAX_OUTPUT_CHARS || "50000"),
 };
 
 if (!config.muninApiKey) {
@@ -75,12 +83,76 @@ function parseTask(content: string): TaskConfig | null {
   };
 }
 
+// --- Log directory ---
+
+function ensureLogDir(): void {
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+}
+
+function extractTaskId(namespace: string): string {
+  return namespace.replace(/^tasks\//, "");
+}
+
+// --- Log rotation ---
+
+async function rotateOldLogs(): Promise<void> {
+  const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - thirtyDaysMs;
+  try {
+    const files = fs.readdirSync(LOG_DIR);
+    let cleaned = 0;
+    for (const file of files) {
+      if (!file.endsWith(".log")) continue;
+      const filePath = path.join(LOG_DIR, file);
+      try {
+        const stat = fs.statSync(filePath);
+        if (stat.mtimeMs < cutoff) {
+          fs.unlinkSync(filePath);
+          cleaned++;
+        }
+      } catch {
+        // Skip files we can't stat/delete
+      }
+    }
+    if (cleaned > 0) {
+      console.log(`Log rotation: cleaned ${cleaned} log file(s) older than 30 days`);
+    }
+  } catch {
+    // LOG_DIR might not exist yet on first run
+  }
+}
+
 // --- Task execution ---
 
+interface SpawnContext {
+  taskNs: string;
+  muninClient: MuninClient;
+}
+
 function spawnRuntime(
-  task: TaskConfig
-): Promise<{ exitCode: number; output: string }> {
+  task: TaskConfig,
+  ctx: SpawnContext
+): Promise<{ exitCode: number | "TIMEOUT"; output: string; logFile: string }> {
   return new Promise((resolve) => {
+    const taskId = extractTaskId(ctx.taskNs);
+    const logFile = path.join(LOG_DIR, `${taskId}.log`);
+    const startedAt = new Date().toISOString();
+    const startMs = Date.now();
+
+    // Open log file stream
+    const logStream = fs.createWriteStream(logFile, { encoding: "utf-8" });
+    logStream.write(
+      [
+        "=== Hugin Task Log ===",
+        `Task: ${ctx.taskNs}`,
+        `Runtime: ${task.runtime}`,
+        `Working dir: ${task.workingDir}`,
+        `Timeout: ${task.timeoutMs}`,
+        `Started: ${startedAt}`,
+        "===\n",
+      ].join("\n")
+    );
+
     const cmd =
       task.runtime === "codex"
         ? ["codex", ["exec", "--full-auto", task.prompt]]
@@ -93,23 +165,55 @@ function spawnRuntime(
     });
 
     currentChild = child;
+    let timedOut = false;
 
-    // Ring buffer for output capture
+    // Ring buffer for output capture (kept for Munin result)
     let output = "";
     const appendOutput = (chunk: Buffer) => {
-      output += chunk.toString();
+      // Replace non-UTF8 sequences for safety
+      const text = chunk.toString("utf-8");
+      output += text;
       if (output.length > config.maxOutputChars * 2) {
         output = output.slice(-config.maxOutputChars);
       }
+      // Stream to log file
+      logStream.write(text);
     };
 
     child.stdout?.on("data", appendOutput);
     child.stderr?.on("data", appendOutput);
 
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
+      timedOut = true;
+      const elapsedS = Math.round((Date.now() - startMs) / 1000);
       console.log(
-        `Task timeout (${task.timeoutMs}ms), sending SIGTERM to child`
+        `Task timeout (${task.timeoutMs}ms / ${elapsedS}s), sending SIGTERM to child`
       );
+
+      // Append timeout note to log file
+      logStream.write(
+        `\n===\nTIMEOUT after ${elapsedS}s — sending SIGTERM\n===\n`
+      );
+
+      // Write partial result to Munin before killing
+      try {
+        await ctx.muninClient.write(ctx.taskNs, "result", [
+          "## Result (PARTIAL — task timed out)\n",
+          `- **Exit code:** TIMEOUT`,
+          `- **Started at:** ${startedAt}`,
+          `- **Timed out at:** ${new Date().toISOString()}`,
+          `- **Duration:** ${elapsedS}s`,
+          `- **Log file:** ~/.hugin/logs/${taskId}.log`,
+          "",
+          "### Last Output",
+          "```",
+          output.slice(-config.maxOutputChars) || "(no output captured)",
+          "```",
+        ].join("\n"));
+      } catch (err) {
+        console.error("Failed to write partial result on timeout:", err);
+      }
+
       child.kill("SIGTERM");
       setTimeout(() => {
         if (!child.killed) child.kill("SIGKILL");
@@ -119,18 +223,39 @@ function spawnRuntime(
     child.on("close", (code) => {
       clearTimeout(timer);
       currentChild = null;
+
+      const durationS = Math.round((Date.now() - startMs) / 1000);
+
+      // Write footer to log file
+      logStream.write(
+        [
+          "\n===",
+          `Exit code: ${timedOut ? "TIMEOUT" : (code ?? 1)}`,
+          `Duration: ${durationS}s`,
+          `Completed: ${new Date().toISOString()}`,
+          "===\n",
+        ].join("\n")
+      );
+      logStream.end();
+
       resolve({
-        exitCode: code ?? 1,
+        exitCode: timedOut ? "TIMEOUT" : (code ?? 1),
         output: output.slice(-config.maxOutputChars),
+        logFile,
       });
     });
 
     child.on("error", (err) => {
       clearTimeout(timer);
       currentChild = null;
+
+      logStream.write(`\n=== Spawn error: ${err.message} ===\n`);
+      logStream.end();
+
       resolve({
         exitCode: 1,
         output: `Spawn error: ${err.message}\n${output.slice(-config.maxOutputChars)}`,
+        logFile,
       });
     });
   });
@@ -260,6 +385,7 @@ async function pollOnce(): Promise<boolean> {
 
   currentTask = taskNs;
   const startedAt = new Date().toISOString();
+  const taskId = extractTaskId(taskNs);
   console.log(`Executing task ${taskNs}...`);
 
   await munin.log(
@@ -268,25 +394,27 @@ async function pollOnce(): Promise<boolean> {
   );
 
   const startMs = Date.now();
-  const result = await spawnRuntime(task);
+  const result = await spawnRuntime(task, { taskNs, muninClient: munin });
   const durationMs = Date.now() - startMs;
   const completedAt = new Date().toISOString();
+  const isTimeout = result.exitCode === "TIMEOUT";
   const ok = result.exitCode === 0;
 
   console.log(
-    `Task ${taskNs} ${ok ? "completed" : "failed"} (exit: ${result.exitCode}, duration: ${Math.round(durationMs / 1000)}s)`
+    `Task ${taskNs} ${ok ? "completed" : isTimeout ? "timed out" : "failed"} (exit: ${result.exitCode}, duration: ${Math.round(durationMs / 1000)}s)`
   );
 
-  // Write result
+  // Write result (for timeout, partial result was already written — overwrite with final)
   await munin.write(
     taskNs,
     "result",
     [
-      "## Result\n",
+      isTimeout ? "## Result (task timed out)\n" : "## Result\n",
       `- **Exit code:** ${result.exitCode}`,
       `- **Started at:** ${startedAt}`,
       `- **Completed at:** ${completedAt}`,
       `- **Duration:** ${Math.round(durationMs / 1000)}s`,
+      `- **Log file:** ~/.hugin/logs/${taskId}.log`,
       "",
       "### Output",
       "```",
@@ -303,7 +431,7 @@ async function pollOnce(): Promise<boolean> {
 
   await munin.log(
     taskNs,
-    `Task ${ok ? "completed" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${result.exitCode})`
+    `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${result.exitCode})`
   );
 
   currentTask = null;
@@ -317,6 +445,9 @@ async function pollLoop(): Promise<void> {
 
   // Recover any tasks left running from a previous crash
   await recoverStaleTasks();
+
+  // Clean up old log files
+  await rotateOldLogs();
 
   while (!shuttingDown) {
     try {
@@ -377,6 +508,10 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
 // --- Start ---
+
+// Ensure log directory exists
+ensureLogDir();
+console.log(`Log directory: ${LOG_DIR}`);
 
 const server = app.listen(config.port, config.host, () => {
   console.log(`Hugin health endpoint: http://${config.host}:${config.port}/health`);
