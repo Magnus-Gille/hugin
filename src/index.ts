@@ -280,22 +280,19 @@ async function recoverStaleTasks(): Promise<void> {
       const entry = await munin.read(result.namespace, "status");
       if (!entry) continue;
 
-      const submittedAt = entry.content.match(
-        /\*\*Submitted at:\*\*\s*(.+)/i
-      )?.[1]?.trim();
-      if (!submittedAt) continue;
-
+      // Use updated_at (when tags changed to "running") not submitted_at
+      const claimedAt = new Date(entry.updated_at).getTime();
       const timeoutStr = entry.content.match(
         /\*\*Timeout:\*\*\s*(\d+)/i
       )?.[1];
       const timeoutMs = timeoutStr
         ? parseInt(timeoutStr)
         : config.defaultTimeoutMs;
-      const elapsed = Date.now() - new Date(submittedAt).getTime();
+      const elapsed = Date.now() - claimedAt;
 
       if (elapsed > timeoutMs * 2) {
         console.log(
-          `Recovering stale task ${result.namespace} (elapsed: ${Math.round(elapsed / 1000)}s)`
+          `Recovering stale task ${result.namespace} (running for ${Math.round(elapsed / 1000)}s, timeout: ${Math.round(timeoutMs / 1000)}s)`
         );
         const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
         await munin.write(
