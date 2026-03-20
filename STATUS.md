@@ -18,14 +18,14 @@
   - GitHub: grimnir-bot (SSH key on Pi, collaborator on hugin/noxctl/heimdall)
   - Pi git identity set to Grimnir Bot
 - Updated Claude Code CLI on Pi: 2.1.39 → 2.1.80 (removed stale /usr/bin/claude)
-- Recovered Munin from missing .env file
+- Recovered Munin from missing .env file (added MUNIN_ALLOWED_HOSTS, OAuth config)
 - Successfully dispatched noxctl tier3 task (running at session end)
 
 ## In Progress
 - noxctl tier3 task running on Pi (2hr timeout, ~23:20 UTC start)
 
 ## Blockers
-- Munin embedding model failing (cache dir issue) — lexical search still works
+- Munin embedding model failing (cache dir ENOENT under ProtectHome=read-only) — lexical search works
 - mDNS (huginmunin.local) not resolving — using Tailscale IP 100.97.117.37
 
 ## Next Steps
