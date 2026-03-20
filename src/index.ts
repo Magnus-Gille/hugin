@@ -33,6 +33,7 @@ if (!config.muninApiKey) {
 let shuttingDown = false;
 let currentTask: string | null = null;
 let currentChild: ChildProcess | null = null;
+const startedAt = Date.now();
 
 const munin = new MuninClient({
   baseUrl: config.muninUrl,
@@ -320,10 +321,25 @@ async function recoverStaleTasks(): Promise<void> {
   }
 }
 
+// --- Heartbeat ---
+
+async function emitHeartbeat(queueDepth: number): Promise<void> {
+  try {
+    await munin.write("tasks/_heartbeat", "status", JSON.stringify({
+      polled_at: new Date().toISOString(),
+      queue_depth: queueDepth,
+      current_task: currentTask,
+      uptime_s: Math.round((Date.now() - startedAt) / 1000),
+    }), ["heartbeat"]);
+  } catch (err) {
+    console.error("Heartbeat write failed:", err);
+  }
+}
+
 // --- Poll loop ---
 
-async function pollOnce(): Promise<boolean> {
-  const { results } = await munin.query({
+async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
+  const { results, total } = await munin.query({
     query: "task",
     tags: ["pending"],
     namespace: "tasks/",
@@ -333,16 +349,17 @@ async function pollOnce(): Promise<boolean> {
 
   // Find the first result that has key "status"
   const taskResult = results.find((r) => r.key === "status");
-  if (!taskResult) return false;
+  if (!taskResult) return { hadTask: false, queueDepth: 0 };
 
   const taskNs = taskResult.namespace;
+  const queueDepth = total;
   const entry = await munin.read(taskNs, "status");
-  if (!entry) return false;
+  if (!entry) return { hadTask: false, queueDepth };
 
   // Verify it's still pending (another dispatcher might have claimed it)
   if (!entry.tags.includes("pending")) {
     console.log(`Task ${taskNs} no longer pending, skipping`);
-    return false;
+    return { hadTask: false, queueDepth };
   }
 
   const task = parseTask(entry.content);
@@ -361,7 +378,7 @@ async function pollOnce(): Promise<boolean> {
       "result",
       "## Result\n\n- **Exit code:** -1\n- **Error:** Failed to parse task (missing prompt or runtime)\n"
     );
-    return true;
+    return { hadTask: true, queueDepth };
   }
 
   console.log(
@@ -380,7 +397,7 @@ async function pollOnce(): Promise<boolean> {
     );
   } catch (err) {
     console.log(`Failed to claim ${taskNs} (concurrent claim?):`, err);
-    return false;
+    return { hadTask: false, queueDepth };
   }
 
   currentTask = taskNs;
@@ -435,7 +452,7 @@ async function pollOnce(): Promise<boolean> {
   );
 
   currentTask = null;
-  return true;
+  return { hadTask: true, queueDepth };
 }
 
 async function pollLoop(): Promise<void> {
@@ -450,11 +467,17 @@ async function pollLoop(): Promise<void> {
   await rotateOldLogs();
 
   while (!shuttingDown) {
+    let queueDepth = 0;
     try {
-      const hadTask = await pollOnce();
-      if (hadTask && !shuttingDown) continue; // Check for more immediately
+      const poll = await pollOnce();
+      queueDepth = poll.queueDepth;
+      // Fire-and-forget heartbeat
+      emitHeartbeat(queueDepth);
+      if (poll.hadTask && !shuttingDown) continue; // Check for more immediately
     } catch (err) {
       console.error("Poll error:", err);
+      // Still emit heartbeat on error
+      emitHeartbeat(queueDepth);
     }
 
     // Wait for next poll

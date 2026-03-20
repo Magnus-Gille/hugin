@@ -36,6 +36,14 @@ else
   echo "  Generate a key or reuse the existing Munin API key"
 fi
 
+echo "==> Syncing global Claude config..."
+"$(dirname "$0")/sync-claude-config.sh" "$PI_HOST"
+
+echo "==> Installing CLI update cron job..."
+CRON_CMD="0 4 * * * $REMOTE_DIR/scripts/update-cli.sh 2>&1 | logger -t hugin-update"
+ssh "$REMOTE" "crontab -l 2>/dev/null | grep -v 'update-cli.sh' | { cat; echo '$CRON_CMD'; } | crontab -"
+echo "  Cron installed: daily at 04:00"
+
 echo "==> Ensuring workspace directory exists..."
 ssh "$REMOTE" "mkdir -p /home/$DEPLOY_USER/workspace"
 
