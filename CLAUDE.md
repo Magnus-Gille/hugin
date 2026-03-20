@@ -18,9 +18,10 @@ Part of the Grimnir system: **Munin** (memory/brain), **Mímir** (file archive),
 1. Polls Munin every 30s for entries in `tasks/` namespace with tag `pending`
 2. Claims a task (updates tags to `running` with compare-and-swap)
 3. Spawns the configured runtime (`claude -p` or `codex exec --full-auto`)
-4. Captures stdout/stderr (last 4000 chars)
+4. Captures stdout/stderr (last 50k chars) + streams to per-task log file
 5. Writes result back to Munin, updates tags to `completed` or `failed`
-6. One task at a time — no parallelism
+6. Emits heartbeat to `tasks/_heartbeat` after each poll cycle
+7. One task at a time — no parallelism
 
 ### Task schema
 
@@ -62,7 +63,9 @@ hugin/
 ├── tests/
 │   └── dispatcher.test.ts
 └── scripts/
-    └── deploy-pi.sh
+    ├── deploy-pi.sh
+    ├── sync-claude-config.sh  # Sync ~/.claude/ config to Pi
+    └── update-cli.sh          # Auto-update CLI tools (daily cron)
 ```
 
 ## How to build
@@ -90,7 +93,7 @@ MUNIN_API_KEY=<key> MUNIN_URL=http://localhost:3030 npm run dev
 ./scripts/deploy-pi.sh [hostname]
 ```
 
-Default host: `huginmunin.local`.
+Default host: `huginmunin.local` (or Tailscale IP `100.97.117.37` if mDNS unavailable).
 
 The Pi needs a `.env` file at `/home/magnus/hugin/.env`:
 ```
@@ -108,4 +111,4 @@ MUNIN_API_KEY=<same key Munin uses>
 | `HUGIN_POLL_INTERVAL_MS` | `30000` | Poll frequency (ms) |
 | `HUGIN_DEFAULT_TIMEOUT_MS` | `300000` | Default task timeout (ms) |
 | `HUGIN_WORKSPACE` | `/home/magnus/workspace` | Default working directory |
-| `HUGIN_MAX_OUTPUT_CHARS` | `4000` | Max output chars to capture |
+| `HUGIN_MAX_OUTPUT_CHARS` | `50000` | Max output chars to capture |
