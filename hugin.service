@@ -15,7 +15,7 @@ Environment=PATH=/home/magnus/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 
 # Sandboxing
 ProtectSystem=strict
-ReadWritePaths=/home/magnus/hugin /home/magnus/workspace /tmp
+ReadWritePaths=/home/magnus /tmp
 NoNewPrivileges=true
 PrivateTmp=false
 

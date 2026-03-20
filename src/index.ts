@@ -140,6 +140,9 @@ function spawnRuntime(
     const startedAt = new Date().toISOString();
     const startMs = Date.now();
 
+    // Ensure working directory exists
+    fs.mkdirSync(task.workingDir, { recursive: true });
+
     // Open log file stream
     const logStream = fs.createWriteStream(logFile, { encoding: "utf-8" });
     logStream.write(
@@ -221,14 +224,21 @@ function spawnRuntime(
       }, 10000);
     }, task.timeoutMs);
 
+    let logEnded = false;
+    function endLog(footer: string): void {
+      if (logEnded) return;
+      logEnded = true;
+      logStream.write(footer);
+      logStream.end();
+    }
+
     child.on("close", (code) => {
       clearTimeout(timer);
       currentChild = null;
 
       const durationS = Math.round((Date.now() - startMs) / 1000);
 
-      // Write footer to log file
-      logStream.write(
+      endLog(
         [
           "\n===",
           `Exit code: ${timedOut ? "TIMEOUT" : (code ?? 1)}`,
@@ -237,7 +247,6 @@ function spawnRuntime(
           "===\n",
         ].join("\n")
       );
-      logStream.end();
 
       resolve({
         exitCode: timedOut ? "TIMEOUT" : (code ?? 1),
@@ -250,8 +259,7 @@ function spawnRuntime(
       clearTimeout(timer);
       currentChild = null;
 
-      logStream.write(`\n=== Spawn error: ${err.message} ===\n`);
-      logStream.end();
+      endLog(`\n=== Spawn error: ${err.message} ===\n`);
 
       resolve({
         exitCode: 1,

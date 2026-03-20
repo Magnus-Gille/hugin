@@ -2,9 +2,9 @@
 
 ## What this project is
 
-Hugin is a task dispatcher for the Jarvis personal AI system. Named after one of Odin's ravens (thought). Polls Munin for pending tasks, spawns AI runtimes (Claude Code, Codex) to execute them, and writes results back.
+Hugin is a task dispatcher for the Grimnir personal AI system. Named after one of Odin's ravens (thought). Polls Munin for pending tasks, spawns AI runtimes (Claude Code, Codex) to execute them, and writes results back.
 
-Part of the Hugin & Munin system: **Munin** (memory/brain), **Mímir** (file archive), **Hugin** (task dispatcher).
+Part of the Grimnir system: **Munin** (memory/brain), **Mímir** (file archive), **Hugin** (task dispatcher).
 
 ## Architecture
 

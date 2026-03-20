@@ -1,7 +1,7 @@
 {
   "name": "hugin",
   "version": "0.1.0",
-  "description": "Task dispatcher for the Jarvis AI system — polls Munin for tasks, spawns AI runtimes, reports results",
+  "description": "Task dispatcher for the Grimnir AI system — polls Munin for tasks, spawns AI runtimes, reports results",
   "type": "module",
   "scripts": {
     "build": "tsc",

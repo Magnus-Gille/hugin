@@ -1,6 +1,6 @@
 # Hugin
 
-Task dispatcher for the [Jarvis](https://github.com/magnusgille) personal AI system. Named after Odin's raven of thought.
+Task dispatcher for the [Grimnir](https://github.com/Magnus-Gille/grimnir) personal AI system. Named after Odin's raven of thought.
 
 Polls [Munin](https://github.com/magnusgille/munin-memory) for pending tasks, spawns AI runtimes to execute them, and writes results back. Submit tasks from any Claude environment (Desktop, Web, Mobile, Code) — Hugin picks them up and runs them on the Pi.
 

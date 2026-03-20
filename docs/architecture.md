@@ -1,17 +1,17 @@
-# The Jarvis System — Architecture Guide
+# The Grimnir System — Architecture Guide
 
-> Internal reference document for the Jarvis personal AI infrastructure.
+> Internal reference document for the Grimnir personal AI infrastructure.
 > Last updated: 2026-03-14.
 
 ---
 
-## The Jarvis System
+## The Grimnir System
 
-Jarvis is a personal AI infrastructure built on two Raspberry Pi 5 units, a MacBook, and a set of cloud AI services. It gives Claude (and other AI runtimes) persistent memory, file access, and the ability to execute tasks autonomously — all running on hardware owned and controlled by its operator.
+Grimnir is a personal AI infrastructure built on two Raspberry Pi 5 units, a MacBook, and a set of cloud AI services. It gives Claude (and other AI runtimes) persistent memory, file access, and the ability to execute tasks autonomously — all running on hardware owned and controlled by its operator.
 
 ### Why it exists
 
-Every conversation with Claude starts from zero. There is no memory between sessions, no access to personal files, and no way to say "do this while I sleep." Jarvis solves these three problems:
+Every conversation with Claude starts from zero. There is no memory between sessions, no access to personal files, and no way to say "do this while I sleep." Grimnir solves these three problems:
 
 1. **Memory** — Munin gives Claude persistent, searchable memory across every environment (desktop, mobile, web, CLI).
 2. **Files** — Mimir makes personal documents available to agents over HTTPS, with summaries cached in Munin for environments that can't fetch files directly.
@@ -367,9 +367,9 @@ Hugin parses this structured markdown, extracts the runtime, working directory, 
 
 - **One task at a time** — no parallelism. Simplicity over throughput.
 - **Compare-and-swap claiming** — uses Munin's `expected_updated_at` to prevent double-claiming if multiple dispatchers ever run.
-- **Output capture** — ring buffer keeps the last 4,000 characters of combined stdout/stderr.
+- **Output capture** — ring buffer keeps the last 50,000 characters of combined stdout/stderr. Full output is also streamed to per-task log files in `~/.hugin/logs/`.
 - **Timeout handling** — SIGTERM after the configured timeout, SIGKILL after an additional 10 seconds.
-- **Stale task recovery** — on startup, Hugin scans for tasks in `running` state. A task is considered stale if the elapsed time since its `Submitted at` timestamp exceeds 2x its configured timeout. Stale tasks are marked as `failed`. Note: this measures time since submission, not time since execution started — a task that sat pending for a long time before being claimed could be marked stale immediately after a restart. This is a known simplification.
+- **Stale task recovery** — on startup, Hugin scans for tasks in `running` state. A task is considered stale if the elapsed time since it was claimed (entered `running` state, tracked via `updated_at`) exceeds 2x its configured timeout. Stale tasks are marked as `failed`.
 - **Graceful shutdown** — SIGTERM is forwarded to any running child process, with a 30-second grace period before SIGKILL.
 
 ### systemd sandboxing
@@ -380,7 +380,7 @@ Hugin runs with `ProtectSystem=strict`, `NoNewPrivileges=true`, and write access
 
 ## Security Model
 
-Every network-exposed service in Jarvis uses the same two-layer authentication pattern:
+Every network-exposed service in Grimnir uses the same two-layer authentication pattern:
 
 ### Layer 1: Edge authentication
 
@@ -430,7 +430,7 @@ The Munin backup uses `sqlite3 .backup` (WAL-safe) rather than file copy, follow
 
 ### The two-layer state model
 
-A recurring pattern across Jarvis is the separation of **execution detail** and **cross-environment summary**:
+A recurring pattern across Grimnir is the separation of **execution detail** and **cross-environment summary**:
 
 - **Local files** hold the full detail — source code, documents, build artifacts. These live on disk and are accessed directly by the runtime executing the work.
 - **Munin entries** hold the summary — project status, document summaries, task results. These are accessible from any environment, including mobile.
@@ -439,7 +439,7 @@ This isn't just a convenience pattern; it's a necessity. Claude.ai and Claude Mo
 
 ### The debate/review process
 
-Architecture decisions in Jarvis are stress-tested through a structured debate process between AI systems:
+Architecture decisions in Grimnir are stress-tested through a structured debate process between AI systems:
 
 1. **Claude** (Opus) drafts the proposal or design
 2. **Codex** (GPT) provides adversarial review — finding blind spots, challenging assumptions, proposing alternatives
@@ -486,7 +486,7 @@ Another workflow — autonomous task execution:
 
 ## What's Next
 
-The Jarvis system is functional but early. The roadmap extends in three directions:
+The Grimnir system is functional but early. The roadmap extends in three directions:
 
 ### Hugin as ingestion worker
 
@@ -506,7 +506,7 @@ The Sovereign AI Compliance project (born from an architecture debate) is design
 
 ### The north star
 
-The goal is simple: **tell Jarvis to do X and go to sleep.** Wake up to a summary of what happened, what succeeded, what needs attention. The pieces are in place — memory, files, task execution. What remains is making the feedback loop reliable enough to trust overnight.
+The goal is simple: **tell Grimnir to do X and go to sleep.** Wake up to a summary of what happened, what succeeded, what needs attention. The pieces are in place — memory, files, task execution. What remains is making the feedback loop reliable enough to trust overnight.
 
 ---
 
