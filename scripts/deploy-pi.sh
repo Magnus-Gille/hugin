@@ -7,7 +7,7 @@ set -euo pipefail
 PI_HOST="${1:-huginmunin.local}"
 DEPLOY_USER="${DEPLOY_USER:-magnus}"
 REMOTE="$DEPLOY_USER@$PI_HOST"
-REMOTE_DIR="/home/$DEPLOY_USER/hugin"
+REMOTE_DIR="/home/$DEPLOY_USER/repos/hugin"
 
 echo "==> Building locally..."
 npm run build

@@ -6,11 +6,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=magnus
-WorkingDirectory=/home/magnus/hugin
+WorkingDirectory=/home/magnus/repos/hugin
 ExecStart=/usr/bin/node dist/index.js
 Restart=always
 RestartSec=10
-EnvironmentFile=/home/magnus/hugin/.env
+EnvironmentFile=/home/magnus/repos/hugin/.env
 Environment=PATH=/home/magnus/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 
 # Sandboxing
