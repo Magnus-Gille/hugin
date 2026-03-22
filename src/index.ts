@@ -4,11 +4,9 @@ import * as path from "node:path";
 import express from "express";
 import { MuninClient } from "./munin-client.js";
 
-const LOG_DIR = path.join(
-  process.env.HOME || "/home/magnus",
-  ".hugin",
-  "logs"
-);
+const HUGIN_HOME = path.join(process.env.HOME || "/home/magnus", ".hugin");
+const LOG_DIR = path.join(HUGIN_HOME, "logs");
+const HOOK_RESULT_DIR = path.join(HUGIN_HOME, "hook-results");
 
 // --- Configuration ---
 
@@ -165,6 +163,27 @@ async function rotateOldLogs(): Promise<void> {
   }
 }
 
+// --- Hook result reader ---
+
+interface HookResult {
+  task_id: string;
+  task_namespace: string;
+  session_id: string | null;
+  last_assistant_message: string;
+  completed_at: string;
+}
+
+function readHookResult(taskId: string): HookResult | null {
+  const filePath = path.join(HOOK_RESULT_DIR, `${taskId}.json`);
+  try {
+    const data = fs.readFileSync(filePath, "utf-8");
+    fs.unlinkSync(filePath); // Clean up after reading
+    return JSON.parse(data) as HookResult;
+  } catch {
+    return null;
+  }
+}
+
 // --- Task execution ---
 
 interface SpawnContext {
@@ -207,7 +226,12 @@ function spawnRuntime(
     const child = spawn(cmd[0] as string, cmd[1] as string[], {
       cwd: task.workingDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: {
+        ...process.env,
+        HOME: "/home/magnus",
+        HUGIN_TASK_ID: taskId,
+        HUGIN_TASK_NAMESPACE: ctx.taskNs,
+      },
     });
 
     currentChild = child;
@@ -468,7 +492,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     `Task ${taskNs} ${ok ? "completed" : isTimeout ? "timed out" : "failed"} (exit: ${result.exitCode}, duration: ${Math.round(durationMs / 1000)}s)`
   );
 
-  // Write result (for timeout, partial result was already written — overwrite with final)
+  // Check for hook result (Stop hook writes last_assistant_message to file)
+  const hookResult = readHookResult(taskId);
+  const resultSource = hookResult ? "hook" : "stdout";
+  if (hookResult) {
+    console.log(`Using Stop hook result for task ${taskNs}`);
+  }
+
+  // Write result — prefer hook's last_assistant_message over raw stdout
   await munin.write(
     taskNs,
     "result",
@@ -478,12 +509,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       `- **Started at:** ${startedAt}`,
       `- **Completed at:** ${completedAt}`,
       `- **Duration:** ${Math.round(durationMs / 1000)}s`,
+      `- **Result source:** ${resultSource}`,
       `- **Log file:** ~/.hugin/logs/${taskId}.log`,
       "",
-      "### Output",
-      "```",
-      result.output || "(no output)",
-      "```",
+      hookResult
+        ? `### Response\n\n${hookResult.last_assistant_message}`
+        : `### Output\n\`\`\`\n${result.output || "(no output)"}\n\`\`\``,
     ].join("\n")
   );
 
