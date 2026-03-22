@@ -112,3 +112,5 @@ MUNIN_API_KEY=<same key Munin uses>
 | `HUGIN_DEFAULT_TIMEOUT_MS` | `300000` | Default task timeout (ms) |
 | `HUGIN_WORKSPACE` | `/home/magnus/workspace` | Default working directory |
 | `HUGIN_MAX_OUTPUT_CHARS` | `50000` | Max output chars to capture |
+| `NOTIFY_EMAIL` | — | Email recipient for task notifications (via Heimdall) |
+| `HEIMDALL_URL` | `http://127.0.0.1:3033` | Heimdall HTTP endpoint |
