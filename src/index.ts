@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import express from "express";
 import { MuninClient } from "./munin-client.js";
+import { executeSdkTask } from "./sdk-executor.js";
 
 const HUGIN_HOME = path.join(process.env.HOME || "/home/magnus", ".hugin");
 const LOG_DIR = path.join(HUGIN_HOME, "logs");
@@ -21,6 +22,7 @@ const config = {
   maxOutputChars: parseInt(process.env.HUGIN_MAX_OUTPUT_CHARS || "50000"),
   notifyEmail: process.env.NOTIFY_EMAIL || "",
   heimdallUrl: process.env.HEIMDALL_URL || "http://127.0.0.1:3033",
+  claudeExecutor: (process.env.HUGIN_CLAUDE_EXECUTOR || "sdk") as "sdk" | "spawn",
 };
 
 if (!config.muninApiKey) {
@@ -33,6 +35,7 @@ if (!config.muninApiKey) {
 let shuttingDown = false;
 let currentTask: string | null = null;
 let currentChild: ChildProcess | null = null;
+let currentSdkAbort: AbortController | null = null;
 const startedAt = Date.now();
 
 const munin = new MuninClient({
@@ -476,47 +479,130 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   const taskId = extractTaskId(taskNs);
   console.log(`Executing task ${taskNs}...`);
 
+  const useSdk = task.runtime === "claude" && config.claudeExecutor === "sdk";
+  const executorLabel = useSdk ? "agent-sdk" : "spawn";
+
   await munin.log(
     taskNs,
-    `Task started by Hugin (runtime: ${task.runtime}, timeout: ${task.timeoutMs}ms)`
+    `Task started by Hugin (runtime: ${task.runtime}, executor: ${executorLabel}, timeout: ${task.timeoutMs}ms)`
   );
 
   const startMs = Date.now();
-  const result = await spawnRuntime(task, { taskNs, muninClient: munin });
-  const durationMs = Date.now() - startMs;
-  const completedAt = new Date().toISOString();
-  const isTimeout = result.exitCode === "TIMEOUT";
-  const ok = result.exitCode === 0;
 
-  console.log(
-    `Task ${taskNs} ${ok ? "completed" : isTimeout ? "timed out" : "failed"} (exit: ${result.exitCode}, duration: ${Math.round(durationMs / 1000)}s)`
-  );
+  // --- Execute via SDK or spawn ---
+  let exitCode: number | "TIMEOUT";
+  let output: string;
+  let logFile: string;
+  let resultText: string | null = null;
+  let costUsd: number | null = null;
 
-  // Check for hook result (Stop hook writes last_assistant_message to file)
-  const hookResult = readHookResult(taskId);
-  const resultSource = hookResult ? "hook" : "stdout";
-  if (hookResult) {
-    console.log(`Using Stop hook result for task ${taskNs}`);
+  if (useSdk) {
+    console.log(`Using Agent SDK executor for task ${taskNs}`);
+    const sdkAbort = new AbortController();
+    currentSdkAbort = sdkAbort;
+    const sdkResult = await executeSdkTask(
+      {
+        prompt: task.prompt,
+        workingDir: task.workingDir,
+        timeoutMs: task.timeoutMs,
+        muninUrl: config.muninUrl,
+        muninApiKey: config.muninApiKey,
+        maxOutputChars: config.maxOutputChars,
+      },
+      taskId,
+      LOG_DIR,
+      {
+        abortController: sdkAbort,
+        onTimeout: async (partialOutput) => {
+          // Write partial result on timeout
+          try {
+            await munin.write(taskNs, "result", [
+              "## Result (PARTIAL — task timed out)\n",
+              `- **Exit code:** TIMEOUT`,
+              `- **Started at:** ${startedAt}`,
+              `- **Timed out at:** ${new Date().toISOString()}`,
+              `- **Duration:** ${Math.round((Date.now() - startMs) / 1000)}s`,
+              `- **Executor:** agent-sdk`,
+              `- **Log file:** ~/.hugin/logs/${taskId}.log`,
+              "",
+              "### Last Output",
+              "```",
+              partialOutput || "(no output captured)",
+              "```",
+            ].join("\n"));
+          } catch (err) {
+            console.error("Failed to write partial result on timeout:", err);
+          }
+        },
+      },
+    );
+    currentSdkAbort = null;
+    exitCode = sdkResult.exitCode;
+    output = sdkResult.output;
+    logFile = sdkResult.logFile;
+    resultText = sdkResult.resultText;
+    costUsd = sdkResult.costUsd;
+  } else {
+    const spawnResult = await spawnRuntime(task, { taskNs, muninClient: munin });
+    exitCode = spawnResult.exitCode;
+    output = spawnResult.output;
+    logFile = spawnResult.logFile;
   }
 
-  // Write result — prefer hook's last_assistant_message over raw stdout
-  await munin.write(
-    taskNs,
-    "result",
-    [
-      isTimeout ? "## Result (task timed out)\n" : "## Result\n",
-      `- **Exit code:** ${result.exitCode}`,
-      `- **Started at:** ${startedAt}`,
-      `- **Completed at:** ${completedAt}`,
-      `- **Duration:** ${Math.round(durationMs / 1000)}s`,
-      `- **Result source:** ${resultSource}`,
-      `- **Log file:** ~/.hugin/logs/${taskId}.log`,
-      "",
-      hookResult
-        ? `### Response\n\n${hookResult.last_assistant_message}`
-        : `### Output\n\`\`\`\n${result.output || "(no output)"}\n\`\`\``,
-    ].join("\n")
+  const durationMs = Date.now() - startMs;
+  const completedAt = new Date().toISOString();
+  const isTimeout = exitCode === "TIMEOUT";
+  const ok = exitCode === 0;
+
+  console.log(
+    `Task ${taskNs} ${ok ? "completed" : isTimeout ? "timed out" : "failed"} (exit: ${exitCode}, executor: ${executorLabel}, duration: ${Math.round(durationMs / 1000)}s)`
   );
+
+  // For SDK executor, use resultText directly (structured result from query)
+  // For spawn executor, check for hook result, then fall back to stdout
+  let resultBody: string;
+  let resultSource: string;
+
+  if (useSdk && resultText) {
+    resultSource = "agent-sdk";
+    resultBody = `### Response\n\n${resultText}`;
+  } else if (!useSdk) {
+    const hookResult = readHookResult(taskId);
+    if (hookResult) {
+      resultSource = "hook";
+      resultBody = `### Response\n\n${hookResult.last_assistant_message}`;
+      console.log(`Using Stop hook result for task ${taskNs}`);
+    } else {
+      resultSource = "stdout";
+      resultBody = `### Output\n\`\`\`\n${output || "(no output)"}\n\`\`\``;
+    }
+  } else {
+    resultSource = useSdk ? "agent-sdk" : "stdout";
+    resultBody = `### Output\n\`\`\`\n${output || "(no output)"}\n\`\`\``;
+  }
+
+  const costLine = costUsd !== null ? `\n- **Cost:** $${costUsd.toFixed(4)}` : "";
+
+  // Write result to Munin (skip if timeout already wrote partial result via SDK)
+  if (!(isTimeout && useSdk)) {
+    await munin.write(
+      taskNs,
+      "result",
+      [
+        isTimeout ? "## Result (task timed out)\n" : "## Result\n",
+        `- **Exit code:** ${exitCode}`,
+        `- **Started at:** ${startedAt}`,
+        `- **Completed at:** ${completedAt}`,
+        `- **Duration:** ${Math.round(durationMs / 1000)}s`,
+        `- **Executor:** ${executorLabel}`,
+        `- **Result source:** ${resultSource}`,
+        `- **Log file:** ~/.hugin/logs/${taskId}.log`,
+        costLine,
+        "",
+        resultBody,
+      ].join("\n")
+    );
+  }
 
   // Update status tags
   await munin.write(taskNs, "status", entry.content, [
@@ -526,7 +612,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
   await munin.log(
     taskNs,
-    `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${result.exitCode})`
+    `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`
   );
 
   // Fire-and-forget email notification
@@ -534,7 +620,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     taskId,
     ok ? "completed" : isTimeout ? "timed out" : "failed",
     Math.round(durationMs / 1000),
-    result.output || "(no output)",
+    resultText || output || "(no output)",
   ).catch(() => {}); // swallow — must never block task lifecycle
 
   currentTask = null;
@@ -600,6 +686,11 @@ function shutdown(signal: string): void {
   console.log(`Received ${signal}, shutting down...`);
   shuttingDown = true;
 
+  if (currentSdkAbort) {
+    console.log("Aborting running SDK task...");
+    currentSdkAbort.abort();
+  }
+
   if (currentChild) {
     console.log("Forwarding signal to running task...");
     currentChild.kill("SIGTERM");
@@ -626,6 +717,7 @@ const server = app.listen(config.port, config.host, () => {
   console.log(`Hugin health endpoint: http://${config.host}:${config.port}/health`);
   console.log(`Munin: ${config.muninUrl}`);
   console.log(`Workspace: ${config.workspace}`);
+  console.log(`Claude executor: ${config.claudeExecutor} (set HUGIN_CLAUDE_EXECUTOR=spawn to use legacy)`);
 });
 
 // Check Munin is reachable before starting poll loop

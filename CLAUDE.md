@@ -17,8 +17,10 @@ Part of the Grimnir system: **Munin** (memory/brain), **Mímir** (file archive),
 
 1. Polls Munin every 30s for entries in `tasks/` namespace with tag `pending`
 2. Claims a task (updates tags to `running` with compare-and-swap)
-3. Spawns the configured runtime (`claude -p` or `codex exec --full-auto`)
-4. Captures stdout/stderr (last 50k chars) + streams to per-task log file
+3. Executes via the configured runtime:
+   - `claude` (default): Agent SDK `query()` for structured results (or legacy `claude -p` spawn via `HUGIN_CLAUDE_EXECUTOR=spawn`)
+   - `codex`: `codex exec --full-auto` spawn
+4. Captures output (SDK message events or stdout/stderr) + streams to per-task log file
 5. Writes result back to Munin, updates tags to `completed` or `failed`
 6. Emits heartbeat to `tasks/_heartbeat` after each poll cycle
 7. One task at a time — no parallelism
@@ -59,9 +61,11 @@ hugin/
 ├── hugin.service
 ├── src/
 │   ├── index.ts           # Dispatcher: poll loop, task execution, health endpoint
+│   ├── sdk-executor.ts    # Agent SDK executor (query() based, default for claude runtime)
 │   └── munin-client.ts    # HTTP client for Munin JSON-RPC API
 ├── tests/
-│   └── dispatcher.test.ts
+│   ├── dispatcher.test.ts
+│   └── sdk-executor.test.ts
 └── scripts/
     ├── deploy-pi.sh
     ├── sync-claude-config.sh  # Sync ~/.claude/ config to Pi
@@ -112,5 +116,6 @@ MUNIN_API_KEY=<same key Munin uses>
 | `HUGIN_DEFAULT_TIMEOUT_MS` | `300000` | Default task timeout (ms) |
 | `HUGIN_WORKSPACE` | `/home/magnus/workspace` | Default working directory |
 | `HUGIN_MAX_OUTPUT_CHARS` | `50000` | Max output chars to capture |
+| `HUGIN_CLAUDE_EXECUTOR` | `sdk` | Claude executor: `sdk` (Agent SDK) or `spawn` (legacy CLI) |
 | `NOTIFY_EMAIL` | — | Email recipient for task notifications (via Heimdall) |
 | `HEIMDALL_URL` | `http://127.0.0.1:3033` | Heimdall HTTP endpoint |
