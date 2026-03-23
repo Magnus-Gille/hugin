@@ -34,6 +34,7 @@ if (!config.muninApiKey) {
 
 let shuttingDown = false;
 let currentTask: string | null = null;
+let currentTaskConfig: TaskConfig | null = null;
 let currentChild: ChildProcess | null = null;
 let currentSdkAbort: AbortController | null = null;
 const startedAt = Date.now();
@@ -49,9 +50,36 @@ interface TaskConfig {
   prompt: string;
   runtime: "claude" | "codex";
   workingDir: string;
+  context?: string;
   timeoutMs: number;
   submittedBy: string;
   submittedAt: string;
+  replyTo?: string;
+  replyFormat?: string;
+  group?: string;
+  sequence?: number;
+}
+
+function resolveContext(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("repo:")) {
+    const name = trimmed.slice(5);
+    const resolved = path.resolve(`/home/magnus/repos/${name}`);
+    // Guard against traversal (e.g. repo:../../tmp)
+    if (!resolved.startsWith("/home/magnus/repos/")) {
+      return "/home/magnus/workspace";
+    }
+    return resolved;
+  }
+  switch (trimmed) {
+    case "scratch": return "/home/magnus/scratch";
+    case "files": return "/home/magnus/mimir";
+    default: {
+      // Only allow absolute paths; reject relative paths
+      if (trimmed.startsWith("/")) return trimmed;
+      return "/home/magnus/workspace";
+    }
+  }
 }
 
 function parseTask(content: string): TaskConfig | null {
@@ -63,6 +91,9 @@ function parseTask(content: string): TaskConfig | null {
   const workingDir = content.match(
     /\*\*Working dir:\*\*\s*(.+)/i
   )?.[1]?.trim();
+  const contextRaw = content.match(
+    /\*\*Context:\*\*\s*(.+)/i
+  )?.[1]?.trim();
   const timeoutStr = content.match(/\*\*Timeout:\*\*\s*(\d+)/i)?.[1];
   const submittedBy = content.match(
     /\*\*Submitted by:\*\*\s*(.+)/i
@@ -70,6 +101,18 @@ function parseTask(content: string): TaskConfig | null {
   const submittedAt = content.match(
     /\*\*Submitted at:\*\*\s*(.+)/i
   )?.[1]?.trim();
+  const replyTo = content.match(
+    /\*\*Reply-to:\*\*\s*(.+)/i
+  )?.[1]?.trim();
+  const replyFormat = content.match(
+    /\*\*Reply-format:\*\*\s*(.+)/i
+  )?.[1]?.trim();
+  const group = content.match(
+    /\*\*Group:\*\*\s*(.+)/i
+  )?.[1]?.trim();
+  const sequenceStr = content.match(
+    /\*\*Sequence:\*\*\s*(\d+)/i
+  )?.[1];
 
   // Extract prompt from ### Prompt section
   const promptMatch = content.match(/###\s*Prompt\s*\n([\s\S]+)$/i);
@@ -77,13 +120,23 @@ function parseTask(content: string): TaskConfig | null {
 
   if (!prompt || !runtime) return null;
 
+  // Resolution priority: Context > Working dir > config.workspace
+  const resolvedDir = contextRaw
+    ? resolveContext(contextRaw)
+    : workingDir || config.workspace;
+
   return {
     prompt,
     runtime: runtime || "claude",
-    workingDir: workingDir || config.workspace,
+    workingDir: resolvedDir,
+    context: contextRaw || undefined,
     timeoutMs: timeoutStr ? parseInt(timeoutStr) : config.defaultTimeoutMs,
     submittedBy: submittedBy || "unknown",
     submittedAt: submittedAt || new Date().toISOString(),
+    replyTo: replyTo || undefined,
+    replyFormat: replyFormat || undefined,
+    group: group || undefined,
+    sequence: sequenceStr ? parseInt(sequenceStr) : undefined,
   };
 }
 
@@ -372,11 +425,12 @@ async function recoverStaleTasks(): Promise<void> {
           `Recovering stale task ${result.namespace} (running for ${Math.round(elapsed / 1000)}s, timeout: ${Math.round(timeoutMs / 1000)}s)`
         );
         const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
+        const recoverTypeTags = entry.tags.filter((t) => t.startsWith("type:"));
         await munin.write(
           result.namespace,
           "status",
           entry.content,
-          ["failed", ...(runtimeTag ? [runtimeTag] : [])],
+          ["failed", ...(runtimeTag ? [runtimeTag] : []), ...recoverTypeTags],
           entry.updated_at
         );
         await munin.write(
@@ -399,12 +453,15 @@ async function recoverStaleTasks(): Promise<void> {
 
 async function emitHeartbeat(queueDepth: number): Promise<void> {
   try {
-    await munin.write("tasks/_heartbeat", "status", JSON.stringify({
+    const heartbeat: Record<string, unknown> = {
       polled_at: new Date().toISOString(),
       queue_depth: queueDepth,
       current_task: currentTask,
       uptime_s: Math.round((Date.now() - startedAt) / 1000),
-    }), ["heartbeat"]);
+    };
+    if (currentTaskConfig?.group) heartbeat.group = currentTaskConfig.group;
+    if (currentTaskConfig?.sequence !== undefined) heartbeat.sequence = currentTaskConfig.sequence;
+    await munin.write("tasks/_heartbeat", "status", JSON.stringify(heartbeat), ["heartbeat"]);
   } catch (err) {
     console.error("Heartbeat write failed:", err);
   }
@@ -440,11 +497,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   if (!task) {
     console.error(`Failed to parse task ${taskNs}, marking as failed`);
     const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
+    const parseTypeTags = entry.tags.filter((t) => t.startsWith("type:"));
     await munin.write(
       taskNs,
       "status",
       entry.content,
-      ["failed", ...(runtimeTag ? [runtimeTag] : [])],
+      ["failed", ...(runtimeTag ? [runtimeTag] : []), ...parseTypeTags],
       entry.updated_at
     );
     await munin.write(
@@ -461,12 +519,13 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
   // Claim the task with compare-and-swap
   const runtimeTag = `runtime:${task.runtime}`;
+  const typeTags = entry.tags.filter((t) => t.startsWith("type:"));
   try {
     await munin.write(
       taskNs,
       "status",
       entry.content,
-      ["running", runtimeTag],
+      ["running", runtimeTag, ...typeTags],
       entry.updated_at
     );
   } catch (err) {
@@ -475,6 +534,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   }
 
   currentTask = taskNs;
+  currentTaskConfig = task;
   const startedAt = new Date().toISOString();
   const taskId = extractTaskId(taskNs);
   console.log(`Executing task ${taskNs}...`);
@@ -582,6 +642,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   }
 
   const costLine = costUsd !== null ? `\n- **Cost:** $${costUsd.toFixed(4)}` : "";
+  const replyToLine = task.replyTo ? `\n- **Reply-to:** ${task.replyTo}` : "";
+  const replyFormatLine = task.replyFormat ? `\n- **Reply-format:** ${task.replyFormat}` : "";
+  const groupLine = task.group ? `\n- **Group:** ${task.group}` : "";
+  const sequenceLine = task.sequence !== undefined ? `\n- **Sequence:** ${task.sequence}` : "";
 
   // Write result to Munin (skip if timeout already wrote partial result via SDK)
   if (!(isTimeout && useSdk)) {
@@ -598,6 +662,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         `- **Result source:** ${resultSource}`,
         `- **Log file:** ~/.hugin/logs/${taskId}.log`,
         costLine,
+        replyToLine,
+        replyFormatLine,
+        groupLine,
+        sequenceLine,
         "",
         resultBody,
       ].join("\n")
@@ -608,6 +676,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   await munin.write(taskNs, "status", entry.content, [
     ok ? "completed" : "failed",
     runtimeTag,
+    ...typeTags,
   ]);
 
   await munin.log(
@@ -624,6 +693,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   ).catch(() => {}); // swallow — must never block task lifecycle
 
   currentTask = null;
+  currentTaskConfig = null;
   return { hadTask: true, queueDepth };
 }
 

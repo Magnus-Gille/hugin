@@ -40,14 +40,31 @@ Content format:
 ## Task: <title>
 
 - **Runtime:** claude
+- **Context:** repo:heimdall
 - **Working dir:** /home/magnus/workspace
 - **Timeout:** 300000
 - **Submitted by:** claude-desktop
 - **Submitted at:** 2026-03-14T10:00:00Z
+- **Reply-to:** telegram:12345678
+- **Reply-format:** summary
+- **Group:** batch-20260323
+- **Sequence:** 1
 
 ### Prompt
 <the actual prompt for the AI runtime>
 ```
+
+**Context resolution:** `Context:` takes priority over `Working dir:` for determining the working directory. Supported aliases:
+- `repo:<name>` → `/home/magnus/repos/<name>`
+- `scratch` → `/home/magnus/scratch` (non-code tasks)
+- `files` → `/home/magnus/mimir`
+- Raw absolute paths are passed through unchanged
+
+**Reply routing:** `Reply-to:` and `Reply-format:` are forwarded in the result for downstream consumers (e.g., Ratatoskr).
+
+**Task groups:** `Group:` and `Sequence:` enable multi-step task orchestration. Both are forwarded in results and heartbeats.
+
+**Type tags:** Tags matching `type:*` (e.g., `type:research`, `type:email`) are carried forward through the task lifecycle (pending → running → completed/failed).
 
 Results are written to the same namespace under key `result`.
 
