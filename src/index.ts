@@ -58,6 +58,7 @@ interface TaskConfig {
   replyFormat?: string;
   group?: string;
   sequence?: number;
+  model?: string;
 }
 
 function resolveContext(raw: string): string {
@@ -113,6 +114,9 @@ function parseTask(content: string): TaskConfig | null {
   const sequenceStr = content.match(
     /\*\*Sequence:\*\*\s*(\d+)/i
   )?.[1];
+  const modelRaw = content.match(
+    /\*\*Model:\*\*\s*(.+)/i
+  )?.[1]?.trim();
 
   // Extract prompt from ### Prompt section
   const promptMatch = content.match(/###\s*Prompt\s*\n([\s\S]+)$/i);
@@ -137,6 +141,7 @@ function parseTask(content: string): TaskConfig | null {
     replyFormat: replyFormat || undefined,
     group: group || undefined,
     sequence: sequenceStr ? parseInt(sequenceStr) : undefined,
+    model: modelRaw || undefined,
   };
 }
 
@@ -187,6 +192,19 @@ async function sendTaskNotification(
     }
   } catch (err) {
     console.error("Email notification error:", err);
+  }
+}
+
+// --- Invocation journal ---
+
+const JOURNAL_FILE = path.join(HUGIN_HOME, "invocation-journal.jsonl");
+
+function appendJournal(entry: Record<string, unknown>): void {
+  try {
+    const line = JSON.stringify(entry) + "\n";
+    fs.appendFileSync(JOURNAL_FILE, line, { encoding: "utf-8", mode: 0o600 });
+  } catch (err) {
+    console.error("Journal write failed:", err);
   }
 }
 
@@ -568,6 +586,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         muninUrl: config.muninUrl,
         muninApiKey: config.muninApiKey,
         maxOutputChars: config.maxOutputChars,
+        model: task.model,
       },
       taskId,
       LOG_DIR,
@@ -683,6 +702,21 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     taskNs,
     `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`
   );
+
+  // Append to invocation journal for usage analysis
+  appendJournal({
+    ts: completedAt,
+    task_id: taskId,
+    repo: task.context || path.basename(task.workingDir),
+    runtime: task.runtime,
+    executor: executorLabel,
+    model_requested: task.model || "default",
+    exit_code: exitCode,
+    duration_s: Math.round(durationMs / 1000),
+    timeout_ms: task.timeoutMs,
+    cost_usd: costUsd,
+    group: task.group || null,
+  });
 
   // Fire-and-forget email notification
   sendTaskNotification(

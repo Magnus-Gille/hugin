@@ -11,6 +11,7 @@ export interface SdkTaskConfig {
   muninUrl: string;
   muninApiKey: string;
   maxOutputChars: number;
+  model?: string;
 }
 
 export interface SdkExecutorResult {
@@ -133,6 +134,7 @@ export async function executeSdkTask(
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         persistSession: false,
+        ...(task.model ? { model: task.model } : {}),
         env: {
           ...process.env,
           HOME: "/home/magnus",
