@@ -195,6 +195,38 @@ async function sendTaskNotification(
   }
 }
 
+// --- Quota snapshot ---
+
+interface QuotaSnapshot {
+  q5: number | null;
+  q7: number | null;
+}
+
+async function fetchQuota(): Promise<QuotaSnapshot> {
+  try {
+    const credPath = path.join(process.env.HOME || "/home/magnus", ".claude", ".credentials.json");
+    const creds = JSON.parse(fs.readFileSync(credPath, "utf-8"));
+    const token = creds?.claudeAiOauth?.accessToken;
+    if (!token) return { q5: null, q7: null };
+
+    const res = await fetch("https://api.anthropic.com/api/oauth/usage", {
+      headers: {
+        "anthropic-beta": "oauth-2025-04-20",
+        "Authorization": `Bearer ${token}`,
+      },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return { q5: null, q7: null };
+    const data = await res.json() as Record<string, Record<string, number>>;
+    return {
+      q5: data?.five_hour?.utilization ?? null,
+      q7: data?.seven_day?.utilization ?? null,
+    };
+  } catch {
+    return { q5: null, q7: null };
+  }
+}
+
 // --- Invocation journal ---
 
 const JOURNAL_FILE = path.join(HUGIN_HOME, "invocation-journal.jsonl");
@@ -560,9 +592,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   const useSdk = task.runtime === "claude" && config.claudeExecutor === "sdk";
   const executorLabel = useSdk ? "agent-sdk" : "spawn";
 
+  // Capture quota before task execution (for pilot experiment)
+  const quotaBefore = await fetchQuota();
+
   await munin.log(
     taskNs,
-    `Task started by Hugin (runtime: ${task.runtime}, executor: ${executorLabel}, timeout: ${task.timeoutMs}ms)`
+    `Task started by Hugin (runtime: ${task.runtime}, executor: ${executorLabel}, model: ${task.model || "default"}, timeout: ${task.timeoutMs}ms)`
   );
 
   const startMs = Date.now();
@@ -703,6 +738,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`
   );
 
+  // Capture quota after task execution
+  const quotaAfter = await fetchQuota();
+
   // Append to invocation journal for usage analysis
   appendJournal({
     ts: completedAt,
@@ -716,6 +754,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     timeout_ms: task.timeoutMs,
     cost_usd: costUsd,
     group: task.group || null,
+    quota_before: quotaBefore,
+    quota_after: quotaAfter,
   });
 
   // Fire-and-forget email notification
