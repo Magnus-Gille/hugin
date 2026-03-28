@@ -1,32 +1,27 @@
 # Hugin — Status
 
-**Last session:** 2026-03-22 (evening)
+**Last session:** 2026-03-28
 **Branch:** main
 
 ## Completed This Session
-- **Agent SDK migration** — replaced CLI spawn with `@anthropic-ai/claude-agent-sdk` `query()` for claude runtime
-  - New `src/sdk-executor.ts`: async generator based execution, structured result extraction
-  - Two-stage timeout: `AbortController.abort()` → `query.close()` with 10s grace
-  - Spawn executor preserved as fallback via `HUGIN_CLAUDE_EXECUTOR=spawn`
-  - Codex runtime path completely unchanged
-  - 7 new tests for SDK executor (mock-based)
-  - All 14 tests passing
-  - Adversarial Codex review completed (design + implementation)
-  - Cost tracking: `total_cost_usd` from SDK result logged per task
+- **Post-task git push safety net** (a905f6b) — after successful tasks, Hugin checks for unpushed commits and pushes automatically
+  - Prompted by Heimdall showing hugin repo "2 AHEAD" — Pi tasks were committing but not pushing
+  - Checks `git status --porcelain=v2 --branch` for ahead commits, only runs `git push` if needed
+  - Only fires on exit code 0, logs result, never fails the task
+- **submit-task SKILL.md** — strengthened push instruction to "REQUIRED" with Heimdall drift context
+- **Rebased over 4 Pi commits** — hook result reader, SDK model selection, invocation journal, quota snapshots
 
-## Previous Session (2026-03-21)
-- Grimnir system architecture review & cleanup
-- Standardized deploy path to ~/repos/hugin
-- Stop hook for result capture (e0a141a)
-- Email notifications via Heimdall (e945a3b)
+## Previous Session (2026-03-22)
+- Agent SDK migration — replaced CLI spawn with `@anthropic-ai/claude-agent-sdk` `query()`
+- Cost tracking per task, stop hook for result capture, email notifications via Heimdall
 
 ## Blockers
 - Munin embedding model failing (cache dir ENOENT under ProtectHome=read-only) — lexical search works
-- mDNS (huginmunin.local) not resolving — using Tailscale IP 100.97.117.37
+- mDNS (huginmunin.local) flaky — Tailscale IP 100.97.117.37 is reliable fallback
 
 ## Next Steps
-- Monitor SDK executor in production (first few tasks)
-- If SDK issues: `HUGIN_CLAUDE_EXECUTOR=spawn` in .env, restart
-- Consider MCP server injection for per-task Munin access (currently uses ambient config)
+- Monitor post-task push in production (check Heimdall git repos grid after next task)
+- Deploy latest Ratatoskr features (poll recovery, delivery confirmation)
+- Task progress streaming (partial results before completion)
 - Skuld Phase 2: Fortnox financial awareness
 - Heimdall: bind to 127.0.0.1
