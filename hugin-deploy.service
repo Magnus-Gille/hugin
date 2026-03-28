@@ -1,0 +1,9 @@
+[Unit]
+Description=Build and restart Hugin after new commit
+
+[Service]
+Type=oneshot
+User=magnus
+WorkingDirectory=/home/magnus/repos/hugin
+ExecStart=/usr/bin/npm run build
+ExecStartPost=/usr/bin/sudo /usr/bin/systemctl restart hugin.service

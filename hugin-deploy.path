@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch Hugin repo for new commits
+
+[Path]
+PathModified=/home/magnus/repos/hugin/.git/refs/heads/main
+
+[Install]
+WantedBy=multi-user.target
