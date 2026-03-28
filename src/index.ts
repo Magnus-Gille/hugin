@@ -290,6 +290,61 @@ function readHookResult(taskId: string): HookResult | null {
   }
 }
 
+// --- Post-task git push ---
+
+async function postTaskGitPush(workingDir: string): Promise<void> {
+  // Check if the working directory is a git repo
+  const isGit = await new Promise<boolean>((resolve) => {
+    const child = spawn("git", ["rev-parse", "--git-dir"], {
+      cwd: workingDir,
+      stdio: "ignore",
+    });
+    child.on("close", (code) => resolve(code === 0));
+    child.on("error", () => resolve(false));
+  });
+
+  if (!isGit) return;
+
+  // Check if there are commits ahead of remote
+  const isAhead = await new Promise<boolean>((resolve) => {
+    const child = spawn("git", ["status", "--porcelain=v2", "--branch"], {
+      cwd: workingDir,
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, HOME: "/home/magnus" },
+    });
+    let out = "";
+    child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
+    child.on("close", () => resolve(out.includes("branch.ab +") && !out.includes("branch.ab +0")));
+    child.on("error", () => resolve(false));
+  });
+
+  if (!isAhead) return;
+
+  console.log(`Post-task: unpushed commits detected in ${workingDir}, running git push`);
+  await new Promise<void>((resolve) => {
+    const child = spawn("git", ["push"], {
+      cwd: workingDir,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, HOME: "/home/magnus" },
+    });
+    let output = "";
+    child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
+    child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
+    child.on("close", (code) => {
+      if (code === 0) {
+        console.log(`Post-task git push: ok (${workingDir})`);
+      } else {
+        console.warn(`Post-task git push failed (exit ${code}) in ${workingDir}: ${output.trim()}`);
+      }
+      resolve();
+    });
+    child.on("error", (err) => {
+      console.warn(`Post-task git push error in ${workingDir}: ${(err as Error).message}`);
+      resolve();
+    });
+  });
+}
+
 // --- Task execution ---
 
 interface SpawnContext {
@@ -667,6 +722,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   const completedAt = new Date().toISOString();
   const isTimeout = exitCode === "TIMEOUT";
   const ok = exitCode === 0;
+
+  // Safety net: push any commits the task left unpushed
+  if (ok) {
+    await postTaskGitPush(task.workingDir);
+  }
 
   console.log(
     `Task ${taskNs} ${ok ? "completed" : isTimeout ? "timed out" : "failed"} (exit: ${exitCode}, executor: ${executorLabel}, duration: ${Math.round(durationMs / 1000)}s)`
