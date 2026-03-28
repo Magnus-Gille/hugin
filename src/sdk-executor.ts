@@ -126,6 +126,16 @@ export async function executeSdkTask(
   let queryInstance: Query | null = null;
 
   try {
+    // Build MCP servers config so task-spawned agents get Munin access
+    const mcpServers: Record<string, { type: "http"; url: string; headers?: Record<string, string> }> = {};
+    if (task.muninUrl && task.muninApiKey) {
+      mcpServers["munin-memory"] = {
+        type: "http",
+        url: task.muninUrl,
+        headers: { Authorization: `Bearer ${task.muninApiKey}` },
+      };
+    }
+
     queryInstance = query({
       prompt: task.prompt,
       options: {
@@ -135,6 +145,7 @@ export async function executeSdkTask(
         allowDangerouslySkipPermissions: true,
         persistSession: false,
         ...(task.model ? { model: task.model } : {}),
+        ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
         env: {
           ...process.env,
           HOME: "/home/magnus",
