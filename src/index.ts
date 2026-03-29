@@ -23,6 +23,10 @@ const config = {
   notifyEmail: process.env.NOTIFY_EMAIL || "",
   heimdallUrl: process.env.HEIMDALL_URL || "http://127.0.0.1:3033",
   claudeExecutor: (process.env.HUGIN_CLAUDE_EXECUTOR || "sdk") as "sdk" | "spawn",
+  allowedSubmitters: (process.env.HUGIN_ALLOWED_SUBMITTERS || "claude-code,claude-desktop,ratatoskr,claude-web,claude-mobile,hugin")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
 };
 
 if (!config.muninApiKey) {
@@ -76,8 +80,12 @@ function resolveContext(raw: string): string {
     case "scratch": return "/home/magnus/scratch";
     case "files": return "/home/magnus/mimir";
     default: {
-      // Only allow absolute paths; reject relative paths
-      if (trimmed.startsWith("/")) return trimmed;
+      // Only allow absolute paths under /home/magnus/; reject others
+      if (trimmed.startsWith("/home/magnus/")) return trimmed;
+      if (trimmed.startsWith("/")) {
+        console.warn(`Context path outside /home/magnus/ rejected: ${trimmed}`);
+        return "/home/magnus/workspace";
+      }
       return "/home/magnus/workspace";
     }
   }
@@ -618,8 +626,37 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     return { hadTask: true, queueDepth };
   }
 
+  // Validate submitter against allowlist
+  if (
+    !config.allowedSubmitters.includes("*") &&
+    !config.allowedSubmitters.includes(task.submittedBy)
+  ) {
+    console.warn(
+      `Rejecting task ${taskNs}: submitter "${task.submittedBy}" not in allowed list [${config.allowedSubmitters.join(", ")}]`
+    );
+    const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
+    const rejectTypeTags = entry.tags.filter((t) => t.startsWith("type:"));
+    await munin.write(
+      taskNs,
+      "status",
+      entry.content,
+      ["failed", ...(runtimeTag ? [runtimeTag] : []), ...rejectTypeTags],
+      entry.updated_at
+    );
+    await munin.write(
+      taskNs,
+      "result",
+      `## Result\n\n- **Exit code:** -1\n- **Error:** Unauthorized submitter "${task.submittedBy}". Allowed: [${config.allowedSubmitters.join(", ")}]\n`
+    );
+    await munin.log(
+      taskNs,
+      `Task rejected: submitter "${task.submittedBy}" not authorized`
+    );
+    return { hadTask: true, queueDepth };
+  }
+
   console.log(
-    `Claiming task ${taskNs} (runtime: ${task.runtime}, timeout: ${task.timeoutMs}ms)`
+    `Claiming task ${taskNs} (runtime: ${task.runtime}, submitter: ${task.submittedBy}, timeout: ${task.timeoutMs}ms)`
   );
 
   // Claim the task with compare-and-swap
@@ -922,6 +959,7 @@ const server = app.listen(config.port, config.host, () => {
   console.log(`Munin: ${config.muninUrl}`);
   console.log(`Workspace: ${config.workspace}`);
   console.log(`Claude executor: ${config.claudeExecutor} (set HUGIN_CLAUDE_EXECUTOR=spawn to use legacy)`);
+  console.log(`Allowed submitters: ${config.allowedSubmitters.includes("*") ? "* (all)" : config.allowedSubmitters.join(", ")}`);
 });
 
 // Check Munin is reachable before starting poll loop

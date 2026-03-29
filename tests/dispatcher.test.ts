@@ -21,7 +21,8 @@ function resolveContext(raw: string): string {
     case "scratch": return "/home/magnus/scratch";
     case "files": return "/home/magnus/mimir";
     default: {
-      if (trimmed.startsWith("/")) return trimmed;
+      if (trimmed.startsWith("/home/magnus/")) return trimmed;
+      if (trimmed.startsWith("/")) return "/home/magnus/workspace";
       return "/home/magnus/workspace";
     }
   }
@@ -97,9 +98,15 @@ describe("resolveContext", () => {
     expect(resolveContext("files")).toBe("/home/magnus/mimir");
   });
 
-  it("should pass through raw paths unchanged", () => {
+  it("should pass through absolute paths under /home/magnus/", () => {
     expect(resolveContext("/home/magnus/workspace")).toBe("/home/magnus/workspace");
-    expect(resolveContext("/tmp/test")).toBe("/tmp/test");
+    expect(resolveContext("/home/magnus/custom/dir")).toBe("/home/magnus/custom/dir");
+  });
+
+  it("should reject absolute paths outside /home/magnus/", () => {
+    expect(resolveContext("/tmp/test")).toBe("/home/magnus/workspace");
+    expect(resolveContext("/etc/passwd")).toBe("/home/magnus/workspace");
+    expect(resolveContext("/")).toBe("/home/magnus/workspace");
   });
 
   it("should trim whitespace", () => {
@@ -424,5 +431,49 @@ describe("result format", () => {
     expect(result).toContain("task timed out");
     expect(result).toContain("**Exit code:** TIMEOUT");
     expect(result).toContain("**Log file:**");
+  });
+});
+
+describe("submitter validation", () => {
+  function isSubmitterAllowed(
+    submittedBy: string,
+    allowedSubmitters: string[]
+  ): boolean {
+    return (
+      allowedSubmitters.includes("*") ||
+      allowedSubmitters.includes(submittedBy)
+    );
+  }
+
+  const defaultAllowed = [
+    "claude-code",
+    "claude-desktop",
+    "ratatoskr",
+    "claude-web",
+    "claude-mobile",
+    "hugin",
+  ];
+
+  it("should allow known submitters", () => {
+    expect(isSubmitterAllowed("claude-code", defaultAllowed)).toBe(true);
+    expect(isSubmitterAllowed("ratatoskr", defaultAllowed)).toBe(true);
+    expect(isSubmitterAllowed("claude-desktop", defaultAllowed)).toBe(true);
+  });
+
+  it("should reject unknown submitters", () => {
+    expect(isSubmitterAllowed("unknown", defaultAllowed)).toBe(false);
+    expect(isSubmitterAllowed("attacker", defaultAllowed)).toBe(false);
+    expect(isSubmitterAllowed("", defaultAllowed)).toBe(false);
+  });
+
+  it("should allow all when wildcard is present", () => {
+    expect(isSubmitterAllowed("anything", ["*"])).toBe(true);
+    expect(isSubmitterAllowed("unknown", ["*"])).toBe(true);
+  });
+
+  it("should work with custom allowlist", () => {
+    const custom = ["bot-a", "bot-b"];
+    expect(isSubmitterAllowed("bot-a", custom)).toBe(true);
+    expect(isSubmitterAllowed("claude-code", custom)).toBe(false);
   });
 });

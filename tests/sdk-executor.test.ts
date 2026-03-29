@@ -191,14 +191,13 @@ describe("SDK executor", () => {
 
     const taskConfig = makeTaskConfig({
       prompt: "Do the thing",
-      workingDir: "/home/magnus/workspace",
     });
     await executeSdkTask(taskConfig, "test-task-opts", tmpLogDir);
 
     expect(mockedQuery).toHaveBeenCalledWith({
       prompt: "Do the thing",
       options: expect.objectContaining({
-        cwd: "/home/magnus/workspace",
+        cwd: taskConfig.workingDir,
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         persistSession: false,

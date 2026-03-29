@@ -134,5 +134,6 @@ MUNIN_API_KEY=<same key Munin uses>
 | `HUGIN_WORKSPACE` | `/home/magnus/workspace` | Default working directory |
 | `HUGIN_MAX_OUTPUT_CHARS` | `50000` | Max output chars to capture |
 | `HUGIN_CLAUDE_EXECUTOR` | `sdk` | Claude executor: `sdk` (Agent SDK) or `spawn` (legacy CLI) |
+| `HUGIN_ALLOWED_SUBMITTERS` | `claude-code,claude-desktop,ratatoskr,claude-web,claude-mobile,hugin` | Comma-separated list of allowed `Submitted by:` values. Set to `*` to allow all. |
 | `NOTIFY_EMAIL` | — | Email recipient for task notifications (via Heimdall) |
 | `HEIMDALL_URL` | `http://127.0.0.1:3033` | Heimdall HTTP endpoint |
