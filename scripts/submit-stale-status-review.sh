@@ -19,7 +19,7 @@ TASK_CONTENT=$(cat <<'TASK_EOF'
 - **Runtime:** claude
 - **Context:** scratch
 - **Model:** sonnet
-- **Timeout:** 120000
+- **Timeout:** 300000
 - **Submitted by:** hugin
 
 ### Prompt
