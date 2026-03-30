@@ -20,6 +20,7 @@ Part of the Grimnir system: **Munin** (memory/brain), **Mímir** (file archive),
 3. Executes via the configured runtime:
    - `claude` (default): Agent SDK `query()` for structured results (or legacy `claude -p` spawn via `HUGIN_CLAUDE_EXECUTOR=spawn`)
    - `codex`: `codex exec --full-auto` spawn
+   - `ollama`: Calls ollama's OpenAI-compatible API with streaming. Supports context injection via `Context-refs` and infra-only fallback to Claude.
 4. Captures output (SDK message events or stdout/stderr) + streams to per-task log file
 5. Writes result back to Munin, updates tags to `completed` or `failed`
 6. Emits heartbeat to `tasks/_heartbeat` after each poll cycle
@@ -39,7 +40,7 @@ Content format:
 ```markdown
 ## Task: <title>
 
-- **Runtime:** claude
+- **Runtime:** claude | codex | ollama
 - **Context:** repo:heimdall
 - **Working dir:** /home/magnus/workspace
 - **Timeout:** 300000
@@ -47,6 +48,11 @@ Content format:
 - **Submitted at:** 2026-03-14T10:00:00Z
 - **Reply-to:** telegram:12345678
 - **Reply-format:** summary
+- **Model:** qwen2.5:7b
+- **Ollama-host:** pi | laptop
+- **Fallback:** claude | none
+- **Context-refs:** meta/conventions/status, projects/heimdall/status
+- **Context-budget:** 8000
 - **Group:** batch-20260323
 - **Sequence:** 1
 
@@ -64,6 +70,12 @@ Content format:
 
 **Task groups:** `Group:` and `Sequence:` enable multi-step task orchestration. Both are forwarded in results and heartbeats.
 
+**Ollama-specific fields:**
+- `Ollama-host:` — prefer a specific host (`pi` for local, `laptop` for remote via Tailscale). Default: auto-select.
+- `Fallback:` — `claude` to fall back to Claude on infra failures (host unreachable, 5xx); `none` (default) to fail without fallback. Semantic failure (model responds but poorly) is never retried — that's experiment data.
+- `Context-refs:` — comma-separated Munin references (`namespace/key`) to fetch and inject into the prompt. The task producer decides what context; Hugin just fetches and concatenates.
+- `Context-budget:` — max characters for injected context (default 8000). Truncated from end if exceeded.
+
 **Type tags:** Tags matching `type:*` (e.g., `type:research`, `type:email`) are carried forward through the task lifecycle (pending → running → completed/failed).
 
 Results are written to the same namespace under key `result`.
@@ -79,14 +91,18 @@ hugin/
 ├── src/
 │   ├── index.ts           # Dispatcher: poll loop, task execution, health endpoint
 │   ├── sdk-executor.ts    # Agent SDK executor (query() based, default for claude runtime)
+│   ├── ollama-executor.ts # Ollama executor (streaming, OpenAI-compatible API)
+│   ├── ollama-hosts.ts    # Lazy host resolution with negative caching
+│   ├── context-loader.ts  # Context-refs resolver (fetch Munin entries for prompt injection)
 │   └── munin-client.ts    # HTTP client for Munin JSON-RPC API
 ├── tests/
 │   ├── dispatcher.test.ts
 │   └── sdk-executor.test.ts
 └── scripts/
     ├── deploy-pi.sh
-    ├── sync-claude-config.sh  # Sync ~/.claude/ config to Pi
-    └── update-cli.sh          # Auto-update CLI tools (daily cron)
+    ├── submit-daily-analysis.sh  # Submit daily journal analysis as ollama task
+    ├── sync-claude-config.sh     # Sync ~/.claude/ config to Pi
+    └── update-cli.sh             # Auto-update CLI tools (daily cron)
 ```
 
 ## How to build
@@ -137,3 +153,6 @@ MUNIN_API_KEY=<same key Munin uses>
 | `HUGIN_ALLOWED_SUBMITTERS` | `claude-code,claude-desktop,ratatoskr,claude-web,claude-mobile,hugin` | Comma-separated list of allowed `Submitted by:` values. Set to `*` to allow all. |
 | `NOTIFY_EMAIL` | — | Email recipient for task notifications (via Heimdall) |
 | `HEIMDALL_URL` | `http://127.0.0.1:3033` | Heimdall HTTP endpoint |
+| `OLLAMA_PI_URL` | `http://127.0.0.1:11434` | Ollama endpoint on Pi (local) |
+| `OLLAMA_LAPTOP_URL` | — | Ollama endpoint on laptop (via Tailscale, empty = disabled) |
+| `OLLAMA_DEFAULT_MODEL` | `qwen2.5:3b` | Default model for ollama tasks without explicit Model field |

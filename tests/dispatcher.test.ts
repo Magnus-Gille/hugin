@@ -30,9 +30,10 @@ function resolveContext(raw: string): string {
 
 function parseTask(content: string, workspace = "/home/magnus/workspace") {
   const runtime =
-    content.match(/\*\*Runtime:\*\*\s*(claude|codex)/i)?.[1]?.toLowerCase() as
+    content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama)/i)?.[1]?.toLowerCase() as
       | "claude"
       | "codex"
+      | "ollama"
       | undefined;
   const workingDir = content.match(
     /\*\*Working dir:\*\*\s*(.+)/i
@@ -59,6 +60,21 @@ function parseTask(content: string, workspace = "/home/magnus/workspace") {
   const sequenceStr = content.match(
     /\*\*Sequence:\*\*\s*(\d+)/i
   )?.[1];
+  const modelRaw = content.match(
+    /\*\*Model:\*\*\s*(.+)/i
+  )?.[1]?.trim();
+  const ollamaHostRaw = content.match(
+    /\*\*Ollama-host:\*\*\s*(.+)/i
+  )?.[1]?.trim();
+  const fallbackRaw = content.match(
+    /\*\*Fallback:\*\*\s*(claude|none)/i
+  )?.[1]?.toLowerCase() as "claude" | "none" | undefined;
+  const contextRefsRaw = content.match(
+    /\*\*Context-refs:\*\*\s*(.+)/i
+  )?.[1]?.trim();
+  const contextBudgetStr = content.match(
+    /\*\*Context-budget:\*\*\s*(\d+)/i
+  )?.[1];
 
   const promptMatch = content.match(/###\s*Prompt\s*\n([\s\S]+)$/i);
   const prompt = promptMatch?.[1]?.trim();
@@ -81,6 +97,13 @@ function parseTask(content: string, workspace = "/home/magnus/workspace") {
     replyFormat: replyFormat || undefined,
     group: group || undefined,
     sequence: sequenceStr ? parseInt(sequenceStr) : undefined,
+    model: modelRaw || undefined,
+    ollamaHost: ollamaHostRaw || undefined,
+    fallback: fallbackRaw || undefined,
+    contextRefs: contextRefsRaw
+      ? contextRefsRaw.split(",").map((r: string) => r.trim()).filter(Boolean)
+      : undefined,
+    contextBudget: contextBudgetStr ? parseInt(contextBudgetStr) : undefined,
   };
 }
 
@@ -431,6 +454,132 @@ describe("result format", () => {
     expect(result).toContain("task timed out");
     expect(result).toContain("**Exit code:** TIMEOUT");
     expect(result).toContain("**Log file:**");
+  });
+});
+
+describe("ollama runtime parsing", () => {
+  it("should parse Runtime: ollama", () => {
+    const content = `## Task: Ollama test
+
+- **Runtime:** ollama
+- **Context:** scratch
+- **Model:** qwen2.5:7b
+- **Timeout:** 120000
+- **Submitted by:** hugin
+
+### Prompt
+Analyze the journal`;
+
+    const task = parseTask(content);
+    expect(task).not.toBeNull();
+    expect(task!.runtime).toBe("ollama");
+    expect(task!.model).toBe("qwen2.5:7b");
+    expect(task!.timeoutMs).toBe(120000);
+  });
+
+  it("should parse Ollama-host field", () => {
+    const content = `## Task: Host test
+
+- **Runtime:** ollama
+- **Model:** llama3.3:70b
+- **Ollama-host:** laptop
+
+### Prompt
+Do something`;
+
+    const task = parseTask(content);
+    expect(task!.ollamaHost).toBe("laptop");
+  });
+
+  it("should parse Fallback field", () => {
+    const content = `## Task: Fallback test
+
+- **Runtime:** ollama
+- **Model:** qwen2.5:7b
+- **Fallback:** claude
+
+### Prompt
+Analyze data`;
+
+    const task = parseTask(content);
+    expect(task!.fallback).toBe("claude");
+  });
+
+  it("should default fallback to undefined when absent", () => {
+    const content = `## Task: No fallback
+
+- **Runtime:** ollama
+
+### Prompt
+Do something`;
+
+    const task = parseTask(content);
+    expect(task!.fallback).toBeUndefined();
+  });
+
+  it("should parse Context-refs as comma-separated list", () => {
+    const content = `## Task: Context refs test
+
+- **Runtime:** ollama
+- **Context-refs:** meta/conventions/status, projects/heimdall/status, projects/munin-memory/status
+- **Context-budget:** 12000
+
+### Prompt
+Review project statuses`;
+
+    const task = parseTask(content);
+    expect(task!.contextRefs).toEqual([
+      "meta/conventions/status",
+      "projects/heimdall/status",
+      "projects/munin-memory/status",
+    ]);
+    expect(task!.contextBudget).toBe(12000);
+  });
+
+  it("should handle Context-refs with no budget", () => {
+    const content = `## Task: Refs no budget
+
+- **Runtime:** ollama
+- **Context-refs:** meta/conventions/status
+
+### Prompt
+Check conventions`;
+
+    const task = parseTask(content);
+    expect(task!.contextRefs).toEqual(["meta/conventions/status"]);
+    expect(task!.contextBudget).toBeUndefined();
+  });
+
+  it("should parse a full ollama task with all fields", () => {
+    const content = `## Task: Full ollama
+
+- **Runtime:** ollama
+- **Context:** scratch
+- **Model:** qwen2.5:7b
+- **Ollama-host:** pi
+- **Fallback:** claude
+- **Context-refs:** meta/conventions/status, projects/grimnir/status
+- **Context-budget:** 8000
+- **Timeout:** 180000
+- **Submitted by:** hugin
+- **Reply-to:** telegram:12345
+- **Group:** daily-analysis
+- **Sequence:** 1
+
+### Prompt
+Generate a daily report`;
+
+    const task = parseTask(content);
+    expect(task).not.toBeNull();
+    expect(task!.runtime).toBe("ollama");
+    expect(task!.model).toBe("qwen2.5:7b");
+    expect(task!.ollamaHost).toBe("pi");
+    expect(task!.fallback).toBe("claude");
+    expect(task!.contextRefs).toEqual(["meta/conventions/status", "projects/grimnir/status"]);
+    expect(task!.contextBudget).toBe(8000);
+    expect(task!.timeoutMs).toBe(180000);
+    expect(task!.group).toBe("daily-analysis");
+    expect(task!.sequence).toBe(1);
   });
 });
 

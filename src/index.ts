@@ -1,9 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import express from "express";
 import { MuninClient } from "./munin-client.js";
 import { executeSdkTask } from "./sdk-executor.js";
+import { executeOllamaTask } from "./ollama-executor.js";
+import { configureHosts, resolveOllamaHost, getHostStatus } from "./ollama-hosts.js";
+import { resolveContextRefs } from "./context-loader.js";
 
 const HUGIN_HOME = path.join(process.env.HOME || "/home/magnus", ".hugin");
 const LOG_DIR = path.join(HUGIN_HOME, "logs");
@@ -27,6 +31,9 @@ const config = {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
+  ollamaPiUrl: process.env.OLLAMA_PI_URL || "http://127.0.0.1:11434",
+  ollamaLaptopUrl: process.env.OLLAMA_LAPTOP_URL || "",
+  ollamaDefaultModel: process.env.OLLAMA_DEFAULT_MODEL || "qwen2.5:3b",
 };
 
 if (!config.muninApiKey) {
@@ -52,7 +59,7 @@ const munin = new MuninClient({
 
 interface TaskConfig {
   prompt: string;
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "ollama";
   workingDir: string;
   context?: string;
   timeoutMs: number;
@@ -63,6 +70,10 @@ interface TaskConfig {
   group?: string;
   sequence?: number;
   model?: string;
+  ollamaHost?: string;
+  fallback?: "claude" | "none";
+  contextRefs?: string[];
+  contextBudget?: number;
 }
 
 function resolveContext(raw: string): string {
@@ -93,9 +104,10 @@ function resolveContext(raw: string): string {
 
 function parseTask(content: string): TaskConfig | null {
   const runtime =
-    content.match(/\*\*Runtime:\*\*\s*(claude|codex)/i)?.[1]?.toLowerCase() as
+    content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama)/i)?.[1]?.toLowerCase() as
       | "claude"
       | "codex"
+      | "ollama"
       | undefined;
   const workingDir = content.match(
     /\*\*Working dir:\*\*\s*(.+)/i
@@ -125,6 +137,18 @@ function parseTask(content: string): TaskConfig | null {
   const modelRaw = content.match(
     /\*\*Model:\*\*\s*(.+)/i
   )?.[1]?.trim();
+  const ollamaHostRaw = content.match(
+    /\*\*Ollama-host:\*\*\s*(.+)/i
+  )?.[1]?.trim();
+  const fallbackRaw = content.match(
+    /\*\*Fallback:\*\*\s*(claude|none)/i
+  )?.[1]?.toLowerCase() as "claude" | "none" | undefined;
+  const contextRefsRaw = content.match(
+    /\*\*Context-refs:\*\*\s*(.+)/i
+  )?.[1]?.trim();
+  const contextBudgetStr = content.match(
+    /\*\*Context-budget:\*\*\s*(\d+)/i
+  )?.[1];
 
   // Extract prompt from ### Prompt section
   const promptMatch = content.match(/###\s*Prompt\s*\n([\s\S]+)$/i);
@@ -150,6 +174,12 @@ function parseTask(content: string): TaskConfig | null {
     group: group || undefined,
     sequence: sequenceStr ? parseInt(sequenceStr) : undefined,
     model: modelRaw || undefined,
+    ollamaHost: ollamaHostRaw || undefined,
+    fallback: fallbackRaw || undefined,
+    contextRefs: contextRefsRaw
+      ? contextRefsRaw.split(",").map((r) => r.trim()).filter(Boolean)
+      : undefined,
+    contextBudget: contextBudgetStr ? parseInt(contextBudgetStr) : undefined,
   };
 }
 
@@ -681,11 +711,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   const taskId = extractTaskId(taskNs);
   console.log(`Executing task ${taskNs}...`);
 
+  const isOllama = task.runtime === "ollama";
   const useSdk = task.runtime === "claude" && config.claudeExecutor === "sdk";
-  const executorLabel = useSdk ? "agent-sdk" : "spawn";
+  const executorLabel = isOllama ? "ollama" : useSdk ? "agent-sdk" : "spawn";
 
-  // Capture quota before task execution (for pilot experiment)
-  const quotaBefore = await fetchQuota();
+  // Capture quota before task execution (skip for ollama — it's Claude-specific)
+  const quotaBefore = isOllama ? { q5: null, q7: null } : await fetchQuota();
 
   await munin.log(
     taskNs,
@@ -694,14 +725,174 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
   const startMs = Date.now();
 
-  // --- Execute via SDK or spawn ---
+  // --- Execute via ollama, SDK, or spawn ---
   let exitCode: number | "TIMEOUT";
   let output: string;
   let logFile: string;
   let resultText: string | null = null;
   let costUsd: number | null = null;
+  let ollamaJournalExtras: Record<string, unknown> = {};
+  let effectiveExecutor = executorLabel;
+  let fallbackTriggered = false;
+  let fallbackReason: string | null = null;
 
-  if (useSdk) {
+  if (isOllama) {
+    // --- Ollama execution path ---
+    const ollamaModel = task.model || config.ollamaDefaultModel;
+    const freeMemBeforeMb = Math.round(os.freemem() / 1024 / 1024);
+
+    // Resolve host
+    const host = await resolveOllamaHost(ollamaModel, task.ollamaHost);
+
+    // Resolve context refs if specified
+    let contextResolution = null;
+    if (task.contextRefs && task.contextRefs.length > 0) {
+      contextResolution = await resolveContextRefs(
+        task.contextRefs,
+        task.contextBudget,
+        munin,
+      );
+    }
+
+    if (!host) {
+      // No host available — check fallback
+      const reason = `No ollama host available for model "${ollamaModel}"`;
+      console.warn(`${reason} — task ${taskNs}`);
+
+      if (task.fallback === "claude") {
+        console.log(`Falling back to Claude for task ${taskNs} (reason: host_unreachable)`);
+        fallbackTriggered = true;
+        fallbackReason = "host_unreachable";
+        effectiveExecutor = "ollama→claude";
+
+        // Execute via Claude SDK with fallback
+        const sdkAbort = new AbortController();
+        currentSdkAbort = sdkAbort;
+        const sdkResult = await executeSdkTask(
+          {
+            prompt: task.prompt,
+            workingDir: task.workingDir,
+            timeoutMs: task.timeoutMs,
+            muninUrl: config.muninUrl,
+            muninApiKey: config.muninApiKey,
+            maxOutputChars: config.maxOutputChars,
+          },
+          taskId,
+          LOG_DIR,
+          { abortController: sdkAbort },
+        );
+        currentSdkAbort = null;
+        exitCode = sdkResult.exitCode;
+        output = sdkResult.output;
+        logFile = sdkResult.logFile;
+        resultText = sdkResult.resultText;
+        costUsd = sdkResult.costUsd;
+      } else {
+        exitCode = 1;
+        output = reason;
+        logFile = path.join(LOG_DIR, `${taskId}.log`);
+        fs.writeFileSync(logFile, `=== Hugin Task Log (ollama) ===\n${reason}\n`);
+      }
+    } else {
+      // Host available — execute via ollama
+      console.log(`Using ollama executor for task ${taskNs} (host: ${host.name}, model: ${ollamaModel})`);
+      const ollamaResult = await executeOllamaTask(
+        {
+          prompt: task.prompt,
+          model: ollamaModel,
+          ollamaBaseUrl: host.baseUrl,
+          timeoutMs: task.timeoutMs,
+          maxOutputChars: config.maxOutputChars,
+          injectedContext: contextResolution?.content || undefined,
+        },
+        taskId,
+        LOG_DIR,
+      );
+
+      // Check for infra-level failure that should trigger fallback
+      const isInfraFailure = ollamaResult.exitCode === 1 &&
+        ollamaResult.output.match(/\[Ollama (HTTP|error:)/);
+
+      if (isInfraFailure && task.fallback === "claude") {
+        console.log(`Ollama infra failure, falling back to Claude for task ${taskNs}`);
+        fallbackTriggered = true;
+        fallbackReason = "ollama_error";
+        effectiveExecutor = "ollama→claude";
+
+        const sdkAbort = new AbortController();
+        currentSdkAbort = sdkAbort;
+        const sdkResult = await executeSdkTask(
+          {
+            prompt: task.prompt,
+            workingDir: task.workingDir,
+            timeoutMs: task.timeoutMs,
+            muninUrl: config.muninUrl,
+            muninApiKey: config.muninApiKey,
+            maxOutputChars: config.maxOutputChars,
+          },
+          taskId,
+          LOG_DIR,
+          { abortController: sdkAbort },
+        );
+        currentSdkAbort = null;
+        exitCode = sdkResult.exitCode;
+        output = sdkResult.output;
+        logFile = sdkResult.logFile;
+        resultText = sdkResult.resultText;
+        costUsd = sdkResult.costUsd;
+      } else {
+        exitCode = ollamaResult.exitCode;
+        output = ollamaResult.output;
+        logFile = ollamaResult.logFile;
+        resultText = ollamaResult.resultText;
+      }
+
+      // Collect ollama-specific journal data
+      ollamaJournalExtras = {
+        runtime_requested: "ollama",
+        runtime_effective: fallbackTriggered ? "claude" : "ollama",
+        host_requested: task.ollamaHost || "auto",
+        host_effective: fallbackTriggered ? "claude-sdk" : host.name,
+        model_effective: fallbackTriggered ? "default" : ollamaModel,
+        fallback_triggered: fallbackTriggered,
+        fallback_reason: fallbackReason,
+        prompt_tokens: ollamaResult.promptTokens,
+        completion_tokens: ollamaResult.completionTokens,
+        total_tokens: ollamaResult.totalTokens,
+        inference_ms: ollamaResult.inferenceMs,
+        load_ms: ollamaResult.loadMs,
+        prompt_chars: ollamaResult.promptChars,
+        output_chars: ollamaResult.outputChars,
+        free_mem_before_mb: ollamaResult.freeMemBeforeMb,
+        free_mem_after_mb: ollamaResult.freeMemAfterMb,
+        context_refs_requested: contextResolution?.refsRequested || [],
+        context_refs_resolved: contextResolution?.refsResolved || [],
+        context_refs_missing: contextResolution?.refsMissing || [],
+        context_chars_total: contextResolution?.totalChars || 0,
+        context_truncated: contextResolution?.truncated || false,
+      };
+    }
+
+    // For no-host case without fallback, still populate journal extras
+    if (!host && !fallbackTriggered) {
+      ollamaJournalExtras = {
+        runtime_requested: "ollama",
+        runtime_effective: "none",
+        host_requested: task.ollamaHost || "auto",
+        host_effective: "none",
+        model_effective: ollamaModel,
+        fallback_triggered: false,
+        fallback_reason: "host_unreachable",
+        free_mem_before_mb: freeMemBeforeMb,
+        free_mem_after_mb: Math.round(os.freemem() / 1024 / 1024),
+        context_refs_requested: contextResolution?.refsRequested || [],
+        context_refs_resolved: contextResolution?.refsResolved || [],
+        context_refs_missing: contextResolution?.refsMissing || [],
+        context_chars_total: contextResolution?.totalChars || 0,
+        context_truncated: contextResolution?.truncated || false,
+      };
+    }
+  } else if (useSdk) {
     console.log(`Using Agent SDK executor for task ${taskNs}`);
     const sdkAbort = new AbortController();
     currentSdkAbort = sdkAbort;
@@ -769,15 +960,15 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     `Task ${taskNs} ${ok ? "completed" : isTimeout ? "timed out" : "failed"} (exit: ${exitCode}, executor: ${executorLabel}, duration: ${Math.round(durationMs / 1000)}s)`
   );
 
-  // For SDK executor, use resultText directly (structured result from query)
+  // For SDK/ollama executor, use resultText directly
   // For spawn executor, check for hook result, then fall back to stdout
   let resultBody: string;
   let resultSource: string;
 
-  if (useSdk && resultText) {
-    resultSource = "agent-sdk";
+  if ((useSdk || isOllama) && resultText) {
+    resultSource = effectiveExecutor;
     resultBody = `### Response\n\n${resultText}`;
-  } else if (!useSdk) {
+  } else if (!useSdk && !isOllama) {
     const hookResult = readHookResult(taskId);
     if (hookResult) {
       resultSource = "hook";
@@ -788,7 +979,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       resultBody = `### Output\n\`\`\`\n${output || "(no output)"}\n\`\`\``;
     }
   } else {
-    resultSource = useSdk ? "agent-sdk" : "stdout";
+    resultSource = effectiveExecutor;
     resultBody = `### Output\n\`\`\`\n${output || "(no output)"}\n\`\`\``;
   }
 
@@ -809,7 +1000,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         `- **Started at:** ${startedAt}`,
         `- **Completed at:** ${completedAt}`,
         `- **Duration:** ${Math.round(durationMs / 1000)}s`,
-        `- **Executor:** ${executorLabel}`,
+        `- **Executor:** ${effectiveExecutor}`,
         `- **Result source:** ${resultSource}`,
         `- **Log file:** ~/.hugin/logs/${taskId}.log`,
         costLine,
@@ -835,8 +1026,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`
   );
 
-  // Capture quota after task execution
-  const quotaAfter = await fetchQuota();
+  // Capture quota after task execution (run for claude tasks or ollama fallback to claude)
+  const quotaAfter = (!isOllama || fallbackTriggered) ? await fetchQuota() : { q5: null, q7: null };
 
   // Append to invocation journal for usage analysis
   appendJournal({
@@ -844,7 +1035,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     task_id: taskId,
     repo: task.context || path.basename(task.workingDir),
     runtime: task.runtime,
-    executor: executorLabel,
+    executor: effectiveExecutor,
     model_requested: task.model || "default",
     exit_code: exitCode,
     duration_s: Math.round(durationMs / 1000),
@@ -853,6 +1044,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     group: task.group || null,
     quota_before: quotaBefore,
     quota_after: quotaAfter,
+    // Ollama-specific fields (null/absent for non-ollama tasks)
+    ...ollamaJournalExtras,
   });
 
   // Fire-and-forget email notification
@@ -917,6 +1110,7 @@ app.get("/health", (_req, res) => {
     service: "hugin",
     current_task: currentTask,
     polling: !shuttingDown,
+    ollama_hosts: getHostStatus(),
   });
 });
 
@@ -953,6 +1147,19 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 // Ensure log directory exists
 ensureLogDir();
 console.log(`Log directory: ${LOG_DIR}`);
+
+// Configure ollama hosts
+configureHosts({
+  piUrl: config.ollamaPiUrl,
+  laptopUrl: config.ollamaLaptopUrl,
+});
+if (config.ollamaPiUrl) {
+  console.log(`Ollama Pi: ${config.ollamaPiUrl}`);
+}
+if (config.ollamaLaptopUrl) {
+  console.log(`Ollama Laptop: ${config.ollamaLaptopUrl}`);
+}
+console.log(`Ollama default model: ${config.ollamaDefaultModel}`);
 
 const server = app.listen(config.port, config.host, () => {
   console.log(`Hugin health endpoint: http://${config.host}:${config.port}/health`);
