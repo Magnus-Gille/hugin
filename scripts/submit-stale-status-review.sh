@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Submit a Munin stale-status review task to Hugin via Munin.
-# This is the real ollama experiment: exercises context bootstrap,
-# conventions awareness, and judgment.
+# Reads project statuses from Munin and checks for staleness,
+# convention compliance, and inconsistencies.
 #
 # One-shot — run manually, not on a timer.
 
@@ -16,20 +16,20 @@ TASK_NS="tasks/${TASK_ID}"
 TASK_CONTENT=$(cat <<'TASK_EOF'
 ## Task: Munin stale-status review
 
-- **Runtime:** ollama
+- **Runtime:** claude
 - **Context:** scratch
-- **Model:** qwen2.5:3b
-- **Fallback:** none
-- **Context-refs:** meta/conventions/status, projects/grimnir/status, projects/heimdall/status, projects/munin-memory/status, projects/hugin/status, projects/ratatoskr/status, projects/skuld/status
-- **Context-budget:** 12000
-- **Timeout:** 180000
+- **Model:** sonnet
+- **Timeout:** 120000
 - **Submitted by:** hugin
 
 ### Prompt
-Review the project status entries provided in context. For each project:
+Read project status entries from Munin for all active projects: grimnir, heimdall, munin-memory, hugin, ratatoskr, skuld. Use memory_read with namespace "projects/<name>" and key "status" for each.
+
+Then for each project:
 1. Is the status entry stale (not updated in >14 days)?
-2. Does the status follow the conventions (phase, current work, blockers)?
+2. Does the status follow conventions (should include: phase, current work, blockers)?
 3. Are there any inconsistencies between projects?
+
 Report findings as a structured markdown summary.
 TASK_EOF
 )
@@ -53,7 +53,7 @@ BODY=$(cat <<JSON_EOF
       "namespace": "${TASK_NS}",
       "key": "status",
       "content": ${TASK_JSON},
-      "tags": ["pending", "runtime:ollama", "type:experiment", "type:stale-review"]
+      "tags": ["pending", "runtime:claude", "type:stale-review"]
     }
   }
 }
