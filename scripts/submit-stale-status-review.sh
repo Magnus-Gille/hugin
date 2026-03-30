@@ -18,7 +18,7 @@ TASK_CONTENT=$(cat <<'TASK_EOF'
 
 - **Runtime:** ollama
 - **Context:** scratch
-- **Model:** qwen2.5:7b
+- **Model:** qwen2.5:3b
 - **Fallback:** none
 - **Context-refs:** meta/conventions/status, projects/grimnir/status, projects/heimdall/status, projects/munin-memory/status, projects/hugin/status, projects/ratatoskr/status, projects/skuld/status
 - **Context-budget:** 12000

@@ -43,9 +43,9 @@ TASK_CONTENT=$(cat <<TASK_EOF
 
 - **Runtime:** ollama
 - **Context:** scratch
-- **Model:** qwen2.5:7b
+- **Model:** qwen2.5:3b
 - **Fallback:** claude
-- **Timeout:** 120000
+- **Timeout:** 300000
 - **Submitted by:** hugin
 - **Submitted at:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
