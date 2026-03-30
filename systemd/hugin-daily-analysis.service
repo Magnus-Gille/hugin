@@ -1,0 +1,33 @@
+[Unit]
+Description=Hugin daily journal analysis — summarize last 24h via ollama
+After=network-online.target munin-memory.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=magnus
+WorkingDirectory=/home/magnus/repos/hugin
+ExecStart=/usr/bin/bash scripts/submit-daily-analysis.sh
+EnvironmentFile=/home/magnus/repos/hugin/.env
+TimeoutStartSec=60
+
+# Sandboxing
+ProtectSystem=strict
+ReadOnlyPaths=/home/magnus/repos/hugin /home/magnus/.hugin
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+PrivateDevices=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target
