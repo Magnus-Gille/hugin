@@ -34,10 +34,12 @@ let rpcId = 0;
 export class MuninClient {
   private baseUrl: string;
   private apiKey: string;
+  private sessionId: string;
 
   constructor(config: MuninClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, "");
     this.apiKey = config.apiKey;
+    this.sessionId = crypto.randomUUID();
   }
 
   private async callTool(
@@ -57,6 +59,7 @@ export class MuninClient {
         Authorization: `Bearer ${this.apiKey}`,
         "Content-Type": "application/json",
         Accept: "application/json, text/event-stream",
+        "mcp-session-id": this.sessionId,
       },
       body: JSON.stringify(body),
     });
