@@ -39,6 +39,13 @@ if (!config.muninApiKey) {
   process.exit(1);
 }
 
+// --- Worker identity ---
+
+const LEASE_DURATION_MS = 120_000; // 2 minutes — renewed during execution
+const LEASE_RENEWAL_INTERVAL_MS = 60_000; // renew every 60s
+
+const workerId = `hugin-${os.hostname()}-${process.pid}`;
+
 // --- State ---
 
 let shuttingDown = false;
@@ -46,6 +53,7 @@ let currentTask: string | null = null;
 let currentTaskConfig: TaskConfig | null = null;
 let currentChild: ChildProcess | null = null;
 let currentSdkAbort: AbortController | null = null;
+let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
 const startedAt = Date.now();
 
 const munin = new MuninClient({
@@ -493,7 +501,76 @@ function spawnRuntime(
   });
 }
 
+// --- Lease helpers ---
+
+function leaseExpiry(): string {
+  return new Date(Date.now() + LEASE_DURATION_MS).toISOString();
+}
+
+function parseLeaseExpiry(tags: string[]): number | null {
+  const tag = tags.find((t) => t.startsWith("lease_expires:"));
+  if (!tag) return null;
+  const ts = new Date(tag.slice("lease_expires:".length)).getTime();
+  return Number.isNaN(ts) ? null : ts;
+}
+
+function parseClaimedBy(tags: string[]): string | null {
+  const tag = tags.find((t) => t.startsWith("claimed_by:"));
+  return tag ? tag.slice("claimed_by:".length) : null;
+}
+
+/** Build tags preserving runtime/type tags and adding lease metadata. */
+function buildClaimTags(
+  baseTags: string[],
+  lifecycle: string,
+): string[] {
+  const runtimeTag = baseTags.find((t) => t.startsWith("runtime:"));
+  const typeTags = baseTags.filter((t) => t.startsWith("type:"));
+  return [
+    lifecycle,
+    ...(runtimeTag ? [runtimeTag] : []),
+    ...typeTags,
+    `claimed_by:${workerId}`,
+    `lease_expires:${leaseExpiry()}`,
+  ];
+}
+
+/** Strip lease metadata from tags (for final status updates). */
+function stripLeaseTags(tags: string[]): string[] {
+  return tags.filter(
+    (t) => !t.startsWith("claimed_by:") && !t.startsWith("lease_expires:")
+  );
+}
+
+/** Start periodic lease renewal for the current task. */
+function startLeaseRenewal(taskNs: string, entryContent: string, baseTags: string[]): void {
+  stopLeaseRenewal();
+  leaseRenewalTimer = setInterval(async () => {
+    if (!currentTask || currentTask !== taskNs) {
+      stopLeaseRenewal();
+      return;
+    }
+    try {
+      const renewedTags = buildClaimTags(baseTags, "running");
+      await munin.write(taskNs, "status", entryContent, renewedTags);
+      console.log(`Lease renewed for ${taskNs} (expires: ${leaseExpiry()})`);
+    } catch (err) {
+      console.error(`Lease renewal failed for ${taskNs}:`, err);
+    }
+  }, LEASE_RENEWAL_INTERVAL_MS);
+}
+
+function stopLeaseRenewal(): void {
+  if (leaseRenewalTimer) {
+    clearInterval(leaseRenewalTimer);
+    leaseRenewalTimer = null;
+  }
+}
+
 // --- Stale task recovery ---
+// Recover tasks whose lease has expired. Tasks claimed by this worker are always
+// recovered (we just restarted, so they're orphaned). Tasks claimed by other
+// workers are only recovered if their lease has expired.
 
 async function recoverStaleTasks(): Promise<void> {
   try {
@@ -502,7 +579,7 @@ async function recoverStaleTasks(): Promise<void> {
       tags: ["running"],
       namespace: "tasks/",
       entry_type: "state",
-      limit: 10,
+      limit: 20,
     });
 
     for (const result of results) {
@@ -511,39 +588,57 @@ async function recoverStaleTasks(): Promise<void> {
       const entry = await munin.read(result.namespace, "status");
       if (!entry) continue;
 
-      // Use updated_at (when tags changed to "running") not submitted_at
-      const claimedAt = new Date(entry.updated_at).getTime();
-      const timeoutStr = entry.content.match(
-        /\*\*Timeout:\*\*\s*(\d+)/i
-      )?.[1];
-      const timeoutMs = timeoutStr
-        ? parseInt(timeoutStr)
-        : config.defaultTimeoutMs;
-      const elapsed = Date.now() - claimedAt;
+      const claimedBy = parseClaimedBy(entry.tags);
+      const leaseExpires = parseLeaseExpiry(entry.tags);
+      const now = Date.now();
 
-      if (elapsed > timeoutMs * 2) {
-        console.log(
-          `Recovering stale task ${result.namespace} (running for ${Math.round(elapsed / 1000)}s, timeout: ${Math.round(timeoutMs / 1000)}s)`
-        );
-        const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
-        const recoverTypeTags = entry.tags.filter((t) => t.startsWith("type:"));
-        await munin.write(
-          result.namespace,
-          "status",
-          entry.content,
-          ["failed", ...(runtimeTag ? [runtimeTag] : []), ...recoverTypeTags],
-          entry.updated_at
-        );
-        await munin.write(
-          result.namespace,
-          "result",
-          `## Result\n\n- **Exit code:** -1\n- **Error:** Recovered after dispatcher restart (task exceeded ${Math.round(timeoutMs / 1000)}s timeout)\n`
-        );
-        await munin.log(
-          result.namespace,
-          `Task recovered as failed after dispatcher restart (elapsed: ${Math.round(elapsed / 1000)}s)`
-        );
+      // Decide whether to recover this task:
+      // - Our own tasks: always recover (we just restarted)
+      // - Other worker's tasks: only if lease expired
+      // - No lease metadata (legacy): recover if older than default timeout
+      const isOurs = claimedBy === workerId || claimedBy === null;
+      const leaseExpired = leaseExpires !== null && now > leaseExpires;
+      const legacyStale = leaseExpires === null &&
+        (now - new Date(entry.updated_at).getTime()) > config.defaultTimeoutMs;
+
+      if (!isOurs && !leaseExpired) {
+        if (leaseExpires !== null) {
+          console.log(
+            `Skipping task ${result.namespace} — claimed by ${claimedBy}, lease expires in ${Math.round((leaseExpires - now) / 1000)}s`
+          );
+        }
+        continue;
       }
+
+      if (!isOurs && !leaseExpired && !legacyStale) continue;
+
+      const elapsed = Math.round((now - new Date(entry.updated_at).getTime()) / 1000);
+      const reason = isOurs || claimedBy === null
+        ? "dispatcher restart"
+        : "lease expired";
+
+      console.log(
+        `Recovering task ${result.namespace} (${reason}, claimed_by: ${claimedBy || "none"}, elapsed: ${elapsed}s)`
+      );
+
+      const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
+      const recoverTypeTags = entry.tags.filter((t) => t.startsWith("type:"));
+      await munin.write(
+        result.namespace,
+        "status",
+        entry.content,
+        ["failed", ...(runtimeTag ? [runtimeTag] : []), ...recoverTypeTags],
+        entry.updated_at
+      );
+      await munin.write(
+        result.namespace,
+        "result",
+        `## Result\n\n- **Exit code:** -1\n- **Error:** Task recovered (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)\n`
+      );
+      await munin.log(
+        result.namespace,
+        `Task recovered as failed (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)`
+      );
     }
   } catch (err) {
     console.error("Failed to recover stale tasks:", err);
@@ -555,6 +650,7 @@ async function recoverStaleTasks(): Promise<void> {
 async function emitHeartbeat(queueDepth: number): Promise<void> {
   try {
     const heartbeat: Record<string, unknown> = {
+      worker_id: workerId,
       polled_at: new Date().toISOString(),
       queue_depth: queueDepth,
       current_task: currentTask,
@@ -644,18 +740,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   }
 
   console.log(
-    `Claiming task ${taskNs} (runtime: ${task.runtime}, submitter: ${task.submittedBy}, timeout: ${task.timeoutMs}ms)`
+    `Claiming task ${taskNs} (runtime: ${task.runtime}, submitter: ${task.submittedBy}, timeout: ${task.timeoutMs}ms, worker: ${workerId})`
   );
 
-  // Claim the task with compare-and-swap
-  const runtimeTag = `runtime:${task.runtime}`;
-  const typeTags = entry.tags.filter((t) => t.startsWith("type:"));
+  // Claim the task with compare-and-swap, attaching worker identity and lease
+  const claimTags = buildClaimTags(entry.tags, "running");
   try {
     await munin.write(
       taskNs,
       "status",
       entry.content,
-      ["running", runtimeTag, ...typeTags],
+      claimTags,
       entry.updated_at
     );
   } catch (err) {
@@ -669,6 +764,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   const taskId = extractTaskId(taskNs);
   console.log(`Executing task ${taskNs}...`);
 
+  // Start periodic lease renewal
+  startLeaseRenewal(taskNs, entry.content, entry.tags);
+
   const isOllama = task.runtime === "ollama";
   const useSdk = task.runtime === "claude" && config.claudeExecutor === "sdk";
   const executorLabel = isOllama ? "ollama" : useSdk ? "agent-sdk" : "spawn";
@@ -678,7 +776,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
   await munin.log(
     taskNs,
-    `Task started by Hugin (runtime: ${task.runtime}, executor: ${executorLabel}, model: ${task.model || "default"}, timeout: ${task.timeoutMs}ms)`
+    `Task started by Hugin (runtime: ${task.runtime}, executor: ${executorLabel}, model: ${task.model || "default"}, worker: ${workerId}, timeout: ${task.timeoutMs}ms)`
   );
 
   const startMs = Date.now();
@@ -904,6 +1002,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     logFile = spawnResult.logFile;
   }
 
+  // Stop lease renewal — task is done
+  stopLeaseRenewal();
+
   const durationMs = Date.now() - startMs;
   const completedAt = new Date().toISOString();
   const isTimeout = exitCode === "TIMEOUT";
@@ -972,11 +1073,13 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     );
   }
 
-  // Update status tags
+  // Update status tags — strip lease metadata, keep runtime/type tags
+  const finalRuntimeTag = entry.tags.find((t) => t.startsWith("runtime:")) || `runtime:${task.runtime}`;
+  const finalTypeTags = entry.tags.filter((t) => t.startsWith("type:"));
   await munin.write(taskNs, "status", entry.content, [
     ok ? "completed" : "failed",
-    runtimeTag,
-    ...typeTags,
+    finalRuntimeTag,
+    ...finalTypeTags,
   ]);
 
   await munin.log(
@@ -1058,6 +1161,7 @@ app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
     service: "hugin",
+    worker_id: workerId,
     current_task: currentTask,
     polling: !shuttingDown,
     ollama_hosts: getHostStatus(),
@@ -1066,10 +1170,41 @@ app.get("/health", (_req, res) => {
 
 // --- Graceful shutdown ---
 
-function shutdown(signal: string): void {
+async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
-  console.log(`Received ${signal}, shutting down...`);
+  console.log(`Received ${signal}, shutting down (worker: ${workerId})...`);
   shuttingDown = true;
+  stopLeaseRenewal();
+
+  // Mark the current task as failed before killing the process
+  if (currentTask) {
+    console.log(`Marking current task ${currentTask} as failed (shutdown)...`);
+    try {
+      const entry = await munin.read(currentTask, "status");
+      if (entry) {
+        const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
+        const typeTags = entry.tags.filter((t) => t.startsWith("type:"));
+        await munin.write(
+          currentTask,
+          "status",
+          entry.content,
+          ["failed", ...(runtimeTag ? [runtimeTag] : []), ...typeTags],
+          entry.updated_at
+        );
+        await munin.write(
+          currentTask,
+          "result",
+          `## Result\n\n- **Exit code:** -1\n- **Error:** Task interrupted by dispatcher shutdown (${signal}, worker: ${workerId})\n`
+        );
+        await munin.log(
+          currentTask,
+          `Task interrupted by dispatcher shutdown (${signal}, worker: ${workerId})`
+        );
+      }
+    } catch (err) {
+      console.error("Failed to mark task as failed during shutdown:", err);
+    }
+  }
 
   if (currentSdkAbort) {
     console.log("Aborting running SDK task...");
@@ -1096,6 +1231,7 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 
 // Ensure log directory exists
 ensureLogDir();
+console.log(`Worker ID: ${workerId}`);
 console.log(`Log directory: ${LOG_DIR}`);
 
 // Configure ollama hosts
