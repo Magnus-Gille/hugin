@@ -129,9 +129,10 @@ export async function executeSdkTask(
     // Build MCP servers config so task-spawned agents get Munin access
     const mcpServers: Record<string, { type: "http"; url: string; headers?: Record<string, string> }> = {};
     if (task.muninUrl && task.muninApiKey) {
+      const muninMcpUrl = task.muninUrl.replace(/\/$/, "") + "/mcp";
       mcpServers["munin-memory"] = {
         type: "http",
-        url: task.muninUrl,
+        url: muninMcpUrl,
         headers: { Authorization: `Bearer ${task.muninApiKey}` },
       };
     }
