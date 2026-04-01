@@ -13,7 +13,8 @@
 ## Previous Session (earlier 2026-04-01)
 - MCP connectivity fix for spawned agents (12b533c)
 - Removed dead email notification code (6446262)
-- debate-codex skill improvements debate
+- **debate-codex skill improvements debate** — 2-round adversarial review of 8 proposed improvements. Codex cut it to 2: type-specific prompts + calibrated severity. See `debate/skill-improvements-summary.md`
+- **Implemented debate results** — patched SKILL.md Steps 3, 6, 8 (b793a46 in claude-skills repo)
 
 ## Blockers
 - mDNS (huginmunin.local) flaky — Tailscale IP 100.97.117.37 is reliable fallback
