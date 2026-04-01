@@ -151,8 +151,6 @@ MUNIN_API_KEY=<same key Munin uses>
 | `HUGIN_MAX_OUTPUT_CHARS` | `50000` | Max output chars to capture |
 | `HUGIN_CLAUDE_EXECUTOR` | `sdk` | Claude executor: `sdk` (Agent SDK) or `spawn` (legacy CLI) |
 | `HUGIN_ALLOWED_SUBMITTERS` | `claude-code,claude-desktop,ratatoskr,claude-web,claude-mobile,hugin` | Comma-separated list of allowed `Submitted by:` values. Set to `*` to allow all. |
-| `NOTIFY_EMAIL` | — | Email recipient for task notifications (via Heimdall) |
-| `HEIMDALL_URL` | `http://127.0.0.1:3033` | Heimdall HTTP endpoint |
 | `OLLAMA_PI_URL` | `http://127.0.0.1:11434` | Ollama endpoint on Pi (local) |
 | `OLLAMA_LAPTOP_URL` | — | Ollama endpoint on laptop (via Tailscale, empty = disabled) |
 | `OLLAMA_DEFAULT_MODEL` | `qwen2.5:3b` | Default model for ollama tasks without explicit Model field |

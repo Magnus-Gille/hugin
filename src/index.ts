@@ -24,8 +24,6 @@ const config = {
   defaultTimeoutMs: parseInt(process.env.HUGIN_DEFAULT_TIMEOUT_MS || "300000"),
   workspace: process.env.HUGIN_WORKSPACE || "/home/magnus/workspace",
   maxOutputChars: parseInt(process.env.HUGIN_MAX_OUTPUT_CHARS || "50000"),
-  notifyEmail: process.env.NOTIFY_EMAIL || "",
-  heimdallUrl: process.env.HEIMDALL_URL || "http://127.0.0.1:3033",
   claudeExecutor: (process.env.HUGIN_CLAUDE_EXECUTOR || "sdk") as "sdk" | "spawn",
   allowedSubmitters: (process.env.HUGIN_ALLOWED_SUBMITTERS || "claude-code,claude-desktop,ratatoskr,claude-web,claude-mobile,hugin")
     .split(",")
@@ -191,46 +189,6 @@ function ensureLogDir(): void {
 
 function extractTaskId(namespace: string): string {
   return namespace.replace(/^tasks\//, "");
-}
-
-// --- Email notification via Heimdall ---
-
-async function sendTaskNotification(
-  taskId: string,
-  status: "completed" | "failed" | "timed out",
-  durationS: number,
-  output: string,
-): Promise<void> {
-  if (!config.notifyEmail) return;
-
-  const resultSnippet = output.slice(0, 500) + (output.length > 500 ? "\n…(truncated)" : "");
-  const subject = `[Hugin] Task ${taskId}: ${status}`;
-  const body = [
-    `Task: ${taskId}`,
-    `Status: ${status}`,
-    `Duration: ${durationS}s`,
-    "",
-    "Result (first 500 chars):",
-    resultSnippet,
-    "",
-    `Full result: memory_read("tasks/${taskId}", "result")`,
-  ].join("\n");
-
-  try {
-    const res = await fetch(`${config.heimdallUrl}/api/send-email`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ to: config.notifyEmail, subject, body }),
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      console.error(`Email notification failed (${res.status}): ${text.slice(0, 200)}`);
-    } else {
-      console.log(`Email notification sent for task ${taskId}`);
-    }
-  } catch (err) {
-    console.error("Email notification error:", err);
-  }
 }
 
 // --- Quota snapshot ---
@@ -1047,14 +1005,6 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // Ollama-specific fields (null/absent for non-ollama tasks)
     ...ollamaJournalExtras,
   });
-
-  // Fire-and-forget email notification
-  sendTaskNotification(
-    taskId,
-    ok ? "completed" : isTimeout ? "timed out" : "failed",
-    Math.round(durationMs / 1000),
-    resultText || output || "(no output)",
-  ).catch(() => {}); // swallow — must never block task lifecycle
 
   currentTask = null;
   currentTaskConfig = null;
