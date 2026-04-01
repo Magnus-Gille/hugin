@@ -1,27 +1,22 @@
 # Hugin — Status
 
-**Last session:** 2026-03-28
+**Last session:** 2026-04-01
 **Branch:** main
 
 ## Completed This Session
-- **Post-task git push safety net** (a905f6b) — after successful tasks, Hugin checks for unpushed commits and pushes automatically
-  - Prompted by Heimdall showing hugin repo "2 AHEAD" — Pi tasks were committing but not pushing
-  - Checks `git status --porcelain=v2 --branch` for ahead commits, only runs `git push` if needed
-  - Only fires on exit code 0, logs result, never fails the task
-- **submit-task SKILL.md** — strengthened push instruction to "REQUIRED" with Heimdall drift context
-- **Rebased over 4 Pi commits** — hook result reader, SDK model selection, invocation journal, quota snapshots
+- **Fixed Munin MCP connectivity for spawned agents** (12b533c) — SDK executor was passing base Munin URL (`http://localhost:3030`) as MCP server URL, but Munin's MCP HTTP transport is at `/mcp`. Appended `/mcp` to the URL in the `mcpServers` config passed to Agent SDK `query()`.
+- **Validated with smoke test** — deployed test task (`20260401-110500-mcp-connectivity-test`) that called `memory_orient` + `memory_write` from a spawned agent. Both succeeded.
+- **Removed dead email notification code** (6446262) — Heimdall email via Outlook was abandoned due to account lockouts. Removed `sendTaskNotification`, `NOTIFY_EMAIL`, `HEIMDALL_URL` config and docs.
 
-## Previous Session (2026-03-22)
-- Agent SDK migration — replaced CLI spawn with `@anthropic-ai/claude-agent-sdk` `query()`
-- Cost tracking per task, stop hook for result capture, email notifications via Heimdall
+## Previous Session (2026-03-28)
+- Post-task git push safety net (a905f6b)
+- submit-task SKILL.md strengthened push instruction
+- Rebased over 4 Pi commits
 
 ## Blockers
-- Munin embedding model failing (cache dir ENOENT under ProtectHome=read-only) — lexical search works
 - mDNS (huginmunin.local) flaky — Tailscale IP 100.97.117.37 is reliable fallback
 
 ## Next Steps
-- Monitor post-task push in production (check Heimdall git repos grid after next task)
 - Deploy latest Ratatoskr features (poll recovery, delivery confirmation)
 - Task progress streaming (partial results before completion)
 - Skuld Phase 2: Fortnox financial awareness
-- Heimdall: bind to 127.0.0.1
