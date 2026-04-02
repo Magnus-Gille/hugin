@@ -4,6 +4,7 @@
 **Branch:** main
 
 ## Completed This Session
+- **Sprint artifact convention added** — created `sprints/` for human-facing sprint demos and feedback capture, with the Step 1 demo and first user feedback recorded in `sprints/2026-04-02-step1-live-eval.md`.
 - **Step 1 live evaluation passed on the Pi** — deployed branch `codex/step1-live-eval` to `huginmunin`, then validated success-path promotion, `on-dep-failure:fail`, `on-dep-failure:continue`, and startup reconciliation. Evidence recorded in `docs/step1-live-evaluation.md`.
 - **Engineering plan derived from orchestrator draft** — wrote `docs/hugin-v2-engineering-plan.md` with phased delivery, explicit evaluation gates, and a recommendation to stop after Step 1 for live validation before building the pipeline compiler.
 - **Step 1 parent/child joins implemented** — blocked-task dependency evaluation, `depends-on:` / `on-dep-failure:` semantics, event-driven promotion on child completion/failure, periodic blocked-task reconciliation, and blocked task observability in heartbeat/health.
@@ -26,6 +27,7 @@
 
 ## Next Steps
 - **Step 2: Pipeline IR + compiler** — Step 1 is now validated. Next build `Runtime: pipeline` parsing, validated IR storage, and child-task decomposition with explicit runtimes only.
+- **Review dependency provenance retention** — current promotion strips `depends-on:*` tags; decide whether downstream auditability needs explicit provenance storage before Step 2.
 - **Step 3: Structured results + pipeline operations** — only after Step 2 compile/decompose evaluation passes.
 - **Step 5+: Capability registry + routing** — still deferred until Bet 1 is proven end to end.
 - Deploy latest Ratatoskr features (poll recovery, delivery confirmation)
