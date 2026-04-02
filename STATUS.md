@@ -1,9 +1,18 @@
 # Hugin — Status
 
-**Last session:** 2026-04-02 (Step 3 resume slice implemented locally)
+**Last session:** 2026-04-02 (Step 3 sprint demo live eval + bug reports)
 **Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Step 3 sprint demo live-tested** — submitted 3 targeted pipeline tasks, observed `result-structured` and `summary` artifacts at each lifecycle stage.
+- **Two Step 3 bugs found and written up** — `docs/step3-bug-report.md`:
+  - Bug 1 (medium): `refreshPipelineSummary` parallel reads burst Munin rate limit → intermediate `running` state silently dropped; fixed by making reads sequential + best-effort catch.
+  - Bug 2 (low): `errorMessage` in timed-out ollama tasks had leading/trailing newlines; trimmed.
+- **Step 2 live re-test after bug fixes** — all four Step 2 regressions confirmed resolved: `type:*` tags preserved on successful pipeline parent, `on-dep-failure:continue` survives task completion, missing-runtime error message clear, result formatting clean.
+- **AGENTS.md fixed and committed** — corrected Codex→claude substitution errors introduced during generation (runtime names, script paths, env var descriptions, allowed submitters).
+- **Bug reports and tickets committed and pushed** — `3a4c7a7` on `codex/step1-live-eval`.
+
+## Previous Sessions
 - **Step 3 resume-from-failed-phase implemented locally** — added pipeline parent `resume-requested` handling in [src/index.ts](/Users/magnus/repos/hugin/src/index.ts), a pure resume planner in [src/pipeline-ops.ts](/Users/magnus/repos/hugin/src/pipeline-ops.ts), and logic to reset only non-completed phases while keeping successful phases intact.
 - **Resume planning now supports retry after partial progress** — the planner distinguishes between a genuinely active pipeline and a partially resumed pipeline after a Munin `429`. If some phases are already reactivated while the parent still looks cancelled/failed, Hugin now finalizes the parent back to the resumed state instead of discarding the resume request.
 - **Summary refresh no longer surfaces stale old results during resumed attempts** — [src/index.ts](/Users/magnus/repos/hugin/src/index.ts) now ignores prior `result` / `result-structured` artifacts for non-terminal phase states, so a resumed phase that is back in `pending`, `blocked`, or `running` does not inherit stale failure/cancellation metadata in the parent summary.
@@ -60,7 +69,7 @@
 - **Architecture debate with Codex** — 2-round adversarial review of multi-agent orchestration plan. Changed sequencing: worker/lease before DAG. See `debate/multi-agent-orch-summary.md`.
 - **Step 1 spec written** — `docs/step1-parent-child-joins.md` specifies parent/child task dependencies with fan-out/fan-in, failure policy, reconciliation loop.
 
-## Previous Session (earlier 2026-04-01)
+## Earlier Sessions
 - MCP connectivity fix for spawned agents (12b533c)
 - Removed dead email notification code (6446262)
 - **debate-codex skill improvements debate** — 2-round adversarial review of 8 proposed improvements. Codex cut it to 2: type-specific prompts + calibrated severity. See `debate/skill-improvements-summary.md`
@@ -78,7 +87,6 @@
 - Add dispatcher-level tests for the `Runtime: pipeline` execution path if parent-tag and result-contract behavior should be covered above the current pure-helper and compiler unit tests.
 - **Fix submitter allowlist drift** — the deployed service still authorizes `claude-*`/`hugin`, while repo docs and current Codex workflows assume `Codex` names. Align config and documentation before the next live desktop-driven test cycle.
 - **Decide whether Munin 429 log noise needs another hardening pass** — cancellation now converges safely under load, but heartbeats and poll-loop logs still show intermittent `429` pressure during live runs.
-- **Decide on AGENTS.md** — Codex generated this as its CLAUDE.md equivalent; has incorrect substitutions (script names, env var labels). Fix or delete before committing.
 - **Step 5+: Capability registry + routing** — still deferred until Bet 1 is proven end to end.
 - Deploy latest Ratatoskr features (poll recovery, delivery confirmation)
 - Task progress streaming (partial results before completion)
