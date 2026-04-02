@@ -21,6 +21,7 @@ export interface PipelineRuntimeDefinition {
   id: PipelineRuntimeId;
   dispatcherRuntime: "claude" | "codex" | "ollama";
   ollamaHost?: "pi" | "laptop";
+  defaultModel?: string;
 }
 
 export const PIPELINE_RUNTIME_REGISTRY: Record<PipelineRuntimeId, PipelineRuntimeDefinition> = {
@@ -36,11 +37,13 @@ export const PIPELINE_RUNTIME_REGISTRY: Record<PipelineRuntimeId, PipelineRuntim
     id: "ollama-pi",
     dispatcherRuntime: "ollama",
     ollamaHost: "pi",
+    defaultModel: "qwen2.5:3b",
   },
   "ollama-laptop": {
     id: "ollama-laptop",
     dispatcherRuntime: "ollama",
     ollamaHost: "laptop",
+    defaultModel: "qwen3.5:35b-a3b",
   },
 };
 
@@ -52,6 +55,7 @@ export const pipelinePhaseIRSchema = z.object({
   runtime: pipelineRuntimeIdSchema,
   dispatcherRuntime: z.enum(["claude", "codex", "ollama"]),
   ollamaHost: z.enum(["pi", "laptop"]).optional(),
+  model: z.string().min(1).optional(),
   context: z.string().min(1).optional(),
   dependsOn: z.array(z.string().min(1)),
   dependencyTaskIds: z.array(z.string().min(1)),
