@@ -44,7 +44,7 @@ Content format:
 - **Context:** repo:heimdall
 - **Working dir:** /home/magnus/workspace
 - **Timeout:** 300000
-- **Submitted by:** claude-desktop
+- **Submitted by:** Codex-desktop
 - **Submitted at:** 2026-03-14T10:00:00Z
 - **Reply-to:** telegram:12345678
 - **Reply-format:** summary
@@ -150,7 +150,7 @@ MUNIN_API_KEY=<same key Munin uses>
 | `HUGIN_WORKSPACE` | `/home/magnus/workspace` | Default working directory |
 | `HUGIN_MAX_OUTPUT_CHARS` | `50000` | Max output chars to capture |
 | `HUGIN_CLAUDE_EXECUTOR` | `sdk` | Claude executor: `sdk` (Agent SDK) or `spawn` (legacy CLI) |
-| `HUGIN_ALLOWED_SUBMITTERS` | `claude-code,claude-desktop,ratatoskr,claude-web,claude-mobile,hugin` | Comma-separated list of allowed `Submitted by:` values. Set to `*` to allow all. |
+| `HUGIN_ALLOWED_SUBMITTERS` | `Codex,Codex-desktop,ratatoskr,Codex-web,Codex-mobile,claude-code,claude-desktop,claude-web,claude-mobile,hugin` | Comma-separated list of allowed `Submitted by:` values. Includes both current Codex-facing names and legacy `claude-*` names during the transition. Set to `*` to allow all. |
 | `OLLAMA_PI_URL` | `http://127.0.0.1:11434` | Ollama endpoint on Pi (local) |
 | `OLLAMA_LAPTOP_URL` | — | Ollama endpoint on laptop (via Tailscale, empty = disabled) |
 | `OLLAMA_DEFAULT_MODEL` | `qwen2.5:3b` | Default model for ollama tasks without explicit Model field |

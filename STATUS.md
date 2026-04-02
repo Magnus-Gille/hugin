@@ -1,9 +1,11 @@
 # Hugin — Status
 
-**Last session:** 2026-04-02 (Step 3 resume live eval)
+**Last session:** 2026-04-02 (submitter allowlist drift fix)
 **Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Submitter allowlist drift fixed, deployed, and live-verified** — Hugin now defaults `HUGIN_ALLOWED_SUBMITTERS` to both current Codex-facing names (`Codex`, `Codex-desktop`, `Codex-web`, `Codex-mobile`) and legacy `claude-*` names during the transition. Deployed to `huginmunin` and validated live with `tasks/20260402-200746-allowlist-codex`, which completed successfully from `Submitted by: Codex`.
+- **Repo docs and tests aligned to the new transition allowlist** — updated [AGENTS.md](/Users/magnus/repos/hugin/AGENTS.md), [CLAUDE.md](/Users/magnus/repos/hugin/CLAUDE.md), and [tests/dispatcher.test.ts](/Users/magnus/repos/hugin/tests/dispatcher.test.ts) so the documented default and submitter-validation coverage match the shipped runtime behavior.
 - **Step 3 resume-from-failed-phase validated live** — recorded in `docs/step3-resume-live-evaluation.md` with two probes:
   - Full restart probe `tasks/20260402-193721-step3-resume-partial5` proved that an all-cancelled pipeline can be resumed end to end and that the parent `summary` now converges to `completed` after the last rerun phase finishes.
   - Keep-completed probe `tasks/20260402-194512-step3-resume-partial-keep1` proved that Hugin keeps completed head phases intact, resumes only the cancelled tail, and writes `Pipeline action: resumed`, `Resumed phases: 2`, `Completed phases kept: 1`.
@@ -88,7 +90,6 @@
 - Decide whether Munin `429` remediation needs its own sprint before more orchestration complexity is added; the Step 3 state machine now converges under pressure, but latency and retry noise are still high.
 - Add dispatcher-level tests for the `Runtime: pipeline` execution path if parent-tag and result-contract behavior should be covered above the current pure-helper and compiler unit tests.
 - Decide whether cancellation/result finalization should be hardened further so parent `status/result` converge as quickly as parent `summary` under heavy `429` pressure.
-- **Fix submitter allowlist drift** — the deployed service still authorizes `claude-*`/`hugin`, while repo docs and current Codex workflows assume `Codex` names. Align config and documentation before the next live desktop-driven test cycle.
 - **Decide whether Munin 429 log noise needs another hardening pass** — cancellation now converges safely under load, but heartbeats and poll-loop logs still show intermittent `429` pressure during live runs.
 - **Step 5+: Capability registry + routing** — still deferred until Bet 1 is proven end to end.
 - Deploy latest Ratatoskr features (poll recovery, delivery confirmation)

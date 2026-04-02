@@ -595,15 +595,21 @@ describe("submitter validation", () => {
   }
 
   const defaultAllowed = [
+    "Codex",
+    "Codex-desktop",
+    "ratatoskr",
+    "Codex-web",
+    "Codex-mobile",
     "claude-code",
     "claude-desktop",
-    "ratatoskr",
     "claude-web",
     "claude-mobile",
     "hugin",
   ];
 
   it("should allow known submitters", () => {
+    expect(isSubmitterAllowed("Codex", defaultAllowed)).toBe(true);
+    expect(isSubmitterAllowed("Codex-desktop", defaultAllowed)).toBe(true);
     expect(isSubmitterAllowed("claude-code", defaultAllowed)).toBe(true);
     expect(isSubmitterAllowed("ratatoskr", defaultAllowed)).toBe(true);
     expect(isSubmitterAllowed("claude-desktop", defaultAllowed)).toBe(true);
@@ -623,6 +629,7 @@ describe("submitter validation", () => {
   it("should work with custom allowlist", () => {
     const custom = ["bot-a", "bot-b"];
     expect(isSubmitterAllowed("bot-a", custom)).toBe(true);
+    expect(isSubmitterAllowed("Codex", custom)).toBe(false);
     expect(isSubmitterAllowed("claude-code", custom)).toBe(false);
   });
 });

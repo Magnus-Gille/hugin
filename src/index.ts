@@ -66,7 +66,7 @@ const config = {
   workspace: process.env.HUGIN_WORKSPACE || "/home/magnus/workspace",
   maxOutputChars: parseInt(process.env.HUGIN_MAX_OUTPUT_CHARS || "50000"),
   claudeExecutor: (process.env.HUGIN_CLAUDE_EXECUTOR || "sdk") as "sdk" | "spawn",
-  allowedSubmitters: (process.env.HUGIN_ALLOWED_SUBMITTERS || "claude-code,claude-desktop,ratatoskr,claude-web,claude-mobile,hugin")
+  allowedSubmitters: (process.env.HUGIN_ALLOWED_SUBMITTERS || "Codex,Codex-desktop,ratatoskr,Codex-web,Codex-mobile,claude-code,claude-desktop,claude-web,claude-mobile,hugin")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
