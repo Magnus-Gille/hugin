@@ -2570,12 +2570,18 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     }
     if (task.pipeline?.pipelineId) {
       try {
-        await refreshPipelineSummary(task.pipeline.pipelineId);
         if (isCancelled && cancellation?.pipelineId === task.pipeline.pipelineId) {
-          await finalizePipelineCancellationIfReady(
-            task.pipeline.pipelineId,
-            cancellation.reason
+          const pipelineEntry = await munin.read(
+            `tasks/${task.pipeline.pipelineId}`,
+            "status"
           );
+          if (pipelineEntry?.tags.includes(CANCEL_REQUESTED_TAG)) {
+            await processPipelineCancellationRequest(pipelineEntry);
+          } else {
+            await refreshPipelineSummary(task.pipeline.pipelineId);
+          }
+        } else {
+          await refreshPipelineSummary(task.pipeline.pipelineId);
         }
       } catch (err) {
         console.error(
