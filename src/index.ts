@@ -14,12 +14,17 @@ import {
   compilePipelineTask,
 } from "./pipeline-compiler.js";
 import type { PipelineIR } from "./pipeline-ir.js";
+import { buildTaskResultDocument } from "./result-format.js";
 import {
   buildPromotedTags,
   evaluateBlockedTask,
   getDependencyIds,
   type DependencyState,
 } from "./task-graph.js";
+import {
+  buildPipelineParentSuccessTags,
+  buildTerminalStatusTags,
+} from "./task-status-tags.js";
 
 const HUGIN_HOME = path.join(process.env.HOME || "/home/magnus", ".hugin");
 const LOG_DIR = path.join(HUGIN_HOME, "logs");
@@ -826,13 +831,11 @@ async function failTaskWithMessage(
   errorMessage: string,
   runtimeTagOverride?: string,
 ): Promise<void> {
-  const runtimeTag = runtimeTagOverride || entry.tags.find((tag) => tag.startsWith("runtime:"));
-  const typeTags = entry.tags.filter((tag) => tag.startsWith("type:"));
   await munin.write(
     taskNs,
     "status",
     entry.content,
-    ["failed", ...(runtimeTag ? [runtimeTag] : []), ...typeTags],
+    buildTerminalStatusTags("failed", entry.tags, runtimeTagOverride),
     entry.updated_at
   );
   await munin.write(
@@ -881,7 +884,7 @@ async function handlePipelineTask(
       taskNs,
       "status",
       entry.content,
-      ["completed", "runtime:pipeline", "type:pipeline"],
+      buildPipelineParentSuccessTags(entry.tags),
       entry.updated_at
     );
     await munin.write(taskNs, "result", buildPipelineDecompositionResult(pipeline));
@@ -1305,45 +1308,36 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     resultBody = `### Output\n\`\`\`\n${output || "(no output)"}\n\`\`\``;
   }
 
-  const costLine = costUsd !== null ? `\n- **Cost:** $${costUsd.toFixed(4)}` : "";
-  const replyToLine = task.replyTo ? `\n- **Reply-to:** ${task.replyTo}` : "";
-  const replyFormatLine = task.replyFormat ? `\n- **Reply-format:** ${task.replyFormat}` : "";
-  const groupLine = task.group ? `\n- **Group:** ${task.group}` : "";
-  const sequenceLine = task.sequence !== undefined ? `\n- **Sequence:** ${task.sequence}` : "";
-
   // Write result to Munin (skip if timeout already wrote partial result via SDK)
   if (!(isTimeout && useSdk)) {
     await munin.write(
       taskNs,
       "result",
-      [
-        isTimeout ? "## Result (task timed out)\n" : "## Result\n",
-        `- **Exit code:** ${exitCode}`,
-        `- **Started at:** ${startedAt}`,
-        `- **Completed at:** ${completedAt}`,
-        `- **Duration:** ${Math.round(durationMs / 1000)}s`,
-        `- **Executor:** ${effectiveExecutor}`,
-        `- **Result source:** ${resultSource}`,
-        `- **Log file:** ~/.hugin/logs/${taskId}.log`,
-        costLine,
-        replyToLine,
-        replyFormatLine,
-        groupLine,
-        sequenceLine,
-        "",
-        resultBody,
-      ].join("\n")
+      buildTaskResultDocument({
+        timedOut: isTimeout,
+        exitCode,
+        startedAt,
+        completedAt,
+        durationSeconds: Math.round(durationMs / 1000),
+        executor: effectiveExecutor,
+        resultSource,
+        logFile: `~/.hugin/logs/${taskId}.log`,
+        costUsd,
+        replyTo: task.replyTo,
+        replyFormat: task.replyFormat,
+        group: task.group,
+        sequence: task.sequence,
+        body: resultBody,
+      })
     );
   }
 
-  // Update status tags — strip lease metadata, keep runtime/type tags
-  const finalRuntimeTag = entry.tags.find((t) => t.startsWith("runtime:")) || `runtime:${task.runtime}`;
-  const finalTypeTags = entry.tags.filter((t) => t.startsWith("type:"));
-  await munin.write(taskNs, "status", entry.content, [
-    ok ? "completed" : "failed",
-    finalRuntimeTag,
-    ...finalTypeTags,
-  ]);
+  await munin.write(
+    taskNs,
+    "status",
+    entry.content,
+    buildTerminalStatusTags(ok ? "completed" : "failed", entry.tags, `runtime:${task.runtime}`)
+  );
 
   await munin.log(
     taskNs,

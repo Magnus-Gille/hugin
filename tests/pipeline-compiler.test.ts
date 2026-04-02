@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildPhaseTaskDrafts,
+  buildPipelineDecompositionResult,
   compilePipelineTask,
 } from "../src/pipeline-compiler.js";
 
@@ -21,6 +22,9 @@ describe("pipeline compiler", () => {
 - **Submitted by:** claude-code
 - **Submitted at:** 2026-04-02T22:00:00Z
 - **Reply-to:** telegram:12345678
+- **Reply-format:** summary
+- **Group:** demo-batch
+- **Sequence:** 4
 
 ### Pipeline
 
@@ -40,6 +44,9 @@ Phase: debate
 
     expect(pipeline.id).toBe("20260402-improve-munin-ux");
     expect(pipeline.replyTo).toBe("telegram:12345678");
+    expect(pipeline.replyFormat).toBe("summary");
+    expect(pipeline.group).toBe("demo-batch");
+    expect(pipeline.sequence).toBe(4);
     expect(pipeline.sensitivity).toBe("internal");
     expect(pipeline.phases).toHaveLength(2);
     expect(pipeline.phases[0]?.taskId).toBe("20260402-improve-munin-ux-explore");
@@ -166,5 +173,46 @@ Phase: deploy
     Deploy.
 `)
     ).toThrow(/deferred until Step 4/);
+  });
+
+  it("renders parent routing metadata in the decomposition result", () => {
+    const pipeline = makePipeline(`## Task: Improve Munin UX
+
+- **Runtime:** pipeline
+- **Submitted by:** claude-code
+- **Reply-to:** telegram:12345678
+- **Reply-format:** summary
+- **Group:** demo-batch
+- **Sequence:** 4
+
+### Pipeline
+
+Phase: explore
+  Runtime: ollama-pi
+  Prompt: |
+    Explore.
+`);
+
+    const result = buildPipelineDecompositionResult(pipeline);
+
+    expect(result).toContain("- **Reply-to:** telegram:12345678");
+    expect(result).toContain("- **Reply-format:** summary");
+    expect(result).toContain("- **Group:** demo-batch");
+    expect(result).toContain("- **Sequence:** 4");
+  });
+
+  it("rejects missing phase runtimes with a direct error", () => {
+    expect(() =>
+      makePipeline(`## Task: Missing runtime
+
+- **Runtime:** pipeline
+
+### Pipeline
+
+Phase: explore
+  Prompt: |
+    Explore.
+`)
+    ).toThrow(/missing a Runtime field/);
   });
 });

@@ -76,6 +76,8 @@ export const pipelineIRSchema = z.object({
   sensitivity: pipelineSensitivitySchema,
   replyTo: z.string().min(1).optional(),
   replyFormat: z.string().min(1).optional(),
+  group: z.string().min(1).optional(),
+  sequence: z.number().int().nonnegative().optional(),
   submittedBy: z.string().min(1),
   submittedAt: z.string().min(1),
   phases: z.array(pipelinePhaseIRSchema).min(1),

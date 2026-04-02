@@ -1,9 +1,15 @@
 # Hugin — Status
 
-**Last session:** 2026-04-02 (Step 2 live evaluation)
+**Last session:** 2026-04-02 (Step 2 follow-up bug fixes)
 **Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Step 2 follow-up bug fixes implemented locally** — fixed all five current pipeline follow-ups from `feedback/hugin/step2-pipeline-findings`: terminal phase status now preserves `on-dep-failure:*`, successful pipeline parents preserve incoming `type:*` tags, pipeline parent decomposition results now include reply-routing metadata plus parent `Group`/`Sequence`, missing phase runtimes now fail with a direct validation error, and phase result formatting no longer emits extra blank metadata gaps.
+- **Lifecycle-tag and result-format helpers added** — extracted `src/task-status-tags.ts` and `src/result-format.ts` so terminal-tag preservation and result-contract rendering are pure, reusable, and testable instead of staying embedded in dispatcher control flow.
+- **Regression coverage expanded for the bug set** — added tests for terminal tag preservation, clean result formatting, parent routing metadata rendering, and the missing-runtime compiler error. `npm test` and `npm run build` both passed after the fixes.
+- **Repo-local ticket docs added** — wrote [docs/ticket-pipeline-parent-drops-type-tags-on-success.md](/Users/magnus/repos/hugin/docs/ticket-pipeline-parent-drops-type-tags-on-success.md) and [docs/ticket-pipeline-parent-result-omits-routing-metadata.md](/Users/magnus/repos/hugin/docs/ticket-pipeline-parent-result-omits-routing-metadata.md) so the follow-up bugs now exist both in Munin and in the repo itself.
+- **Local demo validation pass completed** — reran `npm test` and `npm run build` successfully, manually compiled/decomposed a valid `explore -> synthesize -> review` pipeline, and reconfirmed invalid-runtime plus cyclic-graph rejection from the compiler surface.
+- **Two follow-up bugs identified during demo review** — successful pipeline parents currently drop incoming `type:*` tags instead of preserving them through the task lifecycle, and pipeline decomposition results omit the standard reply-routing metadata contract (`Reply-to`, `Reply-format`, plus current `Group`/`Sequence` forwarding parity).
 - **Step 2 live evaluation passed on the Pi** — validated one explicit-runtime pipeline end to end: parent compile/decompose, immutable `spec` write, correct root/dependent child task states, ordered child execution, and successful final child results. Evidence recorded in `docs/step2-live-evaluation.md`.
 - **Live rejection paths confirmed** — invalid pipeline parents now fail cleanly before decomposition for both unknown runtimes and cyclic dependency graphs; no `spec` entries or child task namespaces were created for either invalid case.
 - **Explicit ollama runtime variants now pin concrete models** — the first live Step 2 attempt exposed a routing leak where `ollama-pi` still fell through to the laptop host because no model was emitted. Fixed by pinning `ollama-pi -> qwen2.5:3b` and `ollama-laptop -> qwen3.5:35b-a3b`, then redeploying and rerunning the evaluation.
@@ -35,6 +41,8 @@
 - mDNS (huginmunin.local) flaky — Tailscale IP 100.97.117.37 is reliable fallback
 
 ## Next Steps
+- Deploy the Step 2 bug-fix set to the Pi and rerun a focused live check for parent tags, parent result metadata, `on-dep-failure:continue` terminal tags, and the cleaned child-result formatting.
+- Add dispatcher-level tests for the `Runtime: pipeline` execution path if parent-tag and result-contract behavior should be covered above the current pure-helper and compiler unit tests.
 - **Step 3: Structured results + pipeline operations** — add phase result schema, pipeline summary artifacts, cancellation, and resume-from-failed-phase support now that compile/decompose is proven live.
 - **Define Step 3 live gate before implementing it** — the next evaluation should exercise cancellation and resume on one fixed pipeline, not just the happy path.
 - **Decide on AGENTS.md** — Codex generated this as its CLAUDE.md equivalent; has incorrect substitutions (script names, env var labels). Fix or delete before committing.

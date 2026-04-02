@@ -10,6 +10,7 @@ import {
   type PipelineRuntimeId,
   type PipelineSensitivity,
 } from "./pipeline-ir.js";
+import { buildRoutingMetadataLines } from "./result-format.js";
 import { MAX_DEPENDENCIES } from "./task-graph.js";
 
 interface ParsedPipelinePhase {
@@ -29,6 +30,8 @@ interface ParsedPipelineDocument {
   submittedAt: string;
   replyTo?: string;
   replyFormat?: string;
+  group?: string;
+  sequence?: number;
   sensitivity: PipelineSensitivity;
   phases: ParsedPipelinePhase[];
 }
@@ -40,6 +43,17 @@ function readField(content: string, field: string): string | undefined {
 
 function readTaskTitle(content: string): string {
   return content.match(/^##\s*Task:\s*(.+)$/im)?.[1]?.trim() || "Pipeline task";
+}
+
+function readNumberField(content: string, field: string): number | undefined {
+  const raw = readField(content, field);
+  if (!raw) return undefined;
+
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`Invalid ${field} value "${raw}"`);
+  }
+  return parsed;
 }
 
 function assertValidSensitivity(value: string | undefined): PipelineSensitivity {
@@ -196,6 +210,8 @@ function parsePipelineDocument(content: string): ParsedPipelineDocument {
     submittedAt: readField(content, "Submitted at") || new Date().toISOString(),
     replyTo: readField(content, "Reply-to"),
     replyFormat: readField(content, "Reply-format"),
+    group: readField(content, "Group"),
+    sequence: readNumberField(content, "Sequence"),
     sensitivity: assertValidSensitivity(readField(content, "Sensitivity")),
     phases: parsePipelineBody(pipelineBody),
   };
@@ -267,13 +283,17 @@ function validateAcyclic(phases: ParsedPipelinePhase[]): void {
 }
 
 function validateRuntimeId(phaseName: string, runtime: string): PipelineRuntimeId {
-  if (runtime === "auto") {
+  const normalized = runtime.trim();
+  if (!normalized) {
+    throw new Error(`Phase "${phaseName}" is missing a Runtime field`);
+  }
+  if (normalized === "auto") {
     throw new Error(`Phase "${phaseName}" uses Runtime: auto, which is deferred until Step 6`);
   }
 
-  const parsed = pipelineRuntimeIdSchema.safeParse(runtime.trim());
+  const parsed = pipelineRuntimeIdSchema.safeParse(normalized);
   if (!parsed.success) {
-    throw new Error(`Phase "${phaseName}" uses unknown runtime "${runtime}"`);
+    throw new Error(`Phase "${phaseName}" uses unknown runtime "${normalized}"`);
   }
   return parsed.data;
 }
@@ -356,6 +376,8 @@ export function compilePipelineTask(
     sensitivity: parsed.sensitivity,
     replyTo: parsed.replyTo,
     replyFormat: parsed.replyFormat,
+    group: parsed.group,
+    sequence: parsed.sequence,
     submittedBy: parsed.submittedBy,
     submittedAt: parsed.submittedAt,
     phases,
@@ -419,12 +441,14 @@ export function buildPhaseTaskDrafts(pipeline: PipelineIR): PipelinePhaseTaskDra
 
 export function buildPipelineDecompositionResult(pipeline: PipelineIR): string {
   return [
-    "## Result\n",
+    "## Result",
+    "",
     "- **Exit code:** 0",
     "- **Pipeline action:** compiled and decomposed",
     `- **Pipeline id:** ${pipeline.id}`,
     `- **Phases:** ${pipeline.phases.length}`,
     `- **Spec key:** ${pipeline.sourceTaskNamespace}/spec`,
+    ...buildRoutingMetadataLines(pipeline),
     "",
     "### Child tasks",
     ...pipeline.phases.map(
