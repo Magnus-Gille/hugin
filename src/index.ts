@@ -3,11 +3,17 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import express from "express";
-import { MuninClient } from "./munin-client.js";
+import { MuninClient, type MuninEntry } from "./munin-client.js";
 import { executeSdkTask } from "./sdk-executor.js";
 import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus } from "./ollama-hosts.js";
 import { resolveContextRefs } from "./context-loader.js";
+import {
+  buildPromotedTags,
+  evaluateBlockedTask,
+  getDependencyIds,
+  type DependencyState,
+} from "./task-graph.js";
 
 const HUGIN_HOME = path.join(process.env.HOME || "/home/magnus", ".hugin");
 const LOG_DIR = path.join(HUGIN_HOME, "logs");
@@ -54,6 +60,8 @@ let currentTaskConfig: TaskConfig | null = null;
 let currentChild: ChildProcess | null = null;
 let currentSdkAbort: AbortController | null = null;
 let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
+let lastQueueDepth = 0;
+let lastBlockedTaskCount = 0;
 const startedAt = Date.now();
 
 const munin = new MuninClient({
@@ -639,20 +647,171 @@ async function recoverStaleTasks(): Promise<void> {
         result.namespace,
         `Task recovered as failed (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)`
       );
+      await promoteDependents(extractTaskId(result.namespace));
     }
   } catch (err) {
     console.error("Failed to recover stale tasks:", err);
   }
 }
 
+// --- Dependency joins ---
+
+function dependencyStateFromEntry(entry: (MuninEntry & { found: true }) | null): DependencyState {
+  if (!entry) return "missing";
+  if (entry.tags.includes("completed")) return "completed";
+  if (entry.tags.includes("failed")) return "failed";
+  return "pending";
+}
+
+async function readDependencyStates(dependencyIds: string[]): Promise<Record<string, DependencyState>> {
+  const entries = await Promise.all(
+    dependencyIds.map((dependencyId) => munin.read(`tasks/${dependencyId}`, "status"))
+  );
+
+  const states: Record<string, DependencyState> = {};
+  dependencyIds.forEach((dependencyId, index) => {
+    states[dependencyId] = dependencyStateFromEntry(entries[index]);
+  });
+  return states;
+}
+
+async function failBlockedTask(
+  taskNs: string,
+  entry: MuninEntry & { found: true },
+  errorMessage: string
+): Promise<void> {
+  const runtimeTag = entry.tags.find((tag) => tag.startsWith("runtime:"));
+  const typeTags = entry.tags.filter((tag) => tag.startsWith("type:"));
+  await munin.write(
+    taskNs,
+    "status",
+    entry.content,
+    ["failed", ...(runtimeTag ? [runtimeTag] : []), ...typeTags],
+    entry.updated_at
+  );
+  await munin.write(
+    taskNs,
+    "result",
+    `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`
+  );
+  await munin.log(taskNs, `Failed due to dependency state: ${errorMessage}`);
+}
+
+async function evaluateBlockedTaskState(taskNs: string): Promise<"promoted" | "failed" | "waiting"> {
+  const entry = await munin.read(taskNs, "status");
+  if (!entry || !entry.tags.includes("blocked")) return "waiting";
+
+  const dependencyIds = getDependencyIds(entry.tags);
+  const dependencyStates = await readDependencyStates(dependencyIds);
+  const evaluation = evaluateBlockedTask(entry.tags, dependencyStates);
+
+  if (evaluation.shouldFail) {
+    const errorMessage = evaluation.failureReason || "Dependency failure";
+    await failBlockedTask(taskNs, entry, errorMessage);
+    console.log(`Blocked task ${taskNs} failed (${errorMessage})`);
+    return "failed";
+  }
+
+  if (evaluation.shouldPromote) {
+    const promotedTags = buildPromotedTags(entry.tags);
+    await munin.write(taskNs, "status", entry.content, promotedTags, entry.updated_at);
+    const statusReason = evaluation.failedIds.length > 0
+      ? `Promoted from blocked -> pending (all ${evaluation.dependencyIds.length} dependencies reached terminal state; continuing after failures)`
+      : `Promoted from blocked -> pending (all ${evaluation.dependencyIds.length} dependencies met)`;
+    await munin.log(taskNs, statusReason);
+    console.log(`Promoted ${taskNs} -> pending (deps checked: ${evaluation.dependencyIds.length})`);
+    return "promoted";
+  }
+
+  return "waiting";
+}
+
+async function promoteDependents(completedTaskId: string): Promise<void> {
+  try {
+    const { results, total } = await munin.query({
+      query: "task",
+      tags: ["blocked", `depends-on:${completedTaskId}`],
+      namespace: "tasks/",
+      entry_type: "state",
+      limit: 100,
+    });
+
+    let promoted = 0;
+    let failed = 0;
+    for (const result of results) {
+      if (result.key !== "status") continue;
+      try {
+        const outcome = await evaluateBlockedTaskState(result.namespace);
+        if (outcome === "promoted") promoted++;
+        if (outcome === "failed") failed++;
+      } catch (err) {
+        console.error(`Failed to evaluate blocked task ${result.namespace}:`, err);
+      }
+    }
+
+    if (promoted > 0 || failed > 0 || total > results.length) {
+      console.log(
+        `Dependency scan for ${completedTaskId}: promoted=${promoted}, failed=${failed}, scanned=${results.length}, total_matches=${total}`
+      );
+    }
+  } catch (err) {
+    console.error(`Failed to promote dependents for ${completedTaskId}:`, err);
+  }
+}
+
+async function reconcileBlockedTasks(): Promise<void> {
+  try {
+    const { results, total } = await munin.query({
+      query: "task",
+      tags: ["blocked"],
+      namespace: "tasks/",
+      entry_type: "state",
+      limit: 100,
+    });
+
+    let promoted = 0;
+    let failed = 0;
+    for (const result of results) {
+      if (result.key !== "status") continue;
+      try {
+        const outcome = await evaluateBlockedTaskState(result.namespace);
+        if (outcome === "promoted") promoted++;
+        if (outcome === "failed") failed++;
+      } catch (err) {
+        console.error(`Blocked-task reconciliation failed for ${result.namespace}:`, err);
+      }
+    }
+
+    if (promoted > 0 || failed > 0 || total > results.length) {
+      console.log(
+        `Blocked-task reconciliation: promoted=${promoted}, failed=${failed}, scanned=${results.length}, total_blocked=${total}`
+      );
+    }
+  } catch (err) {
+    console.error("Blocked-task reconciliation failed:", err);
+  }
+}
+
+async function countTasksWithLifecycle(lifecycleTag: string): Promise<number> {
+  const { total } = await munin.query({
+    query: "task",
+    tags: [lifecycleTag],
+    namespace: "tasks/",
+    entry_type: "state",
+    limit: 1,
+  });
+  return total;
+}
+
 // --- Heartbeat ---
 
-async function emitHeartbeat(queueDepth: number): Promise<void> {
+async function emitHeartbeat(queueDepth: number, blockedTasks: number): Promise<void> {
   try {
     const heartbeat: Record<string, unknown> = {
       worker_id: workerId,
       polled_at: new Date().toISOString(),
       queue_depth: queueDepth,
+      blocked_tasks: blockedTasks,
       current_task: currentTask,
       uptime_s: Math.round((Date.now() - startedAt) / 1000),
     };
@@ -707,6 +866,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       "result",
       "## Result\n\n- **Exit code:** -1\n- **Error:** Failed to parse task (missing prompt or runtime)\n"
     );
+    await promoteDependents(extractTaskId(taskNs));
     return { hadTask: true, queueDepth };
   }
 
@@ -736,6 +896,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       taskNs,
       `Task rejected: submitter "${task.submittedBy}" not authorized`
     );
+    await promoteDependents(extractTaskId(taskNs));
     return { hadTask: true, queueDepth };
   }
 
@@ -1086,6 +1247,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     taskNs,
     `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`
   );
+  await promoteDependents(taskId);
 
   // Capture quota after task execution (run for claude tasks or ollama fallback to claude)
   const quotaAfter = (!isOllama || fallbackTriggered) ? await fetchQuota() : { q5: null, q7: null };
@@ -1121,22 +1283,30 @@ async function pollLoop(): Promise<void> {
 
   // Recover any tasks left running from a previous crash
   await recoverStaleTasks();
+  await reconcileBlockedTasks();
 
   // Clean up old log files
   await rotateOldLogs();
 
+  let pollCount = 0;
   while (!shuttingDown) {
     let queueDepth = 0;
     try {
+      pollCount++;
       const poll = await pollOnce();
       queueDepth = poll.queueDepth;
+      lastQueueDepth = queueDepth;
+      if (pollCount % 5 === 0) {
+        await reconcileBlockedTasks();
+      }
+      lastBlockedTaskCount = await countTasksWithLifecycle("blocked");
       // Fire-and-forget heartbeat
-      emitHeartbeat(queueDepth);
+      emitHeartbeat(queueDepth, lastBlockedTaskCount);
       if (poll.hadTask && !shuttingDown) continue; // Check for more immediately
     } catch (err) {
       console.error("Poll error:", err);
       // Still emit heartbeat on error
-      emitHeartbeat(queueDepth);
+      emitHeartbeat(queueDepth, lastBlockedTaskCount);
     }
 
     // Wait for next poll
@@ -1164,6 +1334,8 @@ app.get("/health", (_req, res) => {
     worker_id: workerId,
     current_task: currentTask,
     polling: !shuttingDown,
+    queue_depth: lastQueueDepth,
+    blocked_tasks: lastBlockedTaskCount,
     ollama_hosts: getHostStatus(),
   });
 });
@@ -1200,6 +1372,7 @@ async function shutdown(signal: string): Promise<void> {
           currentTask,
           `Task interrupted by dispatcher shutdown (${signal}, worker: ${workerId})`
         );
+        await promoteDependents(extractTaskId(currentTask));
       }
     } catch (err) {
       console.error("Failed to mark task as failed during shutdown:", err);
