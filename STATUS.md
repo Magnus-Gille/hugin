@@ -1,9 +1,15 @@
 # Hugin — Status
 
-**Last session:** 2026-04-02 (Step 3 sprint demo live eval + bug reports)
+**Last session:** 2026-04-02 (Step 3 resume live eval)
 **Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Step 3 resume-from-failed-phase validated live** — recorded in `docs/step3-resume-live-evaluation.md` with two probes:
+  - Full restart probe `tasks/20260402-193721-step3-resume-partial5` proved that an all-cancelled pipeline can be resumed end to end and that the parent `summary` now converges to `completed` after the last rerun phase finishes.
+  - Keep-completed probe `tasks/20260402-194512-step3-resume-partial-keep1` proved that Hugin keeps completed head phases intact, resumes only the cancelled tail, and writes `Pipeline action: resumed`, `Resumed phases: 2`, `Completed phases kept: 1`.
+- **Tracked summary reconciliation fixed the original live blocker** — non-terminal pipeline parents are now added to a small reconciliation watchlist and refreshed on later poll cycles until their `summary` reaches a terminal state. This closed the previous bug where the final resumed child could complete while the parent `summary` stayed stuck in a pre-terminal state.
+- **Startup priming was narrowed after first deploy feedback** — broad priming of all historical pipeline parents caused avoidable Munin `429` bursts. The watchlist now only seeds from already-existing, parseable, non-terminal summaries instead of trying to backfill old runs with missing summaries.
+- **Live behavior under Munin `429` is now characterized** — summary refresh, blocked-task promotion, and parent cancellation/result finalization can still lag under rate limiting, but the dispatcher now eventually converges both the full-restart and keep-completed resume paths without manual repair.
 - **Step 3 sprint demo live-tested** — submitted 3 targeted pipeline tasks, observed `result-structured` and `summary` artifacts at each lifecycle stage.
 - **Two Step 3 bugs found and written up** — `docs/step3-bug-report.md`:
   - Bug 1 (medium): `refreshPipelineSummary` parallel reads burst Munin rate limit → intermediate `running` state silently dropped; fixed by making reads sequential + best-effort catch.
@@ -79,12 +85,9 @@
 - mDNS (huginmunin.local) flaky — Tailscale IP 100.97.117.37 is reliable fallback
 
 ## Next Steps
-- Push, deploy, and live-validate the Step 3 resume slice with one fixed cancel -> resume pipeline.
-- Verify both resume cases live:
-  1. some phases completed, later phases cancelled
-  2. all phases cancelled and full pipeline restart
-- Confirm the parent `summary` stays coherent across cancel -> resume and that only non-completed phases rerun.
+- Decide whether Munin `429` remediation needs its own sprint before more orchestration complexity is added; the Step 3 state machine now converges under pressure, but latency and retry noise are still high.
 - Add dispatcher-level tests for the `Runtime: pipeline` execution path if parent-tag and result-contract behavior should be covered above the current pure-helper and compiler unit tests.
+- Decide whether cancellation/result finalization should be hardened further so parent `status/result` converge as quickly as parent `summary` under heavy `429` pressure.
 - **Fix submitter allowlist drift** — the deployed service still authorizes `claude-*`/`hugin`, while repo docs and current Codex workflows assume `Codex` names. Align config and documentation before the next live desktop-driven test cycle.
 - **Decide whether Munin 429 log noise needs another hardening pass** — cancellation now converges safely under load, but heartbeats and poll-loop logs still show intermittent `429` pressure during live runs.
 - **Step 5+: Capability registry + routing** — still deferred until Bet 1 is proven end to end.
