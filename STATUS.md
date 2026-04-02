@@ -1,9 +1,13 @@
 # Hugin — Status
 
-**Last session:** 2026-04-02 (Step 2 follow-up bug fixes live-validated)
+**Last session:** 2026-04-02 (Step 3 structured results + summary artifacts)
 **Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Step 3 structured result schema implemented locally** — regular task execution now writes machine-readable `result-structured` artifacts in addition to the existing markdown `result` entry, with validated fields for lifecycle/outcome, timings, routing metadata, runtime metadata, and pipeline phase context.
+- **Pipeline summary artifact implemented locally** — pipeline parents now gain a machine-readable `summary` artifact derived from `spec` plus child task state/results. It reports per-phase lifecycle, timings, runtimes, errors, aggregate counts, and top-level execution state (`decomposed`, `running`, `completed`, `failed`, `completed_with_failures`).
+- **Summary refresh wired into execution transitions** — the parent summary is refreshed on pipeline decomposition, child task claim, child task completion/failure, blocked-task promotion/failure, stale-task recovery, and shutdown interruption so the artifact tracks workflow progress instead of only final state.
+- **Step 3 artifact coverage added** — added pure tests for the structured task-result schema and pipeline summary reducer. `npm test` and `npm run build` both passed after the Step 3 slice.
 - **Step 2 follow-up bug fixes pushed, deployed, and live-validated** — deployed commit `615f98f` to `huginmunin`, restarted Hugin, and verified on live tasks that parent `type:*` tags survive successful decomposition, parent decomposition results now include `Reply-to` / `Reply-format` / `Group` / `Sequence`, dependent child phases keep `on-dep-failure:continue` on terminal status, child result formatting is clean, and missing phase runtimes now fail with a direct compiler error.
 - **Step 2 follow-up bug fixes implemented locally** — fixed all five current pipeline follow-ups from `feedback/hugin/step2-pipeline-findings`: terminal phase status now preserves `on-dep-failure:*`, successful pipeline parents preserve incoming `type:*` tags, pipeline parent decomposition results now include reply-routing metadata plus parent `Group`/`Sequence`, missing phase runtimes now fail with a direct validation error, and phase result formatting no longer emits extra blank metadata gaps.
 - **Lifecycle-tag and result-format helpers added** — extracted `src/task-status-tags.ts` and `src/result-format.ts` so terminal-tag preservation and result-contract rendering are pure, reusable, and testable instead of staying embedded in dispatcher control flow.
@@ -43,8 +47,9 @@
 
 ## Next Steps
 - Add dispatcher-level tests for the `Runtime: pipeline` execution path if parent-tag and result-contract behavior should be covered above the current pure-helper and compiler unit tests.
-- **Step 3: Structured results + pipeline operations** — add phase result schema, pipeline summary artifacts, cancellation, and resume-from-failed-phase support now that compile/decompose is proven live.
-- **Define Step 3 live gate before implementing it** — the next evaluation should exercise cancellation and resume on one fixed pipeline, not just the happy path.
+- **Deploy and live-evaluate the Step 3 artifact slice** — verify `result-structured` and parent `summary` on the Pi with one fixed pipeline before adding cancellation/resume behavior.
+- **Continue Step 3 with operations** — add cancellation and resume-from-failed-phase support on top of the new structured artifacts.
+- **Define the Step 3 live gate in detail** — the next evaluation should exercise cancellation and resume on one fixed pipeline, not just the happy path.
 - **Decide on AGENTS.md** — Codex generated this as its CLAUDE.md equivalent; has incorrect substitutions (script names, env var labels). Fix or delete before committing.
 - **Step 5+: Capability registry + routing** — still deferred until Bet 1 is proven end to end.
 - Deploy latest Ratatoskr features (poll recovery, delivery confirmation)

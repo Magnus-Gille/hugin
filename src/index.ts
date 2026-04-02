@@ -13,7 +13,12 @@ import {
   buildPipelineDecompositionResult,
   compilePipelineTask,
 } from "./pipeline-compiler.js";
-import type { PipelineIR } from "./pipeline-ir.js";
+import { pipelineIRSchema, type PipelineIR } from "./pipeline-ir.js";
+import {
+  buildPipelineExecutionSummary,
+  getPipelinePhaseLifecycle,
+  type PipelinePhaseSnapshot,
+} from "./pipeline-summary.js";
 import { buildTaskResultDocument } from "./result-format.js";
 import {
   buildPromotedTags,
@@ -25,6 +30,15 @@ import {
   buildPipelineParentSuccessTags,
   buildTerminalStatusTags,
 } from "./task-status-tags.js";
+import {
+  buildStructuredTaskResult,
+  structuredTaskResultSchema,
+  type DispatcherRuntime,
+  type StructuredTaskResult,
+  type TaskExecutionBodyKind,
+  type TaskExecutionPipelineContext,
+  type TaskExecutionRuntimeMetadata,
+} from "./task-result-schema.js";
 
 const HUGIN_HOME = path.join(process.env.HOME || "/home/magnus", ".hugin");
 const LOG_DIR = path.join(HUGIN_HOME, "logs");
@@ -99,6 +113,7 @@ interface TaskConfig {
   fallback?: "claude" | "none";
   contextRefs?: string[];
   contextBudget?: number;
+  pipeline?: TaskExecutionPipelineContext;
 }
 
 type DeclaredRuntime = TaskConfig["runtime"] | "pipeline";
@@ -185,6 +200,31 @@ function parseTask(content: string): TaskConfig | null {
   const contextBudgetStr = content.match(
     /\*\*Context-budget:\*\*\s*(\d+)/i
   )?.[1];
+  const pipelineId = content.match(
+    /\*\*Pipeline:\*\*\s*(.+)/i
+  )?.[1]?.trim();
+  const pipelinePhase = content.match(
+    /\*\*Pipeline phase:\*\*\s*(.+)/i
+  )?.[1]?.trim();
+  const pipelineSubmittedBy = content.match(
+    /\*\*Pipeline submitted by:\*\*\s*(.+)/i
+  )?.[1]?.trim();
+  const pipelineSensitivity = content.match(
+    /\*\*Pipeline sensitivity:\*\*\s*(public|internal|private)/i
+  )?.[1]?.trim()?.toLowerCase() as
+    | "public"
+    | "internal"
+    | "private"
+    | undefined;
+  const pipelineAuthority = content.match(
+    /\*\*Pipeline authority:\*\*\s*(autonomous|gated)/i
+  )?.[1]?.trim()?.toLowerCase() as "autonomous" | "gated" | undefined;
+  const pipelineDependencyTaskIdsRaw = content.match(
+    /\*\*Depends on task ids:\*\*\s*(.+)/i
+  )?.[1]?.trim();
+  const pipelineDependencyPhasesRaw = content.match(
+    /\*\*Depends on phases:\*\*\s*(.+)/i
+  )?.[1]?.trim();
 
   // Extract prompt from ### Prompt section
   const promptMatch = content.match(/###\s*Prompt\s*\n([\s\S]+)$/i);
@@ -216,6 +256,28 @@ function parseTask(content: string): TaskConfig | null {
       ? contextRefsRaw.split(",").map((r) => r.trim()).filter(Boolean)
       : undefined,
     contextBudget: contextBudgetStr ? parseInt(contextBudgetStr) : undefined,
+    pipeline:
+      pipelineId && pipelinePhase
+        ? {
+            pipelineId,
+            phase: pipelinePhase,
+            dependencyTaskIds: pipelineDependencyTaskIdsRaw
+              ? pipelineDependencyTaskIdsRaw
+                  .split(",")
+                  .map((value) => value.trim())
+                  .filter(Boolean)
+              : [],
+            dependencyPhases: pipelineDependencyPhasesRaw
+              ? pipelineDependencyPhasesRaw
+                  .split(",")
+                  .map((value) => value.trim())
+                  .filter(Boolean)
+              : [],
+            submittedBy: pipelineSubmittedBy || undefined,
+            sensitivity: pipelineSensitivity,
+            authority: pipelineAuthority,
+          }
+        : undefined,
   };
 }
 
@@ -227,6 +289,135 @@ function ensureLogDir(): void {
 
 function extractTaskId(namespace: string): string {
   return namespace.replace(/^tasks\//, "");
+}
+
+function getPipelineIdFromContent(content: string): string | undefined {
+  return content.match(/\*\*Pipeline:\*\*\s*(.+)/i)?.[1]?.trim();
+}
+
+function parseErrorMessageFromResult(content: string | undefined): string | undefined {
+  if (!content) return undefined;
+  return content.match(/\*\*Error:\*\*\s*(.+)/)?.[1]?.trim();
+}
+
+async function readStructuredTaskResult(
+  taskNs: string
+): Promise<StructuredTaskResult | null> {
+  const entry = await munin.read(taskNs, "result-structured");
+  if (!entry) return null;
+
+  try {
+    return structuredTaskResultSchema.parse(JSON.parse(entry.content));
+  } catch (err) {
+    console.error(`Failed to parse structured result for ${taskNs}:`, err);
+    return null;
+  }
+}
+
+async function writeStructuredTaskResult(
+  taskNs: string,
+  result: StructuredTaskResult
+): Promise<void> {
+  await munin.write(
+    taskNs,
+    "result-structured",
+    JSON.stringify(buildStructuredTaskResult(result), null, 2),
+    ["type:task-result", "type:task-result-structured"]
+  );
+}
+
+async function refreshPipelineSummary(pipelineId: string): Promise<void> {
+  const pipelineNs = `tasks/${pipelineId}`;
+  const specEntry = await munin.read(pipelineNs, "spec");
+  if (!specEntry) return;
+
+  let pipeline: PipelineIR;
+  try {
+    pipeline = pipelineIRSchema.parse(JSON.parse(specEntry.content));
+  } catch (err) {
+    console.error(`Failed to parse pipeline spec for ${pipelineNs}:`, err);
+    return;
+  }
+
+  const snapshots = await Promise.all(
+    pipeline.phases.map(async (phase): Promise<PipelinePhaseSnapshot> => {
+      const [statusEntry, structuredResult, resultEntry] = await Promise.all([
+        munin.read(phase.taskNamespace, "status"),
+        readStructuredTaskResult(phase.taskNamespace),
+        munin.read(phase.taskNamespace, "result"),
+      ]);
+
+      return {
+        phase,
+        lifecycle: getPipelinePhaseLifecycle(statusEntry?.tags),
+        structuredResult: structuredResult || undefined,
+        errorMessage:
+          structuredResult?.errorMessage ||
+          parseErrorMessageFromResult(resultEntry?.content),
+      };
+    })
+  );
+
+  const summary = buildPipelineExecutionSummary(pipeline, snapshots);
+  await munin.write(
+    pipelineNs,
+    "summary",
+    JSON.stringify(summary, null, 2),
+    ["type:pipeline", "type:pipeline-summary"]
+  );
+}
+
+async function refreshPipelineSummaryFromContent(content: string): Promise<void> {
+  const pipelineId = getPipelineIdFromContent(content);
+  if (!pipelineId) return;
+  await refreshPipelineSummary(pipelineId);
+}
+
+function createFailureStructuredResult(
+  taskNs: string,
+  runtime: DispatcherRuntime,
+  errorMessage: string,
+  options: {
+    executor: string;
+    resultSource: string;
+    exitCode?: number | "TIMEOUT";
+    startedAt?: string;
+    completedAt?: string;
+    durationSeconds?: number;
+    logFile?: string;
+    replyTo?: string;
+    replyFormat?: string;
+    group?: string;
+    sequence?: number;
+    pipeline?: TaskExecutionPipelineContext;
+    runtimeMetadata?: TaskExecutionRuntimeMetadata;
+  }
+): StructuredTaskResult {
+  const completedAt = options.completedAt || new Date().toISOString();
+  return buildStructuredTaskResult({
+    schemaVersion: 1,
+    taskId: extractTaskId(taskNs),
+    taskNamespace: taskNs,
+    lifecycle: "failed",
+    outcome: options.exitCode === "TIMEOUT" ? "timed_out" : "failed",
+    runtime,
+    executor: options.executor,
+    resultSource: options.resultSource,
+    exitCode: options.exitCode || -1,
+    startedAt: options.startedAt,
+    completedAt,
+    durationSeconds: options.durationSeconds,
+    logFile: options.logFile,
+    replyTo: options.replyTo,
+    replyFormat: options.replyFormat,
+    group: options.group,
+    sequence: options.sequence,
+    bodyKind: "error",
+    bodyText: errorMessage,
+    errorMessage,
+    runtimeMetadata: options.runtimeMetadata,
+    pipeline: options.pipeline,
+  });
 }
 
 // --- Quota snapshot ---
@@ -652,12 +843,11 @@ async function recoverStaleTasks(): Promise<void> {
       );
 
       const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
-      const recoverTypeTags = entry.tags.filter((t) => t.startsWith("type:"));
       await munin.write(
         result.namespace,
         "status",
         entry.content,
-        ["failed", ...(runtimeTag ? [runtimeTag] : []), ...recoverTypeTags],
+        buildTerminalStatusTags("failed", entry.tags),
         entry.updated_at
       );
       await munin.write(
@@ -665,11 +855,28 @@ async function recoverStaleTasks(): Promise<void> {
         "result",
         `## Result\n\n- **Exit code:** -1\n- **Error:** Task recovered (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)\n`
       );
+      const runtime = (runtimeTag || "runtime:claude").replace(
+        /^runtime:/,
+        ""
+      ) as DispatcherRuntime;
+      await writeStructuredTaskResult(
+        result.namespace,
+        createFailureStructuredResult(
+          result.namespace,
+          runtime,
+          `Task recovered (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)`,
+          {
+            executor: "dispatcher",
+            resultSource: "recovery",
+          }
+        )
+      );
       await munin.log(
         result.namespace,
         `Task recovered as failed (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)`
       );
       await promoteDependents(extractTaskId(result.namespace));
+      await refreshPipelineSummaryFromContent(entry.content);
     }
   } catch (err) {
     console.error("Failed to recover stale tasks:", err);
@@ -702,13 +909,11 @@ async function failBlockedTask(
   entry: MuninEntry & { found: true },
   errorMessage: string
 ): Promise<void> {
-  const runtimeTag = entry.tags.find((tag) => tag.startsWith("runtime:"));
-  const typeTags = entry.tags.filter((tag) => tag.startsWith("type:"));
   await munin.write(
     taskNs,
     "status",
     entry.content,
-    ["failed", ...(runtimeTag ? [runtimeTag] : []), ...typeTags],
+    buildTerminalStatusTags("failed", entry.tags),
     entry.updated_at
   );
   await munin.write(
@@ -716,7 +921,24 @@ async function failBlockedTask(
     "result",
     `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`
   );
+  const task = parseTask(entry.content);
+  const runtime = (
+    entry.tags.find((tag) => tag.startsWith("runtime:")) || "runtime:claude"
+  ).replace(/^runtime:/, "") as DispatcherRuntime;
+  await writeStructuredTaskResult(
+    taskNs,
+    createFailureStructuredResult(taskNs, runtime, errorMessage, {
+      executor: "dispatcher",
+      resultSource: "dependency",
+      replyTo: task?.replyTo,
+      replyFormat: task?.replyFormat,
+      group: task?.group,
+      sequence: task?.sequence,
+      pipeline: task?.pipeline,
+    })
+  );
   await munin.log(taskNs, `Failed due to dependency state: ${errorMessage}`);
+  await refreshPipelineSummaryFromContent(entry.content);
 }
 
 async function evaluateBlockedTaskState(taskNs: string): Promise<"promoted" | "failed" | "waiting"> {
@@ -742,6 +964,7 @@ async function evaluateBlockedTaskState(taskNs: string): Promise<"promoted" | "f
       : `Promoted from blocked -> pending (all ${evaluation.dependencyIds.length} dependencies met)`;
     await munin.log(taskNs, statusReason);
     console.log(`Promoted ${taskNs} -> pending (deps checked: ${evaluation.dependencyIds.length})`);
+    await refreshPipelineSummaryFromContent(entry.content);
     return "promoted";
   }
 
@@ -831,6 +1054,11 @@ async function failTaskWithMessage(
   errorMessage: string,
   runtimeTagOverride?: string,
 ): Promise<void> {
+  const runtime = (
+    runtimeTagOverride ||
+    entry.tags.find((tag) => tag.startsWith("runtime:")) ||
+    "runtime:claude"
+  ).replace(/^runtime:/, "") as DispatcherRuntime | "pipeline";
   await munin.write(
     taskNs,
     "status",
@@ -843,6 +1071,15 @@ async function failTaskWithMessage(
     "result",
     `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`
   );
+  if (runtime !== "pipeline") {
+    await writeStructuredTaskResult(
+      taskNs,
+      createFailureStructuredResult(taskNs, runtime, errorMessage, {
+        executor: "dispatcher",
+        resultSource: "dispatcher",
+      })
+    );
+  }
 }
 
 async function handlePipelineTask(
@@ -888,6 +1125,7 @@ async function handlePipelineTask(
       entry.updated_at
     );
     await munin.write(taskNs, "result", buildPipelineDecompositionResult(pipeline));
+    await refreshPipelineSummary(pipelineId);
     await munin.log(taskNs, `Pipeline compiled and decomposed into ${phaseDrafts.length} phase task(s)`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -955,6 +1193,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       "Failed to parse task (missing prompt or runtime)",
     );
     await promoteDependents(extractTaskId(taskNs));
+    await refreshPipelineSummaryFromContent(entry.content);
     return { hadTask: true, queueDepth };
   }
 
@@ -978,6 +1217,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       `Task rejected: submitter "${submittedBy}" not authorized`
     );
     await promoteDependents(extractTaskId(taskNs));
+    await refreshPipelineSummaryFromContent(entry.content);
     return { hadTask: true, queueDepth };
   }
 
@@ -1026,12 +1266,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       "Failed to parse task (missing prompt or runtime)",
     );
     await promoteDependents(taskId);
+    await refreshPipelineSummaryFromContent(entry.content);
     currentTask = null;
     currentTaskConfig = null;
     return { hadTask: true, queueDepth };
   }
 
   currentTaskConfig = task;
+  if (task.pipeline?.pipelineId) {
+    await refreshPipelineSummary(task.pipeline.pipelineId);
+  }
 
   const isOllama = task.runtime === "ollama";
   const useSdk = task.runtime === "claude" && config.claudeExecutor === "sdk";
@@ -1332,6 +1576,70 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     );
   }
 
+  const structuredBodyKind: TaskExecutionBodyKind =
+    resultSource === "stdout" ? "output" : "response";
+  const structuredBodyText =
+    resultSource === "stdout"
+      ? output || "(no output)"
+      : resultText || output || "(no output)";
+  const runtimeMetadata: TaskExecutionRuntimeMetadata | undefined =
+    isOllama
+      ? {
+          requestedModel: task.model || config.ollamaDefaultModel,
+          effectiveModel:
+            typeof ollamaJournalExtras.model_effective === "string"
+              ? ollamaJournalExtras.model_effective
+              : undefined,
+          requestedHost: task.ollamaHost || "auto",
+          effectiveHost:
+            typeof ollamaJournalExtras.host_effective === "string"
+              ? ollamaJournalExtras.host_effective
+              : undefined,
+          fallbackTriggered:
+            typeof ollamaJournalExtras.fallback_triggered === "boolean"
+              ? ollamaJournalExtras.fallback_triggered
+              : undefined,
+          fallbackReason:
+            typeof ollamaJournalExtras.fallback_reason === "string"
+              ? ollamaJournalExtras.fallback_reason
+              : undefined,
+        }
+      : task.model
+        ? {
+            requestedModel: task.model,
+            effectiveModel: task.model,
+          }
+        : undefined;
+
+  await writeStructuredTaskResult(
+    taskNs,
+    buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId,
+      taskNamespace: taskNs,
+      lifecycle: ok ? "completed" : "failed",
+      outcome: ok ? "completed" : isTimeout ? "timed_out" : "failed",
+      runtime: task.runtime,
+      executor: effectiveExecutor,
+      resultSource,
+      exitCode,
+      startedAt,
+      completedAt,
+      durationSeconds: Math.round(durationMs / 1000),
+      logFile: `~/.hugin/logs/${taskId}.log`,
+      replyTo: task.replyTo,
+      replyFormat: task.replyFormat,
+      group: task.group,
+      sequence: task.sequence,
+      costUsd: costUsd ?? undefined,
+      bodyKind: structuredBodyKind,
+      bodyText: structuredBodyText,
+      errorMessage: ok ? undefined : structuredBodyText,
+      runtimeMetadata,
+      pipeline: task.pipeline,
+    })
+  );
+
   await munin.write(
     taskNs,
     "status",
@@ -1344,6 +1652,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`
   );
   await promoteDependents(taskId);
+  if (task.pipeline?.pipelineId) {
+    await refreshPipelineSummary(task.pipeline.pipelineId);
+  }
 
   // Capture quota after task execution (run for claude tasks or ollama fallback to claude)
   const quotaAfter = (!isOllama || fallbackTriggered) ? await fetchQuota() : { q5: null, q7: null };
@@ -1451,12 +1762,11 @@ async function shutdown(signal: string): Promise<void> {
       const entry = await munin.read(currentTask, "status");
       if (entry) {
         const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
-        const typeTags = entry.tags.filter((t) => t.startsWith("type:"));
         await munin.write(
           currentTask,
           "status",
           entry.content,
-          ["failed", ...(runtimeTag ? [runtimeTag] : []), ...typeTags],
+          buildTerminalStatusTags("failed", entry.tags),
           entry.updated_at
         );
         await munin.write(
@@ -1464,11 +1774,34 @@ async function shutdown(signal: string): Promise<void> {
           "result",
           `## Result\n\n- **Exit code:** -1\n- **Error:** Task interrupted by dispatcher shutdown (${signal}, worker: ${workerId})\n`
         );
+        const task = parseTask(entry.content);
+        const runtime = (runtimeTag || "runtime:claude").replace(
+          /^runtime:/,
+          ""
+        ) as DispatcherRuntime;
+        await writeStructuredTaskResult(
+          currentTask,
+          createFailureStructuredResult(
+            currentTask,
+            runtime,
+            `Task interrupted by dispatcher shutdown (${signal}, worker: ${workerId})`,
+            {
+              executor: "dispatcher",
+              resultSource: "shutdown",
+              replyTo: task?.replyTo,
+              replyFormat: task?.replyFormat,
+              group: task?.group,
+              sequence: task?.sequence,
+              pipeline: task?.pipeline,
+            }
+          )
+        );
         await munin.log(
           currentTask,
           `Task interrupted by dispatcher shutdown (${signal}, worker: ${workerId})`
         );
         await promoteDependents(extractTaskId(currentTask));
+        await refreshPipelineSummaryFromContent(entry.content);
       }
     } catch (err) {
       console.error("Failed to mark task as failed during shutdown:", err);
