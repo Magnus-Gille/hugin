@@ -1,9 +1,15 @@
 # Hugin — Status
 
-**Last session:** 2026-04-02 (Step 3 structured results + summary artifacts)
+**Last session:** 2026-04-02 (Step 3 structured results + summary live-validated)
 **Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Step 3 artifact slice pushed, deployed, and live-validated** — deployed commit `9b1b900` to `huginmunin`, restarted Hugin onto worker `hugin-huginmunin-741842`, and validated both the success and failure artifact paths on the live service.
+- **Pipeline summary artifact validated live** — the parent task `tasks/20260402-122116-step3-artifacts-valid2` wrote `spec`, `result`, and `summary` immediately on decomposition, then refreshed the summary through child execution until the final artifact reported `executionState: completed`, `terminal: true`, correct aggregate counts, and end-to-end timing.
+- **Structured phase results validated live** — child tasks `...-gather` and `...-report` both wrote `result-structured` entries containing runtime metadata, pipeline context, task ids, dependency provenance, body text, and timings. The success path stayed on the Pi host with `qwen2.5:3b`.
+- **Structured failure path validated live** — task `tasks/20260402-122116-step3-invalid-model` failed with a structured result that preserved reply metadata plus runtime metadata (`effectiveHost: none`, `fallbackReason: host_unreachable`) and the failure message in both `bodyText` and `errorMessage`.
+- **Step 3 live evaluation record and sprint demo added** — recorded the formal results in `docs/step3-live-evaluation.md` and the human-facing artifact in `sprints/2026-04-02-step3-live-eval.md`.
+- **Operational config drift exposed during evaluation** — the first submission from `Submitted by: Codex` failed because the deployed allowlist still permits `claude-*` plus `hugin`, not the Codex-facing names in repo docs. The live gate was rerun with `Submitted by: hugin`; this drift should be fixed before more desktop-driven evaluations.
 - **Step 3 structured result schema implemented locally** — regular task execution now writes machine-readable `result-structured` artifacts in addition to the existing markdown `result` entry, with validated fields for lifecycle/outcome, timings, routing metadata, runtime metadata, and pipeline phase context.
 - **Pipeline summary artifact implemented locally** — pipeline parents now gain a machine-readable `summary` artifact derived from `spec` plus child task state/results. It reports per-phase lifecycle, timings, runtimes, errors, aggregate counts, and top-level execution state (`decomposed`, `running`, `completed`, `failed`, `completed_with_failures`).
 - **Summary refresh wired into execution transitions** — the parent summary is refreshed on pipeline decomposition, child task claim, child task completion/failure, blocked-task promotion/failure, stale-task recovery, and shutdown interruption so the artifact tracks workflow progress instead of only final state.
@@ -47,9 +53,9 @@
 
 ## Next Steps
 - Add dispatcher-level tests for the `Runtime: pipeline` execution path if parent-tag and result-contract behavior should be covered above the current pure-helper and compiler unit tests.
-- **Deploy and live-evaluate the Step 3 artifact slice** — verify `result-structured` and parent `summary` on the Pi with one fixed pipeline before adding cancellation/resume behavior.
-- **Continue Step 3 with operations** — add cancellation and resume-from-failed-phase support on top of the new structured artifacts.
-- **Define the Step 3 live gate in detail** — the next evaluation should exercise cancellation and resume on one fixed pipeline, not just the happy path.
+- **Continue Step 3 with operations** — add cancellation and resume-from-failed-phase support now that structured results and parent summaries are proven live.
+- **Define the next Step 3 live gate in detail** — the next evaluation should cancel one fixed pipeline mid-run, resume it cleanly, and verify the parent `summary` stays coherent across both operations.
+- **Fix submitter allowlist drift** — the deployed service still authorizes `claude-*`/`hugin`, while repo docs and current Codex workflows assume `Codex` names. Align config and documentation before the next live desktop-driven test cycle.
 - **Decide on AGENTS.md** — Codex generated this as its CLAUDE.md equivalent; has incorrect substitutions (script names, env var labels). Fix or delete before committing.
 - **Step 5+: Capability registry + routing** — still deferred until Bet 1 is proven end to end.
 - Deploy latest Ratatoskr features (poll recovery, delivery confirmation)

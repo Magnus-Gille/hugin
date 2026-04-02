@@ -33,3 +33,5 @@ Concrete things to carry into the next engineering step.
 ## Current sprint
 
 - [2026-04-02-step1-live-eval.md](/Users/magnus/repos/hugin/sprints/2026-04-02-step1-live-eval.md)
+- [2026-04-02-step2-live-eval.md](/Users/magnus/repos/hugin/sprints/2026-04-02-step2-live-eval.md)
+- [2026-04-02-step3-live-eval.md](/Users/magnus/repos/hugin/sprints/2026-04-02-step3-live-eval.md)
