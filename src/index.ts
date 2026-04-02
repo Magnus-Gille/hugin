@@ -9,6 +9,12 @@ import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus } from "./ollama-hosts.js";
 import { resolveContextRefs } from "./context-loader.js";
 import {
+  buildPhaseTaskDrafts,
+  buildPipelineDecompositionResult,
+  compilePipelineTask,
+} from "./pipeline-compiler.js";
+import type { PipelineIR } from "./pipeline-ir.js";
+import {
   buildPromotedTags,
   evaluateBlockedTask,
   getDependencyIds,
@@ -90,6 +96,18 @@ interface TaskConfig {
   contextBudget?: number;
 }
 
+type DeclaredRuntime = TaskConfig["runtime"] | "pipeline";
+
+function parseDeclaredRuntime(content: string): DeclaredRuntime | undefined {
+  return content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|pipeline)/i)?.[1]?.toLowerCase() as
+    | DeclaredRuntime
+    | undefined;
+}
+
+function parseSubmittedByField(content: string): string {
+  return content.match(/\*\*Submitted by:\*\*\s*(.+)/i)?.[1]?.trim() || "unknown";
+}
+
 function resolveContext(raw: string): string {
   const trimmed = raw.trim();
   if (trimmed.startsWith("repo:")) {
@@ -117,8 +135,7 @@ function resolveContext(raw: string): string {
 }
 
 function parseTask(content: string): TaskConfig | null {
-  const runtime =
-    content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama)/i)?.[1]?.toLowerCase() as
+  const runtime = parseDeclaredRuntime(content) as
       | "claude"
       | "codex"
       | "ollama"
@@ -803,6 +820,83 @@ async function countTasksWithLifecycle(lifecycleTag: string): Promise<number> {
   return total;
 }
 
+async function failTaskWithMessage(
+  taskNs: string,
+  entry: MuninEntry & { found: true },
+  errorMessage: string,
+  runtimeTagOverride?: string,
+): Promise<void> {
+  const runtimeTag = runtimeTagOverride || entry.tags.find((tag) => tag.startsWith("runtime:"));
+  const typeTags = entry.tags.filter((tag) => tag.startsWith("type:"));
+  await munin.write(
+    taskNs,
+    "status",
+    entry.content,
+    ["failed", ...(runtimeTag ? [runtimeTag] : []), ...typeTags],
+    entry.updated_at
+  );
+  await munin.write(
+    taskNs,
+    "result",
+    `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`
+  );
+}
+
+async function handlePipelineTask(
+  taskNs: string,
+  entry: MuninEntry & { found: true },
+  queueDepth: number
+): Promise<{ hadTask: boolean; queueDepth: number }> {
+  const pipelineId = extractTaskId(taskNs);
+  let pipeline: PipelineIR;
+
+  try {
+    pipeline = compilePipelineTask(pipelineId, taskNs, entry.content);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await failTaskWithMessage(taskNs, entry, `Pipeline compile failed: ${message}`, "runtime:pipeline");
+    await munin.log(taskNs, `Pipeline compile failed: ${message}`);
+    await promoteDependents(pipelineId);
+    return { hadTask: true, queueDepth };
+  }
+
+  const phaseDrafts = buildPhaseTaskDrafts(pipeline);
+
+  try {
+    const existingChildren = await Promise.all(
+      phaseDrafts.map((draft) => munin.read(draft.namespace, "status"))
+    );
+    const existingChild = existingChildren.find((child) => child !== null);
+    if (existingChild) {
+      throw new Error(`Child task namespace already exists: ${existingChild.namespace}`);
+    }
+
+    await munin.write(taskNs, "spec", JSON.stringify(pipeline, null, 2), ["type:pipeline", "type:pipeline-spec"]);
+
+    for (const draft of phaseDrafts) {
+      await munin.write(draft.namespace, "status", draft.content, draft.tags);
+    }
+
+    await munin.write(
+      taskNs,
+      "status",
+      entry.content,
+      ["completed", "runtime:pipeline", "type:pipeline"],
+      entry.updated_at
+    );
+    await munin.write(taskNs, "result", buildPipelineDecompositionResult(pipeline));
+    await munin.log(taskNs, `Pipeline compiled and decomposed into ${phaseDrafts.length} phase task(s)`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await failTaskWithMessage(taskNs, entry, `Pipeline decomposition failed: ${message}`, "runtime:pipeline");
+    await munin.log(taskNs, `Pipeline decomposition failed: ${message}`);
+  }
+
+  await promoteDependents(pipelineId);
+
+  return { hadTask: true, queueDepth };
+}
+
 // --- Heartbeat ---
 
 async function emitHeartbeat(queueDepth: number, blockedTasks: number): Promise<void> {
@@ -849,59 +943,43 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     return { hadTask: false, queueDepth };
   }
 
-  const task = parseTask(entry.content);
-  if (!task) {
+  const declaredRuntime = parseDeclaredRuntime(entry.content);
+  if (!declaredRuntime) {
     console.error(`Failed to parse task ${taskNs}, marking as failed`);
-    const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
-    const parseTypeTags = entry.tags.filter((t) => t.startsWith("type:"));
-    await munin.write(
+    await failTaskWithMessage(
       taskNs,
-      "status",
-      entry.content,
-      ["failed", ...(runtimeTag ? [runtimeTag] : []), ...parseTypeTags],
-      entry.updated_at
-    );
-    await munin.write(
-      taskNs,
-      "result",
-      "## Result\n\n- **Exit code:** -1\n- **Error:** Failed to parse task (missing prompt or runtime)\n"
+      entry,
+      "Failed to parse task (missing prompt or runtime)",
     );
     await promoteDependents(extractTaskId(taskNs));
     return { hadTask: true, queueDepth };
   }
 
   // Validate submitter against allowlist
+  const submittedBy = parseSubmittedByField(entry.content);
   if (
     !config.allowedSubmitters.includes("*") &&
-    !config.allowedSubmitters.includes(task.submittedBy)
+    !config.allowedSubmitters.includes(submittedBy)
   ) {
     console.warn(
-      `Rejecting task ${taskNs}: submitter "${task.submittedBy}" not in allowed list [${config.allowedSubmitters.join(", ")}]`
+      `Rejecting task ${taskNs}: submitter "${submittedBy}" not in allowed list [${config.allowedSubmitters.join(", ")}]`
     );
-    const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
-    const rejectTypeTags = entry.tags.filter((t) => t.startsWith("type:"));
-    await munin.write(
+    await failTaskWithMessage(
       taskNs,
-      "status",
-      entry.content,
-      ["failed", ...(runtimeTag ? [runtimeTag] : []), ...rejectTypeTags],
-      entry.updated_at
-    );
-    await munin.write(
-      taskNs,
-      "result",
-      `## Result\n\n- **Exit code:** -1\n- **Error:** Unauthorized submitter "${task.submittedBy}". Allowed: [${config.allowedSubmitters.join(", ")}]\n`
+      entry,
+      `Unauthorized submitter "${submittedBy}". Allowed: [${config.allowedSubmitters.join(", ")}]`,
+      declaredRuntime === "pipeline" ? "runtime:pipeline" : undefined,
     );
     await munin.log(
       taskNs,
-      `Task rejected: submitter "${task.submittedBy}" not authorized`
+      `Task rejected: submitter "${submittedBy}" not authorized`
     );
     await promoteDependents(extractTaskId(taskNs));
     return { hadTask: true, queueDepth };
   }
 
   console.log(
-    `Claiming task ${taskNs} (runtime: ${task.runtime}, submitter: ${task.submittedBy}, timeout: ${task.timeoutMs}ms, worker: ${workerId})`
+    `Claiming task ${taskNs} (runtime: ${declaredRuntime}, submitter: ${submittedBy}, worker: ${workerId})`
   );
 
   // Claim the task with compare-and-swap, attaching worker identity and lease
@@ -920,13 +998,37 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   }
 
   currentTask = taskNs;
-  currentTaskConfig = task;
   const startedAt = new Date().toISOString();
   const taskId = extractTaskId(taskNs);
   console.log(`Executing task ${taskNs}...`);
 
   // Start periodic lease renewal
   startLeaseRenewal(taskNs, entry.content, entry.tags);
+
+  if (declaredRuntime === "pipeline") {
+    currentTaskConfig = null;
+    const pipelineResult = await handlePipelineTask(taskNs, entry, queueDepth);
+    stopLeaseRenewal();
+    currentTask = null;
+    currentTaskConfig = null;
+    return pipelineResult;
+  }
+
+  const task = parseTask(entry.content);
+  if (!task) {
+    stopLeaseRenewal();
+    await failTaskWithMessage(
+      taskNs,
+      entry,
+      "Failed to parse task (missing prompt or runtime)",
+    );
+    await promoteDependents(taskId);
+    currentTask = null;
+    currentTaskConfig = null;
+    return { hadTask: true, queueDepth };
+  }
+
+  currentTaskConfig = task;
 
   const isOllama = task.runtime === "ollama";
   const useSdk = task.runtime === "claude" && config.claudeExecutor === "sdk";

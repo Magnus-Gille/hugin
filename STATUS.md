@@ -1,9 +1,14 @@
 # Hugin — Status
 
-**Last session:** 2026-04-02
-**Branch:** main
+**Last session:** 2026-04-02 (Step 2 implementation)
+**Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Step 2 pipeline compiler implemented locally** — added `src/pipeline-ir.ts` and `src/pipeline-compiler.ts` with a validated `PipelineIR`, explicit runtime registry (`claude-sdk`, `codex-spawn`, `ollama-pi`, `ollama-laptop`), markdown pipeline parsing, dependency/cycle validation, and child-task draft generation.
+- **Dispatcher now recognizes `Runtime: pipeline`** — `src/index.ts` compiles pipeline tasks, writes immutable `spec` JSON to Munin, decomposes phases into child tasks using Step 1 join primitives, and records decomposition results on the parent task.
+- **Dependency provenance preserved for Step 2** — instead of keeping `depends-on:*` forever on promoted tasks, the compiler stores dependencies in the pipeline `spec` and also writes parent pipeline id, phase name, and dependency task ids into child task content so auditability survives promotion.
+- **Pipeline compiler tests added** — `tests/pipeline-compiler.test.ts` covers valid compile/decompose output, dependency provenance, and rejection of `Runtime: auto`, unknown dependencies, cycles, and premature `Authority: gated`.
+- **Step 2 local verification green** — `npm test` and `npm run build` both passed after the pipeline compiler changes.
 - **Sprint artifact convention added** — created `sprints/` for human-facing sprint demos and feedback capture, with the Step 1 demo and first user feedback recorded in `sprints/2026-04-02-step1-live-eval.md`.
 - **Step 1 live evaluation passed on the Pi** — deployed branch `codex/step1-live-eval` to `huginmunin`, then validated success-path promotion, `on-dep-failure:fail`, `on-dep-failure:continue`, and startup reconciliation. Evidence recorded in `docs/step1-live-evaluation.md`.
 - **Engineering plan derived from orchestrator draft** — wrote `docs/hugin-v2-engineering-plan.md` with phased delivery, explicit evaluation gates, and a recommendation to stop after Step 1 for live validation before building the pipeline compiler.
@@ -26,8 +31,9 @@
 - mDNS (huginmunin.local) flaky — Tailscale IP 100.97.117.37 is reliable fallback
 
 ## Next Steps
-- **Step 2: Pipeline IR + compiler** — Step 1 is now validated. Next build `Runtime: pipeline` parsing, validated IR storage, and child-task decomposition with explicit runtimes only.
-- **Review dependency provenance retention** — current promotion strips `depends-on:*` tags; decide whether downstream auditability needs explicit provenance storage before Step 2.
+- **Evaluate Step 2 on the live system** — submit one fixed explicit-runtime pipeline, verify `spec` storage, child task decomposition (`pending` roots, `blocked` dependents), and successful child execution flow.
+- **Exercise compile/decompose failure cases live** — submit invalid pipeline variants and confirm clear parent-task failure for unknown runtime / invalid dependency graph without partial execution.
+- **Decide on AGENTS.md** — Codex generated this as its CLAUDE.md equivalent; has incorrect substitutions (script names, env var labels). Fix or delete before committing.
 - **Step 3: Structured results + pipeline operations** — only after Step 2 compile/decompose evaluation passes.
 - **Step 5+: Capability registry + routing** — still deferred until Bet 1 is proven end to end.
 - Deploy latest Ratatoskr features (poll recovery, delivery confirmation)
