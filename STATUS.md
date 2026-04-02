@@ -1,9 +1,13 @@
 # Hugin — Status
 
-**Last session:** 2026-04-02 (Step 3 cancellation deployed and live-validated)
+**Last session:** 2026-04-02 (Step 3 resume slice implemented locally)
 **Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Step 3 resume-from-failed-phase implemented locally** — added pipeline parent `resume-requested` handling in [src/index.ts](/Users/magnus/repos/hugin/src/index.ts), a pure resume planner in [src/pipeline-ops.ts](/Users/magnus/repos/hugin/src/pipeline-ops.ts), and logic to reset only non-completed phases while keeping successful phases intact.
+- **Resume planning now supports retry after partial progress** — the planner distinguishes between a genuinely active pipeline and a partially resumed pipeline after a Munin `429`. If some phases are already reactivated while the parent still looks cancelled/failed, Hugin now finalizes the parent back to the resumed state instead of discarding the resume request.
+- **Summary refresh no longer surfaces stale old results during resumed attempts** — [src/index.ts](/Users/magnus/repos/hugin/src/index.ts) now ignores prior `result` / `result-structured` artifacts for non-terminal phase states, so a resumed phase that is back in `pending`, `blocked`, or `running` does not inherit stale failure/cancellation metadata in the parent summary.
+- **Resume regression coverage added** — new tests in [tests/pipeline-ops.test.ts](/Users/magnus/repos/hugin/tests/pipeline-ops.test.ts) cover keeping completed phases, requeuing cancelled descendants, restarting failed roots, rejecting already-active pipelines, and retrying partial resume states. Local verification passed with `npm test` (85 tests) and `npm run build`.
 - **Step 3 cancellation shipped, deployed, and live-validated** — added explicit cancellation handling for running tasks, blocked descendants, and pipeline parents, then deployed the feature to `huginmunin` and validated it on live pipeline probes using `claude-sdk` phases that were cancelled mid-run.
 - **Running-phase abort path now works live** — probe `tasks/20260402-152140-step3-cancel-pipeline2` proved that a parent `cancel-requested` tag aborts the active `gather` phase, marks it `cancelled`, prevents the blocked `report` phase from running, and converges the parent to `status: cancelled` plus a cancellation result record.
 - **Two live-found cancellation bugs were fixed immediately** — probe 1 exposed stale parent results when a Munin `429` landed between parent status/result writes, fixed in commit `cd69ed0` by making parent finalization retry-safe; probe 2 exposed an all-cancelled pipeline summary being classified as `decomposed`, fixed in commit `bc590f9` by correcting summary-state precedence.
@@ -66,9 +70,12 @@
 - mDNS (huginmunin.local) flaky — Tailscale IP 100.97.117.37 is reliable fallback
 
 ## Next Steps
+- Push, deploy, and live-validate the Step 3 resume slice with one fixed cancel -> resume pipeline.
+- Verify both resume cases live:
+  1. some phases completed, later phases cancelled
+  2. all phases cancelled and full pipeline restart
+- Confirm the parent `summary` stays coherent across cancel -> resume and that only non-completed phases rerun.
 - Add dispatcher-level tests for the `Runtime: pipeline` execution path if parent-tag and result-contract behavior should be covered above the current pure-helper and compiler unit tests.
-- **Continue Step 3 with resume-from-failed-phase** — cancellation is now proven live, so the next operations slice is to reuse stored `spec` plus `result-structured` artifacts and rerun only unfinished/cancelled phases.
-- **Define the next Step 3 live gate in detail** — the next evaluation should cancel one fixed pipeline, resume it cleanly, and verify the parent `summary` stays coherent across cancel -> resume.
 - **Fix submitter allowlist drift** — the deployed service still authorizes `claude-*`/`hugin`, while repo docs and current Codex workflows assume `Codex` names. Align config and documentation before the next live desktop-driven test cycle.
 - **Decide whether Munin 429 log noise needs another hardening pass** — cancellation now converges safely under load, but heartbeats and poll-loop logs still show intermittent `429` pressure during live runs.
 - **Decide on AGENTS.md** — Codex generated this as its CLAUDE.md equivalent; has incorrect substitutions (script names, env var labels). Fix or delete before committing.

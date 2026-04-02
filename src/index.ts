@@ -13,6 +13,7 @@ import {
   buildPipelineDecompositionResult,
   compilePipelineTask,
 } from "./pipeline-compiler.js";
+import { buildPipelineResumePlan } from "./pipeline-ops.js";
 import { pipelineIRSchema, type PipelineIR } from "./pipeline-ir.js";
 import {
   buildPipelineExecutionSummary,
@@ -48,6 +49,7 @@ const HUGIN_HOME = path.join(process.env.HOME || "/home/magnus", ".hugin");
 const LOG_DIR = path.join(HUGIN_HOME, "logs");
 const HOOK_RESULT_DIR = path.join(HUGIN_HOME, "hook-results");
 const CANCEL_REQUESTED_TAG = "cancel-requested";
+const RESUME_REQUESTED_TAG = "resume-requested";
 const CANCEL_WATCH_INTERVAL_MS = 2000;
 
 // --- Configuration ---
@@ -375,12 +377,21 @@ async function refreshPipelineSummary(pipelineId: string): Promise<void> {
     const snapshots: PipelinePhaseSnapshot[] = [];
     for (const phase of pipeline.phases) {
       const statusEntry = await munin.read(phase.taskNamespace, "status");
-      const structuredResult = await readStructuredTaskResult(phase.taskNamespace);
-      const resultEntry = await munin.read(phase.taskNamespace, "result");
+      const lifecycle = getPipelinePhaseLifecycle(statusEntry?.tags);
+      const isTerminal =
+        lifecycle === "completed" ||
+        lifecycle === "failed" ||
+        lifecycle === "cancelled";
+      const structuredResult = isTerminal
+        ? await readStructuredTaskResult(phase.taskNamespace)
+        : null;
+      const resultEntry = isTerminal
+        ? await munin.read(phase.taskNamespace, "result")
+        : null;
 
       snapshots.push({
         phase,
-        lifecycle: getPipelinePhaseLifecycle(statusEntry?.tags),
+        lifecycle,
         structuredResult: structuredResult || undefined,
         errorMessage:
           structuredResult?.errorMessage ||
@@ -537,6 +548,60 @@ function buildPipelineCancelledResultDocument(input: {
       group: input.group,
       sequence: input.sequence,
     }),
+  ].join("\n");
+}
+
+function buildPhaseResumeResultDocument(input: {
+  pipelineId: string;
+  phaseName: string;
+  previousLifecycle: string;
+  nextLifecycle: "pending" | "blocked";
+}): string {
+  return [
+    "## Result",
+    "",
+    "- **Pipeline action:** resumed",
+    `- **Pipeline id:** ${input.pipelineId}`,
+    `- **Pipeline phase:** ${input.phaseName}`,
+    `- **Previous state:** ${input.previousLifecycle}`,
+    `- **Next state:** ${input.nextLifecycle}`,
+  ].join("\n");
+}
+
+function buildPipelineResumedResultDocument(input: {
+  pipelineId: string;
+  resumedPhaseNames: string[];
+  keptCompletedPhaseNames: string[];
+  replyTo?: string;
+  replyFormat?: string;
+  group?: string;
+  sequence?: number;
+}): string {
+  return [
+    "## Result",
+    "",
+    "- **Exit code:** 0",
+    "- **Pipeline action:** resumed",
+    `- **Pipeline id:** ${input.pipelineId}`,
+    `- **Resumed phases:** ${input.resumedPhaseNames.length}`,
+    `- **Completed phases kept:** ${input.keptCompletedPhaseNames.length}`,
+    `- **Summary key:** tasks/${input.pipelineId}/summary`,
+    ...buildRoutingMetadataLines({
+      replyTo: input.replyTo,
+      replyFormat: input.replyFormat,
+      group: input.group,
+      sequence: input.sequence,
+    }),
+    "",
+    "### Resumed phases",
+    ...(input.resumedPhaseNames.length > 0
+      ? input.resumedPhaseNames.map((name) => `- ${name}`)
+      : ["- (none)"]),
+    "",
+    "### Kept completed phases",
+    ...(input.keptCompletedPhaseNames.length > 0
+      ? input.keptCompletedPhaseNames.map((name) => `- ${name}`)
+      : ["- (none)"]),
   ].join("\n");
 }
 
@@ -1295,6 +1360,19 @@ async function clearCancellationRequest(
   }
 }
 
+async function clearResumeRequest(
+  taskNs: string,
+  entry: MuninEntry & { found: true },
+  logMessage?: string
+): Promise<void> {
+  const updatedTags = removeTag(entry.tags, RESUME_REQUESTED_TAG);
+  if (updatedTags.length === entry.tags.length) return;
+  await munin.write(taskNs, "status", entry.content, updatedTags, entry.updated_at);
+  if (logMessage) {
+    await munin.log(taskNs, logMessage);
+  }
+}
+
 async function markTaskCancelled(
   taskNs: string,
   entry: MuninEntry & { found: true },
@@ -1549,6 +1627,217 @@ async function processCancellationRequests(): Promise<boolean> {
         resultSource: "cancellation",
       }
     );
+    processed = true;
+  }
+
+  return processed;
+}
+
+async function processResumeRequests(): Promise<boolean> {
+  const { results } = await munin.query({
+    query: "task",
+    tags: [RESUME_REQUESTED_TAG],
+    namespace: "tasks/",
+    entry_type: "state",
+    limit: 50,
+  });
+
+  let processed = false;
+  for (const result of results) {
+    if (result.key !== "status") continue;
+    const entry = await munin.read(result.namespace, "status");
+    if (!entry || !entry.tags.includes(RESUME_REQUESTED_TAG)) continue;
+
+    const declaredRuntime = parseDeclaredRuntime(entry.content);
+    if (declaredRuntime !== "pipeline" && !entry.tags.includes("runtime:pipeline")) {
+      await clearResumeRequest(
+        entry.namespace,
+        entry,
+        "Resume ignored; only pipeline parents can be resumed"
+      );
+      continue;
+    }
+
+    if (entry.tags.includes(CANCEL_REQUESTED_TAG)) {
+      await clearResumeRequest(
+        entry.namespace,
+        entry,
+        "Resume ignored; cancellation is still pending"
+      );
+      continue;
+    }
+
+    const specEntry = await munin.read(entry.namespace, "spec");
+    if (!specEntry) {
+      await clearResumeRequest(
+        entry.namespace,
+        entry,
+        "Resume ignored; pipeline spec is missing"
+      );
+      continue;
+    }
+
+    let pipeline: PipelineIR;
+    try {
+      pipeline = pipelineIRSchema.parse(JSON.parse(specEntry.content));
+    } catch (err) {
+      console.error(`Failed to parse pipeline spec for resume request ${entry.namespace}:`, err);
+      continue;
+    }
+
+    const phaseEntries = new Map<string, (MuninEntry & { found: true }) | null>();
+    const currentLifecycles: Record<string, PipelinePhaseSnapshot["lifecycle"]> = {};
+    for (const phase of pipeline.phases) {
+      const phaseEntry = await munin.read(phase.taskNamespace, "status");
+      phaseEntries.set(phase.taskNamespace, phaseEntry);
+      currentLifecycles[phase.taskNamespace] = getPipelinePhaseLifecycle(phaseEntry?.tags);
+    }
+
+    const plan = buildPipelineResumePlan(pipeline, currentLifecycles);
+    if (!plan.resumable) {
+      if (
+        plan.hasActivePhases &&
+        (entry.tags.includes("cancelled") || entry.tags.includes("failed"))
+      ) {
+        const resumedPhaseNames = plan.phases
+          .filter((phasePlan) => phasePlan.currentLifecycle !== "completed")
+          .map((phasePlan) => phasePlan.phase.name);
+        const keptCompletedPhaseNames = plan.phases
+          .filter((phasePlan) => phasePlan.currentLifecycle === "completed")
+          .map((phasePlan) => phasePlan.phase.name);
+
+        await munin.write(
+          entry.namespace,
+          "result",
+          buildPipelineResumedResultDocument({
+            pipelineId: pipeline.id,
+            resumedPhaseNames,
+            keptCompletedPhaseNames,
+            replyTo: pipeline.replyTo,
+            replyFormat: pipeline.replyFormat,
+            group: pipeline.group,
+            sequence: pipeline.sequence,
+          })
+        );
+        await munin.write(
+          entry.namespace,
+          "status",
+          entry.content,
+          buildPipelineParentSuccessTags(
+            entry.tags.filter(
+              (tag) => tag !== RESUME_REQUESTED_TAG && tag !== CANCEL_REQUESTED_TAG
+            )
+          ),
+          entry.updated_at
+        );
+        await munin.log(
+          entry.namespace,
+          `Pipeline resume finalized after partial update; ${resumedPhaseNames.length} phase(s) already active`
+        );
+        await refreshPipelineSummary(pipeline.id);
+        processed = true;
+        continue;
+      }
+
+      await clearResumeRequest(
+        entry.namespace,
+        entry,
+        `Resume ignored; ${plan.reason || "pipeline is not resumable"}`
+      );
+      continue;
+    }
+
+    const draftByNamespace = new Map(
+      buildPhaseTaskDrafts(pipeline).map((draft) => [draft.namespace, draft])
+    );
+    const resumedPhaseNames: string[] = [];
+    const keptCompletedPhaseNames: string[] = [];
+
+    for (const phasePlan of plan.phases) {
+      if (!phasePlan.shouldReset) {
+        if (phasePlan.currentLifecycle === "completed") {
+          keptCompletedPhaseNames.push(phasePlan.phase.name);
+        }
+        continue;
+      }
+
+      const draft = draftByNamespace.get(phasePlan.phase.taskNamespace);
+      if (!draft) {
+        throw new Error(`Missing pipeline task draft for ${phasePlan.phase.taskNamespace}`);
+      }
+
+      const nextTags =
+        phasePlan.nextLifecycle === "pending"
+          ? buildPromotedTags(draft.tags)
+          : draft.tags;
+
+      await munin.write(
+        phasePlan.phase.taskNamespace,
+        "result",
+        buildPhaseResumeResultDocument({
+          pipelineId: pipeline.id,
+          phaseName: phasePlan.phase.name,
+          previousLifecycle: phasePlan.currentLifecycle,
+          nextLifecycle:
+            phasePlan.nextLifecycle === "pending" ? "pending" : "blocked",
+        })
+      );
+
+      const phaseEntry = phaseEntries.get(phasePlan.phase.taskNamespace);
+      if (phaseEntry) {
+        await munin.write(
+          phasePlan.phase.taskNamespace,
+          "status",
+          draft.content,
+          nextTags,
+          phaseEntry.updated_at
+        );
+      } else {
+        await munin.write(
+          phasePlan.phase.taskNamespace,
+          "status",
+          draft.content,
+          nextTags
+        );
+      }
+
+      await munin.log(
+        phasePlan.phase.taskNamespace,
+        `Phase resumed from ${phasePlan.currentLifecycle} -> ${phasePlan.nextLifecycle} (pipeline ${pipeline.id})`
+      );
+      resumedPhaseNames.push(phasePlan.phase.name);
+    }
+
+    await munin.write(
+      entry.namespace,
+      "result",
+      buildPipelineResumedResultDocument({
+        pipelineId: pipeline.id,
+        resumedPhaseNames,
+        keptCompletedPhaseNames,
+        replyTo: pipeline.replyTo,
+        replyFormat: pipeline.replyFormat,
+        group: pipeline.group,
+        sequence: pipeline.sequence,
+      })
+    );
+
+    await munin.write(
+      entry.namespace,
+      "status",
+      entry.content,
+      buildPipelineParentSuccessTags(
+        entry.tags.filter(
+          (tag) => tag !== RESUME_REQUESTED_TAG && tag !== CANCEL_REQUESTED_TAG
+        )
+      ),
+      entry.updated_at
+    );
+    await munin.log(
+      entry.namespace,
+      `Pipeline resumed: reset ${resumedPhaseNames.length} phase(s), kept ${keptCompletedPhaseNames.length} completed phase(s)`
+    );
+    await refreshPipelineSummary(pipeline.id);
     processed = true;
   }
 
@@ -2321,6 +2610,7 @@ async function pollLoop(): Promise<void> {
     try {
       pollCount++;
       const processedCancellation = await processCancellationRequests();
+      const processedResume = await processResumeRequests();
       const poll = await pollOnce();
       queueDepth = poll.queueDepth;
       lastQueueDepth = queueDepth;
@@ -2330,7 +2620,7 @@ async function pollLoop(): Promise<void> {
       lastBlockedTaskCount = await countTasksWithLifecycle("blocked");
       // Fire-and-forget heartbeat
       emitHeartbeat(queueDepth, lastBlockedTaskCount);
-      if ((processedCancellation || poll.hadTask) && !shuttingDown) continue; // Check for more immediately
+      if ((processedCancellation || processedResume || poll.hadTask) && !shuttingDown) continue; // Check for more immediately
     } catch (err) {
       console.error("Poll error:", err);
       // Still emit heartbeat on error
