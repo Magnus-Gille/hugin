@@ -18,6 +18,9 @@ import { pipelineIRSchema, type PipelineIR } from "./pipeline-ir.js";
 import {
   buildPipelineExecutionSummary,
   getPipelinePhaseLifecycle,
+  parsePipelineExecutionSummary,
+  pipelineSummaryNeedsReconciliation,
+  type PipelineExecutionSummary,
   type PipelinePhaseSnapshot,
 } from "./pipeline-summary.js";
 import {
@@ -102,6 +105,7 @@ let cancelWatchTimer: ReturnType<typeof setInterval> | null = null;
 let lastQueueDepth = 0;
 let lastBlockedTaskCount = 0;
 const startedAt = Date.now();
+const trackedPipelineSummaryIds = new Set<string>();
 
 interface CancellationRequest {
   reason: string;
@@ -364,11 +368,38 @@ async function writeStructuredTaskResult(
   );
 }
 
+function trackPipelineSummary(pipelineId: string): void {
+  trackedPipelineSummaryIds.add(pipelineId);
+}
+
+function untrackPipelineSummary(pipelineId: string): void {
+  trackedPipelineSummaryIds.delete(pipelineId);
+}
+
+async function readPipelineSummary(
+  pipelineNs: string
+): Promise<PipelineExecutionSummary | null> {
+  const entry = await munin.read(pipelineNs, "summary");
+  if (!entry) return null;
+
+  const summary = parsePipelineExecutionSummary(entry.content);
+  if (!summary) {
+    console.error(`Failed to parse pipeline summary for ${pipelineNs}`);
+    return null;
+  }
+
+  return summary;
+}
+
 async function refreshPipelineSummary(pipelineId: string): Promise<void> {
+  trackPipelineSummary(pipelineId);
   try {
     const pipelineNs = `tasks/${pipelineId}`;
     const specEntry = await munin.read(pipelineNs, "spec");
-    if (!specEntry) return;
+    if (!specEntry) {
+      untrackPipelineSummary(pipelineId);
+      return;
+    }
 
     let pipeline: PipelineIR;
     try {
@@ -410,6 +441,9 @@ async function refreshPipelineSummary(pipelineId: string): Promise<void> {
       JSON.stringify(summary, null, 2),
       ["type:pipeline", "type:pipeline-summary"]
     );
+    if (summary.terminal) {
+      untrackPipelineSummary(pipelineId);
+    }
   } catch (err) {
     console.error(`Pipeline summary refresh failed for ${pipelineId}:`, err);
   }
@@ -419,6 +453,53 @@ async function refreshPipelineSummaryFromContent(content: string): Promise<void>
   const pipelineId = getPipelineIdFromContent(content);
   if (!pipelineId) return;
   await refreshPipelineSummary(pipelineId);
+}
+
+async function primeTrackedPipelineSummaries(): Promise<void> {
+  try {
+    const { results, total } = await munin.query({
+      query: "task",
+      tags: ["runtime:pipeline"],
+      namespace: "tasks/",
+      entry_type: "state",
+      limit: 100,
+    });
+
+    let tracked = 0;
+    for (const result of results) {
+      if (result.key !== "status") continue;
+      const summary = await readPipelineSummary(result.namespace);
+      if (pipelineSummaryNeedsReconciliation(summary)) {
+        trackPipelineSummary(extractTaskId(result.namespace));
+        tracked++;
+      }
+    }
+
+    if (tracked > 0 || total > results.length) {
+      console.log(
+        `Pipeline summary watchlist primed: tracked=${tracked}, scanned=${results.length}, total_pipeline_parents=${total}`
+      );
+    }
+  } catch (err) {
+    console.error("Failed to prime pipeline summary watchlist:", err);
+  }
+}
+
+async function reconcileTrackedPipelineSummaries(): Promise<void> {
+  if (trackedPipelineSummaryIds.size === 0) return;
+
+  const pipelineIds = Array.from(trackedPipelineSummaryIds);
+  let reconciled = 0;
+  for (const pipelineId of pipelineIds) {
+    await refreshPipelineSummary(pipelineId);
+    reconciled++;
+  }
+
+  if (reconciled > 0) {
+    console.log(
+      `Pipeline summary reconciliation: refreshed=${reconciled}, still_tracked=${trackedPipelineSummaryIds.size}`
+    );
+  }
 }
 
 function createFailureStructuredResult(
@@ -2649,6 +2730,8 @@ async function pollLoop(): Promise<void> {
   // Recover any tasks left running from a previous crash
   await recoverStaleTasks();
   await reconcileBlockedTasks();
+  await primeTrackedPipelineSummaries();
+  await reconcileTrackedPipelineSummaries();
 
   // Clean up old log files
   await rotateOldLogs();
@@ -2658,6 +2741,7 @@ async function pollLoop(): Promise<void> {
     let queueDepth = 0;
     try {
       pollCount++;
+      await reconcileTrackedPipelineSummaries();
       const processedCancellation = await processCancellationRequests();
       const processedResume = await processResumeRequests();
       const poll = await pollOnce();

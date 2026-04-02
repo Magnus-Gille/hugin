@@ -96,6 +96,22 @@ export type PipelineExecutionSummary = z.infer<
   typeof pipelineExecutionSummarySchema
 >;
 
+export function parsePipelineExecutionSummary(
+  content: string
+): PipelineExecutionSummary | null {
+  try {
+    return pipelineExecutionSummarySchema.parse(JSON.parse(content));
+  } catch {
+    return null;
+  }
+}
+
+export function pipelineSummaryNeedsReconciliation(
+  summary: PipelineExecutionSummary | null
+): boolean {
+  return !summary || !summary.terminal;
+}
+
 export interface PipelinePhaseSnapshot {
   phase: z.infer<typeof pipelineIRSchema>["phases"][number];
   lifecycle: PipelinePhaseLifecycle;

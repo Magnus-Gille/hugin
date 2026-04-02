@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { compilePipelineTask } from "../src/pipeline-compiler.js";
-import { buildPipelineExecutionSummary } from "../src/pipeline-summary.js";
+import {
+  buildPipelineExecutionSummary,
+  parsePipelineExecutionSummary,
+  pipelineSummaryNeedsReconciliation,
+} from "../src/pipeline-summary.js";
 import { buildStructuredTaskResult } from "../src/task-result-schema.js";
 
 function makePipeline() {
@@ -263,5 +267,64 @@ describe("pipeline execution summary", () => {
     expect(summary.executionState).toBe("cancelled");
     expect(summary.terminal).toBe(true);
     expect(summary.phaseCounts.cancelled).toBe(2);
+  });
+
+  it("flags missing and non-terminal summaries for reconciliation", () => {
+    expect(pipelineSummaryNeedsReconciliation(null)).toBe(true);
+
+    const pipeline = makePipeline();
+    const runningSummary = buildPipelineExecutionSummary(
+      pipeline,
+      [
+        {
+          phase: pipeline.phases[0]!,
+          lifecycle: "running",
+        },
+        {
+          phase: pipeline.phases[1]!,
+          lifecycle: "blocked",
+        },
+      ],
+      "2026-04-02T11:00:02Z"
+    );
+
+    expect(pipelineSummaryNeedsReconciliation(runningSummary)).toBe(true);
+    expect(
+      pipelineSummaryNeedsReconciliation(
+        parsePipelineExecutionSummary(JSON.stringify(runningSummary))
+      )
+    ).toBe(true);
+
+    const completedSummary = buildPipelineExecutionSummary(
+      pipeline,
+      pipeline.phases.map((phase, index) => ({
+        phase,
+        lifecycle: "completed" as const,
+        structuredResult: buildStructuredTaskResult({
+          schemaVersion: 1,
+          taskId: phase.taskId,
+          taskNamespace: phase.taskNamespace,
+          lifecycle: "completed",
+          outcome: "completed",
+          runtime: "ollama",
+          executor: "ollama",
+          resultSource: "ollama",
+          exitCode: 0,
+          startedAt: `2026-04-02T11:00:0${index + 1}Z`,
+          completedAt: `2026-04-02T11:00:0${index + 2}Z`,
+          durationSeconds: 1,
+          bodyKind: "response",
+          bodyText: phase.name.toUpperCase(),
+        }),
+      })),
+      "2026-04-02T11:00:03Z"
+    );
+
+    expect(
+      pipelineSummaryNeedsReconciliation(
+        parsePipelineExecutionSummary(JSON.stringify(completedSummary))
+      )
+    ).toBe(false);
+    expect(parsePipelineExecutionSummary("{not-json")).toBeNull();
   });
 });
