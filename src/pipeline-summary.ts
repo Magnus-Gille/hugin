@@ -16,6 +16,7 @@ export const pipelinePhaseLifecycleSchema = z.enum([
   "running",
   "completed",
   "failed",
+  "cancelled",
 ]);
 export type PipelinePhaseLifecycle = z.infer<typeof pipelinePhaseLifecycleSchema>;
 
@@ -25,6 +26,7 @@ export const pipelineExecutionStateSchema = z.enum([
   "completed",
   "failed",
   "completed_with_failures",
+  "cancelled",
 ]);
 export type PipelineExecutionState = z.infer<typeof pipelineExecutionStateSchema>;
 
@@ -42,7 +44,13 @@ export const pipelinePhaseExecutionSummarySchema = z.object({
   onDependencyFailure: pipelineDependencyFailureSchema,
   lifecycle: pipelinePhaseLifecycleSchema,
   outcome: taskExecutionOutcomeSchema.optional(),
-  exitCode: z.union([z.number().int(), z.literal("TIMEOUT")]).optional(),
+  exitCode: z
+    .union([
+      z.number().int(),
+      z.literal("TIMEOUT"),
+      z.literal("CANCELLED"),
+    ])
+    .optional(),
   startedAt: z.string().min(1).optional(),
   completedAt: z.string().min(1).optional(),
   durationSeconds: z.number().int().nonnegative().optional(),
@@ -80,6 +88,7 @@ export const pipelineExecutionSummarySchema = z.object({
     running: z.number().int().nonnegative(),
     completed: z.number().int().nonnegative(),
     failed: z.number().int().nonnegative(),
+    cancelled: z.number().int().nonnegative(),
   }),
   phases: z.array(pipelinePhaseExecutionSummarySchema).min(1),
 });
@@ -98,6 +107,7 @@ export function getPipelinePhaseLifecycle(
   tags: string[] | undefined
 ): PipelinePhaseLifecycle {
   if (!tags || tags.length === 0) return "missing";
+  if (tags.includes("cancelled")) return "cancelled";
   if (tags.includes("failed")) return "failed";
   if (tags.includes("completed")) return "completed";
   if (tags.includes("running")) return "running";
@@ -121,6 +131,10 @@ function getExecutionState(
 
   if (activeCount > 0) {
     return "running";
+  }
+
+  if (counts.cancelled > 0) {
+    return "cancelled";
   }
 
   if (counts.failed > 0 && counts.completed > 0) {
@@ -172,6 +186,7 @@ export function buildPipelineExecutionSummary(
     running: phases.filter((phase) => phase.lifecycle === "running").length,
     completed: phases.filter((phase) => phase.lifecycle === "completed").length,
     failed: phases.filter((phase) => phase.lifecycle === "failed").length,
+    cancelled: phases.filter((phase) => phase.lifecycle === "cancelled").length,
   };
 
   const startedAtCandidates = phases
@@ -198,7 +213,8 @@ export function buildPipelineExecutionSummary(
   const terminal =
     executionState === "completed" ||
     executionState === "failed" ||
-    executionState === "completed_with_failures";
+    executionState === "completed_with_failures" ||
+    executionState === "cancelled";
 
   return pipelineExecutionSummarySchema.parse({
     schemaVersion: 1,

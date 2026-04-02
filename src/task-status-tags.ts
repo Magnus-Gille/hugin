@@ -21,7 +21,7 @@ function getRuntimeTag(tags: string[], runtimeFallback?: string): string | undef
 }
 
 export function buildTerminalStatusTags(
-  status: "completed" | "failed",
+  status: "completed" | "failed" | "cancelled",
   tags: string[],
   runtimeFallback?: string
 ): string[] {
@@ -41,5 +41,10 @@ export function buildTerminalStatusTags(
 
 export function buildPipelineParentSuccessTags(tags: string[]): string[] {
   const terminalTags = buildTerminalStatusTags("completed", tags, "runtime:pipeline");
+  return dedupeTags([...terminalTags, "type:pipeline"]);
+}
+
+export function buildPipelineParentCancelledTags(tags: string[]): string[] {
+  const terminalTags = buildTerminalStatusTags("cancelled", tags, "runtime:pipeline");
   return dedupeTags([...terminalTags, "type:pipeline"]);
 }

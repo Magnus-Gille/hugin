@@ -8,6 +8,7 @@ export const taskExecutionOutcomeSchema = z.enum([
   "completed",
   "failed",
   "timed_out",
+  "cancelled",
 ]);
 export type TaskExecutionOutcome = z.infer<typeof taskExecutionOutcomeSchema>;
 
@@ -50,12 +51,16 @@ export const structuredTaskResultSchema = z.object({
   schemaVersion: z.literal(1),
   taskId: z.string().min(1),
   taskNamespace: z.string().min(1),
-  lifecycle: z.enum(["completed", "failed"]),
+  lifecycle: z.enum(["completed", "failed", "cancelled"]),
   outcome: taskExecutionOutcomeSchema,
   runtime: dispatcherRuntimeSchema,
   executor: z.string().min(1),
   resultSource: z.string().min(1),
-  exitCode: z.union([z.number().int(), z.literal("TIMEOUT")]),
+  exitCode: z.union([
+    z.number().int(),
+    z.literal("TIMEOUT"),
+    z.literal("CANCELLED"),
+  ]),
   startedAt: z.string().min(1).optional(),
   completedAt: z.string().min(1),
   durationSeconds: z.number().int().nonnegative().optional(),

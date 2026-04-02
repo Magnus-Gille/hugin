@@ -77,4 +77,28 @@ describe("structured task result schema", () => {
     expect(result.bodyText).toBe("\n[Ollama streaming timed out]\n");
     expect(result.errorMessage).toBe("[Ollama streaming timed out]");
   });
+
+  it("accepts cancelled task results with cancellation exit codes", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "20260402-phase-d",
+      taskNamespace: "tasks/20260402-phase-d",
+      lifecycle: "cancelled",
+      outcome: "cancelled",
+      runtime: "claude",
+      executor: "agent-sdk",
+      resultSource: "agent-sdk",
+      exitCode: "CANCELLED",
+      startedAt: "2026-04-02T11:00:00Z",
+      completedAt: "2026-04-02T11:00:02Z",
+      durationSeconds: 2,
+      bodyKind: "response",
+      bodyText: "Partial answer",
+      errorMessage: "Cancelled by operator",
+    });
+
+    expect(result.lifecycle).toBe("cancelled");
+    expect(result.outcome).toBe("cancelled");
+    expect(result.exitCode).toBe("CANCELLED");
+  });
 });

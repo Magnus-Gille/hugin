@@ -36,6 +36,10 @@ export interface OllamaExecutorResult {
   freeMemAfterMb: number;
 }
 
+export interface OllamaExecutorOptions {
+  abortController?: AbortController;
+}
+
 // --- System prompt ---
 
 const SYSTEM_PROMPT =
@@ -47,6 +51,7 @@ export async function executeOllamaTask(
   task: OllamaTaskConfig,
   taskId: string,
   logDir: string,
+  options?: OllamaExecutorOptions,
 ): Promise<OllamaExecutorResult> {
   const logFile = path.join(logDir, `${taskId}.log`);
   const startedAt = new Date().toISOString();
@@ -99,6 +104,15 @@ export async function executeOllamaTask(
 
   try {
     const abortController = new AbortController();
+    if (options?.abortController) {
+      if (options.abortController.signal.aborted) {
+        abortController.abort();
+      } else {
+        options.abortController.signal.addEventListener("abort", () => {
+          abortController.abort();
+        });
+      }
+    }
     const timer = setTimeout(() => {
       abortController.abort();
     }, task.timeoutMs);

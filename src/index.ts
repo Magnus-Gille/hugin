@@ -19,7 +19,10 @@ import {
   getPipelinePhaseLifecycle,
   type PipelinePhaseSnapshot,
 } from "./pipeline-summary.js";
-import { buildTaskResultDocument } from "./result-format.js";
+import {
+  buildRoutingMetadataLines,
+  buildTaskResultDocument,
+} from "./result-format.js";
 import {
   buildPromotedTags,
   evaluateBlockedTask,
@@ -27,6 +30,7 @@ import {
   type DependencyState,
 } from "./task-graph.js";
 import {
+  buildPipelineParentCancelledTags,
   buildPipelineParentSuccessTags,
   buildTerminalStatusTags,
 } from "./task-status-tags.js";
@@ -43,6 +47,8 @@ import {
 const HUGIN_HOME = path.join(process.env.HOME || "/home/magnus", ".hugin");
 const LOG_DIR = path.join(HUGIN_HOME, "logs");
 const HOOK_RESULT_DIR = path.join(HUGIN_HOME, "hook-results");
+const CANCEL_REQUESTED_TAG = "cancel-requested";
+const CANCEL_WATCH_INTERVAL_MS = 2000;
 
 // --- Configuration ---
 
@@ -84,10 +90,21 @@ let currentTask: string | null = null;
 let currentTaskConfig: TaskConfig | null = null;
 let currentChild: ChildProcess | null = null;
 let currentSdkAbort: AbortController | null = null;
+let currentOllamaAbort: AbortController | null = null;
 let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
+let cancelWatchTimer: ReturnType<typeof setInterval> | null = null;
 let lastQueueDepth = 0;
 let lastBlockedTaskCount = 0;
 const startedAt = Date.now();
+
+interface CancellationRequest {
+  reason: string;
+  sourceNamespace: string;
+  pipelineId?: string;
+}
+
+let currentCancellation: CancellationRequest | null = null;
+let cancellationCheckInFlight = false;
 
 const munin = new MuninClient({
   baseUrl: config.muninUrl,
@@ -126,6 +143,21 @@ function parseDeclaredRuntime(content: string): DeclaredRuntime | undefined {
 
 function parseSubmittedByField(content: string): string {
   return content.match(/\*\*Submitted by:\*\*\s*(.+)/i)?.[1]?.trim() || "unknown";
+}
+
+function extractRoutingMetadataFromContent(content: string): {
+  replyTo?: string;
+  replyFormat?: string;
+  group?: string;
+  sequence?: number;
+} {
+  const sequenceRaw = content.match(/\*\*Sequence:\*\*\s*(\d+)/i)?.[1];
+  return {
+    replyTo: content.match(/\*\*Reply-to:\*\*\s*(.+)/i)?.[1]?.trim(),
+    replyFormat: content.match(/\*\*Reply-format:\*\*\s*(.+)/i)?.[1]?.trim(),
+    group: content.match(/\*\*Group:\*\*\s*(.+)/i)?.[1]?.trim(),
+    sequence: sequenceRaw ? parseInt(sequenceRaw, 10) : undefined,
+  };
 }
 
 function resolveContext(raw: string): string {
@@ -416,6 +448,141 @@ function createFailureStructuredResult(
     bodyKind: "error",
     bodyText: errorMessage,
     errorMessage,
+    runtimeMetadata: options.runtimeMetadata,
+    pipeline: options.pipeline,
+  });
+}
+
+function getRuntimeFromTags(
+  tags: string[],
+  runtimeFallback = "runtime:claude"
+): DispatcherRuntime | "pipeline" {
+  return (tags.find((tag) => tag.startsWith("runtime:")) || runtimeFallback).replace(
+    /^runtime:/,
+    ""
+  ) as DispatcherRuntime | "pipeline";
+}
+
+function removeTag(tags: string[], tagToRemove: string): string[] {
+  return tags.filter((tag) => tag !== tagToRemove);
+}
+
+function isTerminalTaskStatus(tags: string[]): boolean {
+  return (
+    tags.includes("completed") ||
+    tags.includes("failed") ||
+    tags.includes("cancelled")
+  );
+}
+
+function buildCancelledTaskResultDocument(input: {
+  startedAt?: string;
+  completedAt: string;
+  durationSeconds?: number;
+  executor: string;
+  resultSource: string;
+  logFile?: string;
+  reason: string;
+  replyTo?: string;
+  replyFormat?: string;
+  group?: string;
+  sequence?: number;
+  body?: string;
+}): string {
+  const lines = [
+    "## Result (task cancelled)",
+    "",
+    "- **Exit code:** CANCELLED",
+    ...(input.startedAt ? [`- **Started at:** ${input.startedAt}`] : []),
+    `- **Completed at:** ${input.completedAt}`,
+    ...(input.durationSeconds !== undefined
+      ? [`- **Duration:** ${input.durationSeconds}s`]
+      : []),
+    `- **Executor:** ${input.executor}`,
+    `- **Result source:** ${input.resultSource}`,
+    ...(input.logFile ? [`- **Log file:** ${input.logFile}`] : []),
+    `- **Reason:** ${input.reason}`,
+    ...buildRoutingMetadataLines({
+      replyTo: input.replyTo,
+      replyFormat: input.replyFormat,
+      group: input.group,
+      sequence: input.sequence,
+    }),
+    ...(input.body ? ["", input.body] : []),
+  ];
+
+  return lines.join("\n");
+}
+
+function buildPipelineCancelledResultDocument(input: {
+  pipelineId: string;
+  reason: string;
+  replyTo?: string;
+  replyFormat?: string;
+  group?: string;
+  sequence?: number;
+}): string {
+  return [
+    "## Result",
+    "",
+    "- **Exit code:** CANCELLED",
+    "- **Pipeline action:** cancelled",
+    `- **Pipeline id:** ${input.pipelineId}`,
+    `- **Spec key:** tasks/${input.pipelineId}/spec`,
+    `- **Summary key:** tasks/${input.pipelineId}/summary`,
+    `- **Reason:** ${input.reason}`,
+    ...buildRoutingMetadataLines({
+      replyTo: input.replyTo,
+      replyFormat: input.replyFormat,
+      group: input.group,
+      sequence: input.sequence,
+    }),
+  ].join("\n");
+}
+
+function createCancelledStructuredResult(
+  taskNs: string,
+  runtime: DispatcherRuntime,
+  reason: string,
+  options: {
+    executor: string;
+    resultSource: string;
+    startedAt?: string;
+    completedAt?: string;
+    durationSeconds?: number;
+    logFile?: string;
+    replyTo?: string;
+    replyFormat?: string;
+    group?: string;
+    sequence?: number;
+    pipeline?: TaskExecutionPipelineContext;
+    runtimeMetadata?: TaskExecutionRuntimeMetadata;
+    bodyKind?: TaskExecutionBodyKind;
+    bodyText?: string;
+  }
+): StructuredTaskResult {
+  const completedAt = options.completedAt || new Date().toISOString();
+  return buildStructuredTaskResult({
+    schemaVersion: 1,
+    taskId: extractTaskId(taskNs),
+    taskNamespace: taskNs,
+    lifecycle: "cancelled",
+    outcome: "cancelled",
+    runtime,
+    executor: options.executor,
+    resultSource: options.resultSource,
+    exitCode: "CANCELLED",
+    startedAt: options.startedAt,
+    completedAt,
+    durationSeconds: options.durationSeconds,
+    logFile: options.logFile,
+    replyTo: options.replyTo,
+    replyFormat: options.replyFormat,
+    group: options.group,
+    sequence: options.sequence,
+    bodyKind: options.bodyKind || "error",
+    bodyText: options.bodyText || reason,
+    errorMessage: reason,
     runtimeMetadata: options.runtimeMetadata,
     pipeline: options.pipeline,
   });
@@ -789,6 +956,71 @@ function stopLeaseRenewal(): void {
   }
 }
 
+function requestCancellationForCurrentTask(request: CancellationRequest): void {
+  if (currentCancellation) return;
+  currentCancellation = request;
+  console.log(
+    `Cancellation requested for ${currentTask} (source: ${request.sourceNamespace}, reason: ${request.reason})`
+  );
+
+  if (currentSdkAbort && !currentSdkAbort.signal.aborted) {
+    currentSdkAbort.abort(request.reason);
+  }
+  if (currentOllamaAbort && !currentOllamaAbort.signal.aborted) {
+    currentOllamaAbort.abort(request.reason);
+  }
+  if (currentChild && !currentChild.killed) {
+    currentChild.kill("SIGTERM");
+  }
+}
+
+async function checkCurrentTaskCancellation(): Promise<void> {
+  if (cancellationCheckInFlight || !currentTask) return;
+  cancellationCheckInFlight = true;
+
+  try {
+    const currentEntry = await munin.read(currentTask, "status");
+    if (currentEntry?.tags.includes(CANCEL_REQUESTED_TAG)) {
+      requestCancellationForCurrentTask({
+        reason: `Task ${extractTaskId(currentTask)} cancelled by operator`,
+        sourceNamespace: currentTask,
+      });
+      return;
+    }
+
+    const pipelineId = currentTaskConfig?.pipeline?.pipelineId;
+    if (!pipelineId) return;
+
+    const pipelineNs = `tasks/${pipelineId}`;
+    const pipelineEntry = await munin.read(pipelineNs, "status");
+    if (!pipelineEntry?.tags.includes(CANCEL_REQUESTED_TAG)) return;
+
+    requestCancellationForCurrentTask({
+      reason: `Pipeline ${pipelineId} cancelled by operator`,
+      sourceNamespace: pipelineNs,
+      pipelineId,
+    });
+  } catch (err) {
+    console.error(`Cancellation watch failed for ${currentTask}:`, err);
+  } finally {
+    cancellationCheckInFlight = false;
+  }
+}
+
+function startCancellationWatch(): void {
+  stopCancellationWatch();
+  cancelWatchTimer = setInterval(() => {
+    void checkCurrentTaskCancellation();
+  }, CANCEL_WATCH_INTERVAL_MS);
+}
+
+function stopCancellationWatch(): void {
+  if (cancelWatchTimer) {
+    clearInterval(cancelWatchTimer);
+    cancelWatchTimer = null;
+  }
+}
+
 // --- Stale task recovery ---
 // Recover tasks whose lease has expired. Tasks claimed by this worker are always
 // recovered (we just restarted, so they're orphaned). Tasks claimed by other
@@ -889,6 +1121,7 @@ async function recoverStaleTasks(): Promise<void> {
 function dependencyStateFromEntry(entry: (MuninEntry & { found: true }) | null): DependencyState {
   if (!entry) return "missing";
   if (entry.tags.includes("completed")) return "completed";
+  if (entry.tags.includes("cancelled")) return "failed";
   if (entry.tags.includes("failed")) return "failed";
   return "pending";
 }
@@ -1049,6 +1282,280 @@ async function countTasksWithLifecycle(lifecycleTag: string): Promise<number> {
   return total;
 }
 
+async function clearCancellationRequest(
+  taskNs: string,
+  entry: MuninEntry & { found: true },
+  logMessage?: string
+): Promise<void> {
+  const updatedTags = removeTag(entry.tags, CANCEL_REQUESTED_TAG);
+  if (updatedTags.length === entry.tags.length) return;
+  await munin.write(taskNs, "status", entry.content, updatedTags, entry.updated_at);
+  if (logMessage) {
+    await munin.log(taskNs, logMessage);
+  }
+}
+
+async function markTaskCancelled(
+  taskNs: string,
+  entry: MuninEntry & { found: true },
+  reason: string,
+  options: {
+    executor: string;
+    resultSource: string;
+    startedAt?: string;
+    completedAt?: string;
+    durationSeconds?: number;
+    body?: string;
+    bodyKind?: TaskExecutionBodyKind;
+    bodyText?: string;
+    logFile?: string;
+    runtimeMetadata?: TaskExecutionRuntimeMetadata;
+  }
+): Promise<void> {
+  const task = parseTask(entry.content);
+  const completedAt = options.completedAt || new Date().toISOString();
+  const runtime = getRuntimeFromTags(entry.tags);
+
+  await munin.write(
+    taskNs,
+    "status",
+    entry.content,
+    buildTerminalStatusTags("cancelled", entry.tags),
+    entry.updated_at
+  );
+  await munin.write(
+    taskNs,
+    "result",
+    buildCancelledTaskResultDocument({
+      startedAt: options.startedAt,
+      completedAt,
+      durationSeconds: options.durationSeconds,
+      executor: options.executor,
+      resultSource: options.resultSource,
+      logFile: options.logFile,
+      reason,
+      replyTo: task?.replyTo,
+      replyFormat: task?.replyFormat,
+      group: task?.group,
+      sequence: task?.sequence,
+      body: options.body,
+    })
+  );
+
+  if (runtime !== "pipeline") {
+    await writeStructuredTaskResult(
+      taskNs,
+      createCancelledStructuredResult(taskNs, runtime, reason, {
+        executor: options.executor,
+        resultSource: options.resultSource,
+        startedAt: options.startedAt,
+        completedAt,
+        durationSeconds: options.durationSeconds,
+        logFile: options.logFile,
+        replyTo: task?.replyTo,
+        replyFormat: task?.replyFormat,
+        group: task?.group,
+        sequence: task?.sequence,
+        pipeline: task?.pipeline,
+        runtimeMetadata: options.runtimeMetadata,
+        bodyKind: options.bodyKind,
+        bodyText: options.bodyText,
+      })
+    );
+  }
+
+  await munin.log(taskNs, `Task cancelled: ${reason}`);
+  if (task?.pipeline?.pipelineId) {
+    await refreshPipelineSummary(task.pipeline.pipelineId);
+  }
+}
+
+async function finalizePipelineCancellationIfReady(
+  pipelineId: string,
+  reason: string
+): Promise<boolean> {
+  const pipelineNs = `tasks/${pipelineId}`;
+  const [pipelineEntry, specEntry] = await Promise.all([
+    munin.read(pipelineNs, "status"),
+    munin.read(pipelineNs, "spec"),
+  ]);
+  if (!pipelineEntry || !specEntry || !pipelineEntry.tags.includes(CANCEL_REQUESTED_TAG)) {
+    return false;
+  }
+
+  let pipeline: PipelineIR;
+  try {
+    pipeline = pipelineIRSchema.parse(JSON.parse(specEntry.content));
+  } catch (err) {
+    console.error(`Failed to parse pipeline spec while finalizing cancellation for ${pipelineNs}:`, err);
+    return false;
+  }
+
+  for (const phase of pipeline.phases) {
+    const phaseEntry = await munin.read(phase.taskNamespace, "status");
+    if (phaseEntry && !isTerminalTaskStatus(phaseEntry.tags)) {
+      return false;
+    }
+  }
+
+  const refreshedEntry = await munin.read(pipelineNs, "status");
+  if (!refreshedEntry || !refreshedEntry.tags.includes(CANCEL_REQUESTED_TAG)) {
+    return false;
+  }
+
+  await munin.write(
+    pipelineNs,
+    "status",
+    refreshedEntry.content,
+    buildPipelineParentCancelledTags(refreshedEntry.tags),
+    refreshedEntry.updated_at
+  );
+  await munin.write(
+    pipelineNs,
+    "result",
+    buildPipelineCancelledResultDocument({
+      pipelineId,
+      reason,
+      replyTo: pipeline.replyTo,
+      replyFormat: pipeline.replyFormat,
+      group: pipeline.group,
+      sequence: pipeline.sequence,
+    })
+  );
+  await munin.log(pipelineNs, `Pipeline cancelled: ${reason}`);
+  await refreshPipelineSummary(pipelineId);
+  return true;
+}
+
+async function processPipelineCancellationRequest(
+  entry: MuninEntry & { found: true }
+): Promise<boolean> {
+  const pipelineId = extractTaskId(entry.namespace);
+  const specEntry = await munin.read(entry.namespace, "spec");
+  const reason = `Pipeline ${pipelineId} cancelled by operator`;
+
+  if (!specEntry) {
+    const routing = extractRoutingMetadataFromContent(entry.content);
+    await munin.write(
+      entry.namespace,
+      "status",
+      entry.content,
+      buildPipelineParentCancelledTags(entry.tags),
+      entry.updated_at
+    );
+    await munin.write(
+      entry.namespace,
+      "result",
+      buildPipelineCancelledResultDocument({
+        pipelineId,
+        reason,
+        ...routing,
+      })
+    );
+    await munin.log(entry.namespace, `Pipeline cancelled before decomposition: ${reason}`);
+    return true;
+  }
+
+  let pipeline: PipelineIR;
+  try {
+    pipeline = pipelineIRSchema.parse(JSON.parse(specEntry.content));
+  } catch (err) {
+    console.error(`Failed to parse pipeline spec for cancellation request ${entry.namespace}:`, err);
+    return false;
+  }
+
+  let activeRunningPhase = false;
+  let cancelledAny = false;
+
+  for (const phase of pipeline.phases) {
+    const phaseEntry = await munin.read(phase.taskNamespace, "status");
+    if (!phaseEntry || isTerminalTaskStatus(phaseEntry.tags)) {
+      if (phaseEntry?.tags.includes("cancelled")) cancelledAny = true;
+      continue;
+    }
+
+    if (phaseEntry.tags.includes("running")) {
+      activeRunningPhase = true;
+      if (phase.taskNamespace === currentTask) {
+        requestCancellationForCurrentTask({
+          reason,
+          sourceNamespace: entry.namespace,
+          pipelineId,
+        });
+      }
+      continue;
+    }
+
+    cancelledAny = true;
+    await markTaskCancelled(phase.taskNamespace, phaseEntry, reason, {
+      executor: "dispatcher",
+      resultSource: "cancellation",
+    });
+  }
+
+  if (!activeRunningPhase && !cancelledAny) {
+    await clearCancellationRequest(
+      entry.namespace,
+      entry,
+      `Pipeline cancellation ignored; pipeline already terminal`
+    );
+    return false;
+  }
+
+  await refreshPipelineSummary(pipelineId);
+
+  if (activeRunningPhase) {
+    return true;
+  }
+
+  return finalizePipelineCancellationIfReady(pipelineId, reason);
+}
+
+async function processCancellationRequests(): Promise<boolean> {
+  const { results } = await munin.query({
+    query: "task",
+    tags: [CANCEL_REQUESTED_TAG],
+    namespace: "tasks/",
+    entry_type: "state",
+    limit: 50,
+  });
+
+  let processed = false;
+  for (const result of results) {
+    if (result.key !== "status") continue;
+    const entry = await munin.read(result.namespace, "status");
+    if (!entry || !entry.tags.includes(CANCEL_REQUESTED_TAG)) continue;
+
+    const declaredRuntime = parseDeclaredRuntime(entry.content);
+    if (declaredRuntime === "pipeline" || entry.tags.includes("runtime:pipeline")) {
+      processed = (await processPipelineCancellationRequest(entry)) || processed;
+      continue;
+    }
+
+    if (isTerminalTaskStatus(entry.tags)) {
+      await clearCancellationRequest(
+        entry.namespace,
+        entry,
+        `Cancellation ignored; task already terminal`
+      );
+      continue;
+    }
+
+    await markTaskCancelled(
+      entry.namespace,
+      entry,
+      `Task ${extractTaskId(entry.namespace)} cancelled by operator`,
+      {
+        executor: "dispatcher",
+        resultSource: "cancellation",
+      }
+    );
+    processed = true;
+  }
+
+  return processed;
+}
+
 async function failTaskWithMessage(
   taskNs: string,
   entry: MuninEntry & { found: true },
@@ -1185,6 +1692,23 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     return { hadTask: false, queueDepth };
   }
 
+  if (entry.tags.includes(CANCEL_REQUESTED_TAG)) {
+    if (parseDeclaredRuntime(entry.content) === "pipeline" || entry.tags.includes("runtime:pipeline")) {
+      await processPipelineCancellationRequest(entry);
+    } else {
+      await markTaskCancelled(
+        taskNs,
+        entry,
+        `Task ${extractTaskId(taskNs)} cancelled by operator`,
+        {
+          executor: "dispatcher",
+          resultSource: "cancellation",
+        }
+      );
+    }
+    return { hadTask: true, queueDepth };
+  }
+
   const declaredRuntime = parseDeclaredRuntime(entry.content);
   if (!declaredRuntime) {
     console.error(`Failed to parse task ${taskNs}, marking as failed`);
@@ -1242,6 +1766,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   }
 
   currentTask = taskNs;
+  currentCancellation = null;
   const startedAt = new Date().toISOString();
   const taskId = extractTaskId(taskNs);
   console.log(`Executing task ${taskNs}...`);
@@ -1253,6 +1778,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     currentTaskConfig = null;
     const pipelineResult = await handlePipelineTask(taskNs, entry, queueDepth);
     stopLeaseRenewal();
+    stopCancellationWatch();
     currentTask = null;
     currentTaskConfig = null;
     return pipelineResult;
@@ -1261,6 +1787,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   const task = parseTask(entry.content);
   if (!task) {
     stopLeaseRenewal();
+    stopCancellationWatch();
     await failTaskWithMessage(
       taskNs,
       entry,
@@ -1277,6 +1804,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   if (task.pipeline?.pipelineId) {
     await refreshPipelineSummary(task.pipeline.pipelineId);
   }
+  startCancellationWatch();
 
   const isOllama = task.runtime === "ollama";
   const useSdk = task.runtime === "claude" && config.claudeExecutor === "sdk";
@@ -1307,6 +1835,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // --- Ollama execution path ---
     const ollamaModel = task.model || config.ollamaDefaultModel;
     const freeMemBeforeMb = Math.round(os.freemem() / 1024 / 1024);
+    const ollamaAbort = new AbortController();
+    currentOllamaAbort = ollamaAbort;
 
     // Resolve host
     const host = await resolveOllamaHost(ollamaModel, task.ollamaHost);
@@ -1374,6 +1904,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         },
         taskId,
         LOG_DIR,
+        { abortController: ollamaAbort }
       );
 
       // Check for infra-level failure that should trigger fallback
@@ -1459,6 +1990,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         context_truncated: contextResolution?.truncated || false,
       };
     }
+    currentOllamaAbort = null;
   } else if (useSdk) {
     console.log(`Using Agent SDK executor for task ${taskNs}`);
     const sdkAbort = new AbortController();
@@ -1515,19 +2047,44 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
   // Stop lease renewal — task is done
   stopLeaseRenewal();
+  stopCancellationWatch();
+  currentSdkAbort = null;
+  currentOllamaAbort = null;
 
   const durationMs = Date.now() - startMs;
   const completedAt = new Date().toISOString();
+  let cancellation: CancellationRequest | null = currentCancellation;
+  if (!cancellation) {
+    const currentEntry = await munin.read(taskNs, "status");
+    if (currentEntry?.tags.includes(CANCEL_REQUESTED_TAG)) {
+      cancellation = {
+        reason: `Task ${taskId} cancelled by operator`,
+        sourceNamespace: taskNs,
+      };
+    } else if (task.pipeline?.pipelineId) {
+      const pipelineNs = `tasks/${task.pipeline.pipelineId}`;
+      const pipelineEntry = await munin.read(pipelineNs, "status");
+      if (pipelineEntry?.tags.includes(CANCEL_REQUESTED_TAG)) {
+        cancellation = {
+          reason: `Pipeline ${task.pipeline.pipelineId} cancelled by operator`,
+          sourceNamespace: pipelineNs,
+          pipelineId: task.pipeline.pipelineId,
+        };
+      }
+    }
+  }
+  currentCancellation = null;
   const isTimeout = exitCode === "TIMEOUT";
   const ok = exitCode === 0;
+  const isCancelled = cancellation !== null;
 
   // Safety net: push any commits the task left unpushed
-  if (ok) {
+  if (ok && !isCancelled) {
     await postTaskGitPush(task.workingDir);
   }
 
   console.log(
-    `Task ${taskNs} ${ok ? "completed" : isTimeout ? "timed out" : "failed"} (exit: ${exitCode}, executor: ${executorLabel}, duration: ${Math.round(durationMs / 1000)}s)`
+    `Task ${taskNs} ${isCancelled ? "cancelled" : ok ? "completed" : isTimeout ? "timed out" : "failed"} (exit: ${isCancelled ? "CANCELLED" : exitCode}, executor: ${executorLabel}, duration: ${Math.round(durationMs / 1000)}s)`
   );
 
   // For SDK/ollama executor, use resultText directly
@@ -1612,49 +2169,110 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           }
         : undefined;
 
-  await writeStructuredTaskResult(
-    taskNs,
-    buildStructuredTaskResult({
-      schemaVersion: 1,
-      taskId,
-      taskNamespace: taskNs,
-      lifecycle: ok ? "completed" : "failed",
-      outcome: ok ? "completed" : isTimeout ? "timed_out" : "failed",
-      runtime: task.runtime,
-      executor: effectiveExecutor,
-      resultSource,
-      exitCode,
-      startedAt,
-      completedAt,
-      durationSeconds: Math.round(durationMs / 1000),
-      logFile: `~/.hugin/logs/${taskId}.log`,
-      replyTo: task.replyTo,
-      replyFormat: task.replyFormat,
-      group: task.group,
-      sequence: task.sequence,
-      costUsd: costUsd ?? undefined,
-      bodyKind: structuredBodyKind,
-      bodyText: structuredBodyText,
-      errorMessage: ok ? undefined : structuredBodyText,
-      runtimeMetadata,
-      pipeline: task.pipeline,
-    })
-  );
+  if (isCancelled && cancellation) {
+    await munin.write(
+      taskNs,
+      "result",
+      buildCancelledTaskResultDocument({
+        startedAt,
+        completedAt,
+        durationSeconds: Math.round(durationMs / 1000),
+        executor: effectiveExecutor,
+        resultSource,
+        logFile: `~/.hugin/logs/${taskId}.log`,
+        reason: cancellation.reason,
+        replyTo: task.replyTo,
+        replyFormat: task.replyFormat,
+        group: task.group,
+        sequence: task.sequence,
+        body: resultBody,
+      })
+    );
+    await writeStructuredTaskResult(
+      taskNs,
+      createCancelledStructuredResult(taskNs, task.runtime, cancellation.reason, {
+        executor: effectiveExecutor,
+        resultSource,
+        startedAt,
+        completedAt,
+        durationSeconds: Math.round(durationMs / 1000),
+        logFile: `~/.hugin/logs/${taskId}.log`,
+        replyTo: task.replyTo,
+        replyFormat: task.replyFormat,
+        group: task.group,
+        sequence: task.sequence,
+        pipeline: task.pipeline,
+        runtimeMetadata,
+        bodyKind: structuredBodyKind,
+        bodyText: structuredBodyText,
+      })
+    );
+    await munin.write(
+      taskNs,
+      "status",
+      entry.content,
+      buildTerminalStatusTags("cancelled", entry.tags, `runtime:${task.runtime}`)
+    );
+    await munin.log(
+      taskNs,
+      `Task cancelled in ${Math.round(durationMs / 1000)}s (reason: ${cancellation.reason}, executor: ${executorLabel})`
+    );
+  } else {
+    await writeStructuredTaskResult(
+      taskNs,
+      buildStructuredTaskResult({
+        schemaVersion: 1,
+        taskId,
+        taskNamespace: taskNs,
+        lifecycle: ok ? "completed" : "failed",
+        outcome: ok ? "completed" : isTimeout ? "timed_out" : "failed",
+        runtime: task.runtime,
+        executor: effectiveExecutor,
+        resultSource,
+        exitCode,
+        startedAt,
+        completedAt,
+        durationSeconds: Math.round(durationMs / 1000),
+        logFile: `~/.hugin/logs/${taskId}.log`,
+        replyTo: task.replyTo,
+        replyFormat: task.replyFormat,
+        group: task.group,
+        sequence: task.sequence,
+        costUsd: costUsd ?? undefined,
+        bodyKind: structuredBodyKind,
+        bodyText: structuredBodyText,
+        errorMessage: ok ? undefined : structuredBodyText,
+        runtimeMetadata,
+        pipeline: task.pipeline,
+      })
+    );
 
-  await munin.write(
-    taskNs,
-    "status",
-    entry.content,
-    buildTerminalStatusTags(ok ? "completed" : "failed", entry.tags, `runtime:${task.runtime}`)
-  );
+    await munin.write(
+      taskNs,
+      "status",
+      entry.content,
+      buildTerminalStatusTags(ok ? "completed" : "failed", entry.tags, `runtime:${task.runtime}`)
+    );
 
-  await munin.log(
-    taskNs,
-    `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`
-  );
-  await promoteDependents(taskId);
+    await munin.log(
+      taskNs,
+      `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`
+    );
+  }
+
+  const shouldPromoteDependents =
+    !isCancelled || cancellation?.pipelineId !== task.pipeline?.pipelineId;
+  if (shouldPromoteDependents) {
+    await promoteDependents(taskId);
+  }
   if (task.pipeline?.pipelineId) {
     await refreshPipelineSummary(task.pipeline.pipelineId);
+    if (isCancelled && cancellation?.pipelineId === task.pipeline.pipelineId) {
+      await finalizePipelineCancellationIfReady(
+        task.pipeline.pipelineId,
+        cancellation.reason
+      );
+    }
   }
 
   // Capture quota after task execution (run for claude tasks or ollama fallback to claude)
@@ -1668,13 +2286,15 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     runtime: task.runtime,
     executor: effectiveExecutor,
     model_requested: task.model || "default",
-    exit_code: exitCode,
+    exit_code: isCancelled ? "CANCELLED" : exitCode,
     duration_s: Math.round(durationMs / 1000),
     timeout_ms: task.timeoutMs,
     cost_usd: costUsd,
     group: task.group || null,
     quota_before: quotaBefore,
     quota_after: quotaAfter,
+    cancellation_reason: cancellation?.reason || null,
+    cancellation_source: cancellation?.sourceNamespace || null,
     // Ollama-specific fields (null/absent for non-ollama tasks)
     ...ollamaJournalExtras,
   });
@@ -1701,6 +2321,7 @@ async function pollLoop(): Promise<void> {
     let queueDepth = 0;
     try {
       pollCount++;
+      const processedCancellation = await processCancellationRequests();
       const poll = await pollOnce();
       queueDepth = poll.queueDepth;
       lastQueueDepth = queueDepth;
@@ -1710,7 +2331,7 @@ async function pollLoop(): Promise<void> {
       lastBlockedTaskCount = await countTasksWithLifecycle("blocked");
       // Fire-and-forget heartbeat
       emitHeartbeat(queueDepth, lastBlockedTaskCount);
-      if (poll.hadTask && !shuttingDown) continue; // Check for more immediately
+      if ((processedCancellation || poll.hadTask) && !shuttingDown) continue; // Check for more immediately
     } catch (err) {
       console.error("Poll error:", err);
       // Still emit heartbeat on error
@@ -1755,6 +2376,7 @@ async function shutdown(signal: string): Promise<void> {
   console.log(`Received ${signal}, shutting down (worker: ${workerId})...`);
   shuttingDown = true;
   stopLeaseRenewal();
+  stopCancellationWatch();
 
   // Mark the current task as failed before killing the process
   if (currentTask) {
@@ -1812,6 +2434,11 @@ async function shutdown(signal: string): Promise<void> {
   if (currentSdkAbort) {
     console.log("Aborting running SDK task...");
     currentSdkAbort.abort();
+  }
+
+  if (currentOllamaAbort) {
+    console.log("Aborting running ollama task...");
+    currentOllamaAbort.abort();
   }
 
   if (currentChild) {

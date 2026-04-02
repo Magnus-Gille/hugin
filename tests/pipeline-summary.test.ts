@@ -180,4 +180,58 @@ describe("pipeline execution summary", () => {
     expect(summary.phaseCounts.failed).toBe(1);
     expect(summary.phases[0]?.errorMessage).toBe("boom");
   });
+
+  it("reports cancelled once all remaining phases are cancelled", () => {
+    const pipeline = makePipeline();
+    const summary = buildPipelineExecutionSummary(
+      pipeline,
+      [
+        {
+          phase: pipeline.phases[0]!,
+          lifecycle: "completed",
+          structuredResult: buildStructuredTaskResult({
+            schemaVersion: 1,
+            taskId: pipeline.phases[0]!.taskId,
+            taskNamespace: pipeline.phases[0]!.taskNamespace,
+            lifecycle: "completed",
+            outcome: "completed",
+            runtime: "ollama",
+            executor: "ollama",
+            resultSource: "ollama",
+            exitCode: 0,
+            startedAt: "2026-04-02T11:00:01Z",
+            completedAt: "2026-04-02T11:00:03Z",
+            durationSeconds: 2,
+            logFile: "~/.hugin/logs/gather.log",
+            bodyKind: "response",
+            bodyText: "GATHER",
+          }),
+        },
+        {
+          phase: pipeline.phases[1]!,
+          lifecycle: "cancelled",
+          structuredResult: buildStructuredTaskResult({
+            schemaVersion: 1,
+            taskId: pipeline.phases[1]!.taskId,
+            taskNamespace: pipeline.phases[1]!.taskNamespace,
+            lifecycle: "cancelled",
+            outcome: "cancelled",
+            runtime: "ollama",
+            executor: "dispatcher",
+            resultSource: "cancellation",
+            exitCode: "CANCELLED",
+            completedAt: "2026-04-02T11:00:04Z",
+            bodyKind: "error",
+            bodyText: "Pipeline cancelled by operator",
+            errorMessage: "Pipeline cancelled by operator",
+          }),
+        },
+      ]
+    );
+
+    expect(summary.executionState).toBe("cancelled");
+    expect(summary.terminal).toBe(true);
+    expect(summary.phaseCounts.cancelled).toBe(1);
+    expect(summary.phases[1]?.outcome).toBe("cancelled");
+  });
 });
