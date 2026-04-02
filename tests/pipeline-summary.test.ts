@@ -234,4 +234,34 @@ describe("pipeline execution summary", () => {
     expect(summary.phaseCounts.cancelled).toBe(1);
     expect(summary.phases[1]?.outcome).toBe("cancelled");
   });
+
+  it("reports cancelled when every phase is cancelled", () => {
+    const pipeline = makePipeline();
+    const summary = buildPipelineExecutionSummary(
+      pipeline,
+      pipeline.phases.map((phase) => ({
+        phase,
+        lifecycle: "cancelled" as const,
+        structuredResult: buildStructuredTaskResult({
+          schemaVersion: 1,
+          taskId: phase.taskId,
+          taskNamespace: phase.taskNamespace,
+          lifecycle: "cancelled",
+          outcome: "cancelled",
+          runtime: "claude",
+          executor: "dispatcher",
+          resultSource: "cancellation",
+          exitCode: "CANCELLED",
+          completedAt: "2026-04-02T11:00:04Z",
+          bodyKind: "error",
+          bodyText: "Pipeline cancelled by operator",
+          errorMessage: "Pipeline cancelled by operator",
+        }),
+      }))
+    );
+
+    expect(summary.executionState).toBe("cancelled");
+    expect(summary.terminal).toBe(true);
+    expect(summary.phaseCounts.cancelled).toBe(2);
+  });
 });

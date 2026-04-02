@@ -125,7 +125,11 @@ function getExecutionState(
     return "running";
   }
 
-  if (counts.completed === 0 && counts.failed === 0) {
+  if (
+    counts.completed === 0 &&
+    counts.failed === 0 &&
+    counts.cancelled === 0
+  ) {
     return "decomposed";
   }
 
