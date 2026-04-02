@@ -4,6 +4,7 @@
 **Branch:** main
 
 ## Completed This Session
+- **Step 1 live evaluation passed on the Pi** — deployed branch `codex/step1-live-eval` to `huginmunin`, then validated success-path promotion, `on-dep-failure:fail`, `on-dep-failure:continue`, and startup reconciliation. Evidence recorded in `docs/step1-live-evaluation.md`.
 - **Engineering plan derived from orchestrator draft** — wrote `docs/hugin-v2-engineering-plan.md` with phased delivery, explicit evaluation gates, and a recommendation to stop after Step 1 for live validation before building the pipeline compiler.
 - **Step 1 parent/child joins implemented** — blocked-task dependency evaluation, `depends-on:` / `on-dep-failure:` semantics, event-driven promotion on child completion/failure, periodic blocked-task reconciliation, and blocked task observability in heartbeat/health.
 - **Task-graph helper module + tests** — added `src/task-graph.ts` and `tests/task-graph.test.ts` to cover dependency parsing, failure policy semantics, promotion behavior, fan-out limit enforcement, and missing dependency handling.
@@ -24,8 +25,8 @@
 - mDNS (huginmunin.local) flaky — Tailscale IP 100.97.117.37 is reliable fallback
 
 ## Next Steps
-- **Evaluate Step 1 on live tasks** — run the manual three-task graph from `docs/hugin-v2-engineering-plan.md`: success path, `on-dep-failure:fail`, `on-dep-failure:continue`, and restart/reconciliation.
-- **Step 2: Pipeline IR + compiler** — only start after Step 1 evaluation passes. Use explicit runtimes only; compile markdown pipeline tasks to validated IR plus decomposed child tasks.
+- **Step 2: Pipeline IR + compiler** — Step 1 is now validated. Next build `Runtime: pipeline` parsing, validated IR storage, and child-task decomposition with explicit runtimes only.
+- **Step 3: Structured results + pipeline operations** — only after Step 2 compile/decompose evaluation passes.
 - **Step 5+: Capability registry + routing** — still deferred until Bet 1 is proven end to end.
 - Deploy latest Ratatoskr features (poll recovery, delivery confirmation)
 - Task progress streaming (partial results before completion)
