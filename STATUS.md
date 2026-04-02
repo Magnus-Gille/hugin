@@ -1,9 +1,13 @@
 # Hugin — Status
 
-**Last session:** 2026-04-02 (Step 2 implementation)
+**Last session:** 2026-04-02 (Step 2 live evaluation)
 **Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Step 2 live evaluation passed on the Pi** — validated one explicit-runtime pipeline end to end: parent compile/decompose, immutable `spec` write, correct root/dependent child task states, ordered child execution, and successful final child results. Evidence recorded in `docs/step2-live-evaluation.md`.
+- **Live rejection paths confirmed** — invalid pipeline parents now fail cleanly before decomposition for both unknown runtimes and cyclic dependency graphs; no `spec` entries or child task namespaces were created for either invalid case.
+- **Explicit ollama runtime variants now pin concrete models** — the first live Step 2 attempt exposed a routing leak where `ollama-pi` still fell through to the laptop host because no model was emitted. Fixed by pinning `ollama-pi -> qwen2.5:3b` and `ollama-laptop -> qwen3.5:35b-a3b`, then redeploying and rerunning the evaluation.
+- **Step 2 sprint artifact added** — recorded the demo and live-eval feedback in `sprints/2026-04-02-step2-live-eval.md` to keep product-facing progress and operational findings together.
 - **Step 2 pipeline compiler implemented locally** — added `src/pipeline-ir.ts` and `src/pipeline-compiler.ts` with a validated `PipelineIR`, explicit runtime registry (`claude-sdk`, `codex-spawn`, `ollama-pi`, `ollama-laptop`), markdown pipeline parsing, dependency/cycle validation, and child-task draft generation.
 - **Dispatcher now recognizes `Runtime: pipeline`** — `src/index.ts` compiles pipeline tasks, writes immutable `spec` JSON to Munin, decomposes phases into child tasks using Step 1 join primitives, and records decomposition results on the parent task.
 - **Dependency provenance preserved for Step 2** — instead of keeping `depends-on:*` forever on promoted tasks, the compiler stores dependencies in the pipeline `spec` and also writes parent pipeline id, phase name, and dependency task ids into child task content so auditability survives promotion.
@@ -31,10 +35,9 @@
 - mDNS (huginmunin.local) flaky — Tailscale IP 100.97.117.37 is reliable fallback
 
 ## Next Steps
-- **Evaluate Step 2 on the live system** — submit one fixed explicit-runtime pipeline, verify `spec` storage, child task decomposition (`pending` roots, `blocked` dependents), and successful child execution flow.
-- **Exercise compile/decompose failure cases live** — submit invalid pipeline variants and confirm clear parent-task failure for unknown runtime / invalid dependency graph without partial execution.
+- **Step 3: Structured results + pipeline operations** — add phase result schema, pipeline summary artifacts, cancellation, and resume-from-failed-phase support now that compile/decompose is proven live.
+- **Define Step 3 live gate before implementing it** — the next evaluation should exercise cancellation and resume on one fixed pipeline, not just the happy path.
 - **Decide on AGENTS.md** — Codex generated this as its CLAUDE.md equivalent; has incorrect substitutions (script names, env var labels). Fix or delete before committing.
-- **Step 3: Structured results + pipeline operations** — only after Step 2 compile/decompose evaluation passes.
 - **Step 5+: Capability registry + routing** — still deferred until Bet 1 is proven end to end.
 - Deploy latest Ratatoskr features (poll recovery, delivery confirmation)
 - Task progress streaming (partial results before completion)
