@@ -85,6 +85,10 @@ const LEASE_RENEWAL_INTERVAL_MS = 60_000; // renew every 60s
 
 const workerId = `hugin-${os.hostname()}-${process.pid}`;
 
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // --- State ---
 
 let shuttingDown = false;
@@ -2569,25 +2573,33 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       await promoteDependents(taskId);
     }
     if (task.pipeline?.pipelineId) {
-      try {
-        if (isCancelled && cancellation?.pipelineId === task.pipeline.pipelineId) {
-          const pipelineEntry = await munin.read(
-            `tasks/${task.pipeline.pipelineId}`,
-            "status"
-          );
-          if (pipelineEntry?.tags.includes(CANCEL_REQUESTED_TAG)) {
-            await processPipelineCancellationRequest(pipelineEntry);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          if (isCancelled && cancellation?.pipelineId === task.pipeline.pipelineId) {
+            const pipelineEntry = await munin.read(
+              `tasks/${task.pipeline.pipelineId}`,
+              "status"
+            );
+            if (pipelineEntry?.tags.includes(CANCEL_REQUESTED_TAG)) {
+              await processPipelineCancellationRequest(pipelineEntry);
+            } else {
+              await refreshPipelineSummary(task.pipeline.pipelineId);
+            }
           } else {
             await refreshPipelineSummary(task.pipeline.pipelineId);
           }
-        } else {
-          await refreshPipelineSummary(task.pipeline.pipelineId);
+          break;
+        } catch (err) {
+          const finalAttempt = attempt === 2;
+          console.error(
+            `Post-task pipeline update failed for ${task.pipeline.pipelineId} (attempt ${attempt + 1}/3):`,
+            err
+          );
+          if (finalAttempt) {
+            break;
+          }
+          await sleepMs(1000 * (attempt + 1));
         }
-      } catch (err) {
-        console.error(
-          `Post-task pipeline update failed for ${task.pipeline.pipelineId}:`,
-          err
-        );
       }
     }
 
