@@ -1315,14 +1315,6 @@ async function markTaskCancelled(
   const task = parseTask(entry.content);
   const completedAt = options.completedAt || new Date().toISOString();
   const runtime = getRuntimeFromTags(entry.tags);
-
-  await munin.write(
-    taskNs,
-    "status",
-    entry.content,
-    buildTerminalStatusTags("cancelled", entry.tags),
-    entry.updated_at
-  );
   await munin.write(
     taskNs,
     "result",
@@ -1364,6 +1356,13 @@ async function markTaskCancelled(
     );
   }
 
+  await munin.write(
+    taskNs,
+    "status",
+    entry.content,
+    buildTerminalStatusTags("cancelled", entry.tags),
+    entry.updated_at
+  );
   await munin.log(taskNs, `Task cancelled: ${reason}`);
   if (task?.pipeline?.pipelineId) {
     await refreshPipelineSummary(task.pipeline.pipelineId);
@@ -1405,13 +1404,6 @@ async function finalizePipelineCancellationIfReady(
 
   await munin.write(
     pipelineNs,
-    "status",
-    refreshedEntry.content,
-    buildPipelineParentCancelledTags(refreshedEntry.tags),
-    refreshedEntry.updated_at
-  );
-  await munin.write(
-    pipelineNs,
     "result",
     buildPipelineCancelledResultDocument({
       pipelineId,
@@ -1421,6 +1413,13 @@ async function finalizePipelineCancellationIfReady(
       group: pipeline.group,
       sequence: pipeline.sequence,
     })
+  );
+  await munin.write(
+    pipelineNs,
+    "status",
+    refreshedEntry.content,
+    buildPipelineParentCancelledTags(refreshedEntry.tags),
+    refreshedEntry.updated_at
   );
   await munin.log(pipelineNs, `Pipeline cancelled: ${reason}`);
   await refreshPipelineSummary(pipelineId);
@@ -1438,19 +1437,19 @@ async function processPipelineCancellationRequest(
     const routing = extractRoutingMetadataFromContent(entry.content);
     await munin.write(
       entry.namespace,
-      "status",
-      entry.content,
-      buildPipelineParentCancelledTags(entry.tags),
-      entry.updated_at
-    );
-    await munin.write(
-      entry.namespace,
       "result",
       buildPipelineCancelledResultDocument({
         pipelineId,
         reason,
         ...routing,
       })
+    );
+    await munin.write(
+      entry.namespace,
+      "status",
+      entry.content,
+      buildPipelineParentCancelledTags(entry.tags),
+      entry.updated_at
     );
     await munin.log(entry.namespace, `Pipeline cancelled before decomposition: ${reason}`);
     return true;
