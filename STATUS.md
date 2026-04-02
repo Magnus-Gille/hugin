@@ -1,9 +1,10 @@
 # Hugin — Status
 
-**Last session:** 2026-04-02 (Step 2 follow-up bug fixes)
+**Last session:** 2026-04-02 (Step 2 follow-up bug fixes live-validated)
 **Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Step 2 follow-up bug fixes pushed, deployed, and live-validated** — deployed commit `615f98f` to `huginmunin`, restarted Hugin, and verified on live tasks that parent `type:*` tags survive successful decomposition, parent decomposition results now include `Reply-to` / `Reply-format` / `Group` / `Sequence`, dependent child phases keep `on-dep-failure:continue` on terminal status, child result formatting is clean, and missing phase runtimes now fail with a direct compiler error.
 - **Step 2 follow-up bug fixes implemented locally** — fixed all five current pipeline follow-ups from `feedback/hugin/step2-pipeline-findings`: terminal phase status now preserves `on-dep-failure:*`, successful pipeline parents preserve incoming `type:*` tags, pipeline parent decomposition results now include reply-routing metadata plus parent `Group`/`Sequence`, missing phase runtimes now fail with a direct validation error, and phase result formatting no longer emits extra blank metadata gaps.
 - **Lifecycle-tag and result-format helpers added** — extracted `src/task-status-tags.ts` and `src/result-format.ts` so terminal-tag preservation and result-contract rendering are pure, reusable, and testable instead of staying embedded in dispatcher control flow.
 - **Regression coverage expanded for the bug set** — added tests for terminal tag preservation, clean result formatting, parent routing metadata rendering, and the missing-runtime compiler error. `npm test` and `npm run build` both passed after the fixes.
@@ -41,7 +42,6 @@
 - mDNS (huginmunin.local) flaky — Tailscale IP 100.97.117.37 is reliable fallback
 
 ## Next Steps
-- Deploy the Step 2 bug-fix set to the Pi and rerun a focused live check for parent tags, parent result metadata, `on-dep-failure:continue` terminal tags, and the cleaned child-result formatting.
 - Add dispatcher-level tests for the `Runtime: pipeline` execution path if parent-tag and result-contract behavior should be covered above the current pure-helper and compiler unit tests.
 - **Step 3: Structured results + pipeline operations** — add phase result schema, pipeline summary artifacts, cancellation, and resume-from-failed-phase support now that compile/decompose is proven live.
 - **Define Step 3 live gate before implementing it** — the next evaluation should exercise cancellation and resume on one fixed pipeline, not just the happy path.
