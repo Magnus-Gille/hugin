@@ -112,6 +112,13 @@ export function pipelineSummaryNeedsReconciliation(
   return !summary || !summary.terminal;
 }
 
+export function getPipelineExecutionSummaryFingerprint(
+  summary: PipelineExecutionSummary
+): string {
+  const { generatedAt: _generatedAt, ...stableSummary } = summary;
+  return JSON.stringify(stableSummary);
+}
+
 export interface PipelinePhaseSnapshot {
   phase: z.infer<typeof pipelineIRSchema>["phases"][number];
   lifecycle: PipelinePhaseLifecycle;

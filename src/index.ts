@@ -3,7 +3,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import express from "express";
-import { MuninClient, type MuninEntry } from "./munin-client.js";
+import {
+  MuninClient,
+  type MuninEntry,
+  type MuninReadResult,
+} from "./munin-client.js";
 import { executeSdkTask } from "./sdk-executor.js";
 import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus } from "./ollama-hosts.js";
@@ -17,9 +21,11 @@ import { buildPipelineResumePlan } from "./pipeline-ops.js";
 import { pipelineIRSchema, type PipelineIR } from "./pipeline-ir.js";
 import {
   buildPipelineExecutionSummary,
+  getPipelineExecutionSummaryFingerprint,
   getPipelinePhaseLifecycle,
   parsePipelineExecutionSummary,
   pipelineSummaryNeedsReconciliation,
+  type PipelineExecutionSummary,
   type PipelinePhaseSnapshot,
 } from "./pipeline-summary.js";
 import {
@@ -105,6 +111,7 @@ let lastQueueDepth = 0;
 let lastBlockedTaskCount = 0;
 const startedAt = Date.now();
 const trackedPipelineSummaryIds = new Set<string>();
+const pipelineSummaryFingerprints = new Map<string, string>();
 
 interface CancellationRequest {
   reason: string;
@@ -341,18 +348,24 @@ function parseErrorMessageFromResult(content: string | undefined): string | unde
   return content.match(/\*\*Error:\*\*\s*(.+)/)?.[1]?.trim();
 }
 
+function parseStructuredTaskResultContent(
+  taskNs: string,
+  content: string
+): StructuredTaskResult | null {
+  try {
+    return structuredTaskResultSchema.parse(JSON.parse(content));
+  } catch (err) {
+    console.error(`Failed to parse structured result for ${taskNs}:`, err);
+    return null;
+  }
+}
+
 async function readStructuredTaskResult(
   taskNs: string
 ): Promise<StructuredTaskResult | null> {
   const entry = await munin.read(taskNs, "result-structured");
   if (!entry) return null;
-
-  try {
-    return structuredTaskResultSchema.parse(JSON.parse(entry.content));
-  } catch (err) {
-    console.error(`Failed to parse structured result for ${taskNs}:`, err);
-    return null;
-  }
+  return parseStructuredTaskResultContent(taskNs, entry.content);
 }
 
 async function writeStructuredTaskResult(
@@ -367,12 +380,29 @@ async function writeStructuredTaskResult(
   );
 }
 
+function getBatchResultKey(namespace: string, key: string): string {
+  return `${namespace}::${key}`;
+}
+
+function getFoundBatchEntry(
+  entry: MuninReadResult | undefined
+): (MuninEntry & { found: true }) | null {
+  return entry && entry.found ? entry : null;
+}
+
 function trackPipelineSummary(pipelineId: string): void {
   trackedPipelineSummaryIds.add(pipelineId);
 }
 
 function untrackPipelineSummary(pipelineId: string): void {
   trackedPipelineSummaryIds.delete(pipelineId);
+  pipelineSummaryFingerprints.delete(pipelineId);
+}
+
+function cachePipelineSummaryFingerprint(summary: PipelineExecutionSummary): string {
+  const fingerprint = getPipelineExecutionSummaryFingerprint(summary);
+  pipelineSummaryFingerprints.set(summary.pipelineId, fingerprint);
+  return fingerprint;
 }
 
 async function refreshPipelineSummary(pipelineId: string): Promise<void> {
@@ -393,38 +423,83 @@ async function refreshPipelineSummary(pipelineId: string): Promise<void> {
       return;
     }
 
-    const snapshots: PipelinePhaseSnapshot[] = [];
-    for (const phase of pipeline.phases) {
-      const statusEntry = await munin.read(phase.taskNamespace, "status");
+    const statusEntries = await munin.readBatch(
+      pipeline.phases.map((phase) => ({
+        namespace: phase.taskNamespace,
+        key: "status",
+      }))
+    );
+    const terminalPhases: Array<{
+      phase: PipelineIR["phases"][number];
+      lifecycle: PipelinePhaseSnapshot["lifecycle"];
+    }> = [];
+    const snapshots: PipelinePhaseSnapshot[] = pipeline.phases.map((phase, index) => {
+      const statusEntry = getFoundBatchEntry(statusEntries[index]);
       const lifecycle = getPipelinePhaseLifecycle(statusEntry?.tags);
-      const isTerminal =
+      if (
         lifecycle === "completed" ||
         lifecycle === "failed" ||
-        lifecycle === "cancelled";
-      const structuredResult = isTerminal
-        ? await readStructuredTaskResult(phase.taskNamespace)
-        : null;
-      const resultEntry = isTerminal
-        ? await munin.read(phase.taskNamespace, "result")
-        : null;
-
-      snapshots.push({
+        lifecycle === "cancelled"
+      ) {
+        terminalPhases.push({ phase, lifecycle });
+      }
+      return {
         phase,
         lifecycle,
-        structuredResult: structuredResult || undefined,
-        errorMessage:
-          structuredResult?.errorMessage ||
-          parseErrorMessageFromResult(resultEntry?.content),
-      });
+      };
+    });
+
+    const terminalResultEntries = terminalPhases.length
+      ? await munin.readBatch(
+          terminalPhases.flatMap(({ phase }) => [
+            { namespace: phase.taskNamespace, key: "result-structured" },
+            { namespace: phase.taskNamespace, key: "result" },
+          ])
+        )
+      : [];
+    const terminalEntryMap = new Map<string, MuninReadResult>();
+    for (const entry of terminalResultEntries) {
+      terminalEntryMap.set(getBatchResultKey(entry.namespace, entry.key), entry);
     }
 
+    snapshots.forEach((snapshot) => {
+      const isTerminal =
+        snapshot.lifecycle === "completed" ||
+        snapshot.lifecycle === "failed" ||
+        snapshot.lifecycle === "cancelled";
+      if (!isTerminal) {
+        return;
+      }
+
+      const structuredEntry = getFoundBatchEntry(
+        terminalEntryMap.get(
+          getBatchResultKey(snapshot.phase.taskNamespace, "result-structured")
+        )
+      );
+      const resultEntry = getFoundBatchEntry(
+        terminalEntryMap.get(getBatchResultKey(snapshot.phase.taskNamespace, "result"))
+      );
+      const structuredResult = structuredEntry
+        ? parseStructuredTaskResultContent(snapshot.phase.taskNamespace, structuredEntry.content)
+        : null;
+
+      snapshot.structuredResult = structuredResult || undefined;
+      snapshot.errorMessage =
+        structuredResult?.errorMessage ||
+        parseErrorMessageFromResult(resultEntry?.content);
+    });
+
     const summary = buildPipelineExecutionSummary(pipeline, snapshots);
-    await munin.write(
-      pipelineNs,
-      "summary",
-      JSON.stringify(summary, null, 2),
-      ["type:pipeline", "type:pipeline-summary"]
-    );
+    const nextFingerprint = getPipelineExecutionSummaryFingerprint(summary);
+    if (pipelineSummaryFingerprints.get(pipelineId) !== nextFingerprint) {
+      await munin.write(
+        pipelineNs,
+        "summary",
+        JSON.stringify(summary, null, 2),
+        ["type:pipeline", "type:pipeline-summary"]
+      );
+    }
+    pipelineSummaryFingerprints.set(pipelineId, nextFingerprint);
     if (summary.terminal) {
       untrackPipelineSummary(pipelineId);
     }
@@ -449,10 +524,18 @@ async function primeTrackedPipelineSummaries(): Promise<void> {
       limit: 100,
     });
 
+    const pipelineParents = results.filter((result) => result.key === "status");
+    const summaryEntries = pipelineParents.length
+      ? await munin.readBatch(
+          pipelineParents.map((result) => ({
+            namespace: result.namespace,
+            key: "summary",
+          }))
+        )
+      : [];
     let tracked = 0;
-    for (const result of results) {
-      if (result.key !== "status") continue;
-      const summaryEntry = await munin.read(result.namespace, "summary");
+    for (const [index, result] of pipelineParents.entries()) {
+      const summaryEntry = getFoundBatchEntry(summaryEntries[index]);
       if (!summaryEntry) continue;
 
       const summary = parsePipelineExecutionSummary(summaryEntry.content);
@@ -460,6 +543,7 @@ async function primeTrackedPipelineSummaries(): Promise<void> {
         console.error(`Failed to parse pipeline summary for ${result.namespace}`);
         continue;
       }
+      cachePipelineSummaryFingerprint(summary);
 
       if (pipelineSummaryNeedsReconciliation(summary)) {
         trackPipelineSummary(extractTaskId(result.namespace));
@@ -1260,8 +1344,8 @@ async function recoverStaleTasks(): Promise<void> {
 
 // --- Dependency joins ---
 
-function dependencyStateFromEntry(entry: (MuninEntry & { found: true }) | null): DependencyState {
-  if (!entry) return "missing";
+function dependencyStateFromEntry(entry: MuninReadResult | null | undefined): DependencyState {
+  if (!entry || !entry.found) return "missing";
   if (entry.tags.includes("completed")) return "completed";
   if (entry.tags.includes("cancelled")) return "failed";
   if (entry.tags.includes("failed")) return "failed";
@@ -1269,8 +1353,11 @@ function dependencyStateFromEntry(entry: (MuninEntry & { found: true }) | null):
 }
 
 async function readDependencyStates(dependencyIds: string[]): Promise<Record<string, DependencyState>> {
-  const entries = await Promise.all(
-    dependencyIds.map((dependencyId) => munin.read(`tasks/${dependencyId}`, "status"))
+  const entries = await munin.readBatch(
+    dependencyIds.map((dependencyId) => ({
+      namespace: `tasks/${dependencyId}`,
+      key: "status",
+    }))
   );
 
   const states: Record<string, DependencyState> = {};
@@ -1529,10 +1616,12 @@ async function finalizePipelineCancellationIfReady(
   reason: string
 ): Promise<boolean> {
   const pipelineNs = `tasks/${pipelineId}`;
-  const [pipelineEntry, specEntry] = await Promise.all([
-    munin.read(pipelineNs, "status"),
-    munin.read(pipelineNs, "spec"),
+  const [pipelineEntryResult, specEntryResult] = await munin.readBatch([
+    { namespace: pipelineNs, key: "status" },
+    { namespace: pipelineNs, key: "spec" },
   ]);
+  const pipelineEntry = getFoundBatchEntry(pipelineEntryResult);
+  const specEntry = getFoundBatchEntry(specEntryResult);
   if (!pipelineEntry || !specEntry || !pipelineEntry.tags.includes(CANCEL_REQUESTED_TAG)) {
     return false;
   }
@@ -1545,8 +1634,14 @@ async function finalizePipelineCancellationIfReady(
     return false;
   }
 
-  for (const phase of pipeline.phases) {
-    const phaseEntry = await munin.read(phase.taskNamespace, "status");
+  const phaseEntries = await munin.readBatch(
+    pipeline.phases.map((phase) => ({
+      namespace: phase.taskNamespace,
+      key: "status",
+    }))
+  );
+  for (const phaseEntryResult of phaseEntries) {
+    const phaseEntry = getFoundBatchEntry(phaseEntryResult);
     if (phaseEntry && !isTerminalTaskStatus(phaseEntry.tags)) {
       return false;
     }
@@ -1621,8 +1716,15 @@ async function processPipelineCancellationRequest(
   let activeRunningPhase = false;
   let cancelledAny = false;
 
-  for (const phase of pipeline.phases) {
-    const phaseEntry = await munin.read(phase.taskNamespace, "status");
+  const phaseEntries = await munin.readBatch(
+    pipeline.phases.map((phase) => ({
+      namespace: phase.taskNamespace,
+      key: "status",
+    }))
+  );
+
+  for (const [index, phase] of pipeline.phases.entries()) {
+    const phaseEntry = getFoundBatchEntry(phaseEntries[index]);
     if (!phaseEntry || isTerminalTaskStatus(phaseEntry.tags)) {
       if (phaseEntry?.tags.includes("cancelled")) cancelledAny = true;
       continue;
@@ -1770,8 +1872,14 @@ async function processResumeRequests(): Promise<boolean> {
 
     const phaseEntries = new Map<string, (MuninEntry & { found: true }) | null>();
     const currentLifecycles: Record<string, PipelinePhaseSnapshot["lifecycle"]> = {};
-    for (const phase of pipeline.phases) {
-      const phaseEntry = await munin.read(phase.taskNamespace, "status");
+    const phaseStatusEntries = await munin.readBatch(
+      pipeline.phases.map((phase) => ({
+        namespace: phase.taskNamespace,
+        key: "status",
+      }))
+    );
+    for (const [index, phase] of pipeline.phases.entries()) {
+      const phaseEntry = getFoundBatchEntry(phaseStatusEntries[index]);
       phaseEntries.set(phase.taskNamespace, phaseEntry);
       currentLifecycles[phase.taskNamespace] = getPipelinePhaseLifecycle(phaseEntry?.tags);
     }
@@ -1990,10 +2098,15 @@ async function handlePipelineTask(
   const phaseDrafts = buildPhaseTaskDrafts(pipeline);
 
   try {
-    const existingChildren = await Promise.all(
-      phaseDrafts.map((draft) => munin.read(draft.namespace, "status"))
+    const existingChildren = await munin.readBatch(
+      phaseDrafts.map((draft) => ({
+        namespace: draft.namespace,
+        key: "status",
+      }))
     );
-    const existingChild = existingChildren.find((child) => child !== null);
+    const existingChild = existingChildren
+      .map((entry) => getFoundBatchEntry(entry))
+      .find((child) => child !== null);
     if (existingChild) {
       throw new Error(`Child task namespace already exists: ${existingChild.namespace}`);
     }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { compilePipelineTask } from "../src/pipeline-compiler.js";
 import {
   buildPipelineExecutionSummary,
+  getPipelineExecutionSummaryFingerprint,
   parsePipelineExecutionSummary,
   pipelineSummaryNeedsReconciliation,
 } from "../src/pipeline-summary.js";
@@ -326,5 +327,41 @@ describe("pipeline execution summary", () => {
       )
     ).toBe(false);
     expect(parsePipelineExecutionSummary("{not-json")).toBeNull();
+  });
+
+  it("ignores generatedAt when fingerprinting summaries", () => {
+    const pipeline = makePipeline();
+    const first = buildPipelineExecutionSummary(
+      pipeline,
+      [
+        {
+          phase: pipeline.phases[0]!,
+          lifecycle: "running",
+        },
+        {
+          phase: pipeline.phases[1]!,
+          lifecycle: "blocked",
+        },
+      ],
+      "2026-04-02T11:00:02Z"
+    );
+    const second = buildPipelineExecutionSummary(
+      pipeline,
+      [
+        {
+          phase: pipeline.phases[0]!,
+          lifecycle: "running",
+        },
+        {
+          phase: pipeline.phases[1]!,
+          lifecycle: "blocked",
+        },
+      ],
+      "2026-04-02T11:00:22Z"
+    );
+
+    expect(getPipelineExecutionSummaryFingerprint(first)).toBe(
+      getPipelineExecutionSummaryFingerprint(second)
+    );
   });
 });

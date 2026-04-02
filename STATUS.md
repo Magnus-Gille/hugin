@@ -1,9 +1,13 @@
 # Hugin — Status
 
-**Last session:** 2026-04-02 (submitter allowlist drift fix)
+**Last session:** 2026-04-02 (Munin 429 hardening sprint)
 **Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Munin 429 hardening sprint shipped, deployed, and live-validated** — batched the dispatcher’s hottest Munin read paths, added client-side request serialization/pacing plus `Retry-After` support, and cached stable pipeline-summary fingerprints so unchanged summaries are not rewritten just because `generatedAt` changes.
+- **Live rollout exposed and fixed two real HTTP-bridge compatibility bugs** — the client now accepts both `data:` and `data: ` SSE lines, and `memory_read_batch` is chunked to Munin’s live 20-read validation limit. Final validation is recorded in `docs/munin-429-hardening-live-evaluation.md`.
+- **Startup watchlist priming now survives real historical load** — the final deploy booted cleanly against a live backlog of 39 historical pipeline parents without throwing a watchlist-prime error.
+- **Representative live pipeline completed without fresh 429/timeouts** — probe `tasks/20260402-202957-hardening-summary-dedupe` ran end to end on `huginmunin`, and the post-deploy journal for that run contained normal claim/execute/reconcile messages with no fresh `429`, `Too many requests`, or timeout errors.
 - **Submitter allowlist drift fixed, deployed, and live-verified** — Hugin now defaults `HUGIN_ALLOWED_SUBMITTERS` to both current Codex-facing names (`Codex`, `Codex-desktop`, `Codex-web`, `Codex-mobile`) and legacy `claude-*` names during the transition. Deployed to `huginmunin` and validated live with `tasks/20260402-200746-allowlist-codex`, which completed successfully from `Submitted by: Codex`.
 - **Repo docs and tests aligned to the new transition allowlist** — updated [AGENTS.md](/Users/magnus/repos/hugin/AGENTS.md), [CLAUDE.md](/Users/magnus/repos/hugin/CLAUDE.md), and [tests/dispatcher.test.ts](/Users/magnus/repos/hugin/tests/dispatcher.test.ts) so the documented default and submitter-validation coverage match the shipped runtime behavior.
 - **Step 3 resume-from-failed-phase validated live** — recorded in `docs/step3-resume-live-evaluation.md` with two probes:
@@ -87,10 +91,9 @@
 - mDNS (huginmunin.local) flaky — Tailscale IP 100.97.117.37 is reliable fallback
 
 ## Next Steps
-- Decide whether Munin `429` remediation needs its own sprint before more orchestration complexity is added; the Step 3 state machine now converges under pressure, but latency and retry noise are still high.
 - Add dispatcher-level tests for the `Runtime: pipeline` execution path if parent-tag and result-contract behavior should be covered above the current pure-helper and compiler unit tests.
-- Decide whether cancellation/result finalization should be hardened further so parent `status/result` converge as quickly as parent `summary` under heavy `429` pressure.
-- **Decide whether Munin 429 log noise needs another hardening pass** — cancellation now converges safely under load, but heartbeats and poll-loop logs still show intermittent `429` pressure during live runs.
+- Observe a few more mixed live workloads before declaring Munin-pressure hardening done; this sprint removed the immediate startup/batch compatibility failures, but the orchestration layer still depends heavily on Munin state traffic.
+- Decide whether cancellation/result finalization should be hardened further so parent `status/result` converge as quickly as parent `summary` under heavy pressure.
 - **Step 5+: Capability registry + routing** — still deferred until Bet 1 is proven end to end.
 - Deploy latest Ratatoskr features (poll recovery, delivery confirmation)
 - Task progress streaming (partial results before completion)
