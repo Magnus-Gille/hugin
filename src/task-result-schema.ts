@@ -76,5 +76,9 @@ export type StructuredTaskResult = z.infer<typeof structuredTaskResultSchema>;
 export function buildStructuredTaskResult(
   input: StructuredTaskResult
 ): StructuredTaskResult {
-  return structuredTaskResultSchema.parse(input);
+  const normalizedErrorMessage = input.errorMessage?.trim();
+  return structuredTaskResultSchema.parse({
+    ...input,
+    errorMessage: normalizedErrorMessage || undefined,
+  });
 }

@@ -56,4 +56,25 @@ describe("structured task result schema", () => {
     expect(result.errorMessage).toBe("Dependency 20260402-phase-a failed");
     expect(result.startedAt).toBeUndefined();
   });
+
+  it("trims machine-readable error messages without changing body text", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "20260402-phase-c",
+      taskNamespace: "tasks/20260402-phase-c",
+      lifecycle: "failed",
+      outcome: "timed_out",
+      runtime: "ollama",
+      executor: "ollama",
+      resultSource: "ollama",
+      exitCode: "TIMEOUT",
+      completedAt: "2026-04-02T11:00:03Z",
+      bodyKind: "error",
+      bodyText: "\n[Ollama streaming timed out]\n",
+      errorMessage: "\n[Ollama streaming timed out]\n",
+    });
+
+    expect(result.bodyText).toBe("\n[Ollama streaming timed out]\n");
+    expect(result.errorMessage).toBe("[Ollama streaming timed out]");
+  });
 });

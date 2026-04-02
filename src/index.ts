@@ -327,44 +327,45 @@ async function writeStructuredTaskResult(
 }
 
 async function refreshPipelineSummary(pipelineId: string): Promise<void> {
-  const pipelineNs = `tasks/${pipelineId}`;
-  const specEntry = await munin.read(pipelineNs, "spec");
-  if (!specEntry) return;
-
-  let pipeline: PipelineIR;
   try {
-    pipeline = pipelineIRSchema.parse(JSON.parse(specEntry.content));
-  } catch (err) {
-    console.error(`Failed to parse pipeline spec for ${pipelineNs}:`, err);
-    return;
-  }
+    const pipelineNs = `tasks/${pipelineId}`;
+    const specEntry = await munin.read(pipelineNs, "spec");
+    if (!specEntry) return;
 
-  const snapshots = await Promise.all(
-    pipeline.phases.map(async (phase): Promise<PipelinePhaseSnapshot> => {
-      const [statusEntry, structuredResult, resultEntry] = await Promise.all([
-        munin.read(phase.taskNamespace, "status"),
-        readStructuredTaskResult(phase.taskNamespace),
-        munin.read(phase.taskNamespace, "result"),
-      ]);
+    let pipeline: PipelineIR;
+    try {
+      pipeline = pipelineIRSchema.parse(JSON.parse(specEntry.content));
+    } catch (err) {
+      console.error(`Failed to parse pipeline spec for ${pipelineNs}:`, err);
+      return;
+    }
 
-      return {
+    const snapshots: PipelinePhaseSnapshot[] = [];
+    for (const phase of pipeline.phases) {
+      const statusEntry = await munin.read(phase.taskNamespace, "status");
+      const structuredResult = await readStructuredTaskResult(phase.taskNamespace);
+      const resultEntry = await munin.read(phase.taskNamespace, "result");
+
+      snapshots.push({
         phase,
         lifecycle: getPipelinePhaseLifecycle(statusEntry?.tags),
         structuredResult: structuredResult || undefined,
         errorMessage:
           structuredResult?.errorMessage ||
           parseErrorMessageFromResult(resultEntry?.content),
-      };
-    })
-  );
+      });
+    }
 
-  const summary = buildPipelineExecutionSummary(pipeline, snapshots);
-  await munin.write(
-    pipelineNs,
-    "summary",
-    JSON.stringify(summary, null, 2),
-    ["type:pipeline", "type:pipeline-summary"]
-  );
+    const summary = buildPipelineExecutionSummary(pipeline, snapshots);
+    await munin.write(
+      pipelineNs,
+      "summary",
+      JSON.stringify(summary, null, 2),
+      ["type:pipeline", "type:pipeline-summary"]
+    );
+  } catch (err) {
+    console.error(`Pipeline summary refresh failed for ${pipelineId}:`, err);
+  }
 }
 
 async function refreshPipelineSummaryFromContent(content: string): Promise<void> {

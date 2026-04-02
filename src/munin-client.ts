@@ -27,19 +27,40 @@ export interface MuninQueryResult {
 export interface MuninClientConfig {
   baseUrl: string;
   apiKey: string;
+  requestTimeoutMs?: number;
+  maxRetries?: number;
+  retryBaseDelayMs?: number;
 }
 
 let rpcId = 0;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableFetchError(err: unknown): boolean {
+  return err instanceof Error && (
+    err.name === "AbortError" ||
+    err.name === "TimeoutError" ||
+    err instanceof TypeError
+  );
+}
 
 export class MuninClient {
   private baseUrl: string;
   private apiKey: string;
   private sessionId: string;
+  private requestTimeoutMs: number;
+  private maxRetries: number;
+  private retryBaseDelayMs: number;
 
   constructor(config: MuninClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, "");
     this.apiKey = config.apiKey;
     this.sessionId = crypto.randomUUID();
+    this.requestTimeoutMs = config.requestTimeoutMs ?? 10_000;
+    this.maxRetries = config.maxRetries ?? 2;
+    this.retryBaseDelayMs = config.retryBaseDelayMs ?? 250;
   }
 
   private async callTool(
@@ -53,50 +74,75 @@ export class MuninClient {
       params: { name, arguments: args },
     };
 
-    const res = await fetch(`${this.baseUrl}/mcp`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json, text/event-stream",
-        "mcp-session-id": this.sessionId,
-      },
-      body: JSON.stringify(body),
-    });
+    let attempt = 0;
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`Munin ${res.status}: ${text}`);
-    }
+    while (true) {
+      try {
+        const res = await fetch(`${this.baseUrl}/mcp`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            "mcp-session-id": this.sessionId,
+          },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(this.requestTimeoutMs),
+        });
 
-    // Parse SSE response — extract the last data line with a JSON-RPC result
-    const text = await res.text();
-    const lines = text.split("\n");
-    let lastData = "";
-    for (const line of lines) {
-      if (line.startsWith("data: ")) {
-        lastData = line.slice(6);
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          const shouldRetry =
+            (res.status === 429 || res.status >= 500) &&
+            attempt < this.maxRetries;
+          if (shouldRetry) {
+            await sleep(this.retryBaseDelayMs * (attempt + 1));
+            attempt++;
+            continue;
+          }
+          throw new Error(`Munin ${res.status}: ${text}`);
+        }
+
+        // Parse SSE response — extract the last data line with a JSON-RPC result
+        const text = await res.text();
+        const lines = text.split("\n");
+        let lastData = "";
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            lastData = line.slice(6);
+          }
+        }
+
+        if (!lastData) {
+          // Maybe it's a plain JSON response
+          const parsed = JSON.parse(text);
+          if (parsed.result?.content?.[0]?.text) {
+            return JSON.parse(parsed.result.content[0].text);
+          }
+          return parsed;
+        }
+
+        const rpc = JSON.parse(lastData);
+        if (rpc.error) {
+          throw new Error(`Munin RPC error: ${JSON.stringify(rpc.error)}`);
+        }
+        const content = rpc.result?.content?.[0]?.text;
+        if (content) {
+          return JSON.parse(content);
+        }
+        return rpc.result;
+      } catch (err) {
+        if (attempt < this.maxRetries && isRetryableFetchError(err)) {
+          await sleep(this.retryBaseDelayMs * (attempt + 1));
+          attempt++;
+          continue;
+        }
+        if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
+          throw new Error(`Munin request timed out after ${this.requestTimeoutMs}ms`);
+        }
+        throw err;
       }
     }
-
-    if (!lastData) {
-      // Maybe it's a plain JSON response
-      const parsed = JSON.parse(text);
-      if (parsed.result?.content?.[0]?.text) {
-        return JSON.parse(parsed.result.content[0].text);
-      }
-      return parsed;
-    }
-
-    const rpc = JSON.parse(lastData);
-    if (rpc.error) {
-      throw new Error(`Munin RPC error: ${JSON.stringify(rpc.error)}`);
-    }
-    const content = rpc.result?.content?.[0]?.text;
-    if (content) {
-      return JSON.parse(content);
-    }
-    return rpc.result;
   }
 
   async read(
