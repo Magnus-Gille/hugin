@@ -44,6 +44,7 @@ describe("pipeline resume planner", () => {
     });
 
     expect(plan.resumable).toBe(true);
+    expect(plan.hasActivePhases).toBe(false);
     expect(plan.phases.map((phase) => phase.nextLifecycle)).toEqual([
       "completed",
       "pending",
@@ -60,6 +61,7 @@ describe("pipeline resume planner", () => {
     });
 
     expect(plan.resumable).toBe(true);
+    expect(plan.hasActivePhases).toBe(false);
     expect(plan.phases.map((phase) => phase.nextLifecycle)).toEqual([
       "pending",
       "blocked",

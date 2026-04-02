@@ -1579,13 +1579,28 @@ async function processPipelineCancellationRequest(
     return false;
   }
 
-  await refreshPipelineSummary(pipelineId);
+  try {
+    await refreshPipelineSummary(pipelineId);
+  } catch (err) {
+    console.error(
+      `Pipeline summary refresh failed during cancellation for ${pipelineId}:`,
+      err
+    );
+  }
 
   if (activeRunningPhase) {
     return true;
   }
 
-  return finalizePipelineCancellationIfReady(pipelineId, reason);
+  try {
+    return await finalizePipelineCancellationIfReady(pipelineId, reason);
+  } catch (err) {
+    console.error(
+      `Pipeline cancellation finalization failed for ${pipelineId}:`,
+      err
+    );
+    return true;
+  }
 }
 
 async function processCancellationRequests(): Promise<boolean> {
@@ -1658,15 +1673,6 @@ async function processResumeRequests(): Promise<boolean> {
       continue;
     }
 
-    if (entry.tags.includes(CANCEL_REQUESTED_TAG)) {
-      await clearResumeRequest(
-        entry.namespace,
-        entry,
-        "Resume ignored; cancellation is still pending"
-      );
-      continue;
-    }
-
     const specEntry = await munin.read(entry.namespace, "spec");
     if (!specEntry) {
       await clearResumeRequest(
@@ -1694,6 +1700,14 @@ async function processResumeRequests(): Promise<boolean> {
     }
 
     const plan = buildPipelineResumePlan(pipeline, currentLifecycles);
+    if (entry.tags.includes(CANCEL_REQUESTED_TAG) && plan.hasActivePhases) {
+      await clearResumeRequest(
+        entry.namespace,
+        entry,
+        "Resume ignored; cancellation is still pending"
+      );
+      continue;
+    }
     if (!plan.resumable) {
       if (
         plan.hasActivePhases &&
@@ -2062,64 +2076,65 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   // Start periodic lease renewal
   startLeaseRenewal(taskNs, entry.content, entry.tags);
 
-  if (declaredRuntime === "pipeline") {
-    currentTaskConfig = null;
-    const pipelineResult = await handlePipelineTask(taskNs, entry, queueDepth);
-    stopLeaseRenewal();
-    stopCancellationWatch();
-    currentTask = null;
-    currentTaskConfig = null;
-    return pipelineResult;
-  }
+  try {
+    if (declaredRuntime === "pipeline") {
+      currentTaskConfig = null;
+      const pipelineResult = await handlePipelineTask(taskNs, entry, queueDepth);
+      stopLeaseRenewal();
+      stopCancellationWatch();
+      currentTask = null;
+      currentTaskConfig = null;
+      return pipelineResult;
+    }
 
-  const task = parseTask(entry.content);
-  if (!task) {
-    stopLeaseRenewal();
-    stopCancellationWatch();
-    await failTaskWithMessage(
+    const task = parseTask(entry.content);
+    if (!task) {
+      stopLeaseRenewal();
+      stopCancellationWatch();
+      await failTaskWithMessage(
+        taskNs,
+        entry,
+        "Failed to parse task (missing prompt or runtime)",
+      );
+      await promoteDependents(taskId);
+      await refreshPipelineSummaryFromContent(entry.content);
+      currentTask = null;
+      currentTaskConfig = null;
+      return { hadTask: true, queueDepth };
+    }
+
+    currentTaskConfig = task;
+    if (task.pipeline?.pipelineId) {
+      await refreshPipelineSummary(task.pipeline.pipelineId);
+    }
+    startCancellationWatch();
+
+    const isOllama = task.runtime === "ollama";
+    const useSdk = task.runtime === "claude" && config.claudeExecutor === "sdk";
+    const executorLabel = isOllama ? "ollama" : useSdk ? "agent-sdk" : "spawn";
+
+    // Capture quota before task execution (skip for ollama — it's Claude-specific)
+    const quotaBefore = isOllama ? { q5: null, q7: null } : await fetchQuota();
+
+    await munin.log(
       taskNs,
-      entry,
-      "Failed to parse task (missing prompt or runtime)",
+      `Task started by Hugin (runtime: ${task.runtime}, executor: ${executorLabel}, model: ${task.model || "default"}, worker: ${workerId}, timeout: ${task.timeoutMs}ms)`
     );
-    await promoteDependents(taskId);
-    await refreshPipelineSummaryFromContent(entry.content);
-    currentTask = null;
-    currentTaskConfig = null;
-    return { hadTask: true, queueDepth };
-  }
 
-  currentTaskConfig = task;
-  if (task.pipeline?.pipelineId) {
-    await refreshPipelineSummary(task.pipeline.pipelineId);
-  }
-  startCancellationWatch();
+    const startMs = Date.now();
 
-  const isOllama = task.runtime === "ollama";
-  const useSdk = task.runtime === "claude" && config.claudeExecutor === "sdk";
-  const executorLabel = isOllama ? "ollama" : useSdk ? "agent-sdk" : "spawn";
+    // --- Execute via ollama, SDK, or spawn ---
+    let exitCode: number | "TIMEOUT";
+    let output: string;
+    let logFile: string;
+    let resultText: string | null = null;
+    let costUsd: number | null = null;
+    let ollamaJournalExtras: Record<string, unknown> = {};
+    let effectiveExecutor = executorLabel;
+    let fallbackTriggered = false;
+    let fallbackReason: string | null = null;
 
-  // Capture quota before task execution (skip for ollama — it's Claude-specific)
-  const quotaBefore = isOllama ? { q5: null, q7: null } : await fetchQuota();
-
-  await munin.log(
-    taskNs,
-    `Task started by Hugin (runtime: ${task.runtime}, executor: ${executorLabel}, model: ${task.model || "default"}, worker: ${workerId}, timeout: ${task.timeoutMs}ms)`
-  );
-
-  const startMs = Date.now();
-
-  // --- Execute via ollama, SDK, or spawn ---
-  let exitCode: number | "TIMEOUT";
-  let output: string;
-  let logFile: string;
-  let resultText: string | null = null;
-  let costUsd: number | null = null;
-  let ollamaJournalExtras: Record<string, unknown> = {};
-  let effectiveExecutor = executorLabel;
-  let fallbackTriggered = false;
-  let fallbackReason: string | null = null;
-
-  if (isOllama) {
+    if (isOllama) {
     // --- Ollama execution path ---
     const ollamaModel = task.model || config.ollamaDefaultModel;
     const freeMemBeforeMb = Math.round(os.freemem() / 1024 / 1024);
@@ -2279,7 +2294,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       };
     }
     currentOllamaAbort = null;
-  } else if (useSdk) {
+    } else if (useSdk) {
     console.log(`Using Agent SDK executor for task ${taskNs}`);
     const sdkAbort = new AbortController();
     currentSdkAbort = sdkAbort;
@@ -2326,270 +2341,286 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     logFile = sdkResult.logFile;
     resultText = sdkResult.resultText;
     costUsd = sdkResult.costUsd;
-  } else {
-    const spawnResult = await spawnRuntime(task, { taskNs, muninClient: munin });
-    exitCode = spawnResult.exitCode;
-    output = spawnResult.output;
-    logFile = spawnResult.logFile;
-  }
+    } else {
+      const spawnResult = await spawnRuntime(task, { taskNs, muninClient: munin });
+      exitCode = spawnResult.exitCode;
+      output = spawnResult.output;
+      logFile = spawnResult.logFile;
+    }
 
-  // Stop lease renewal — task is done
-  stopLeaseRenewal();
-  stopCancellationWatch();
-  currentSdkAbort = null;
-  currentOllamaAbort = null;
+    // Stop lease renewal — task is done
+    stopLeaseRenewal();
+    stopCancellationWatch();
+    currentSdkAbort = null;
+    currentOllamaAbort = null;
 
-  const durationMs = Date.now() - startMs;
-  const completedAt = new Date().toISOString();
-  let cancellation: CancellationRequest | null = currentCancellation;
-  if (!cancellation) {
-    const currentEntry = await munin.read(taskNs, "status");
-    if (currentEntry?.tags.includes(CANCEL_REQUESTED_TAG)) {
-      cancellation = {
-        reason: `Task ${taskId} cancelled by operator`,
-        sourceNamespace: taskNs,
-      };
-    } else if (task.pipeline?.pipelineId) {
-      const pipelineNs = `tasks/${task.pipeline.pipelineId}`;
-      const pipelineEntry = await munin.read(pipelineNs, "status");
-      if (pipelineEntry?.tags.includes(CANCEL_REQUESTED_TAG)) {
+    const durationMs = Date.now() - startMs;
+    const completedAt = new Date().toISOString();
+    let cancellation: CancellationRequest | null = currentCancellation;
+    if (!cancellation) {
+      const currentEntry = await munin.read(taskNs, "status");
+      if (currentEntry?.tags.includes(CANCEL_REQUESTED_TAG)) {
         cancellation = {
-          reason: `Pipeline ${task.pipeline.pipelineId} cancelled by operator`,
-          sourceNamespace: pipelineNs,
-          pipelineId: task.pipeline.pipelineId,
+          reason: `Task ${taskId} cancelled by operator`,
+          sourceNamespace: taskNs,
         };
+      } else if (task.pipeline?.pipelineId) {
+        const pipelineNs = `tasks/${task.pipeline.pipelineId}`;
+        const pipelineEntry = await munin.read(pipelineNs, "status");
+        if (pipelineEntry?.tags.includes(CANCEL_REQUESTED_TAG)) {
+          cancellation = {
+            reason: `Pipeline ${task.pipeline.pipelineId} cancelled by operator`,
+            sourceNamespace: pipelineNs,
+            pipelineId: task.pipeline.pipelineId,
+          };
+        }
       }
     }
-  }
-  currentCancellation = null;
-  const isTimeout = exitCode === "TIMEOUT";
-  const ok = exitCode === 0;
-  const isCancelled = cancellation !== null;
+    currentCancellation = null;
+    const isTimeout = exitCode === "TIMEOUT";
+    const ok = exitCode === 0;
+    const isCancelled = cancellation !== null;
 
-  // Safety net: push any commits the task left unpushed
-  if (ok && !isCancelled) {
-    await postTaskGitPush(task.workingDir);
-  }
+    // Safety net: push any commits the task left unpushed
+    if (ok && !isCancelled) {
+      await postTaskGitPush(task.workingDir);
+    }
 
-  console.log(
-    `Task ${taskNs} ${isCancelled ? "cancelled" : ok ? "completed" : isTimeout ? "timed out" : "failed"} (exit: ${isCancelled ? "CANCELLED" : exitCode}, executor: ${executorLabel}, duration: ${Math.round(durationMs / 1000)}s)`
-  );
+    console.log(
+      `Task ${taskNs} ${isCancelled ? "cancelled" : ok ? "completed" : isTimeout ? "timed out" : "failed"} (exit: ${isCancelled ? "CANCELLED" : exitCode}, executor: ${executorLabel}, duration: ${Math.round(durationMs / 1000)}s)`
+    );
 
-  // For SDK/ollama executor, use resultText directly
-  // For spawn executor, check for hook result, then fall back to stdout
-  let resultBody: string;
-  let resultSource: string;
+    // For SDK/ollama executor, use resultText directly
+    // For spawn executor, check for hook result, then fall back to stdout
+    let resultBody: string;
+    let resultSource: string;
 
-  if ((useSdk || isOllama) && resultText) {
-    resultSource = effectiveExecutor;
-    resultBody = `### Response\n\n${resultText}`;
-  } else if (!useSdk && !isOllama) {
-    const hookResult = readHookResult(taskId);
-    if (hookResult) {
-      resultSource = "hook";
-      resultBody = `### Response\n\n${hookResult.last_assistant_message}`;
-      console.log(`Using Stop hook result for task ${taskNs}`);
+    if ((useSdk || isOllama) && resultText) {
+      resultSource = effectiveExecutor;
+      resultBody = `### Response\n\n${resultText}`;
+    } else if (!useSdk && !isOllama) {
+      const hookResult = readHookResult(taskId);
+      if (hookResult) {
+        resultSource = "hook";
+        resultBody = `### Response\n\n${hookResult.last_assistant_message}`;
+        console.log(`Using Stop hook result for task ${taskNs}`);
+      } else {
+        resultSource = "stdout";
+        resultBody = `### Output\n\`\`\`\n${output || "(no output)"}\n\`\`\``;
+      }
     } else {
-      resultSource = "stdout";
+      resultSource = effectiveExecutor;
       resultBody = `### Output\n\`\`\`\n${output || "(no output)"}\n\`\`\``;
     }
-  } else {
-    resultSource = effectiveExecutor;
-    resultBody = `### Output\n\`\`\`\n${output || "(no output)"}\n\`\`\``;
-  }
 
-  // Write result to Munin (skip if timeout already wrote partial result via SDK)
-  if (!(isTimeout && useSdk)) {
-    await munin.write(
-      taskNs,
-      "result",
-      buildTaskResultDocument({
-        timedOut: isTimeout,
-        exitCode,
-        startedAt,
-        completedAt,
-        durationSeconds: Math.round(durationMs / 1000),
-        executor: effectiveExecutor,
-        resultSource,
-        logFile: `~/.hugin/logs/${taskId}.log`,
-        costUsd,
-        replyTo: task.replyTo,
-        replyFormat: task.replyFormat,
-        group: task.group,
-        sequence: task.sequence,
-        body: resultBody,
-      })
-    );
-  }
-
-  const structuredBodyKind: TaskExecutionBodyKind =
-    resultSource === "stdout" ? "output" : "response";
-  const structuredBodyText =
-    resultSource === "stdout"
-      ? output || "(no output)"
-      : resultText || output || "(no output)";
-  const runtimeMetadata: TaskExecutionRuntimeMetadata | undefined =
-    isOllama
-      ? {
-          requestedModel: task.model || config.ollamaDefaultModel,
-          effectiveModel:
-            typeof ollamaJournalExtras.model_effective === "string"
-              ? ollamaJournalExtras.model_effective
-              : undefined,
-          requestedHost: task.ollamaHost || "auto",
-          effectiveHost:
-            typeof ollamaJournalExtras.host_effective === "string"
-              ? ollamaJournalExtras.host_effective
-              : undefined,
-          fallbackTriggered:
-            typeof ollamaJournalExtras.fallback_triggered === "boolean"
-              ? ollamaJournalExtras.fallback_triggered
-              : undefined,
-          fallbackReason:
-            typeof ollamaJournalExtras.fallback_reason === "string"
-              ? ollamaJournalExtras.fallback_reason
-              : undefined,
-        }
-      : task.model
-        ? {
-            requestedModel: task.model,
-            effectiveModel: task.model,
-          }
-        : undefined;
-
-  if (isCancelled && cancellation) {
-    await munin.write(
-      taskNs,
-      "result",
-      buildCancelledTaskResultDocument({
-        startedAt,
-        completedAt,
-        durationSeconds: Math.round(durationMs / 1000),
-        executor: effectiveExecutor,
-        resultSource,
-        logFile: `~/.hugin/logs/${taskId}.log`,
-        reason: cancellation.reason,
-        replyTo: task.replyTo,
-        replyFormat: task.replyFormat,
-        group: task.group,
-        sequence: task.sequence,
-        body: resultBody,
-      })
-    );
-    await writeStructuredTaskResult(
-      taskNs,
-      createCancelledStructuredResult(taskNs, task.runtime, cancellation.reason, {
-        executor: effectiveExecutor,
-        resultSource,
-        startedAt,
-        completedAt,
-        durationSeconds: Math.round(durationMs / 1000),
-        logFile: `~/.hugin/logs/${taskId}.log`,
-        replyTo: task.replyTo,
-        replyFormat: task.replyFormat,
-        group: task.group,
-        sequence: task.sequence,
-        pipeline: task.pipeline,
-        runtimeMetadata,
-        bodyKind: structuredBodyKind,
-        bodyText: structuredBodyText,
-      })
-    );
-    await munin.write(
-      taskNs,
-      "status",
-      entry.content,
-      buildTerminalStatusTags("cancelled", entry.tags, `runtime:${task.runtime}`)
-    );
-    await munin.log(
-      taskNs,
-      `Task cancelled in ${Math.round(durationMs / 1000)}s (reason: ${cancellation.reason}, executor: ${executorLabel})`
-    );
-  } else {
-    await writeStructuredTaskResult(
-      taskNs,
-      buildStructuredTaskResult({
-        schemaVersion: 1,
-        taskId,
-        taskNamespace: taskNs,
-        lifecycle: ok ? "completed" : "failed",
-        outcome: ok ? "completed" : isTimeout ? "timed_out" : "failed",
-        runtime: task.runtime,
-        executor: effectiveExecutor,
-        resultSource,
-        exitCode,
-        startedAt,
-        completedAt,
-        durationSeconds: Math.round(durationMs / 1000),
-        logFile: `~/.hugin/logs/${taskId}.log`,
-        replyTo: task.replyTo,
-        replyFormat: task.replyFormat,
-        group: task.group,
-        sequence: task.sequence,
-        costUsd: costUsd ?? undefined,
-        bodyKind: structuredBodyKind,
-        bodyText: structuredBodyText,
-        errorMessage: ok ? undefined : structuredBodyText,
-        runtimeMetadata,
-        pipeline: task.pipeline,
-      })
-    );
-
-    await munin.write(
-      taskNs,
-      "status",
-      entry.content,
-      buildTerminalStatusTags(ok ? "completed" : "failed", entry.tags, `runtime:${task.runtime}`)
-    );
-
-    await munin.log(
-      taskNs,
-      `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`
-    );
-  }
-
-  const shouldPromoteDependents =
-    !isCancelled || cancellation?.pipelineId !== task.pipeline?.pipelineId;
-  if (shouldPromoteDependents) {
-    await promoteDependents(taskId);
-  }
-  if (task.pipeline?.pipelineId) {
-    await refreshPipelineSummary(task.pipeline.pipelineId);
-    if (isCancelled && cancellation?.pipelineId === task.pipeline.pipelineId) {
-      await finalizePipelineCancellationIfReady(
-        task.pipeline.pipelineId,
-        cancellation.reason
+    // Write result to Munin (skip if timeout already wrote partial result via SDK)
+    if (!(isTimeout && useSdk)) {
+      await munin.write(
+        taskNs,
+        "result",
+        buildTaskResultDocument({
+          timedOut: isTimeout,
+          exitCode,
+          startedAt,
+          completedAt,
+          durationSeconds: Math.round(durationMs / 1000),
+          executor: effectiveExecutor,
+          resultSource,
+          logFile: `~/.hugin/logs/${taskId}.log`,
+          costUsd,
+          replyTo: task.replyTo,
+          replyFormat: task.replyFormat,
+          group: task.group,
+          sequence: task.sequence,
+          body: resultBody,
+        })
       );
     }
+
+    const structuredBodyKind: TaskExecutionBodyKind =
+      resultSource === "stdout" ? "output" : "response";
+    const structuredBodyText =
+      resultSource === "stdout"
+        ? output || "(no output)"
+        : resultText || output || "(no output)";
+    const runtimeMetadata: TaskExecutionRuntimeMetadata | undefined =
+      isOllama
+        ? {
+            requestedModel: task.model || config.ollamaDefaultModel,
+            effectiveModel:
+              typeof ollamaJournalExtras.model_effective === "string"
+                ? ollamaJournalExtras.model_effective
+                : undefined,
+            requestedHost: task.ollamaHost || "auto",
+            effectiveHost:
+              typeof ollamaJournalExtras.host_effective === "string"
+                ? ollamaJournalExtras.host_effective
+                : undefined,
+            fallbackTriggered:
+              typeof ollamaJournalExtras.fallback_triggered === "boolean"
+                ? ollamaJournalExtras.fallback_triggered
+                : undefined,
+            fallbackReason:
+              typeof ollamaJournalExtras.fallback_reason === "string"
+                ? ollamaJournalExtras.fallback_reason
+                : undefined,
+          }
+        : task.model
+          ? {
+              requestedModel: task.model,
+              effectiveModel: task.model,
+            }
+          : undefined;
+
+    if (isCancelled && cancellation) {
+      await munin.write(
+        taskNs,
+        "result",
+        buildCancelledTaskResultDocument({
+          startedAt,
+          completedAt,
+          durationSeconds: Math.round(durationMs / 1000),
+          executor: effectiveExecutor,
+          resultSource,
+          logFile: `~/.hugin/logs/${taskId}.log`,
+          reason: cancellation.reason,
+          replyTo: task.replyTo,
+          replyFormat: task.replyFormat,
+          group: task.group,
+          sequence: task.sequence,
+          body: resultBody,
+        })
+      );
+      await writeStructuredTaskResult(
+        taskNs,
+        createCancelledStructuredResult(taskNs, task.runtime, cancellation.reason, {
+          executor: effectiveExecutor,
+          resultSource,
+          startedAt,
+          completedAt,
+          durationSeconds: Math.round(durationMs / 1000),
+          logFile: `~/.hugin/logs/${taskId}.log`,
+          replyTo: task.replyTo,
+          replyFormat: task.replyFormat,
+          group: task.group,
+          sequence: task.sequence,
+          pipeline: task.pipeline,
+          runtimeMetadata,
+          bodyKind: structuredBodyKind,
+          bodyText: structuredBodyText,
+        })
+      );
+      await munin.write(
+        taskNs,
+        "status",
+        entry.content,
+        buildTerminalStatusTags("cancelled", entry.tags, `runtime:${task.runtime}`)
+      );
+      await munin.log(
+        taskNs,
+        `Task cancelled in ${Math.round(durationMs / 1000)}s (reason: ${cancellation.reason}, executor: ${executorLabel})`
+      );
+    } else {
+      await writeStructuredTaskResult(
+        taskNs,
+        buildStructuredTaskResult({
+          schemaVersion: 1,
+          taskId,
+          taskNamespace: taskNs,
+          lifecycle: ok ? "completed" : "failed",
+          outcome: ok ? "completed" : isTimeout ? "timed_out" : "failed",
+          runtime: task.runtime,
+          executor: effectiveExecutor,
+          resultSource,
+          exitCode,
+          startedAt,
+          completedAt,
+          durationSeconds: Math.round(durationMs / 1000),
+          logFile: `~/.hugin/logs/${taskId}.log`,
+          replyTo: task.replyTo,
+          replyFormat: task.replyFormat,
+          group: task.group,
+          sequence: task.sequence,
+          costUsd: costUsd ?? undefined,
+          bodyKind: structuredBodyKind,
+          bodyText: structuredBodyText,
+          errorMessage: ok ? undefined : structuredBodyText,
+          runtimeMetadata,
+          pipeline: task.pipeline,
+        })
+      );
+
+      await munin.write(
+        taskNs,
+        "status",
+        entry.content,
+        buildTerminalStatusTags(ok ? "completed" : "failed", entry.tags, `runtime:${task.runtime}`)
+      );
+
+      await munin.log(
+        taskNs,
+        `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`
+      );
+    }
+
+    const shouldPromoteDependents =
+      !isCancelled || cancellation?.pipelineId !== task.pipeline?.pipelineId;
+    if (shouldPromoteDependents) {
+      await promoteDependents(taskId);
+    }
+    if (task.pipeline?.pipelineId) {
+      try {
+        await refreshPipelineSummary(task.pipeline.pipelineId);
+        if (isCancelled && cancellation?.pipelineId === task.pipeline.pipelineId) {
+          await finalizePipelineCancellationIfReady(
+            task.pipeline.pipelineId,
+            cancellation.reason
+          );
+        }
+      } catch (err) {
+        console.error(
+          `Post-task pipeline update failed for ${task.pipeline.pipelineId}:`,
+          err
+        );
+      }
+    }
+
+    // Capture quota after task execution (run for claude tasks or ollama fallback to claude)
+    const quotaAfter = (!isOllama || fallbackTriggered) ? await fetchQuota() : { q5: null, q7: null };
+
+    // Append to invocation journal for usage analysis
+    appendJournal({
+      ts: completedAt,
+      task_id: taskId,
+      repo: task.context || path.basename(task.workingDir),
+      runtime: task.runtime,
+      executor: effectiveExecutor,
+      model_requested: task.model || "default",
+      exit_code: isCancelled ? "CANCELLED" : exitCode,
+      duration_s: Math.round(durationMs / 1000),
+      timeout_ms: task.timeoutMs,
+      cost_usd: costUsd,
+      group: task.group || null,
+      quota_before: quotaBefore,
+      quota_after: quotaAfter,
+      cancellation_reason: cancellation?.reason || null,
+      cancellation_source: cancellation?.sourceNamespace || null,
+      // Ollama-specific fields (null/absent for non-ollama tasks)
+      ...ollamaJournalExtras,
+    });
+
+    currentTask = null;
+    currentTaskConfig = null;
+    return { hadTask: true, queueDepth };
+  } finally {
+    stopLeaseRenewal();
+    stopCancellationWatch();
+    currentSdkAbort = null;
+    currentOllamaAbort = null;
+    currentCancellation = null;
+    currentTask = null;
+    currentTaskConfig = null;
   }
-
-  // Capture quota after task execution (run for claude tasks or ollama fallback to claude)
-  const quotaAfter = (!isOllama || fallbackTriggered) ? await fetchQuota() : { q5: null, q7: null };
-
-  // Append to invocation journal for usage analysis
-  appendJournal({
-    ts: completedAt,
-    task_id: taskId,
-    repo: task.context || path.basename(task.workingDir),
-    runtime: task.runtime,
-    executor: effectiveExecutor,
-    model_requested: task.model || "default",
-    exit_code: isCancelled ? "CANCELLED" : exitCode,
-    duration_s: Math.round(durationMs / 1000),
-    timeout_ms: task.timeoutMs,
-    cost_usd: costUsd,
-    group: task.group || null,
-    quota_before: quotaBefore,
-    quota_after: quotaAfter,
-    cancellation_reason: cancellation?.reason || null,
-    cancellation_source: cancellation?.sourceNamespace || null,
-    // Ollama-specific fields (null/absent for non-ollama tasks)
-    ...ollamaJournalExtras,
-  });
-
-  currentTask = null;
-  currentTaskConfig = null;
-  return { hadTask: true, queueDepth };
 }
 
 async function pollLoop(): Promise<void> {
