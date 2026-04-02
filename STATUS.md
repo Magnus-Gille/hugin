@@ -1,9 +1,14 @@
 # Hugin — Status
 
-**Last session:** 2026-04-02 (Step 3 follow-up fixes deployed and revalidated)
+**Last session:** 2026-04-02 (Step 3 cancellation deployed and live-validated)
 **Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Step 3 cancellation shipped, deployed, and live-validated** — added explicit cancellation handling for running tasks, blocked descendants, and pipeline parents, then deployed the feature to `huginmunin` and validated it on live pipeline probes using `claude-sdk` phases that were cancelled mid-run.
+- **Running-phase abort path now works live** — probe `tasks/20260402-152140-step3-cancel-pipeline2` proved that a parent `cancel-requested` tag aborts the active `gather` phase, marks it `cancelled`, prevents the blocked `report` phase from running, and converges the parent to `status: cancelled` plus a cancellation result record.
+- **Two live-found cancellation bugs were fixed immediately** — probe 1 exposed stale parent results when a Munin `429` landed between parent status/result writes, fixed in commit `cd69ed0` by making parent finalization retry-safe; probe 2 exposed an all-cancelled pipeline summary being classified as `decomposed`, fixed in commit `bc590f9` by correcting summary-state precedence.
+- **Final cancellation contract validated** — probe `tasks/20260402-152550-step3-cancel-pipeline3` ended with parent `status: cancelled`, parent `result` rewritten to cancellation metadata, and parent `summary.executionState: cancelled` / `terminal: true` / `phaseCounts.cancelled: 2`. Evidence is recorded in `docs/step3-cancellation-live-evaluation.md`.
+- **Cancellation coverage expanded** — `tests/pipeline-summary.test.ts` now covers fully cancelled pipelines, and the local verification pass finished green with `npm test` (80 tests) and `npm run build`.
 - **Step 3 tester follow-ups fixed in code** — hardened `src/munin-client.ts` with request timeouts plus limited retry/backoff for 429/timeout/network failures, made `refreshPipelineSummary()` sequential and best-effort in [src/index.ts](/Users/magnus/repos/hugin/src/index.ts), and normalized machine-readable `errorMessage` values in [src/task-result-schema.ts](/Users/magnus/repos/hugin/src/task-result-schema.ts) without changing raw `bodyText`.
 - **New regression coverage added** — added [tests/munin-client.test.ts](/Users/magnus/repos/hugin/tests/munin-client.test.ts) for 429/timeout retry behavior and expanded [tests/task-result-schema.test.ts](/Users/magnus/repos/hugin/tests/task-result-schema.test.ts) to confirm `errorMessage` trimming. Local verification passed with `npm test` (75 tests) and `npm run build`.
 - **Follow-up fixes pushed, deployed, and live-revalidated** — deployed commit `2b4f366` to `huginmunin`, restarted Hugin onto worker `hugin-huginmunin-747189`, and reran live Step 3 probes successfully.
@@ -62,9 +67,10 @@
 
 ## Next Steps
 - Add dispatcher-level tests for the `Runtime: pipeline` execution path if parent-tag and result-contract behavior should be covered above the current pure-helper and compiler unit tests.
-- **Continue Step 3 with operations** — add cancellation and resume-from-failed-phase support now that structured results and parent summaries are proven live.
-- **Define the next Step 3 live gate in detail** — the next evaluation should cancel one fixed pipeline mid-run, resume it cleanly, and verify the parent `summary` stays coherent across both operations.
+- **Continue Step 3 with resume-from-failed-phase** — cancellation is now proven live, so the next operations slice is to reuse stored `spec` plus `result-structured` artifacts and rerun only unfinished/cancelled phases.
+- **Define the next Step 3 live gate in detail** — the next evaluation should cancel one fixed pipeline, resume it cleanly, and verify the parent `summary` stays coherent across cancel -> resume.
 - **Fix submitter allowlist drift** — the deployed service still authorizes `claude-*`/`hugin`, while repo docs and current Codex workflows assume `Codex` names. Align config and documentation before the next live desktop-driven test cycle.
+- **Decide whether Munin 429 log noise needs another hardening pass** — cancellation now converges safely under load, but heartbeats and poll-loop logs still show intermittent `429` pressure during live runs.
 - **Decide on AGENTS.md** — Codex generated this as its CLAUDE.md equivalent; has incorrect substitutions (script names, env var labels). Fix or delete before committing.
 - **Step 5+: Capability registry + routing** — still deferred until Bet 1 is proven end to end.
 - Deploy latest Ratatoskr features (poll recovery, delivery confirmation)
