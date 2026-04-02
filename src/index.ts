@@ -20,7 +20,6 @@ import {
   getPipelinePhaseLifecycle,
   parsePipelineExecutionSummary,
   pipelineSummaryNeedsReconciliation,
-  type PipelineExecutionSummary,
   type PipelinePhaseSnapshot,
 } from "./pipeline-summary.js";
 import {
@@ -376,21 +375,6 @@ function untrackPipelineSummary(pipelineId: string): void {
   trackedPipelineSummaryIds.delete(pipelineId);
 }
 
-async function readPipelineSummary(
-  pipelineNs: string
-): Promise<PipelineExecutionSummary | null> {
-  const entry = await munin.read(pipelineNs, "summary");
-  if (!entry) return null;
-
-  const summary = parsePipelineExecutionSummary(entry.content);
-  if (!summary) {
-    console.error(`Failed to parse pipeline summary for ${pipelineNs}`);
-    return null;
-  }
-
-  return summary;
-}
-
 async function refreshPipelineSummary(pipelineId: string): Promise<void> {
   trackPipelineSummary(pipelineId);
   try {
@@ -468,7 +452,15 @@ async function primeTrackedPipelineSummaries(): Promise<void> {
     let tracked = 0;
     for (const result of results) {
       if (result.key !== "status") continue;
-      const summary = await readPipelineSummary(result.namespace);
+      const summaryEntry = await munin.read(result.namespace, "summary");
+      if (!summaryEntry) continue;
+
+      const summary = parsePipelineExecutionSummary(summaryEntry.content);
+      if (!summary) {
+        console.error(`Failed to parse pipeline summary for ${result.namespace}`);
+        continue;
+      }
+
       if (pipelineSummaryNeedsReconciliation(summary)) {
         trackPipelineSummary(extractTaskId(result.namespace));
         tracked++;
