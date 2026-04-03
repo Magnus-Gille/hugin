@@ -1,9 +1,12 @@
 # Hugin — Status
 
-**Last session:** 2026-04-03 (Munin hardening reviewer-2 fixes)
+**Last session:** 2026-04-03 (pipeline dispatcher path tests)
 **Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Dispatcher-level pipeline execution path is now covered** — extracted the `Runtime: pipeline` parent-handling branch from [src/index.ts](/Users/magnus/repos/hugin/src/index.ts) into [src/pipeline-dispatch.ts](/Users/magnus/repos/hugin/src/pipeline-dispatch.ts) so it can be tested without importing the live Express/poll-loop bootstrap.
+- **New execution-path tests exercise real decomposition behavior** — added [tests/pipeline-dispatch.test.ts](/Users/magnus/repos/hugin/tests/pipeline-dispatch.test.ts) with an in-memory Munin store that verifies valid pipeline decomposition, compile-time rejection, and child-namespace collision handling, including parent `status/result`, child task writes, and parent `summary` refresh.
+- **Verification stayed green after the extraction** — `npm test` now passes with 98 tests, and `npm run build` still succeeds after routing the live dispatcher through the new module.
 - **Reviewer 2 hardening fixes shipped, deployed, and live-validated** — split lease renewal and current-task cancellation polling onto dedicated Munin clients so they no longer share the background request slot, and tightened `readBatch()` to fail closed on count or identity mismatches instead of trusting positional fallbacks.
 - **Lease renewal was proven live after the client split** — `tasks/20260403-092221-lease-renewal-probe` ran for 81 seconds on `huginmunin`, logged a lease renewal at the 60-second mark, and completed successfully from `Submitted by: Codex`. Evidence is recorded in `docs/munin-hardening-reviewer2-fix-validation.md`.
 - **Batch validation is now a hard trust boundary** — new client tests reject partial and out-of-order batch responses, and startup plus live execution still worked against the real bridge after the stricter validation was deployed.
@@ -94,7 +97,6 @@
 - mDNS (huginmunin.local) flaky — Tailscale IP 100.97.117.37 is reliable fallback
 
 ## Next Steps
-- Add dispatcher-level tests for the `Runtime: pipeline` execution path if parent-tag and result-contract behavior should be covered above the current pure-helper and compiler unit tests.
 - Observe a few more mixed live workloads before declaring Munin-pressure hardening fully closed; the immediate startup, batching, and lease-starvation issues are fixed, but the orchestration layer still depends heavily on Munin state traffic.
 - Decide whether cancellation/result finalization should be hardened further so parent `status/result` converge as quickly as parent `summary` under heavy pressure.
 - **Step 5+: Capability registry + routing** — still deferred until Bet 1 is proven end to end.

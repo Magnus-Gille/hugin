@@ -15,9 +15,8 @@ import { configureHosts, resolveOllamaHost, getHostStatus } from "./ollama-hosts
 import { resolveContextRefs } from "./context-loader.js";
 import {
   buildPhaseTaskDrafts,
-  buildPipelineDecompositionResult,
-  compilePipelineTask,
 } from "./pipeline-compiler.js";
+import { handlePipelineTask as dispatchPipelineTask } from "./pipeline-dispatch.js";
 import { buildPipelineResumePlan } from "./pipeline-ops.js";
 import { pipelineIRSchema, type PipelineIR } from "./pipeline-ir.js";
 import {
@@ -2089,67 +2088,6 @@ async function failTaskWithMessage(
   }
 }
 
-async function handlePipelineTask(
-  taskNs: string,
-  entry: MuninEntry & { found: true },
-  queueDepth: number
-): Promise<{ hadTask: boolean; queueDepth: number }> {
-  const pipelineId = extractTaskId(taskNs);
-  let pipeline: PipelineIR;
-
-  try {
-    pipeline = compilePipelineTask(pipelineId, taskNs, entry.content);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await failTaskWithMessage(taskNs, entry, `Pipeline compile failed: ${message}`, "runtime:pipeline");
-    await munin.log(taskNs, `Pipeline compile failed: ${message}`);
-    await promoteDependents(pipelineId);
-    return { hadTask: true, queueDepth };
-  }
-
-  const phaseDrafts = buildPhaseTaskDrafts(pipeline);
-
-  try {
-    const existingChildren = await munin.readBatch(
-      phaseDrafts.map((draft) => ({
-        namespace: draft.namespace,
-        key: "status",
-      }))
-    );
-    const existingChild = existingChildren
-      .map((entry) => getFoundBatchEntry(entry))
-      .find((child) => child !== null);
-    if (existingChild) {
-      throw new Error(`Child task namespace already exists: ${existingChild.namespace}`);
-    }
-
-    await munin.write(taskNs, "spec", JSON.stringify(pipeline, null, 2), ["type:pipeline", "type:pipeline-spec"]);
-
-    for (const draft of phaseDrafts) {
-      await munin.write(draft.namespace, "status", draft.content, draft.tags);
-    }
-
-    await munin.write(
-      taskNs,
-      "status",
-      entry.content,
-      buildPipelineParentSuccessTags(entry.tags),
-      entry.updated_at
-    );
-    await munin.write(taskNs, "result", buildPipelineDecompositionResult(pipeline));
-    await refreshPipelineSummary(pipelineId);
-    await munin.log(taskNs, `Pipeline compiled and decomposed into ${phaseDrafts.length} phase task(s)`);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await failTaskWithMessage(taskNs, entry, `Pipeline decomposition failed: ${message}`, "runtime:pipeline");
-    await munin.log(taskNs, `Pipeline decomposition failed: ${message}`);
-  }
-
-  await promoteDependents(pipelineId);
-
-  return { hadTask: true, queueDepth };
-}
-
 // --- Heartbeat ---
 
 async function emitHeartbeat(queueDepth: number, blockedTasks: number): Promise<void> {
@@ -2281,7 +2219,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   try {
     if (declaredRuntime === "pipeline") {
       currentTaskConfig = null;
-      const pipelineResult = await handlePipelineTask(taskNs, entry, queueDepth);
+      const pipelineResult = await dispatchPipelineTask(
+        munin,
+        {
+          failTaskWithMessage,
+          promoteDependents,
+          refreshPipelineSummary,
+        },
+        taskNs,
+        entry,
+        queueDepth
+      );
       stopLeaseRenewal();
       stopCancellationWatch();
       currentTask = null;
