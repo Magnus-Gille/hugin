@@ -14,20 +14,17 @@ import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus } from "./ollama-hosts.js";
 import { resolveContextRefs } from "./context-loader.js";
 import {
-  buildPhaseTaskDrafts,
 } from "./pipeline-compiler.js";
-import { handlePipelineTask as dispatchPipelineTask } from "./pipeline-dispatch.js";
-import { buildPipelineResumePlan } from "./pipeline-ops.js";
-import { pipelineIRSchema, type PipelineIR } from "./pipeline-ir.js";
 import {
-  buildPipelineExecutionSummary,
-  getPipelineExecutionSummaryFingerprint,
-  getPipelinePhaseLifecycle,
+  processPipelineCancellationRequest as handlePipelineCancellationEntry,
+  processPipelineResumeRequest as handlePipelineResumeEntry,
+} from "./pipeline-control.js";
+import { handlePipelineTask as dispatchPipelineTask } from "./pipeline-dispatch.js";
+import {
   parsePipelineExecutionSummary,
   pipelineSummaryNeedsReconciliation,
-  type PipelineExecutionSummary,
-  type PipelinePhaseSnapshot,
 } from "./pipeline-summary.js";
+import { PipelineSummaryManager } from "./pipeline-summary-manager.js";
 import {
   buildRoutingMetadataLines,
   buildTaskResultDocument,
@@ -39,13 +36,10 @@ import {
   type DependencyState,
 } from "./task-graph.js";
 import {
-  buildPipelineParentCancelledTags,
-  buildPipelineParentSuccessTags,
   buildTerminalStatusTags,
 } from "./task-status-tags.js";
 import {
   buildStructuredTaskResult,
-  structuredTaskResultSchema,
   type DispatcherRuntime,
   type StructuredTaskResult,
   type TaskExecutionBodyKind,
@@ -110,8 +104,7 @@ let cancelWatchTimer: ReturnType<typeof setInterval> | null = null;
 let lastQueueDepth = 0;
 let lastBlockedTaskCount = 0;
 const startedAt = Date.now();
-const trackedPipelineSummaryIds = new Set<string>();
-const pipelineSummaryFingerprints = new Map<string, string>();
+const pipelineSummaryManager = new PipelineSummaryManager();
 
 interface CancellationRequest {
   reason: string;
@@ -170,21 +163,6 @@ function parseDeclaredRuntime(content: string): DeclaredRuntime | undefined {
 
 function parseSubmittedByField(content: string): string {
   return content.match(/\*\*Submitted by:\*\*\s*(.+)/i)?.[1]?.trim() || "unknown";
-}
-
-function extractRoutingMetadataFromContent(content: string): {
-  replyTo?: string;
-  replyFormat?: string;
-  group?: string;
-  sequence?: number;
-} {
-  const sequenceRaw = content.match(/\*\*Sequence:\*\*\s*(\d+)/i)?.[1];
-  return {
-    replyTo: content.match(/\*\*Reply-to:\*\*\s*(.+)/i)?.[1]?.trim(),
-    replyFormat: content.match(/\*\*Reply-format:\*\*\s*(.+)/i)?.[1]?.trim(),
-    group: content.match(/\*\*Group:\*\*\s*(.+)/i)?.[1]?.trim(),
-    sequence: sequenceRaw ? parseInt(sequenceRaw, 10) : undefined,
-  };
 }
 
 function resolveContext(raw: string): string {
@@ -350,35 +328,6 @@ function extractTaskId(namespace: string): string {
   return namespace.replace(/^tasks\//, "");
 }
 
-function getPipelineIdFromContent(content: string): string | undefined {
-  return content.match(/\*\*Pipeline:\*\*\s*(.+)/i)?.[1]?.trim();
-}
-
-function parseErrorMessageFromResult(content: string | undefined): string | undefined {
-  if (!content) return undefined;
-  return content.match(/\*\*Error:\*\*\s*(.+)/)?.[1]?.trim();
-}
-
-function parseStructuredTaskResultContent(
-  taskNs: string,
-  content: string
-): StructuredTaskResult | null {
-  try {
-    return structuredTaskResultSchema.parse(JSON.parse(content));
-  } catch (err) {
-    console.error(`Failed to parse structured result for ${taskNs}:`, err);
-    return null;
-  }
-}
-
-async function readStructuredTaskResult(
-  taskNs: string
-): Promise<StructuredTaskResult | null> {
-  const entry = await munin.read(taskNs, "result-structured");
-  if (!entry) return null;
-  return parseStructuredTaskResultContent(taskNs, entry.content);
-}
-
 async function writeStructuredTaskResult(
   taskNs: string,
   result: StructuredTaskResult
@@ -391,138 +340,18 @@ async function writeStructuredTaskResult(
   );
 }
 
-function getBatchResultKey(namespace: string, key: string): string {
-  return `${namespace}::${key}`;
-}
-
 function getFoundBatchEntry(
   entry: MuninReadResult | undefined
 ): (MuninEntry & { found: true }) | null {
   return entry && entry.found ? entry : null;
 }
 
-function trackPipelineSummary(pipelineId: string): void {
-  trackedPipelineSummaryIds.add(pipelineId);
-}
-
-function untrackPipelineSummary(pipelineId: string): void {
-  trackedPipelineSummaryIds.delete(pipelineId);
-  pipelineSummaryFingerprints.delete(pipelineId);
-}
-
-function cachePipelineSummaryFingerprint(summary: PipelineExecutionSummary): string {
-  const fingerprint = getPipelineExecutionSummaryFingerprint(summary);
-  pipelineSummaryFingerprints.set(summary.pipelineId, fingerprint);
-  return fingerprint;
-}
-
 async function refreshPipelineSummary(pipelineId: string): Promise<void> {
-  trackPipelineSummary(pipelineId);
-  try {
-    const pipelineNs = `tasks/${pipelineId}`;
-    const specEntry = await munin.read(pipelineNs, "spec");
-    if (!specEntry) {
-      untrackPipelineSummary(pipelineId);
-      return;
-    }
-
-    let pipeline: PipelineIR;
-    try {
-      pipeline = pipelineIRSchema.parse(JSON.parse(specEntry.content));
-    } catch (err) {
-      console.error(`Failed to parse pipeline spec for ${pipelineNs}:`, err);
-      return;
-    }
-
-    const statusEntries = await munin.readBatch(
-      pipeline.phases.map((phase) => ({
-        namespace: phase.taskNamespace,
-        key: "status",
-      }))
-    );
-    const terminalPhases: Array<{
-      phase: PipelineIR["phases"][number];
-      lifecycle: PipelinePhaseSnapshot["lifecycle"];
-    }> = [];
-    const snapshots: PipelinePhaseSnapshot[] = pipeline.phases.map((phase, index) => {
-      const statusEntry = getFoundBatchEntry(statusEntries[index]);
-      const lifecycle = getPipelinePhaseLifecycle(statusEntry?.tags);
-      if (
-        lifecycle === "completed" ||
-        lifecycle === "failed" ||
-        lifecycle === "cancelled"
-      ) {
-        terminalPhases.push({ phase, lifecycle });
-      }
-      return {
-        phase,
-        lifecycle,
-      };
-    });
-
-    const terminalResultEntries = terminalPhases.length
-      ? await munin.readBatch(
-          terminalPhases.flatMap(({ phase }) => [
-            { namespace: phase.taskNamespace, key: "result-structured" },
-            { namespace: phase.taskNamespace, key: "result" },
-          ])
-        )
-      : [];
-    const terminalEntryMap = new Map<string, MuninReadResult>();
-    for (const entry of terminalResultEntries) {
-      terminalEntryMap.set(getBatchResultKey(entry.namespace, entry.key), entry);
-    }
-
-    snapshots.forEach((snapshot) => {
-      const isTerminal =
-        snapshot.lifecycle === "completed" ||
-        snapshot.lifecycle === "failed" ||
-        snapshot.lifecycle === "cancelled";
-      if (!isTerminal) {
-        return;
-      }
-
-      const structuredEntry = getFoundBatchEntry(
-        terminalEntryMap.get(
-          getBatchResultKey(snapshot.phase.taskNamespace, "result-structured")
-        )
-      );
-      const resultEntry = getFoundBatchEntry(
-        terminalEntryMap.get(getBatchResultKey(snapshot.phase.taskNamespace, "result"))
-      );
-      const structuredResult = structuredEntry
-        ? parseStructuredTaskResultContent(snapshot.phase.taskNamespace, structuredEntry.content)
-        : null;
-
-      snapshot.structuredResult = structuredResult || undefined;
-      snapshot.errorMessage =
-        structuredResult?.errorMessage ||
-        parseErrorMessageFromResult(resultEntry?.content);
-    });
-
-    const summary = buildPipelineExecutionSummary(pipeline, snapshots);
-    const nextFingerprint = getPipelineExecutionSummaryFingerprint(summary);
-    if (pipelineSummaryFingerprints.get(pipelineId) !== nextFingerprint) {
-      await munin.write(
-        pipelineNs,
-        "summary",
-        JSON.stringify(summary, null, 2),
-        ["type:pipeline", "type:pipeline-summary"]
-      );
-    }
-    pipelineSummaryFingerprints.set(pipelineId, nextFingerprint);
-    if (summary.terminal) {
-      untrackPipelineSummary(pipelineId);
-    }
-  } catch (err) {
-    console.error(`Pipeline summary refresh failed for ${pipelineId}:`, err);
-  }
+  await pipelineSummaryManager.refresh(munin, pipelineId, console);
 }
 
 async function refreshPipelineSummaryFromContent(content: string): Promise<void> {
-  const pipelineId = getPipelineIdFromContent(content);
-  if (!pipelineId) return;
-  await refreshPipelineSummary(pipelineId);
+  await pipelineSummaryManager.refreshFromContent(munin, content, console);
 }
 
 async function primeTrackedPipelineSummaries(): Promise<void> {
@@ -554,10 +383,10 @@ async function primeTrackedPipelineSummaries(): Promise<void> {
         console.error(`Failed to parse pipeline summary for ${result.namespace}`);
         continue;
       }
-      cachePipelineSummaryFingerprint(summary);
+      pipelineSummaryManager.cacheSummaryFingerprint(summary);
 
       if (pipelineSummaryNeedsReconciliation(summary)) {
-        trackPipelineSummary(extractTaskId(result.namespace));
+        pipelineSummaryManager.track(extractTaskId(result.namespace));
         tracked++;
       }
     }
@@ -573,20 +402,7 @@ async function primeTrackedPipelineSummaries(): Promise<void> {
 }
 
 async function reconcileTrackedPipelineSummaries(): Promise<void> {
-  if (trackedPipelineSummaryIds.size === 0) return;
-
-  const pipelineIds = Array.from(trackedPipelineSummaryIds);
-  let reconciled = 0;
-  for (const pipelineId of pipelineIds) {
-    await refreshPipelineSummary(pipelineId);
-    reconciled++;
-  }
-
-  if (reconciled > 0) {
-    console.log(
-      `Pipeline summary reconciliation: refreshed=${reconciled}, still_tracked=${trackedPipelineSummaryIds.size}`
-    );
-  }
+  await pipelineSummaryManager.reconcile(munin, console);
 }
 
 function createFailureStructuredResult(
@@ -697,85 +513,6 @@ function buildCancelledTaskResultDocument(input: {
   return lines.join("\n");
 }
 
-function buildPipelineCancelledResultDocument(input: {
-  pipelineId: string;
-  reason: string;
-  replyTo?: string;
-  replyFormat?: string;
-  group?: string;
-  sequence?: number;
-}): string {
-  return [
-    "## Result",
-    "",
-    "- **Exit code:** CANCELLED",
-    "- **Pipeline action:** cancelled",
-    `- **Pipeline id:** ${input.pipelineId}`,
-    `- **Spec key:** tasks/${input.pipelineId}/spec`,
-    `- **Summary key:** tasks/${input.pipelineId}/summary`,
-    `- **Reason:** ${input.reason}`,
-    ...buildRoutingMetadataLines({
-      replyTo: input.replyTo,
-      replyFormat: input.replyFormat,
-      group: input.group,
-      sequence: input.sequence,
-    }),
-  ].join("\n");
-}
-
-function buildPhaseResumeResultDocument(input: {
-  pipelineId: string;
-  phaseName: string;
-  previousLifecycle: string;
-  nextLifecycle: "pending" | "blocked";
-}): string {
-  return [
-    "## Result",
-    "",
-    "- **Pipeline action:** resumed",
-    `- **Pipeline id:** ${input.pipelineId}`,
-    `- **Pipeline phase:** ${input.phaseName}`,
-    `- **Previous state:** ${input.previousLifecycle}`,
-    `- **Next state:** ${input.nextLifecycle}`,
-  ].join("\n");
-}
-
-function buildPipelineResumedResultDocument(input: {
-  pipelineId: string;
-  resumedPhaseNames: string[];
-  keptCompletedPhaseNames: string[];
-  replyTo?: string;
-  replyFormat?: string;
-  group?: string;
-  sequence?: number;
-}): string {
-  return [
-    "## Result",
-    "",
-    "- **Exit code:** 0",
-    "- **Pipeline action:** resumed",
-    `- **Pipeline id:** ${input.pipelineId}`,
-    `- **Resumed phases:** ${input.resumedPhaseNames.length}`,
-    `- **Completed phases kept:** ${input.keptCompletedPhaseNames.length}`,
-    `- **Summary key:** tasks/${input.pipelineId}/summary`,
-    ...buildRoutingMetadataLines({
-      replyTo: input.replyTo,
-      replyFormat: input.replyFormat,
-      group: input.group,
-      sequence: input.sequence,
-    }),
-    "",
-    "### Resumed phases",
-    ...(input.resumedPhaseNames.length > 0
-      ? input.resumedPhaseNames.map((name) => `- ${name}`)
-      : ["- (none)"]),
-    "",
-    "### Kept completed phases",
-    ...(input.keptCompletedPhaseNames.length > 0
-      ? input.keptCompletedPhaseNames.map((name) => `- ${name}`)
-      : ["- (none)"]),
-  ].join("\n");
-}
 
 function createCancelledStructuredResult(
   taskNs: string,
@@ -1622,175 +1359,21 @@ async function markTaskCancelled(
   }
 }
 
-async function finalizePipelineCancellationIfReady(
-  pipelineId: string,
-  reason: string
-): Promise<boolean> {
-  const pipelineNs = `tasks/${pipelineId}`;
-  const [pipelineEntryResult, specEntryResult] = await munin.readBatch([
-    { namespace: pipelineNs, key: "status" },
-    { namespace: pipelineNs, key: "spec" },
-  ]);
-  const pipelineEntry = getFoundBatchEntry(pipelineEntryResult);
-  const specEntry = getFoundBatchEntry(specEntryResult);
-  if (!pipelineEntry || !specEntry || !pipelineEntry.tags.includes(CANCEL_REQUESTED_TAG)) {
-    return false;
-  }
-
-  let pipeline: PipelineIR;
-  try {
-    pipeline = pipelineIRSchema.parse(JSON.parse(specEntry.content));
-  } catch (err) {
-    console.error(`Failed to parse pipeline spec while finalizing cancellation for ${pipelineNs}:`, err);
-    return false;
-  }
-
-  const phaseEntries = await munin.readBatch(
-    pipeline.phases.map((phase) => ({
-      namespace: phase.taskNamespace,
-      key: "status",
-    }))
-  );
-  for (const phaseEntryResult of phaseEntries) {
-    const phaseEntry = getFoundBatchEntry(phaseEntryResult);
-    if (phaseEntry && !isTerminalTaskStatus(phaseEntry.tags)) {
-      return false;
-    }
-  }
-
-  const refreshedEntry = await munin.read(pipelineNs, "status");
-  if (!refreshedEntry || !refreshedEntry.tags.includes(CANCEL_REQUESTED_TAG)) {
-    return false;
-  }
-
-  await munin.write(
-    pipelineNs,
-    "result",
-    buildPipelineCancelledResultDocument({
-      pipelineId,
-      reason,
-      replyTo: pipeline.replyTo,
-      replyFormat: pipeline.replyFormat,
-      group: pipeline.group,
-      sequence: pipeline.sequence,
-    })
-  );
-  await munin.write(
-    pipelineNs,
-    "status",
-    refreshedEntry.content,
-    buildPipelineParentCancelledTags(refreshedEntry.tags),
-    refreshedEntry.updated_at
-  );
-  await munin.log(pipelineNs, `Pipeline cancelled: ${reason}`);
-  await refreshPipelineSummary(pipelineId);
-  return true;
-}
-
 async function processPipelineCancellationRequest(
   entry: MuninEntry & { found: true }
 ): Promise<boolean> {
-  const pipelineId = extractTaskId(entry.namespace);
-  const specEntry = await munin.read(entry.namespace, "spec");
-  const reason = `Pipeline ${pipelineId} cancelled by operator`;
-
-  if (!specEntry) {
-    const routing = extractRoutingMetadataFromContent(entry.content);
-    await munin.write(
-      entry.namespace,
-      "result",
-      buildPipelineCancelledResultDocument({
-        pipelineId,
-        reason,
-        ...routing,
-      })
-    );
-    await munin.write(
-      entry.namespace,
-      "status",
-      entry.content,
-      buildPipelineParentCancelledTags(entry.tags),
-      entry.updated_at
-    );
-    await munin.log(entry.namespace, `Pipeline cancelled before decomposition: ${reason}`);
-    return true;
-  }
-
-  let pipeline: PipelineIR;
-  try {
-    pipeline = pipelineIRSchema.parse(JSON.parse(specEntry.content));
-  } catch (err) {
-    console.error(`Failed to parse pipeline spec for cancellation request ${entry.namespace}:`, err);
-    return false;
-  }
-
-  let activeRunningPhase = false;
-  let cancelledAny = false;
-
-  const phaseEntries = await munin.readBatch(
-    pipeline.phases.map((phase) => ({
-      namespace: phase.taskNamespace,
-      key: "status",
-    }))
+  return handlePipelineCancellationEntry(
+    munin,
+    {
+      clearCancellationRequest,
+      clearResumeRequest,
+      markTaskCancelled,
+      requestCancellationForCurrentTask,
+      refreshPipelineSummary,
+    },
+    entry,
+    currentTask
   );
-
-  for (const [index, phase] of pipeline.phases.entries()) {
-    const phaseEntry = getFoundBatchEntry(phaseEntries[index]);
-    if (!phaseEntry || isTerminalTaskStatus(phaseEntry.tags)) {
-      if (phaseEntry?.tags.includes("cancelled")) cancelledAny = true;
-      continue;
-    }
-
-    if (phaseEntry.tags.includes("running")) {
-      activeRunningPhase = true;
-      if (phase.taskNamespace === currentTask) {
-        requestCancellationForCurrentTask({
-          reason,
-          sourceNamespace: entry.namespace,
-          pipelineId,
-        });
-      }
-      continue;
-    }
-
-    cancelledAny = true;
-    await markTaskCancelled(phase.taskNamespace, phaseEntry, reason, {
-      executor: "dispatcher",
-      resultSource: "cancellation",
-    });
-  }
-
-  if (!activeRunningPhase && !cancelledAny) {
-    await clearCancellationRequest(
-      entry.namespace,
-      entry,
-      `Pipeline cancellation ignored; pipeline already terminal`
-    );
-    return false;
-  }
-
-  try {
-    await refreshPipelineSummary(pipelineId);
-  } catch (err) {
-    console.error(
-      `Pipeline summary refresh failed during cancellation for ${pipelineId}:`,
-      err
-    );
-  }
-
-  if (activeRunningPhase) {
-    return true;
-  }
-
-  try {
-    return await finalizePipelineCancellationIfReady(pipelineId, reason);
-  } catch (err) {
-    console.error(
-      `Pipeline cancellation finalization failed for ${pipelineId}:`,
-      err
-    );
-    return true;
-  }
 }
 
 async function processCancellationRequests(): Promise<boolean> {
@@ -1863,192 +1446,19 @@ async function processResumeRequests(): Promise<boolean> {
       continue;
     }
 
-    const specEntry = await munin.read(entry.namespace, "spec");
-    if (!specEntry) {
-      await clearResumeRequest(
-        entry.namespace,
-        entry,
-        "Resume ignored; pipeline spec is missing"
-      );
-      continue;
-    }
-
-    let pipeline: PipelineIR;
-    try {
-      pipeline = pipelineIRSchema.parse(JSON.parse(specEntry.content));
-    } catch (err) {
-      console.error(`Failed to parse pipeline spec for resume request ${entry.namespace}:`, err);
-      continue;
-    }
-
-    const phaseEntries = new Map<string, (MuninEntry & { found: true }) | null>();
-    const currentLifecycles: Record<string, PipelinePhaseSnapshot["lifecycle"]> = {};
-    const phaseStatusEntries = await munin.readBatch(
-      pipeline.phases.map((phase) => ({
-        namespace: phase.taskNamespace,
-        key: "status",
-      }))
-    );
-    for (const [index, phase] of pipeline.phases.entries()) {
-      const phaseEntry = getFoundBatchEntry(phaseStatusEntries[index]);
-      phaseEntries.set(phase.taskNamespace, phaseEntry);
-      currentLifecycles[phase.taskNamespace] = getPipelinePhaseLifecycle(phaseEntry?.tags);
-    }
-
-    const plan = buildPipelineResumePlan(pipeline, currentLifecycles);
-    if (entry.tags.includes(CANCEL_REQUESTED_TAG) && plan.hasActivePhases) {
-      await clearResumeRequest(
-        entry.namespace,
-        entry,
-        "Resume ignored; cancellation is still pending"
-      );
-      continue;
-    }
-    if (!plan.resumable) {
-      if (
-        plan.hasActivePhases &&
-        (entry.tags.includes("cancelled") || entry.tags.includes("failed"))
-      ) {
-        const resumedPhaseNames = plan.phases
-          .filter((phasePlan) => phasePlan.currentLifecycle !== "completed")
-          .map((phasePlan) => phasePlan.phase.name);
-        const keptCompletedPhaseNames = plan.phases
-          .filter((phasePlan) => phasePlan.currentLifecycle === "completed")
-          .map((phasePlan) => phasePlan.phase.name);
-
-        await munin.write(
-          entry.namespace,
-          "result",
-          buildPipelineResumedResultDocument({
-            pipelineId: pipeline.id,
-            resumedPhaseNames,
-            keptCompletedPhaseNames,
-            replyTo: pipeline.replyTo,
-            replyFormat: pipeline.replyFormat,
-            group: pipeline.group,
-            sequence: pipeline.sequence,
-          })
-        );
-        await munin.write(
-          entry.namespace,
-          "status",
-          entry.content,
-          buildPipelineParentSuccessTags(
-            entry.tags.filter(
-              (tag) => tag !== RESUME_REQUESTED_TAG && tag !== CANCEL_REQUESTED_TAG
-            )
-          ),
-          entry.updated_at
-        );
-        await munin.log(
-          entry.namespace,
-          `Pipeline resume finalized after partial update; ${resumedPhaseNames.length} phase(s) already active`
-        );
-        await refreshPipelineSummary(pipeline.id);
-        processed = true;
-        continue;
-      }
-
-      await clearResumeRequest(
-        entry.namespace,
-        entry,
-        `Resume ignored; ${plan.reason || "pipeline is not resumable"}`
-      );
-      continue;
-    }
-
-    const draftByNamespace = new Map(
-      buildPhaseTaskDrafts(pipeline).map((draft) => [draft.namespace, draft])
-    );
-    const resumedPhaseNames: string[] = [];
-    const keptCompletedPhaseNames: string[] = [];
-
-    for (const phasePlan of plan.phases) {
-      if (!phasePlan.shouldReset) {
-        if (phasePlan.currentLifecycle === "completed") {
-          keptCompletedPhaseNames.push(phasePlan.phase.name);
-        }
-        continue;
-      }
-
-      const draft = draftByNamespace.get(phasePlan.phase.taskNamespace);
-      if (!draft) {
-        throw new Error(`Missing pipeline task draft for ${phasePlan.phase.taskNamespace}`);
-      }
-
-      const nextTags =
-        phasePlan.nextLifecycle === "pending"
-          ? buildPromotedTags(draft.tags)
-          : draft.tags;
-
-      await munin.write(
-        phasePlan.phase.taskNamespace,
-        "result",
-        buildPhaseResumeResultDocument({
-          pipelineId: pipeline.id,
-          phaseName: phasePlan.phase.name,
-          previousLifecycle: phasePlan.currentLifecycle,
-          nextLifecycle:
-            phasePlan.nextLifecycle === "pending" ? "pending" : "blocked",
-        })
-      );
-
-      const phaseEntry = phaseEntries.get(phasePlan.phase.taskNamespace);
-      if (phaseEntry) {
-        await munin.write(
-          phasePlan.phase.taskNamespace,
-          "status",
-          draft.content,
-          nextTags,
-          phaseEntry.updated_at
-        );
-      } else {
-        await munin.write(
-          phasePlan.phase.taskNamespace,
-          "status",
-          draft.content,
-          nextTags
-        );
-      }
-
-      await munin.log(
-        phasePlan.phase.taskNamespace,
-        `Phase resumed from ${phasePlan.currentLifecycle} -> ${phasePlan.nextLifecycle} (pipeline ${pipeline.id})`
-      );
-      resumedPhaseNames.push(phasePlan.phase.name);
-    }
-
-    await munin.write(
-      entry.namespace,
-      "result",
-      buildPipelineResumedResultDocument({
-        pipelineId: pipeline.id,
-        resumedPhaseNames,
-        keptCompletedPhaseNames,
-        replyTo: pipeline.replyTo,
-        replyFormat: pipeline.replyFormat,
-        group: pipeline.group,
-        sequence: pipeline.sequence,
-      })
-    );
-
-    await munin.write(
-      entry.namespace,
-      "status",
-      entry.content,
-      buildPipelineParentSuccessTags(
-        entry.tags.filter(
-          (tag) => tag !== RESUME_REQUESTED_TAG && tag !== CANCEL_REQUESTED_TAG
-        )
-      ),
-      entry.updated_at
-    );
-    await munin.log(
-      entry.namespace,
-      `Pipeline resumed: reset ${resumedPhaseNames.length} phase(s), kept ${keptCompletedPhaseNames.length} completed phase(s)`
-    );
-    await refreshPipelineSummary(pipeline.id);
-    processed = true;
+    processed = (
+      await handlePipelineResumeEntry(
+        munin,
+        {
+          clearCancellationRequest,
+          clearResumeRequest,
+          markTaskCancelled,
+          requestCancellationForCurrentTask,
+          refreshPipelineSummary,
+        },
+        entry
+      )
+    ) || processed;
   }
 
   return processed;

@@ -1,9 +1,12 @@
 # Hugin — Status
 
-**Last session:** 2026-04-03 (merged workflow-engine branch to main)
+**Last session:** 2026-04-03 (orchestration control paths extracted and tested)
 **Branch:** main
 
 ## Completed This Session
+- **Orchestration control paths extracted out of the live dispatcher** — moved pipeline cancellation and resume entry handling into [src/pipeline-control.ts](/Users/magnus/repos/hugin/src/pipeline-control.ts) and pipeline summary refresh/reconcile state into [src/pipeline-summary-manager.ts](/Users/magnus/repos/hugin/src/pipeline-summary-manager.ts), leaving [src/index.ts](/Users/magnus/repos/hugin/src/index.ts) to own only query loops, current-task state, and injected hooks.
+- **New integration-level tests now cover the previously untested seams** — added [tests/pipeline-control.test.ts](/Users/magnus/repos/hugin/tests/pipeline-control.test.ts) for pipeline cancellation/resume entry handling and [tests/pipeline-summary-manager.test.ts](/Users/magnus/repos/hugin/tests/pipeline-summary-manager.test.ts) for summary refresh/reconcile behavior. Local verification is green with `npm test` (107 tests) and `npm run build`.
+- **Main redeployed after the extraction and smoke-validated** — `huginmunin` restarted cleanly on worker `hugin-huginmunin-831470`, localhost health stayed `ok`, and smoke task `tasks/20260403-183909-control-summary-smoke` compiled, decomposed, executed, and converged with child response `CONTROL_SUMMARY_SMOKE_OK`.
 - **Workflow-engine branch merged to main** — `codex/step1-live-eval` fast-forwarded cleanly into `main`, so the Step 1-3 pipeline/orchestration work, hardening passes, sprint artifacts, and live-evaluation docs are now the canonical mainline history instead of branch-only state.
 - **Reviewer-2 fix set pushed, deployed, and smoke-validated** — commit `e8a520c` is live on `huginmunin`, health is green on worker `hugin-huginmunin-829542`, and smoke task `tasks/20260403-181159-pipeline-review-fix-smoke` compiled, decomposed, executed, and converged with child response `PIPELINE_REVIEW_FIX_SMOKE_OK`.
 - **Reviewer-2 pre-merge fixes implemented locally** — mixed failed+cancelled pipelines no longer collapse to `cancelled`; [src/pipeline-summary.ts](/Users/magnus/repos/hugin/src/pipeline-summary.ts) now lets failure states outrank cancellation when computing terminal execution state, so downstream summary consumers see `failed` or `completed_with_failures` instead of a misleading blanket cancellation.
@@ -103,7 +106,7 @@
 - mDNS (huginmunin.local) flaky — Tailscale IP 100.97.117.37 is reliable fallback
 
 ## Next Steps
-- Observe a few more mixed live workloads before declaring Munin-pressure hardening fully closed; the immediate startup, batching, and lease-starvation issues are fixed, but the orchestration layer still depends heavily on Munin state traffic.
+- Observe a few more mixed live workloads before declaring Munin-pressure hardening fully closed; the immediate startup, batching, lease-starvation, and current orchestration control-path test gaps are fixed, but the orchestration layer still depends heavily on Munin state traffic.
 - Decide whether cancellation/result finalization should be hardened further so parent `status/result` converge as quickly as parent `summary` under heavy pressure.
 - **Step 5+: Capability registry + routing** — still deferred until Bet 1 is proven end to end.
 - Deploy latest Ratatoskr features (poll recovery, delivery confirmation)
