@@ -4,6 +4,7 @@
 **Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Pipeline dispatcher extraction pushed, deployed, and smoke-validated** — commit `b6a539c` is live on `huginmunin`, and smoke task `tasks/20260403-123648-pipeline-dispatch-smoke` compiled, decomposed, executed, and converged to a terminal parent `summary` with child response `PIPELINE_DISPATCH_SMOKE_OK`.
 - **Dispatcher-level pipeline execution path is now covered** — extracted the `Runtime: pipeline` parent-handling branch from [src/index.ts](/Users/magnus/repos/hugin/src/index.ts) into [src/pipeline-dispatch.ts](/Users/magnus/repos/hugin/src/pipeline-dispatch.ts) so it can be tested without importing the live Express/poll-loop bootstrap.
 - **New execution-path tests exercise real decomposition behavior** — added [tests/pipeline-dispatch.test.ts](/Users/magnus/repos/hugin/tests/pipeline-dispatch.test.ts) with an in-memory Munin store that verifies valid pipeline decomposition, compile-time rejection, and child-namespace collision handling, including parent `status/result`, child task writes, and parent `summary` refresh.
 - **Verification stayed green after the extraction** — `npm test` now passes with 98 tests, and `npm run build` still succeeds after routing the live dispatcher through the new module.
