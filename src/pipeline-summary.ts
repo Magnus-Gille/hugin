@@ -160,16 +160,16 @@ function getExecutionState(
     return "running";
   }
 
-  if (counts.cancelled > 0) {
-    return "cancelled";
-  }
-
   if (counts.failed > 0 && counts.completed > 0) {
     return "completed_with_failures";
   }
 
   if (counts.failed > 0) {
     return "failed";
+  }
+
+  if (counts.cancelled > 0) {
+    return "cancelled";
   }
 
   return "completed";

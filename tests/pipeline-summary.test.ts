@@ -39,6 +39,38 @@ Phase: summarize
   );
 }
 
+function makeThreePhasePipeline() {
+  return compilePipelineTask(
+    "20260402-step3-pipeline-mixed-terminal",
+    "tasks/20260402-step3-pipeline-mixed-terminal",
+    `## Task: Step3 Mixed Terminal Pipeline
+
+- **Runtime:** pipeline
+- **Submitted by:** claude-code
+- **Submitted at:** 2026-04-02T11:00:00Z
+
+### Pipeline
+
+Phase: gather
+  Runtime: ollama-pi
+  Prompt: |
+    Gather.
+
+Phase: summarize
+  Depends-on: gather
+  Runtime: ollama-pi
+  Prompt: |
+    Summarize.
+
+Phase: review
+  Depends-on: summarize
+  Runtime: ollama-pi
+  Prompt: |
+    Review.
+`
+  );
+}
+
 describe("pipeline execution summary", () => {
   it("builds a decomposed summary before any phase runs", () => {
     const pipeline = makePipeline();
@@ -268,6 +300,78 @@ describe("pipeline execution summary", () => {
     expect(summary.executionState).toBe("cancelled");
     expect(summary.terminal).toBe(true);
     expect(summary.phaseCounts.cancelled).toBe(2);
+  });
+
+  it("does not let cancelled phases hide terminal failures", () => {
+    const pipeline = makeThreePhasePipeline();
+    const summary = buildPipelineExecutionSummary(
+      pipeline,
+      [
+        {
+          phase: pipeline.phases[0]!,
+          lifecycle: "completed",
+          structuredResult: buildStructuredTaskResult({
+            schemaVersion: 1,
+            taskId: pipeline.phases[0]!.taskId,
+            taskNamespace: pipeline.phases[0]!.taskNamespace,
+            lifecycle: "completed",
+            outcome: "completed",
+            runtime: "ollama",
+            executor: "ollama",
+            resultSource: "ollama",
+            exitCode: 0,
+            startedAt: "2026-04-02T11:00:01Z",
+            completedAt: "2026-04-02T11:00:03Z",
+            durationSeconds: 2,
+            bodyKind: "response",
+            bodyText: "GATHER",
+          }),
+        },
+        {
+          phase: pipeline.phases[1]!,
+          lifecycle: "failed",
+          structuredResult: buildStructuredTaskResult({
+            schemaVersion: 1,
+            taskId: pipeline.phases[1]!.taskId,
+            taskNamespace: pipeline.phases[1]!.taskNamespace,
+            lifecycle: "failed",
+            outcome: "failed",
+            runtime: "ollama",
+            executor: "dispatcher",
+            resultSource: "dependency",
+            exitCode: -1,
+            completedAt: "2026-04-02T11:00:04Z",
+            bodyKind: "error",
+            bodyText: "summarize failed",
+            errorMessage: "summarize failed",
+          }),
+        },
+        {
+          phase: pipeline.phases[2]!,
+          lifecycle: "cancelled",
+          structuredResult: buildStructuredTaskResult({
+            schemaVersion: 1,
+            taskId: pipeline.phases[2]!.taskId,
+            taskNamespace: pipeline.phases[2]!.taskNamespace,
+            lifecycle: "cancelled",
+            outcome: "cancelled",
+            runtime: "ollama",
+            executor: "dispatcher",
+            resultSource: "cancellation",
+            exitCode: "CANCELLED",
+            completedAt: "2026-04-02T11:00:05Z",
+            bodyKind: "error",
+            bodyText: "review cancelled",
+            errorMessage: "review cancelled",
+          }),
+        },
+      ]
+    );
+
+    expect(summary.executionState).toBe("completed_with_failures");
+    expect(summary.phaseCounts.completed).toBe(1);
+    expect(summary.phaseCounts.failed).toBe(1);
+    expect(summary.phaseCounts.cancelled).toBe(1);
   });
 
   it("flags missing and non-terminal summaries for reconciliation", () => {

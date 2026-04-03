@@ -5,7 +5,10 @@ import {
 } from "./pipeline-compiler.js";
 import type { PipelineIR } from "./pipeline-ir.js";
 import type { MuninEntry, MuninReadRequest, MuninReadResult } from "./munin-client.js";
-import { buildPipelineParentSuccessTags } from "./task-status-tags.js";
+import {
+  buildPipelineParentSuccessTags,
+  buildTerminalStatusTags,
+} from "./task-status-tags.js";
 
 export interface PipelineDispatchClient {
   readBatch(reads: MuninReadRequest[]): Promise<MuninReadResult[]>;
@@ -40,6 +43,33 @@ function getFoundBatchEntry(
   return entry && entry.found ? entry : null;
 }
 
+async function cancelCreatedChildren(
+  client: PipelineDispatchClient,
+  createdDrafts: Array<{ namespace: string; content: string; tags: string[] }>
+): Promise<void> {
+  for (const draft of createdDrafts) {
+    try {
+      await client.write(
+        draft.namespace,
+        "status",
+        draft.content,
+        buildTerminalStatusTags("cancelled", draft.tags)
+      );
+      await client.write(
+        draft.namespace,
+        "result",
+        "## Result\n\n- **Exit code:** CANCELLED\n- **Error:** Pipeline decomposition aborted before parent commit\n"
+      );
+      await client.log(
+        draft.namespace,
+        "Pipeline phase cancelled because parent decomposition failed before commit"
+      );
+    } catch {
+      // Best-effort cleanup: the parent failure will still surface the original error.
+    }
+  }
+}
+
 export async function handlePipelineTask(
   client: PipelineDispatchClient,
   hooks: PipelineDispatchHooks,
@@ -66,6 +96,8 @@ export async function handlePipelineTask(
   }
 
   const phaseDrafts = buildPhaseTaskDrafts(pipeline);
+  const createdDrafts: typeof phaseDrafts = [];
+  let decompositionCommitted = false;
 
   try {
     const existingChildren = await client.readBatch(
@@ -90,6 +122,7 @@ export async function handlePipelineTask(
 
     for (const draft of phaseDrafts) {
       await client.write(draft.namespace, "status", draft.content, draft.tags);
+      createdDrafts.push(draft);
     }
 
     await client.write(
@@ -100,13 +133,12 @@ export async function handlePipelineTask(
       entry.updated_at
     );
     await client.write(taskNs, "result", buildPipelineDecompositionResult(pipeline));
-    await hooks.refreshPipelineSummary(pipelineId);
-    await client.log(
-      taskNs,
-      `Pipeline compiled and decomposed into ${phaseDrafts.length} phase task(s)`
-    );
+    decompositionCommitted = true;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    if (createdDrafts.length > 0) {
+      await cancelCreatedChildren(client, createdDrafts);
+    }
     await hooks.failTaskWithMessage(
       taskNs,
       entry,
@@ -114,6 +146,27 @@ export async function handlePipelineTask(
       "runtime:pipeline"
     );
     await client.log(taskNs, `Pipeline decomposition failed: ${message}`);
+  }
+
+  if (decompositionCommitted) {
+    try {
+      await hooks.refreshPipelineSummary(pipelineId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await client.log(
+        taskNs,
+        `Pipeline decomposition committed, but summary refresh failed: ${message}`
+      );
+    }
+
+    try {
+      await client.log(
+        taskNs,
+        `Pipeline compiled and decomposed into ${phaseDrafts.length} phase task(s)`
+      );
+    } catch {
+      // Best-effort observability only: decomposition is already committed.
+    }
   }
 
   await hooks.promoteDependents(pipelineId);

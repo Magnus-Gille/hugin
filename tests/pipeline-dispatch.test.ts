@@ -15,6 +15,7 @@ type StoredEntry = MuninEntry & { found: true };
 class FakePipelineDispatchClient implements PipelineDispatchClient {
   private entries = new Map<string, StoredEntry>();
   private tick = 0;
+  private writeFailures = new Map<string, string>();
 
   readonly logs: Array<{ namespace: string; content: string; tags: string[] }> = [];
 
@@ -47,6 +48,10 @@ class FakePipelineDispatchClient implements PipelineDispatchClient {
     return timestamp;
   }
 
+  failNextWrite(namespace: string, key: string, message: string): void {
+    this.writeFailures.set(this.entryKey(namespace, key), message);
+  }
+
   async readBatch(reads: MuninReadRequest[]): Promise<MuninReadResult[]> {
     return reads.map(({ namespace, key }) => {
       const entry = this.get(namespace, key);
@@ -66,6 +71,12 @@ class FakePipelineDispatchClient implements PipelineDispatchClient {
       throw new Error(
         `CAS mismatch for ${namespace}/${key}: expected ${expectedUpdatedAt}, got ${existing.updated_at}`
       );
+    }
+    const failureKey = this.entryKey(namespace, key);
+    const failureMessage = this.writeFailures.get(failureKey);
+    if (failureMessage) {
+      this.writeFailures.delete(failureKey);
+      throw new Error(failureMessage);
     }
 
     const timestamp = this.nextTimestamp();
@@ -356,5 +367,53 @@ Phase: Explore
       content: `Pipeline decomposition failed: Child task namespace already exists: ${compiled.phases[0]!.taskNamespace}`,
       tags: [],
     });
+  });
+
+  it("cancels already-created children if decomposition fails mid-write", async () => {
+    const client = new FakePipelineDispatchClient();
+    const { hooks, promotedTaskIds, refreshedPipelineIds } = createPipelineHooks(client);
+    const taskNs = "tasks/20260403-partial-write-pipeline";
+    const parentEntry = client.seed({
+      namespace: taskNs,
+      key: "status",
+      content: makeValidPipelineContent(),
+      tags: ["running", "runtime:pipeline", "type:research"],
+    });
+    const compiled = compilePipelineTask(
+      "20260403-partial-write-pipeline",
+      taskNs,
+      parentEntry.content
+    );
+    client.failNextWrite(
+      compiled.phases[1]!.taskNamespace,
+      "status",
+      "simulated child write failure"
+    );
+
+    await handlePipelineTask(client, hooks, taskNs, parentEntry, 3);
+
+    const rolledBackChild = client.get(compiled.phases[0]!.taskNamespace, "status");
+    expect(rolledBackChild?.tags).toEqual([
+      "cancelled",
+      "runtime:claude",
+      "type:pipeline",
+      "type:pipeline-phase",
+    ]);
+    expect(
+      client.get(compiled.phases[0]!.taskNamespace, "result")?.content
+    ).toContain("Pipeline decomposition aborted before parent commit");
+    expect(client.get(compiled.phases[1]!.taskNamespace, "status")).toBeNull();
+
+    const parentStatus = client.get(taskNs, "status");
+    expect(parentStatus?.tags).toEqual([
+      "failed",
+      "runtime:pipeline",
+      "type:research",
+    ]);
+    expect(client.get(taskNs, "result")?.content).toContain(
+      "Pipeline decomposition failed: simulated child write failure"
+    );
+    expect(refreshedPipelineIds).toEqual([]);
+    expect(promotedTaskIds).toEqual(["20260403-partial-write-pipeline"]);
   });
 });
