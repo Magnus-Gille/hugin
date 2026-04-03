@@ -261,15 +261,30 @@ export class MuninClient {
       if (!results) {
         throw new Error("Munin readBatch returned an unexpected response shape");
       }
+      if (results.length !== chunk.length) {
+        throw new Error(
+          `Munin readBatch returned ${results.length} result(s) for ${chunk.length} request(s)`
+        );
+      }
 
       combinedResults.push(
         ...results.map((entry, chunkIndex) => {
+          const expected = chunk[chunkIndex]!;
+          if (
+            entry.namespace !== expected.namespace ||
+            entry.key !== expected.key
+          ) {
+            throw new Error(
+              `Munin readBatch result mismatch at index ${chunkIndex}: expected ${expected.namespace}/${expected.key}, got ${entry.namespace || "unknown"}/${entry.key || "unknown"}`
+            );
+          }
+
           if (entry.found) {
             return entry as MuninEntry & { found: true };
           }
           return {
-            namespace: entry.namespace || chunk[chunkIndex]!.namespace,
-            key: entry.key || chunk[chunkIndex]!.key,
+            namespace: expected.namespace,
+            key: expected.key,
             found: false as const,
           };
         })

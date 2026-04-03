@@ -1,9 +1,12 @@
 # Hugin — Status
 
-**Last session:** 2026-04-02 (Munin 429 hardening sprint)
+**Last session:** 2026-04-03 (Munin hardening reviewer-2 fixes)
 **Branch:** codex/step1-live-eval
 
 ## Completed This Session
+- **Reviewer 2 hardening fixes shipped, deployed, and live-validated** — split lease renewal and current-task cancellation polling onto dedicated Munin clients so they no longer share the background request slot, and tightened `readBatch()` to fail closed on count or identity mismatches instead of trusting positional fallbacks.
+- **Lease renewal was proven live after the client split** — `tasks/20260403-092221-lease-renewal-probe` ran for 81 seconds on `huginmunin`, logged a lease renewal at the 60-second mark, and completed successfully from `Submitted by: Codex`. Evidence is recorded in `docs/munin-hardening-reviewer2-fix-validation.md`.
+- **Batch validation is now a hard trust boundary** — new client tests reject partial and out-of-order batch responses, and startup plus live execution still worked against the real bridge after the stricter validation was deployed.
 - **Munin 429 hardening sprint shipped, deployed, and live-validated** — batched the dispatcher’s hottest Munin read paths, added client-side request serialization/pacing plus `Retry-After` support, and cached stable pipeline-summary fingerprints so unchanged summaries are not rewritten just because `generatedAt` changes.
 - **Live rollout exposed and fixed two real HTTP-bridge compatibility bugs** — the client now accepts both `data:` and `data: ` SSE lines, and `memory_read_batch` is chunked to Munin’s live 20-read validation limit. Final validation is recorded in `docs/munin-429-hardening-live-evaluation.md`.
 - **Startup watchlist priming now survives real historical load** — the final deploy booted cleanly against a live backlog of 39 historical pipeline parents without throwing a watchlist-prime error.
@@ -92,7 +95,7 @@
 
 ## Next Steps
 - Add dispatcher-level tests for the `Runtime: pipeline` execution path if parent-tag and result-contract behavior should be covered above the current pure-helper and compiler unit tests.
-- Observe a few more mixed live workloads before declaring Munin-pressure hardening done; this sprint removed the immediate startup/batch compatibility failures, but the orchestration layer still depends heavily on Munin state traffic.
+- Observe a few more mixed live workloads before declaring Munin-pressure hardening fully closed; the immediate startup, batching, and lease-starvation issues are fixed, but the orchestration layer still depends heavily on Munin state traffic.
 - Decide whether cancellation/result finalization should be hardened further so parent `status/result` converge as quickly as parent `summary` under heavy pressure.
 - **Step 5+: Capability registry + routing** — still deferred until Bet 1 is proven end to end.
 - Deploy latest Ratatoskr features (poll recovery, delivery confirmation)

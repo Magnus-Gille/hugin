@@ -264,4 +264,105 @@ describe("MuninClient", () => {
     expect(results).toHaveLength(21);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it("fails closed when batch cardinality does not match the request", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      rpcResponse({
+        ok: true,
+        action: "read_batch",
+        results: [
+          {
+            found: false,
+            namespace: "tasks/demo-0",
+            key: "status",
+          },
+        ],
+      })
+    );
+
+    const client = new MuninClient({
+      baseUrl: "http://munin.test",
+      apiKey: "test-key",
+      minRequestSpacingMs: 0,
+    });
+
+    await expect(
+      client.readBatch([
+        { namespace: "tasks/demo-0", key: "status" },
+        { namespace: "tasks/demo-1", key: "status" },
+      ])
+    ).rejects.toThrow("returned 1 result(s) for 2 request(s)");
+  });
+
+  it("fails closed when batch results are returned out of order", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      rpcResponse({
+        ok: true,
+        action: "read_batch",
+        results: [
+          {
+            found: false,
+            namespace: "tasks/demo-1",
+            key: "status",
+          },
+          {
+            found: false,
+            namespace: "tasks/demo-0",
+            key: "status",
+          },
+        ],
+      })
+    );
+
+    const client = new MuninClient({
+      baseUrl: "http://munin.test",
+      apiKey: "test-key",
+      minRequestSpacingMs: 0,
+    });
+
+    await expect(
+      client.readBatch([
+        { namespace: "tasks/demo-0", key: "status" },
+        { namespace: "tasks/demo-1", key: "status" },
+      ])
+    ).rejects.toThrow("Munin readBatch result mismatch");
+  });
+
+  it("does not serialize requests across separate client instances", async () => {
+    let resolveFirst!: (value: Response) => void;
+    const firstResponse = new Promise<Response>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockReturnValueOnce(firstResponse)
+      .mockResolvedValueOnce(
+        rpcResponse({ found: false, namespace: "tasks/b", key: "status" })
+      );
+
+    const backgroundClient = new MuninClient({
+      baseUrl: "http://munin.test",
+      apiKey: "test-key",
+      minRequestSpacingMs: 0,
+    });
+    const controlClient = new MuninClient({
+      baseUrl: "http://munin.test",
+      apiKey: "test-key",
+      minRequestSpacingMs: 0,
+    });
+
+    const first = backgroundClient.read("tasks/a", "status");
+    const second = controlClient.read("tasks/b", "status");
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    resolveFirst(
+      rpcResponse({ found: false, namespace: "tasks/a", key: "status" })
+    );
+
+    await first;
+    await second;
+  });
 });

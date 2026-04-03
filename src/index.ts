@@ -6,6 +6,7 @@ import express from "express";
 import {
   MuninClient,
   type MuninEntry,
+  type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
 import { executeSdkTask } from "./sdk-executor.js";
@@ -122,10 +123,21 @@ interface CancellationRequest {
 let currentCancellation: CancellationRequest | null = null;
 let cancellationCheckInFlight = false;
 
-const munin = new MuninClient({
-  baseUrl: config.muninUrl,
-  apiKey: config.muninApiKey,
-});
+function createMuninClient(
+  overrides: Partial<MuninClientConfig> = {}
+): MuninClient {
+  return new MuninClient({
+    baseUrl: config.muninUrl,
+    apiKey: config.muninApiKey,
+    ...overrides,
+  });
+}
+
+const munin = createMuninClient();
+// Keep lease renewal and active-task cancellation polling off the main request
+// slot so a long Retry-After on background work cannot delay them past expiry.
+const leaseMunin = createMuninClient();
+const cancelWatchMunin = createMuninClient();
 
 // --- Task parsing ---
 
@@ -1167,7 +1179,7 @@ function startLeaseRenewal(taskNs: string, entryContent: string, baseTags: strin
     }
     try {
       const renewedTags = buildClaimTags(baseTags, "running");
-      await munin.write(taskNs, "status", entryContent, renewedTags);
+      await leaseMunin.write(taskNs, "status", entryContent, renewedTags);
       console.log(`Lease renewed for ${taskNs} (expires: ${leaseExpiry()})`);
     } catch (err) {
       console.error(`Lease renewal failed for ${taskNs}:`, err);
@@ -1205,7 +1217,7 @@ async function checkCurrentTaskCancellation(): Promise<void> {
   cancellationCheckInFlight = true;
 
   try {
-    const currentEntry = await munin.read(currentTask, "status");
+    const currentEntry = await cancelWatchMunin.read(currentTask, "status");
     if (currentEntry?.tags.includes(CANCEL_REQUESTED_TAG)) {
       requestCancellationForCurrentTask({
         reason: `Task ${extractTaskId(currentTask)} cancelled by operator`,
@@ -1218,7 +1230,7 @@ async function checkCurrentTaskCancellation(): Promise<void> {
     if (!pipelineId) return;
 
     const pipelineNs = `tasks/${pipelineId}`;
-    const pipelineEntry = await munin.read(pipelineNs, "status");
+    const pipelineEntry = await cancelWatchMunin.read(pipelineNs, "status");
     if (!pipelineEntry?.tags.includes(CANCEL_REQUESTED_TAG)) return;
 
     requestCancellationForCurrentTask({
