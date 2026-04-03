@@ -1,9 +1,10 @@
 # Hugin — Status
 
-**Last session:** 2026-04-03 (pipeline dispatcher path tests)
-**Branch:** codex/step1-live-eval
+**Last session:** 2026-04-03 (merged workflow-engine branch to main)
+**Branch:** main
 
 ## Completed This Session
+- **Workflow-engine branch merged to main** — `codex/step1-live-eval` fast-forwarded cleanly into `main`, so the Step 1-3 pipeline/orchestration work, hardening passes, sprint artifacts, and live-evaluation docs are now the canonical mainline history instead of branch-only state.
 - **Reviewer-2 fix set pushed, deployed, and smoke-validated** — commit `e8a520c` is live on `huginmunin`, health is green on worker `hugin-huginmunin-829542`, and smoke task `tasks/20260403-181159-pipeline-review-fix-smoke` compiled, decomposed, executed, and converged with child response `PIPELINE_REVIEW_FIX_SMOKE_OK`.
 - **Reviewer-2 pre-merge fixes implemented locally** — mixed failed+cancelled pipelines no longer collapse to `cancelled`; [src/pipeline-summary.ts](/Users/magnus/repos/hugin/src/pipeline-summary.ts) now lets failure states outrank cancellation when computing terminal execution state, so downstream summary consumers see `failed` or `completed_with_failures` instead of a misleading blanket cancellation.
 - **Pipeline decomposition now fails closed on partial child creation** — [src/pipeline-dispatch.ts](/Users/magnus/repos/hugin/src/pipeline-dispatch.ts) tracks created child tasks during decomposition and cancels any already-written children if a later write fails before the parent commit, preventing orphaned pending phases from running without a committed parent. Summary refresh and success logging are also best-effort after the parent commit instead of retroactively failing a successful decomposition.
