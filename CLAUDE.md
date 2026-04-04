@@ -89,20 +89,36 @@ hugin/
 ├── CLAUDE.md
 ├── hugin.service
 ├── src/
-│   ├── index.ts           # Dispatcher: poll loop, task execution, health endpoint
-│   ├── sdk-executor.ts    # Agent SDK executor (query() based, default for claude runtime)
-│   ├── ollama-executor.ts # Ollama executor (streaming, OpenAI-compatible API)
-│   ├── ollama-hosts.ts    # Lazy host resolution with negative caching
-│   ├── context-loader.ts  # Context-refs resolver (fetch Munin entries for prompt injection)
-│   └── munin-client.ts    # HTTP client for Munin JSON-RPC API
-├── tests/
-│   ├── dispatcher.test.ts
-│   └── sdk-executor.test.ts
+│   ├── index.ts                  # Dispatcher: poll loop, task execution, health endpoint
+│   ├── sdk-executor.ts           # Agent SDK executor (query() based, default for claude runtime)
+│   ├── ollama-executor.ts        # Ollama executor (streaming, OpenAI-compatible API)
+│   ├── ollama-hosts.ts           # Lazy host resolution with negative caching
+│   ├── context-loader.ts         # Context-refs resolver with classification metadata
+│   ├── munin-client.ts           # HTTP client for Munin JSON-RPC API
+│   ├── sensitivity.ts            # Shared sensitivity model (public/internal/private lattice)
+│   ├── egress-policy.ts          # Fetch egress controls (host allowlist)
+│   ├── pipeline-ir.ts            # Pipeline intermediate representation and schema
+│   ├── pipeline-compiler.ts      # Pipeline compilation with sensitivity enforcement
+│   ├── pipeline-dispatch.ts      # Pipeline phase dispatch to runtimes
+│   ├── pipeline-control.ts       # Pipeline lifecycle control (cancel, resume)
+│   ├── pipeline-ops.ts           # Pipeline CRUD operations
+│   ├── pipeline-gates.ts         # Human gate approval/rejection
+│   ├── pipeline-summary.ts       # Pipeline result summarization
+│   ├── pipeline-summary-manager.ts # Pipeline summary lifecycle management
+│   ├── task-result-schema.ts     # Structured task result with classification
+│   ├── task-status-tags.ts       # Tag manipulation helpers for task lifecycle
+│   ├── task-graph.ts             # Task dependency graph for pipelines
+│   └── result-format.ts          # Result formatting utilities
+├── tests/                        # 16 test files mirroring src/
+├── docs/                         # Engineering plans, evaluations, security docs
+│   └── security/                 # Threat models and security assessments
 └── scripts/
     ├── deploy-pi.sh
     ├── submit-daily-analysis.sh  # Submit daily journal analysis as ollama task
+    ├── submit-stale-status-review.sh
     ├── sync-claude-config.sh     # Sync ~/.claude/ config to Pi
-    └── update-cli.sh             # Auto-update CLI tools (daily cron)
+    ├── update-cli.sh             # Auto-update CLI tools (daily cron)
+    └── on-task-stop.mjs          # Task stop hook
 ```
 
 ## How to build
@@ -162,3 +178,4 @@ Security assessments, threat models, and audit reports live in `docs/security/`.
 | `OLLAMA_PI_URL` | `http://127.0.0.1:11434` | Ollama endpoint on Pi (local) |
 | `OLLAMA_LAPTOP_URL` | — | Ollama endpoint on laptop (via Tailscale, empty = disabled) |
 | `OLLAMA_DEFAULT_MODEL` | `qwen2.5:3b` | Default model for ollama tasks without explicit Model field |
+| `HUGIN_ALLOWED_EGRESS_HOSTS` | — | Comma-separated extra hosts to allow for outbound fetch (added to built-in allowlist) |

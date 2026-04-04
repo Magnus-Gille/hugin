@@ -167,11 +167,6 @@ function createMuninClient(
   });
 }
 
-const munin = createMuninClient();
-// Keep lease renewal and active-task cancellation polling off the main request
-// slot so a long Retry-After on background work cannot delay them past expiry.
-const leaseMunin = createMuninClient();
-const cancelWatchMunin = createMuninClient();
 const egressPolicy = installFetchEgressPolicy(
   buildDefaultEgressHosts({
     muninUrl: config.muninUrl,
@@ -180,6 +175,12 @@ const egressPolicy = installFetchEgressPolicy(
     extraHosts: config.extraAllowedEgressHosts,
   }),
 );
+
+const munin = createMuninClient();
+// Keep lease renewal and active-task cancellation polling off the main request
+// slot so a long Retry-After on background work cannot delay them past expiry.
+const leaseMunin = createMuninClient();
+const cancelWatchMunin = createMuninClient();
 
 // --- Task parsing ---
 

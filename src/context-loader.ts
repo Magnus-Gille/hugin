@@ -1,13 +1,15 @@
 /**
- * Context reference resolver for ollama tasks.
+ * Context reference resolver for task context injection.
  *
- * Mechanically fetches Munin entries listed in a task's Context-refs field,
- * concatenates them, and truncates to budget. No semantic policy — the task
- * producer decides WHAT context to include; this module just fetches it.
+ * Fetches Munin entries listed in a task's Context-refs field, concatenates
+ * them, and truncates to budget. Surfaces per-ref classification metadata
+ * and computes maxSensitivity across resolved refs for upstream policy
+ * enforcement (e.g., runtime sensitivity checks).
  */
 
 import type { MuninClient } from "./munin-client.js";
 import {
+  maxSensitivity,
   muninClassificationToSensitivity,
   namespaceFallbackSensitivity,
   type Sensitivity,
@@ -73,7 +75,7 @@ export async function resolveContextRefs(
   const refsMissing: string[] = [];
   const sections: string[] = [];
   const resolvedRefs: ContextResolution["refs"] = [];
-  let maxSensitivity: Sensitivity | undefined;
+  let maxSens: Sensitivity | undefined;
 
   for (const refStr of refsRequested) {
     const parsed = parseRef(refStr);
@@ -98,9 +100,7 @@ export async function resolveContextRefs(
           classification: entry.classification,
           sensitivity,
         });
-        if (!maxSensitivity || sensitivity === "private" || (sensitivity === "internal" && maxSensitivity === "public")) {
-          maxSensitivity = sensitivity;
-        }
+        maxSens = maxSensitivity(maxSens, sensitivity);
       } else {
         refsMissing.push(refStr);
         console.warn(`Context ref not found in Munin: ${refStr}`);
@@ -123,7 +123,7 @@ export async function resolveContextRefs(
     refsMissing,
     totalChars,
     truncated,
-    maxSensitivity,
+    maxSensitivity: maxSens,
     refs: resolvedRefs,
   };
 }
