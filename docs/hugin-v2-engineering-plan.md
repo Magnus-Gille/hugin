@@ -1,8 +1,8 @@
 # Hugin v2 Engineering Plan
 
 **Source:** [hugin-v2-pipeline-orchestrator.md](/Users/magnus/repos/hugin/docs/hugin-v2-pipeline-orchestrator.md)  
-**Status:** Execution plan derived from the strategy doc  
-**Date:** 2026-04-02
+**Status:** Phases 1-4 complete and live-validated; Bet 1 closed  
+**Date:** 2026-04-04
 
 ## Goal
 
@@ -111,6 +111,9 @@ Each bet must earn the next one. No later phase starts until the current gate is
 **Evaluation step required**
 - Yes. This completes the Bet 1 gate.
 
+**Status**
+- Done and live-validated. See [step4-live-evaluation.md](/Users/magnus/repos/hugin/docs/step4-live-evaluation.md).
+
 ### Bet 1 gate
 
 Do not start routing work until all of these are true:
@@ -162,4 +165,4 @@ Do not start routing work until all of these are true:
 
 ## Current recommendation
 
-The next evaluation checkpoint should be **after Phase 1**, not after the full Bet 1 scope. The workflow engine depends on reliable dependency joins; without that proof, the pipeline compiler only adds failure modes and state complexity.
+Bet 1 is closed. The next implementation target is **Phase 5: sensitivity classification**, followed by a short live soak that mixes normal, cancelled, resumed, and gated pipelines under realistic Munin traffic.

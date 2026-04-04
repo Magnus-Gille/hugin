@@ -1,19 +1,22 @@
 # Hugin — Status
 
-**Last session:** 2026-04-04 (Phase 4 human gates implemented locally)
+**Last session:** 2026-04-04 (Phase 4 human gates live-validated; Bet 1 closed)
 **Branch:** main
 
 ## Plan Status
 - **Phase 1: Dependency-aware task joins** — done and live-validated. See [docs/step1-live-evaluation.md](/Users/magnus/repos/hugin/docs/step1-live-evaluation.md).
 - **Phase 2: Pipeline compiler and decomposition** — done and live-validated. See [docs/step2-live-evaluation.md](/Users/magnus/repos/hugin/docs/step2-live-evaluation.md).
 - **Phase 3: Structured results and pipeline operations** — done and live-validated. This includes structured per-phase results, parent summaries, cancellation, resume-from-failed-phase, and the Munin-pressure hardening/follow-up fixes. See [docs/step3-live-evaluation.md](/Users/magnus/repos/hugin/docs/step3-live-evaluation.md), [docs/step3-cancellation-live-evaluation.md](/Users/magnus/repos/hugin/docs/step3-cancellation-live-evaluation.md), [docs/step3-resume-live-evaluation.md](/Users/magnus/repos/hugin/docs/step3-resume-live-evaluation.md), and [docs/munin-429-hardening-live-evaluation.md](/Users/magnus/repos/hugin/docs/munin-429-hardening-live-evaluation.md).
-- **Phase 4: Human gates for side effects** — implemented locally, not yet live-validated. `Authority: gated` now compiles with explicit `Side-effects:` declarations, gated phases pause in `awaiting-approval`, approval requests/decisions are represented in Munin, approved phases return to `pending`, rejected phases fail with structured approval metadata, and summaries now surface `awaiting_approval`.
+- **Phase 4: Human gates for side effects** — done and live-validated. `Authority: gated` compiles with explicit `Side-effects:` declarations, gated phases pause in `awaiting-approval`, approval requests/decisions are represented in Munin, approved phases return to `pending`, rejected phases fail without execution, and summaries/results retain structured approval metadata. See [docs/step4-live-evaluation.md](/Users/magnus/repos/hugin/docs/step4-live-evaluation.md).
 - **Phase 5: Sensitivity classification** — not started.
 - **Phase 6: Router (`Runtime: auto`)** — not started.
 - **Phase 7: Methodology templates** — not started.
-- **Bet 1 status** — not yet closed. The remaining gate is live validation of Phase 4 on `huginmunin`.
+- **Bet 1 status** — closed. Phases 1-4 are implemented and live-validated on `huginmunin`.
 
 ## Completed This Session
+- **Phase 4 human gates live-validated** — on `huginmunin`, a clean approval probe (`tasks/20260404-123200-step4-gated-approve`) reached `awaiting-approval`, wrote `approval-request`, resumed only after approval, and completed with structured approval metadata; a clean rejection probe (`tasks/20260404-124100-step4-gated-reject-clean2`) reached the same gate, was rejected, failed without execution, and converged to a terminal parent summary with `completed_with_failures`. Evidence is in [docs/step4-live-evaluation.md](/Users/magnus/repos/hugin/docs/step4-live-evaluation.md).
+- **Phase 4 sprint artifact added** — captured the human-facing demo and follow-ups in [sprints/2026-04-04-step4-live-eval.md](/Users/magnus/repos/hugin/sprints/2026-04-04-step4-live-eval.md).
+- **Approval decision contract clarified by live use** — the first manual approval attempt used an under-specified decision payload and was ignored safely. The live-eval record now documents that `approval-decision` producers must include at least `pipelineId`, `phaseTaskId`, `decision`, and `decidedAt`.
 - **Phase 4 human gates implemented locally** — added [src/pipeline-gates.ts](/Users/magnus/repos/hugin/src/pipeline-gates.ts), extended [src/pipeline-ir.ts](/Users/magnus/repos/hugin/src/pipeline-ir.ts) and [src/pipeline-compiler.ts](/Users/magnus/repos/hugin/src/pipeline-compiler.ts) to accept `Authority: gated` plus explicit `Side-effects:`, and updated [src/index.ts](/Users/magnus/repos/hugin/src/index.ts) so gated pipeline phases pause in `awaiting-approval`, write `approval-request`, consume `approval-decision`, resume on approval, and fail on rejection without executing.
 - **Structured artifacts and summaries now understand approval state** — [src/task-result-schema.ts](/Users/magnus/repos/hugin/src/task-result-schema.ts) now carries approval metadata plus pipeline side effects, [src/pipeline-summary.ts](/Users/magnus/repos/hugin/src/pipeline-summary.ts) adds `awaiting_approval` execution state and phase-level approval status, and [src/task-status-tags.ts](/Users/magnus/repos/hugin/src/task-status-tags.ts) now preserves `authority:*` across lifecycle transitions and can build `awaiting-approval` tags.
 - **Resume/cancellation semantics updated for gated phases** — [src/pipeline-ops.ts](/Users/magnus/repos/hugin/src/pipeline-ops.ts) now treats `awaiting_approval` as active, so existing pipeline control paths remain coherent when a pipeline is paused on human approval.
@@ -122,10 +125,11 @@
 - mDNS (huginmunin.local) flaky — Tailscale IP 100.97.117.37 is reliable fallback
 
 ## Next Steps
-- **Run the Phase 4 live gate** — deploy to `huginmunin`, then validate one four-phase pipeline with exactly one gated side-effect phase, checking: `approval-request` written exactly once, `awaiting_approval` summary state visible, approval resumes only the gated phase, rejection fails cleanly, and structured results retain approval metadata.
-- After the live gate, run a mixed soak: normal pipeline, mid-run cancellation, resume, and at least one gated side-effect phase under realistic Munin traffic.
+- **Start Phase 5: sensitivity classification** — add `Sensitivity:` parsing/validation to the next layer, implement a local rule-based classifier, and propagate sensitivity monotonically through pipeline artifacts before enabling any routing behavior.
+- Run a mixed soak: normal pipeline, mid-run cancellation, resume, and at least one gated side-effect phase under realistic Munin traffic.
 - Continue observing mixed live workloads before declaring Munin-pressure hardening fully closed; the immediate startup, batching, lease-starvation, and orchestration control-path test gaps are fixed, but the orchestration layer still depends heavily on Munin state traffic.
+- Add operator-facing documentation or helper tooling for writing valid `approval-decision` artifacts so Ratatoskr/humans do not have to remember the full schema by hand.
 - Decide whether cancellation/result finalization should be hardened further so parent `status/result` converge as quickly as parent `summary` under heavy pressure.
-- **Step 5+: capability registry + routing** remains deferred until Bet 1 is fully closed.
+- **Phase 6+: routing and templates** remain deferred until Phase 5 is implemented and validated.
 - Deploy latest Ratatoskr features (poll recovery, delivery confirmation)
 - Task progress streaming (partial results before completion)

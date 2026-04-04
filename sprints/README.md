@@ -36,3 +36,4 @@ Concrete things to carry into the next engineering step.
 - [2026-04-02-step2-live-eval.md](/Users/magnus/repos/hugin/sprints/2026-04-02-step2-live-eval.md)
 - [2026-04-02-step3-live-eval.md](/Users/magnus/repos/hugin/sprints/2026-04-02-step3-live-eval.md)
 - [2026-04-02-step3-cancellation-live-eval.md](/Users/magnus/repos/hugin/sprints/2026-04-02-step3-cancellation-live-eval.md)
+- [2026-04-04-step4-live-eval.md](/Users/magnus/repos/hugin/sprints/2026-04-04-step4-live-eval.md)
