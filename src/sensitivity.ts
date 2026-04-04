@@ -74,11 +74,24 @@ export function parseSensitivity(
   return parsed.data;
 }
 
+/**
+ * Strip fenced code blocks, inline code, and namespace-style paths
+ * so that technical references (e.g. `clients/invoices`) don't trigger
+ * keyword-based sensitivity classification.
+ */
+function stripCodeAndPaths(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, "")    // fenced code blocks
+    .replace(/`[^`]+`/g, "")           // inline code
+    .replace(/\b[\w-]+\/[\w/*-]+/g, ""); // namespace/path patterns like clients/invoices
+}
+
 export function classifyPromptSensitivity(
   prompt: string | undefined,
 ): Sensitivity | undefined {
   if (!prompt) return undefined;
-  return PRIVATE_PROMPT_PATTERNS.some((pattern) => pattern.test(prompt))
+  const stripped = stripCodeAndPaths(prompt);
+  return PRIVATE_PROMPT_PATTERNS.some((pattern) => pattern.test(stripped))
     ? "private"
     : undefined;
 }

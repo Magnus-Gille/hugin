@@ -4,7 +4,15 @@ set -euo pipefail
 # Sync global ~/.claude/ config from laptop to Pi
 # Usage: ./scripts/sync-claude-config.sh [hostname]
 
-PI_HOST="${1:-huginmunin.local}"
+TAILSCALE_IP="100.97.117.37"
+if [ -n "${1:-}" ]; then
+  PI_HOST="$1"
+elif ping -c1 -W1 huginmunin.local >/dev/null 2>&1; then
+  PI_HOST="huginmunin.local"
+else
+  echo "  mDNS unavailable, falling back to Tailscale IP"
+  PI_HOST="$TAILSCALE_IP"
+fi
 DEPLOY_USER="${DEPLOY_USER:-magnus}"
 REMOTE="$DEPLOY_USER@$PI_HOST"
 REMOTE_CLAUDE_DIR="/home/$DEPLOY_USER/.claude"
