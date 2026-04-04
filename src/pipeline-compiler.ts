@@ -8,7 +8,9 @@ import {
   type PipelinePhaseIR,
   type PipelinePhaseTaskDraft,
   type PipelineRuntimeId,
+  type PipelineSideEffectId,
   type PipelineSensitivity,
+  pipelineSideEffectIdSchema,
 } from "./pipeline-ir.js";
 import { buildRoutingMetadataLines } from "./result-format.js";
 import { MAX_DEPENDENCIES } from "./task-graph.js";
@@ -20,6 +22,7 @@ interface ParsedPipelinePhase {
   context?: string;
   timeout?: number;
   authority?: string;
+  sideEffects: string[];
   onDependencyFailure: PipelineDependencyFailure;
   prompt?: string;
 }
@@ -107,6 +110,7 @@ function parsePipelineBody(body: string): ParsedPipelinePhase[] {
       name: phaseMatch[1].trim(),
       dependsOn: [],
       runtime: "",
+      sideEffects: [],
       onDependencyFailure: "fail",
     };
     index++;
@@ -150,6 +154,10 @@ function parsePipelineBody(body: string): ParsedPipelinePhase[] {
         }
         case "Authority":
           phase.authority = rawValue.trim().toLowerCase();
+          index++;
+          break;
+        case "Side-effects":
+          phase.sideEffects = parseCommaList(rawValue);
           index++;
           break;
         case "On-dep-failure": {
@@ -298,12 +306,41 @@ function validateRuntimeId(phaseName: string, runtime: string): PipelineRuntimeI
   return parsed.data;
 }
 
-function validateAuthority(phaseName: string, authority: string | undefined): PipelineAuthority {
+function validateSideEffects(
+  phaseName: string,
+  sideEffects: string[]
+): PipelineSideEffectId[] {
+  return sideEffects.map((sideEffect) => {
+    const parsed = pipelineSideEffectIdSchema.safeParse(sideEffect);
+    if (!parsed.success) {
+      throw new Error(
+        `Phase "${phaseName}" uses unknown side effect "${sideEffect}"`
+      );
+    }
+    return parsed.data;
+  });
+}
+
+function validateAuthority(
+  phaseName: string,
+  authority: string | undefined,
+  sideEffects: PipelineSideEffectId[]
+): PipelineAuthority {
   if (!authority || authority === "autonomous") {
+    if (sideEffects.length > 0) {
+      throw new Error(
+        `Phase "${phaseName}" declares side effects but uses Authority: autonomous`
+      );
+    }
     return "autonomous";
   }
   if (authority === "gated") {
-    throw new Error(`Phase "${phaseName}" uses Authority: gated, which is deferred until Step 4`);
+    if (sideEffects.length === 0) {
+      throw new Error(
+        `Phase "${phaseName}" uses Authority: gated but declares no Side-effects`
+      );
+    }
+    return "gated";
   }
   throw new Error(`Phase "${phaseName}" uses unsupported authority "${authority}"`);
 }
@@ -339,7 +376,8 @@ export function compilePipelineTask(
       throw new Error(`Internal pipeline compiler error for phase "${phase.name}"`);
     }
 
-    const authority = validateAuthority(phase.name, phase.authority);
+    const sideEffects = validateSideEffects(phase.name, phase.sideEffects);
+    const authority = validateAuthority(phase.name, phase.authority, sideEffects);
     const dependencyTaskIds = phase.dependsOn.map((dependency) => {
       const dependencyTaskId = phaseIdByName.get(dependency);
       if (!dependencyTaskId) {
@@ -364,6 +402,7 @@ export function compilePipelineTask(
       prompt: phase.prompt,
       timeout: phase.timeout,
       authority,
+      sideEffects,
       effectiveSensitivity: parsed.sensitivity,
     };
   });
@@ -406,6 +445,9 @@ function buildPhaseTaskContent(
     `- **Pipeline submitted by:** ${pipeline.submittedBy}`,
     `- **Pipeline sensitivity:** ${phase.effectiveSensitivity}`,
     `- **Pipeline authority:** ${phase.authority}`,
+    ...(phase.sideEffects.length > 0
+      ? [`- **Pipeline side-effects:** ${phase.sideEffects.join(", ")}`]
+      : []),
     ...(phase.dependencyTaskIds.length > 0
       ? [`- **Depends on task ids:** ${phase.dependencyTaskIds.join(", ")}`]
       : []),
@@ -427,6 +469,7 @@ export function buildPhaseTaskDrafts(pipeline: PipelineIR): PipelinePhaseTaskDra
       `runtime:${phase.dispatcherRuntime}`,
       "type:pipeline",
       "type:pipeline-phase",
+      `authority:${phase.authority}`,
       ...(phase.onDependencyFailure === "continue" ? ["on-dep-failure:continue"] : []),
       ...phase.dependencyTaskIds.map((taskId) => `depends-on:${taskId}`),
     ];

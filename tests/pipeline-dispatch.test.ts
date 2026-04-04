@@ -234,6 +234,7 @@ describe("handlePipelineTask", () => {
       "runtime:claude",
       "type:pipeline",
       "type:pipeline-phase",
+      "authority:autonomous",
     ]);
     expect(exploreStatus?.content).toContain("- **Pipeline:** 20260403-valid-pipeline");
 
@@ -246,6 +247,7 @@ describe("handlePipelineTask", () => {
       "runtime:ollama",
       "type:pipeline",
       "type:pipeline-phase",
+      "authority:autonomous",
       "on-dep-failure:continue",
       "depends-on:20260403-valid-pipeline-explore",
     ]);
@@ -398,6 +400,7 @@ Phase: Explore
       "runtime:claude",
       "type:pipeline",
       "type:pipeline-phase",
+      "authority:autonomous",
     ]);
     expect(
       client.get(compiled.phases[0]!.taskNamespace, "result")?.content

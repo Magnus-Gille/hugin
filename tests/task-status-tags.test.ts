@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildAwaitingApprovalTags,
   buildPipelineParentCancelledTags,
   buildPipelineParentSuccessTags,
   buildTerminalStatusTags,
@@ -13,6 +14,7 @@ describe("task status tag helpers", () => {
         "runtime:ollama",
         "type:pipeline",
         "type:pipeline-phase",
+        "authority:gated",
         "on-dep-failure:continue",
         "claimed_by:hugin-x",
         "lease_expires:2026-04-02T10:00:00Z",
@@ -23,6 +25,7 @@ describe("task status tag helpers", () => {
       "type:pipeline",
       "type:pipeline-phase",
       "on-dep-failure:continue",
+      "authority:gated",
     ]);
   });
 
@@ -50,6 +53,7 @@ describe("task status tag helpers", () => {
         "runtime:ollama",
         "type:pipeline",
         "type:pipeline-phase",
+        "authority:gated",
         "on-dep-failure:continue",
         "claimed_by:hugin-x",
         "lease_expires:2026-04-02T10:00:00Z",
@@ -60,6 +64,26 @@ describe("task status tag helpers", () => {
       "type:pipeline",
       "type:pipeline-phase",
       "on-dep-failure:continue",
+      "authority:gated",
+    ]);
+  });
+
+  it("builds awaiting-approval tags while preserving persistent metadata", () => {
+    expect(
+      buildAwaitingApprovalTags([
+        "pending",
+        "runtime:codex",
+        "type:pipeline",
+        "type:pipeline-phase",
+        "authority:gated",
+        "claimed_by:hugin-x",
+      ])
+    ).toEqual([
+      "awaiting-approval",
+      "runtime:codex",
+      "type:pipeline",
+      "type:pipeline-phase",
+      "authority:gated",
     ]);
   });
 

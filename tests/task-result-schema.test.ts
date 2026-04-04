@@ -29,6 +29,7 @@ describe("structured task result schema", () => {
         submittedBy: "claude-code",
         sensitivity: "internal",
         authority: "autonomous",
+        sideEffects: [],
       },
     });
 
@@ -100,5 +101,41 @@ describe("structured task result schema", () => {
     expect(result.lifecycle).toBe("cancelled");
     expect(result.outcome).toBe("cancelled");
     expect(result.exitCode).toBe("CANCELLED");
+  });
+
+  it("accepts approval metadata for gated phases", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "20260404-deploy",
+      taskNamespace: "tasks/20260404-deploy",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "codex",
+      executor: "spawn",
+      resultSource: "hook",
+      exitCode: 0,
+      completedAt: "2026-04-04T10:00:02Z",
+      bodyKind: "response",
+      bodyText: "DEPLOYED",
+      pipeline: {
+        pipelineId: "20260404-pipeline",
+        phase: "deploy",
+        dependencyTaskIds: ["20260404-review"],
+        dependencyPhases: ["review"],
+        authority: "gated",
+        sideEffects: ["deploy.service"],
+      },
+      approval: {
+        status: "approved",
+        requestedAt: "2026-04-04T09:55:00Z",
+        decidedAt: "2026-04-04T09:56:00Z",
+        decisionSource: "ratatoskr",
+        operationKey: "20260404-pipeline:20260404-deploy",
+      },
+    });
+
+    expect(result.pipeline?.authority).toBe("gated");
+    expect(result.pipeline?.sideEffects).toEqual(["deploy.service"]);
+    expect(result.approval?.status).toBe("approved");
   });
 });

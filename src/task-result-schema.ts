@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   pipelineAuthoritySchema,
+  pipelineSideEffectIdSchema,
   pipelineSensitivitySchema,
 } from "./pipeline-ir.js";
 
@@ -30,9 +31,28 @@ export const taskExecutionPipelineContextSchema = z.object({
   submittedBy: z.string().min(1).optional(),
   sensitivity: pipelineSensitivitySchema.optional(),
   authority: pipelineAuthoritySchema.optional(),
+  sideEffects: z.array(pipelineSideEffectIdSchema).default([]),
 });
 export type TaskExecutionPipelineContext = z.infer<
   typeof taskExecutionPipelineContextSchema
+>;
+
+export const taskApprovalStatusSchema = z.enum([
+  "pending",
+  "approved",
+  "rejected",
+]);
+export type TaskApprovalStatus = z.infer<typeof taskApprovalStatusSchema>;
+
+export const taskExecutionApprovalMetadataSchema = z.object({
+  status: taskApprovalStatusSchema,
+  requestedAt: z.string().min(1).optional(),
+  decidedAt: z.string().min(1).optional(),
+  decisionSource: z.string().min(1).optional(),
+  operationKey: z.string().min(1).optional(),
+});
+export type TaskExecutionApprovalMetadata = z.infer<
+  typeof taskExecutionApprovalMetadataSchema
 >;
 
 export const taskExecutionRuntimeMetadataSchema = z.object({
@@ -75,6 +95,7 @@ export const structuredTaskResultSchema = z.object({
   errorMessage: z.string().min(1).optional(),
   runtimeMetadata: taskExecutionRuntimeMetadataSchema.optional(),
   pipeline: taskExecutionPipelineContextSchema.optional(),
+  approval: taskExecutionApprovalMetadataSchema.optional(),
 });
 export type StructuredTaskResult = z.infer<typeof structuredTaskResultSchema>;
 

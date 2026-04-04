@@ -107,6 +107,25 @@ describe("pipeline execution summary", () => {
     expect(summary.phaseCounts.running).toBe(1);
   });
 
+  it("reports awaiting_approval distinctly from dependency blocking", () => {
+    const pipeline = makePipeline();
+    const summary = buildPipelineExecutionSummary(pipeline, [
+      {
+        phase: pipeline.phases[0]!,
+        lifecycle: "awaiting_approval",
+      },
+      {
+        phase: pipeline.phases[1]!,
+        lifecycle: "blocked",
+      },
+    ]);
+
+    expect(summary.executionState).toBe("awaiting_approval");
+    expect(summary.phaseCounts.awaitingApproval).toBe(1);
+    expect(summary.terminal).toBe(false);
+    expect(summary.phases[0]?.approvalStatus).toBe("pending");
+  });
+
   it("builds a completed summary with timings from structured results", () => {
     const pipeline = makePipeline();
     const summary = buildPipelineExecutionSummary(

@@ -14,7 +14,16 @@ import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus } from "./ollama-hosts.js";
 import { resolveContextRefs } from "./context-loader.js";
 import {
-} from "./pipeline-compiler.js";
+  pipelineSideEffectIdSchema,
+  type PipelineSideEffectId,
+} from "./pipeline-ir.js";
+import {
+  buildPhaseApprovalRequestContent,
+  buildPhaseOperationKey,
+  buildPromptPreview,
+  parsePhaseApprovalDecision,
+  parsePhaseApprovalRequest,
+} from "./pipeline-gates.js";
 import {
   processPipelineCancellationRequest as handlePipelineCancellationEntry,
   processPipelineResumeRequest as handlePipelineResumeEntry,
@@ -36,12 +45,14 @@ import {
   type DependencyState,
 } from "./task-graph.js";
 import {
+  buildAwaitingApprovalTags,
   buildTerminalStatusTags,
 } from "./task-status-tags.js";
 import {
   buildStructuredTaskResult,
   type DispatcherRuntime,
   type StructuredTaskResult,
+  type TaskExecutionApprovalMetadata,
   type TaskExecutionBodyKind,
   type TaskExecutionPipelineContext,
   type TaskExecutionRuntimeMetadata,
@@ -163,6 +174,19 @@ function parseDeclaredRuntime(content: string): DeclaredRuntime | undefined {
 
 function parseSubmittedByField(content: string): string {
   return content.match(/\*\*Submitted by:\*\*\s*(.+)/i)?.[1]?.trim() || "unknown";
+}
+
+function parsePipelineSideEffectsField(content: string): PipelineSideEffectId[] {
+  const raw = content.match(/\*\*Pipeline side-effects:\*\*\s*(.+)/i)?.[1]?.trim();
+  if (!raw) return [];
+
+  return raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => pipelineSideEffectIdSchema.safeParse(value))
+    .filter((parsed): parsed is { success: true; data: PipelineSideEffectId } => parsed.success)
+    .map((parsed) => parsed.data);
 }
 
 function resolveContext(raw: string): string {
@@ -313,6 +337,7 @@ function parseTask(content: string): TaskConfig | null {
             submittedBy: pipelineSubmittedBy || undefined,
             sensitivity: pipelineSensitivity,
             authority: pipelineAuthority,
+            sideEffects: parsePipelineSideEffectsField(content),
           }
         : undefined,
   };
@@ -423,6 +448,7 @@ function createFailureStructuredResult(
     sequence?: number;
     pipeline?: TaskExecutionPipelineContext;
     runtimeMetadata?: TaskExecutionRuntimeMetadata;
+    approval?: TaskExecutionApprovalMetadata;
   }
 ): StructuredTaskResult {
   const completedAt = options.completedAt || new Date().toISOString();
@@ -449,6 +475,7 @@ function createFailureStructuredResult(
     errorMessage,
     runtimeMetadata: options.runtimeMetadata,
     pipeline: options.pipeline,
+    approval: options.approval,
   });
 }
 
@@ -513,6 +540,48 @@ function buildCancelledTaskResultDocument(input: {
   return lines.join("\n");
 }
 
+function buildApprovalRejectedTaskResultDocument(input: {
+  taskId: string;
+  pipelineId: string;
+  phaseName: string;
+  sideEffects: string[];
+  reason: string;
+  replyTo?: string;
+  replyFormat?: string;
+  group?: string;
+  sequence?: number;
+  decidedAt?: string;
+  decisionSource?: string;
+  decidedBy?: string;
+}): string {
+  return [
+    "## Result",
+    "",
+    "- **Exit code:** -1",
+    "- **Error:** Approval rejected for gated phase",
+    `- **Task id:** ${input.taskId}`,
+    `- **Pipeline id:** ${input.pipelineId}`,
+    `- **Pipeline phase:** ${input.phaseName}`,
+    `- **Authority:** gated`,
+    ...(input.sideEffects.length > 0
+      ? [`- **Side-effects:** ${input.sideEffects.join(", ")}`]
+      : []),
+    `- **Approval status:** rejected`,
+    ...(input.decidedAt ? [`- **Approval decided at:** ${input.decidedAt}`] : []),
+    ...(input.decisionSource
+      ? [`- **Approval source:** ${input.decisionSource}`]
+      : []),
+    ...(input.decidedBy ? [`- **Approval decided by:** ${input.decidedBy}`] : []),
+    `- **Reason:** ${input.reason}`,
+    ...buildRoutingMetadataLines({
+      replyTo: input.replyTo,
+      replyFormat: input.replyFormat,
+      group: input.group,
+      sequence: input.sequence,
+    }),
+  ].join("\n");
+}
+
 
 function createCancelledStructuredResult(
   taskNs: string,
@@ -533,6 +602,7 @@ function createCancelledStructuredResult(
     runtimeMetadata?: TaskExecutionRuntimeMetadata;
     bodyKind?: TaskExecutionBodyKind;
     bodyText?: string;
+    approval?: TaskExecutionApprovalMetadata;
   }
 ): StructuredTaskResult {
   const completedAt = options.completedAt || new Date().toISOString();
@@ -559,6 +629,7 @@ function createCancelledStructuredResult(
     errorMessage: reason,
     runtimeMetadata: options.runtimeMetadata,
     pipeline: options.pipeline,
+    approval: options.approval,
   });
 }
 
@@ -889,10 +960,12 @@ function buildClaimTags(
 ): string[] {
   const runtimeTag = baseTags.find((t) => t.startsWith("runtime:"));
   const typeTags = baseTags.filter((t) => t.startsWith("type:"));
+  const authorityTags = baseTags.filter((t) => t.startsWith("authority:"));
   return [
     lifecycle,
     ...(runtimeTag ? [runtimeTag] : []),
     ...typeTags,
+    ...authorityTags,
     `claimed_by:${workerId}`,
     `lease_expires:${leaseExpiry()}`,
   ];
@@ -1305,6 +1378,30 @@ async function markTaskCancelled(
   const task = parseTask(entry.content);
   const completedAt = options.completedAt || new Date().toISOString();
   const runtime = getRuntimeFromTags(entry.tags);
+  let approvalMetadata: TaskExecutionApprovalMetadata | undefined;
+  if (task?.pipeline?.authority === "gated") {
+    const [approvalRequestEntry, approvalDecisionEntry] = await Promise.all([
+      munin.read(taskNs, "approval-request"),
+      munin.read(taskNs, "approval-decision"),
+    ]);
+    const approvalRequest = approvalRequestEntry
+      ? parsePhaseApprovalRequest(approvalRequestEntry.content)
+      : null;
+    const approvalDecision = approvalDecisionEntry
+      ? parsePhaseApprovalDecision(approvalDecisionEntry.content)
+      : null;
+    approvalMetadata = {
+      status: approvalDecision?.decision || "pending",
+      requestedAt: approvalRequest?.requestedAt,
+      decidedAt: approvalDecision?.decidedAt,
+      decisionSource: approvalDecision?.source,
+      operationKey:
+        approvalRequest?.operationKey ||
+        (task?.pipeline
+          ? buildPhaseOperationKey(task.pipeline.pipelineId, extractTaskId(taskNs))
+          : undefined),
+    };
+  }
   await munin.write(
     taskNs,
     "result",
@@ -1340,6 +1437,7 @@ async function markTaskCancelled(
         sequence: task?.sequence,
         pipeline: task?.pipeline,
         runtimeMetadata: options.runtimeMetadata,
+        approval: approvalMetadata,
         bodyKind: options.bodyKind,
         bodyText: options.bodyText,
       })
@@ -1357,6 +1455,258 @@ async function markTaskCancelled(
   if (task?.pipeline?.pipelineId) {
     await refreshPipelineSummary(task.pipeline.pipelineId);
   }
+}
+
+function buildPendingFromAwaitingApprovalTags(tags: string[]): string[] {
+  const nextTags = tags.filter((tag) => tag !== "awaiting-approval" && tag !== "pending");
+  nextTags.push("pending");
+  return nextTags;
+}
+
+async function gatePendingTaskForApproval(
+  taskNs: string,
+  entry: MuninEntry & { found: true },
+  task: TaskConfig
+): Promise<boolean> {
+  if (task.pipeline?.authority !== "gated") {
+    return false;
+  }
+
+  const approvalDecisionEntry = await munin.read(taskNs, "approval-decision");
+  const approvalDecision = approvalDecisionEntry
+    ? parsePhaseApprovalDecision(approvalDecisionEntry.content)
+    : null;
+
+  if (approvalDecision?.decision === "approved") {
+    return false;
+  }
+
+  if (approvalDecision?.decision === "rejected") {
+    const rejectionReason = approvalDecision.comment?.trim() || "Rejected by operator";
+    await munin.write(
+      taskNs,
+      "result",
+      buildApprovalRejectedTaskResultDocument({
+        taskId: extractTaskId(taskNs),
+        pipelineId: task.pipeline.pipelineId,
+        phaseName: task.pipeline.phase,
+        sideEffects: task.pipeline.sideEffects,
+        reason: rejectionReason,
+        replyTo: task.replyTo,
+        replyFormat: task.replyFormat,
+        group: task.group,
+        sequence: task.sequence,
+        decidedAt: approvalDecision.decidedAt,
+        decisionSource: approvalDecision.source,
+        decidedBy: approvalDecision.decidedBy,
+      })
+    );
+    await writeStructuredTaskResult(
+      taskNs,
+      createFailureStructuredResult(taskNs, task.runtime, rejectionReason, {
+        executor: "dispatcher",
+        resultSource: "approval",
+        replyTo: task.replyTo,
+        replyFormat: task.replyFormat,
+        group: task.group,
+        sequence: task.sequence,
+        pipeline: task.pipeline,
+        approval: {
+          status: "rejected",
+          decidedAt: approvalDecision.decidedAt,
+          decisionSource: approvalDecision.source,
+          operationKey: buildPhaseOperationKey(
+            task.pipeline.pipelineId,
+            extractTaskId(taskNs)
+          ),
+        },
+      })
+    );
+    await munin.write(
+      taskNs,
+      "status",
+      entry.content,
+      buildTerminalStatusTags("failed", entry.tags, `runtime:${task.runtime}`),
+      entry.updated_at
+    );
+    await munin.log(
+      taskNs,
+      `Gated phase rejected before execution (${approvalDecision.source || "unknown source"}): ${rejectionReason}`
+    );
+    await promoteDependents(extractTaskId(taskNs));
+    await refreshPipelineSummary(task.pipeline.pipelineId);
+    return true;
+  }
+
+  const approvalRequestEntry = await munin.read(taskNs, "approval-request");
+  if (!approvalRequestEntry) {
+    await munin.write(
+      taskNs,
+      "approval-request",
+      buildPhaseApprovalRequestContent({
+        pipelineId: task.pipeline.pipelineId,
+        phaseName: task.pipeline.phase,
+        phaseTaskId: extractTaskId(taskNs),
+        authority: "gated",
+        sideEffects: task.pipeline.sideEffects,
+        status: "pending",
+        requestedAt: new Date().toISOString(),
+        requestedByWorker: workerId,
+        replyTo: task.replyTo,
+        replyFormat: task.replyFormat,
+        operationKey: buildPhaseOperationKey(
+          task.pipeline.pipelineId,
+          extractTaskId(taskNs)
+        ),
+        summary: {
+          runtime: task.runtime,
+          context: task.context,
+          promptPreview: buildPromptPreview(task.prompt),
+          dependencyTaskIds: task.pipeline.dependencyTaskIds,
+        },
+      }),
+      ["type:approval-request", "type:pipeline-approval-request"]
+    );
+    await munin.log(
+      taskNs,
+      `Approval requested for gated phase ${task.pipeline.phase} (${task.pipeline.sideEffects.join(", ") || "side effects unspecified"})`
+    );
+  }
+
+  await munin.write(
+    taskNs,
+    "status",
+    entry.content,
+    buildAwaitingApprovalTags(entry.tags, `runtime:${task.runtime}`),
+    entry.updated_at
+  );
+  await refreshPipelineSummary(task.pipeline.pipelineId);
+  return true;
+}
+
+async function processApprovalDecisions(): Promise<boolean> {
+  const { results } = await munin.query({
+    query: "task",
+    tags: ["awaiting-approval"],
+    namespace: "tasks/",
+    entry_type: "state",
+    limit: 50,
+  });
+
+  let processed = false;
+  for (const result of results) {
+    if (result.key !== "status") continue;
+    const entry = await munin.read(result.namespace, "status");
+    if (!entry || !entry.tags.includes("awaiting-approval")) continue;
+
+    const task = parseTask(entry.content);
+    if (!task?.pipeline || task.pipeline.authority !== "gated") {
+      continue;
+    }
+
+    const approvalDecisionEntry = await munin.read(result.namespace, "approval-decision");
+    if (!approvalDecisionEntry) continue;
+
+    const approvalDecision = parsePhaseApprovalDecision(approvalDecisionEntry.content);
+    if (!approvalDecision) {
+      await munin.log(
+        result.namespace,
+        "Ignoring invalid approval-decision artifact"
+      );
+      continue;
+    }
+
+    if (
+      approvalDecision.phaseTaskId !== extractTaskId(result.namespace) ||
+      approvalDecision.pipelineId !== task.pipeline.pipelineId
+    ) {
+      await munin.log(
+        result.namespace,
+        "Ignoring mismatched approval-decision artifact"
+      );
+      continue;
+    }
+
+    const approvalRequestEntry = await munin.read(result.namespace, "approval-request");
+    const approvalRequest = approvalRequestEntry
+      ? parsePhaseApprovalRequest(approvalRequestEntry.content)
+      : null;
+    const operationKey =
+      approvalRequest?.operationKey ||
+      buildPhaseOperationKey(task.pipeline.pipelineId, extractTaskId(result.namespace));
+
+    if (approvalDecision.decision === "approved") {
+      await munin.write(
+        result.namespace,
+        "status",
+        entry.content,
+        buildPendingFromAwaitingApprovalTags(entry.tags),
+        entry.updated_at
+      );
+      await munin.log(
+        result.namespace,
+        `Approval granted for gated phase ${task.pipeline.phase} (${approvalDecision.source || "unknown source"})`
+      );
+      await refreshPipelineSummary(task.pipeline.pipelineId);
+      processed = true;
+      continue;
+    }
+
+    const rejectionReason = approvalDecision.comment?.trim() || "Rejected by operator";
+    await munin.write(
+      result.namespace,
+      "result",
+      buildApprovalRejectedTaskResultDocument({
+        taskId: extractTaskId(result.namespace),
+        pipelineId: task.pipeline.pipelineId,
+        phaseName: task.pipeline.phase,
+        sideEffects: task.pipeline.sideEffects,
+        reason: rejectionReason,
+        replyTo: task.replyTo,
+        replyFormat: task.replyFormat,
+        group: task.group,
+        sequence: task.sequence,
+        decidedAt: approvalDecision.decidedAt,
+        decisionSource: approvalDecision.source,
+        decidedBy: approvalDecision.decidedBy,
+      })
+    );
+    await writeStructuredTaskResult(
+      result.namespace,
+      createFailureStructuredResult(result.namespace, task.runtime, rejectionReason, {
+        executor: "dispatcher",
+        resultSource: "approval",
+        replyTo: task.replyTo,
+        replyFormat: task.replyFormat,
+        group: task.group,
+        sequence: task.sequence,
+        pipeline: task.pipeline,
+        approval: {
+          status: "rejected",
+          requestedAt: approvalRequest?.requestedAt,
+          decidedAt: approvalDecision.decidedAt,
+          decisionSource: approvalDecision.source,
+          operationKey,
+        },
+      })
+    );
+    await munin.write(
+      result.namespace,
+      "status",
+      entry.content,
+      buildTerminalStatusTags("failed", entry.tags, `runtime:${task.runtime}`),
+      entry.updated_at
+    );
+    await munin.log(
+      result.namespace,
+      `Approval rejected for gated phase ${task.pipeline.phase} (${approvalDecision.source || "unknown source"}): ${rejectionReason}`
+    );
+    await promoteDependents(extractTaskId(result.namespace));
+    await refreshPipelineSummary(task.pipeline.pipelineId);
+    processed = true;
+  }
+
+  return processed;
 }
 
 async function processPipelineCancellationRequest(
@@ -1574,6 +1924,20 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     return { hadTask: true, queueDepth };
   }
 
+  const parsedTask =
+    declaredRuntime === "pipeline" ? null : parseTask(entry.content);
+  if (declaredRuntime !== "pipeline" && !parsedTask) {
+    console.error(`Failed to parse task ${taskNs}, marking as failed`);
+    await failTaskWithMessage(
+      taskNs,
+      entry,
+      "Failed to parse task (missing prompt or runtime)",
+    );
+    await promoteDependents(extractTaskId(taskNs));
+    await refreshPipelineSummaryFromContent(entry.content);
+    return { hadTask: true, queueDepth };
+  }
+
   // Validate submitter against allowlist
   const submittedBy = parseSubmittedByField(entry.content);
   if (
@@ -1595,6 +1959,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     );
     await promoteDependents(extractTaskId(taskNs));
     await refreshPipelineSummaryFromContent(entry.content);
+    return { hadTask: true, queueDepth };
+  }
+
+  if (
+    declaredRuntime !== "pipeline" &&
+    parsedTask &&
+    (await gatePendingTaskForApproval(taskNs, entry, parsedTask))
+  ) {
     return { hadTask: true, queueDepth };
   }
 
@@ -1647,23 +2019,34 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       return pipelineResult;
     }
 
-    const task = parseTask(entry.content);
+    const task = parsedTask;
     if (!task) {
-      stopLeaseRenewal();
-      stopCancellationWatch();
-      await failTaskWithMessage(
-        taskNs,
-        entry,
-        "Failed to parse task (missing prompt or runtime)",
-      );
-      await promoteDependents(taskId);
-      await refreshPipelineSummaryFromContent(entry.content);
-      currentTask = null;
-      currentTaskConfig = null;
-      return { hadTask: true, queueDepth };
+      throw new Error(`Internal dispatcher error: parsed task missing for ${taskNs}`);
     }
 
     currentTaskConfig = task;
+    let approvalMetadata: TaskExecutionApprovalMetadata | undefined;
+    if (task.pipeline?.authority === "gated") {
+      const [approvalRequestEntry, approvalDecisionEntry] = await Promise.all([
+        munin.read(taskNs, "approval-request"),
+        munin.read(taskNs, "approval-decision"),
+      ]);
+      const approvalRequest = approvalRequestEntry
+        ? parsePhaseApprovalRequest(approvalRequestEntry.content)
+        : null;
+      const approvalDecision = approvalDecisionEntry
+        ? parsePhaseApprovalDecision(approvalDecisionEntry.content)
+        : null;
+      approvalMetadata = {
+        status: approvalDecision?.decision || "pending",
+        requestedAt: approvalRequest?.requestedAt,
+        decidedAt: approvalDecision?.decidedAt,
+        decisionSource: approvalDecision?.source,
+        operationKey:
+          approvalRequest?.operationKey ||
+          buildPhaseOperationKey(task.pipeline.pipelineId, taskId),
+      };
+    }
     if (task.pipeline?.pipelineId) {
       await refreshPipelineSummary(task.pipeline.pipelineId);
     }
@@ -2066,6 +2449,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           sequence: task.sequence,
           pipeline: task.pipeline,
           runtimeMetadata,
+          approval: approvalMetadata,
           bodyKind: structuredBodyKind,
           bodyText: structuredBodyText,
         })
@@ -2107,6 +2491,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           errorMessage: ok ? undefined : structuredBodyText,
           runtimeMetadata,
           pipeline: task.pipeline,
+          approval: approvalMetadata,
         })
       );
 
@@ -2219,6 +2604,7 @@ async function pollLoop(): Promise<void> {
       await reconcileTrackedPipelineSummaries();
       const processedCancellation = await processCancellationRequests();
       const processedResume = await processResumeRequests();
+      const processedApproval = await processApprovalDecisions();
       const poll = await pollOnce();
       queueDepth = poll.queueDepth;
       lastQueueDepth = queueDepth;
@@ -2228,7 +2614,7 @@ async function pollLoop(): Promise<void> {
       lastBlockedTaskCount = await countTasksWithLifecycle("blocked");
       // Fire-and-forget heartbeat
       emitHeartbeat(queueDepth, lastBlockedTaskCount);
-      if ((processedCancellation || processedResume || poll.hadTask) && !shuttingDown) continue; // Check for more immediately
+      if ((processedCancellation || processedResume || processedApproval || poll.hadTask) && !shuttingDown) continue; // Check for more immediately
     } catch (err) {
       console.error("Poll error:", err);
       // Still emit heartbeat on error

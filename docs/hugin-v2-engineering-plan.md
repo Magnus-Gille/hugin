@@ -101,6 +101,9 @@ Each bet must earn the next one. No later phase starts until the current gate is
 - Resume gated phases after approval from Ratatoskr.
 - Make side-effect retries idempotent.
 
+**Detailed implementation plan**
+- [phase4-human-gates-engineering-plan.md](/Users/magnus/repos/hugin/docs/phase4-human-gates-engineering-plan.md)
+
 **Definition of done**
 - Side-effecting phases never execute autonomously unless explicitly allowed.
 - Approval and rejection are auditable in Munin.

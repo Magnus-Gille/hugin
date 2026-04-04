@@ -28,6 +28,7 @@ export function buildPipelineResumePlan(
     (item) =>
       item.currentLifecycle === "pending" ||
       item.currentLifecycle === "blocked" ||
+      item.currentLifecycle === "awaiting_approval" ||
       item.currentLifecycle === "running"
   );
 

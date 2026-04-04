@@ -245,13 +245,13 @@ describe("pipeline control handlers", () => {
       namespace: drafts[0]!.namespace,
       key: "status",
       content: drafts[0]!.content,
-      tags: ["running", "runtime:claude", "type:pipeline", "type:pipeline-phase"],
+      tags: ["running", "runtime:claude", "type:pipeline", "type:pipeline-phase", "authority:autonomous"],
     });
     client.seed({
       namespace: drafts[1]!.namespace,
       key: "status",
       content: drafts[1]!.content,
-      tags: ["blocked", "runtime:claude", "type:pipeline", "type:pipeline-phase", "depends-on:20260403-cancel-running-gather"],
+      tags: ["blocked", "runtime:claude", "type:pipeline", "type:pipeline-phase", "authority:autonomous", "depends-on:20260403-cancel-running-gather"],
     });
 
     const processed = await processPipelineCancellationRequest(
@@ -274,6 +274,7 @@ describe("pipeline control handlers", () => {
       "runtime:claude",
       "type:pipeline",
       "type:pipeline-phase",
+      "authority:autonomous",
     ]);
     expect(client.get(taskNs, "status")?.tags).toContain("cancel-requested");
     expect(refreshedPipelineIds).toEqual(["20260403-cancel-running"]);
@@ -301,13 +302,13 @@ describe("pipeline control handlers", () => {
       namespace: drafts[0]!.namespace,
       key: "status",
       content: drafts[0]!.content,
-      tags: ["completed", "runtime:claude", "type:pipeline", "type:pipeline-phase"],
+      tags: ["completed", "runtime:claude", "type:pipeline", "type:pipeline-phase", "authority:autonomous"],
     });
     client.seed({
       namespace: drafts[1]!.namespace,
       key: "status",
       content: drafts[1]!.content,
-      tags: ["blocked", "runtime:claude", "type:pipeline", "type:pipeline-phase", "depends-on:20260403-cancel-finalize-gather"],
+      tags: ["blocked", "runtime:claude", "type:pipeline", "type:pipeline-phase", "authority:autonomous", "depends-on:20260403-cancel-finalize-gather"],
     });
 
     const processed = await processPipelineCancellationRequest(
@@ -323,6 +324,7 @@ describe("pipeline control handlers", () => {
       "runtime:claude",
       "type:pipeline",
       "type:pipeline-phase",
+      "authority:autonomous",
     ]);
     expect(client.get(taskNs, "status")?.tags).toEqual([
       "cancelled",
@@ -360,13 +362,13 @@ describe("pipeline control handlers", () => {
       namespace: drafts[0]!.namespace,
       key: "status",
       content: drafts[0]!.content,
-      tags: ["completed", "runtime:claude", "type:pipeline", "type:pipeline-phase"],
+      tags: ["completed", "runtime:claude", "type:pipeline", "type:pipeline-phase", "authority:autonomous"],
     });
     client.seed({
       namespace: drafts[1]!.namespace,
       key: "status",
       content: drafts[1]!.content,
-      tags: ["cancelled", "runtime:claude", "type:pipeline", "type:pipeline-phase", "depends-on:20260403-resume-tail-gather"],
+      tags: ["cancelled", "runtime:claude", "type:pipeline", "type:pipeline-phase", "authority:autonomous", "depends-on:20260403-resume-tail-gather"],
     });
 
     const processed = await processPipelineResumeRequest(client, hooks, entry);
@@ -376,6 +378,7 @@ describe("pipeline control handlers", () => {
       "runtime:claude",
       "type:pipeline",
       "type:pipeline-phase",
+      "authority:autonomous",
       "pending",
     ]);
     expect(client.get(drafts[1]!.namespace, "result")?.content).toContain(
@@ -415,13 +418,13 @@ describe("pipeline control handlers", () => {
       namespace: drafts[0]!.namespace,
       key: "status",
       content: drafts[0]!.content,
-      tags: ["completed", "runtime:claude", "type:pipeline", "type:pipeline-phase"],
+      tags: ["completed", "runtime:claude", "type:pipeline", "type:pipeline-phase", "authority:autonomous"],
     });
     client.seed({
       namespace: drafts[1]!.namespace,
       key: "status",
       content: drafts[1]!.content,
-      tags: ["pending", "runtime:claude", "type:pipeline", "type:pipeline-phase", "depends-on:20260403-resume-partial-gather"],
+      tags: ["pending", "runtime:claude", "type:pipeline", "type:pipeline-phase", "authority:autonomous", "depends-on:20260403-resume-partial-gather"],
     });
 
     const processed = await processPipelineResumeRequest(client, hooks, entry);

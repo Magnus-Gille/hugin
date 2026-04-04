@@ -13,6 +13,7 @@ export const pipelinePhaseLifecycleSchema = z.enum([
   "missing",
   "pending",
   "blocked",
+  "awaiting_approval",
   "running",
   "completed",
   "failed",
@@ -22,6 +23,7 @@ export type PipelinePhaseLifecycle = z.infer<typeof pipelinePhaseLifecycleSchema
 
 export const pipelineExecutionStateSchema = z.enum([
   "decomposed",
+  "awaiting_approval",
   "running",
   "completed",
   "failed",
@@ -42,7 +44,10 @@ export const pipelinePhaseExecutionSummarySchema = z.object({
   dependsOn: z.array(z.string().min(1)),
   dependencyTaskIds: z.array(z.string().min(1)),
   onDependencyFailure: pipelineDependencyFailureSchema,
+  authority: z.enum(["autonomous", "gated"]),
+  sideEffects: z.array(z.string().min(1)),
   lifecycle: pipelinePhaseLifecycleSchema,
+  approvalStatus: z.enum(["pending", "approved", "rejected"]).optional(),
   outcome: taskExecutionOutcomeSchema.optional(),
   exitCode: z
     .union([
@@ -85,6 +90,7 @@ export const pipelineExecutionSummarySchema = z.object({
     missing: z.number().int().nonnegative(),
     pending: z.number().int().nonnegative(),
     blocked: z.number().int().nonnegative(),
+    awaitingApproval: z.number().int().nonnegative(),
     running: z.number().int().nonnegative(),
     completed: z.number().int().nonnegative(),
     failed: z.number().int().nonnegative(),
@@ -134,6 +140,7 @@ export function getPipelinePhaseLifecycle(
   if (tags.includes("failed")) return "failed";
   if (tags.includes("completed")) return "completed";
   if (tags.includes("running")) return "running";
+  if (tags.includes("awaiting-approval")) return "awaiting_approval";
   if (tags.includes("blocked")) return "blocked";
   if (tags.includes("pending")) return "pending";
   return "missing";
@@ -142,10 +149,15 @@ export function getPipelinePhaseLifecycle(
 function getExecutionState(
   counts: PipelineExecutionSummary["phaseCounts"]
 ): PipelineExecutionState {
-  const activeCount = counts.pending + counts.blocked + counts.running;
+  const activeCount =
+    counts.pending + counts.blocked + counts.awaitingApproval + counts.running;
 
   if (counts.running > 0) {
     return "running";
+  }
+
+  if (counts.awaitingApproval > 0) {
+    return "awaiting_approval";
   }
 
   if (
@@ -193,7 +205,13 @@ export function buildPipelineExecutionSummary(
       dependsOn: snapshot.phase.dependsOn,
       dependencyTaskIds: snapshot.phase.dependencyTaskIds,
       onDependencyFailure: snapshot.phase.onDependencyFailure,
+      authority: snapshot.phase.authority,
+      sideEffects: snapshot.phase.sideEffects,
       lifecycle: snapshot.lifecycle,
+      approvalStatus:
+        snapshot.lifecycle === "awaiting_approval"
+          ? "pending"
+          : snapshot.structuredResult?.approval?.status,
       outcome: snapshot.structuredResult?.outcome,
       exitCode: snapshot.structuredResult?.exitCode,
       startedAt: snapshot.structuredResult?.startedAt,
@@ -210,6 +228,9 @@ export function buildPipelineExecutionSummary(
     missing: phases.filter((phase) => phase.lifecycle === "missing").length,
     pending: phases.filter((phase) => phase.lifecycle === "pending").length,
     blocked: phases.filter((phase) => phase.lifecycle === "blocked").length,
+    awaitingApproval: phases.filter(
+      (phase) => phase.lifecycle === "awaiting_approval"
+    ).length,
     running: phases.filter((phase) => phase.lifecycle === "running").length,
     completed: phases.filter((phase) => phase.lifecycle === "completed").length,
     failed: phases.filter((phase) => phase.lifecycle === "failed").length,

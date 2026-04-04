@@ -87,12 +87,14 @@ Phase: synthesize
       "runtime:ollama",
       "type:pipeline",
       "type:pipeline-phase",
+      "authority:autonomous",
     ]);
     expect(drafts[1]?.tags).toEqual([
       "blocked",
       "runtime:claude",
       "type:pipeline",
       "type:pipeline-phase",
+      "authority:autonomous",
       "on-dep-failure:continue",
       "depends-on:20260402-improve-munin-ux-explore",
     ]);
@@ -158,7 +160,26 @@ Phase: second
     ).toThrow(/cycle/);
   });
 
-  it("rejects gated authority before Step 4", () => {
+  it("accepts gated authority when explicit side effects are declared", () => {
+    const pipeline = makePipeline(`## Task: Gated
+
+- **Runtime:** pipeline
+
+### Pipeline
+
+Phase: deploy
+  Runtime: codex-spawn
+  Authority: gated
+  Side-effects: deploy.service
+  Prompt: |
+    Deploy.
+`);
+
+    expect(pipeline.phases[0]?.authority).toBe("gated");
+    expect(pipeline.phases[0]?.sideEffects).toEqual(["deploy.service"]);
+  });
+
+  it("rejects gated phases without explicit side effects", () => {
     expect(() =>
       makePipeline(`## Task: Gated
 
@@ -172,7 +193,42 @@ Phase: deploy
   Prompt: |
     Deploy.
 `)
-    ).toThrow(/deferred until Step 4/);
+    ).toThrow(/declares no Side-effects/);
+  });
+
+  it("rejects autonomous phases that declare side effects", () => {
+    expect(() =>
+      makePipeline(`## Task: Invalid autonomous side effects
+
+- **Runtime:** pipeline
+
+### Pipeline
+
+Phase: notify
+  Runtime: claude-sdk
+  Side-effects: message.telegram.send
+  Prompt: |
+    Notify.
+`)
+    ).toThrow(/declares side effects but uses Authority: autonomous/);
+  });
+
+  it("rejects unknown side effect ids", () => {
+    expect(() =>
+      makePipeline(`## Task: Unknown side effect
+
+- **Runtime:** pipeline
+
+### Pipeline
+
+Phase: notify
+  Runtime: claude-sdk
+  Authority: gated
+  Side-effects: message.slack.send
+  Prompt: |
+    Notify.
+`)
+    ).toThrow(/unknown side effect/);
   });
 
   it("renders parent routing metadata in the decomposition result", () => {

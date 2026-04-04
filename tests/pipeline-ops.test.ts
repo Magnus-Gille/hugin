@@ -81,6 +81,19 @@ describe("pipeline resume planner", () => {
     expect(plan.reason).toMatch(/already active/);
   });
 
+  it("treats awaiting approval as an active lifecycle", () => {
+    const pipeline = makePipeline();
+    const plan = buildPipelineResumePlan(pipeline, {
+      [pipeline.phases[0]!.taskNamespace]: "awaiting_approval",
+      [pipeline.phases[1]!.taskNamespace]: "blocked",
+      [pipeline.phases[2]!.taskNamespace]: "blocked",
+    });
+
+    expect(plan.resumable).toBe(false);
+    expect(plan.hasActivePhases).toBe(true);
+    expect(plan.reason).toMatch(/already active/);
+  });
+
   it("continues a partial resume when some phases are already active", () => {
     const pipeline = makePipeline();
     const plan = buildPipelineResumePlan(pipeline, {

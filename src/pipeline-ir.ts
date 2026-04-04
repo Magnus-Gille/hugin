@@ -6,6 +6,18 @@ export type PipelineSensitivity = z.infer<typeof pipelineSensitivitySchema>;
 export const pipelineAuthoritySchema = z.enum(["autonomous", "gated"]);
 export type PipelineAuthority = z.infer<typeof pipelineAuthoritySchema>;
 
+export const pipelineSideEffectIdSchema = z.enum([
+  "git.push",
+  "git.merge",
+  "github.pr.create",
+  "github.pr.merge",
+  "deploy.service",
+  "message.telegram.send",
+  "message.email.send",
+  "file.write.outside_workspace",
+]);
+export type PipelineSideEffectId = z.infer<typeof pipelineSideEffectIdSchema>;
+
 export const pipelineDependencyFailureSchema = z.enum(["fail", "continue"]);
 export type PipelineDependencyFailure = z.infer<typeof pipelineDependencyFailureSchema>;
 
@@ -63,6 +75,7 @@ export const pipelinePhaseIRSchema = z.object({
   prompt: z.string().min(1),
   timeout: z.number().int().positive().optional(),
   authority: pipelineAuthoritySchema,
+  sideEffects: z.array(pipelineSideEffectIdSchema).default([]),
   effectiveSensitivity: pipelineSensitivitySchema,
 });
 
