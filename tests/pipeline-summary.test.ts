@@ -126,6 +126,54 @@ describe("pipeline execution summary", () => {
     expect(summary.phases[0]?.approvalStatus).toBe("pending");
   });
 
+  it("parses pre-phase4 summaries without approval fields", () => {
+    const parsed = parsePipelineExecutionSummary(
+      JSON.stringify({
+        schemaVersion: 1,
+        pipelineId: "20260404-legacy",
+        pipelineTaskNamespace: "tasks/20260404-legacy",
+        title: "Legacy",
+        submittedBy: "Codex",
+        submittedAt: "2026-04-04T10:00:00Z",
+        sensitivity: "internal",
+        generatedAt: "2026-04-04T10:01:00Z",
+        executionState: "completed",
+        terminal: true,
+        phaseCounts: {
+          total: 1,
+          missing: 0,
+          pending: 0,
+          blocked: 0,
+          running: 0,
+          completed: 1,
+          failed: 0,
+          cancelled: 0,
+        },
+        phases: [
+          {
+            name: "gather",
+            slug: "gather",
+            taskId: "20260404-legacy-gather",
+            taskNamespace: "tasks/20260404-legacy-gather",
+            runtime: "claude-sdk",
+            dispatcherRuntime: "claude",
+            dependsOn: [],
+            dependencyTaskIds: [],
+            onDependencyFailure: "fail",
+            lifecycle: "completed",
+            outcome: "completed",
+            exitCode: 0,
+          },
+        ],
+      })
+    );
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.phaseCounts.awaitingApproval).toBe(0);
+    expect(parsed?.phases[0]?.authority).toBe("autonomous");
+    expect(parsed?.phases[0]?.sideEffects).toEqual([]);
+  });
+
   it("builds a completed summary with timings from structured results", () => {
     const pipeline = makePipeline();
     const summary = buildPipelineExecutionSummary(
