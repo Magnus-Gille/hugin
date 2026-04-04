@@ -1,6 +1,6 @@
 # Hugin — Status
 
-**Last session:** 2026-04-04 (Critical pre-Phase-5 security hardening implemented and live-validated)
+**Last session:** 2026-04-04 (Review fixes for pre-Phase-5 security hardening)
 **Branch:** main
 
 ## Plan Status
@@ -8,13 +8,22 @@
 - **Phase 2: Pipeline compiler and decomposition** — done and live-validated. See [docs/step2-live-evaluation.md](/Users/magnus/repos/hugin/docs/step2-live-evaluation.md).
 - **Phase 3: Structured results and pipeline operations** — done and live-validated. This includes structured per-phase results, parent summaries, cancellation, resume-from-failed-phase, and the Munin-pressure hardening/follow-up fixes. See [docs/step3-live-evaluation.md](/Users/magnus/repos/hugin/docs/step3-live-evaluation.md), [docs/step3-cancellation-live-evaluation.md](/Users/magnus/repos/hugin/docs/step3-cancellation-live-evaluation.md), [docs/step3-resume-live-evaluation.md](/Users/magnus/repos/hugin/docs/step3-resume-live-evaluation.md), and [docs/munin-429-hardening-live-evaluation.md](/Users/magnus/repos/hugin/docs/munin-429-hardening-live-evaluation.md).
 - **Phase 4: Human gates for side effects** — done and live-validated. `Authority: gated` compiles with explicit `Side-effects:` declarations, gated phases pause in `awaiting-approval`, approval requests/decisions are represented in Munin, approved phases return to `pending`, rejected phases fail without execution, and summaries/results retain structured approval metadata. See [docs/step4-live-evaluation.md](/Users/magnus/repos/hugin/docs/step4-live-evaluation.md).
-- **Critical pre-Phase-5 security hardening** — done and live-validated. Claude spawn removal, first-pass outbound egress allowlist, and context-ref classification enforcement are deployed on `huginmunin`. See [docs/security-critical-holes-live-evaluation.md](/Users/magnus/repos/hugin/docs/security-critical-holes-live-evaluation.md).
+- **Critical pre-Phase-5 security hardening** — done and live-validated. Claude spawn removal, first-pass outbound egress allowlist, and context-ref classification enforcement are deployed on `huginmunin`. See [docs/security-critical-holes-live-evaluation.md](/Users/magnus/repos/hugin/docs/security-critical-holes-live-evaluation.md). Post-review cleanup (egress-policy tests, context-loader fix, docs update) shipped in `13ce918`.
 - **Phase 5: Sensitivity classification** — started. Step 0 is done; remaining propagation and corpus-evaluation work is still open.
 - **Phase 6: Router (`Runtime: auto`)** — not started.
 - **Phase 7: Methodology templates** — not started.
 - **Bet 1 status** — closed. Phases 1-4 are implemented and live-validated on `huginmunin`.
 
 ## Completed This Session
+- **Post-Codex review of pre-Phase-5 security hardening** — reviewed 654b046, found no critical issues. Security model is sound (sensitivity lattice, classification enforcement, pipeline compile-time checks all correct). Identified 5 important, 4 minor, and 2 nit-level findings.
+- **Egress-policy test coverage added** — 26 new tests in `tests/egress-policy.test.ts` covering host matching, wildcard patterns, SCP-style git URLs, fetch blocking/allowing, non-HTTP protocol passthrough, and Request/URL input types.
+- **Context-loader sensitivity logic hardened** — replaced hand-rolled max-sensitivity comparison with the shared `maxSensitivity()` helper from `sensitivity.ts`, reducing fragility if a 4th sensitivity level is added.
+- **Context-loader docstring updated** — removed stale "no semantic policy" claim; now accurately describes classification metadata surfacing and maxSensitivity computation.
+- **Egress policy init ordering fixed** — moved `installFetchEgressPolicy()` above `createMuninClient()` calls in `index.ts` so the intent (all HTTP goes through the policy) is clear to readers.
+- **CLAUDE.md project structure updated** — expanded from 6 to 20 source files, added docs/ and scripts/ entries, documented `HUGIN_ALLOWED_EGRESS_HOSTS` env var.
+- **Test suite now at 153 tests** (up from 127), all passing. Build clean.
+
+## Previous Session
 - **Critical security hardening implemented and deployed** — removed the legacy Claude spawn executor, added a first-pass outbound allowlist (`fetch` + git remote host checks + service address-family narrowing), and introduced a shared sensitivity model in [src/sensitivity.ts](/Users/magnus/repos/hugin/src/sensitivity.ts) plus first-pass egress controls in [src/egress-policy.ts](/Users/magnus/repos/hugin/src/egress-policy.ts).
 - **Context-ref classification enforcement is now live** — [src/context-loader.ts](/Users/magnus/repos/hugin/src/context-loader.ts), [src/munin-client.ts](/Users/magnus/repos/hugin/src/munin-client.ts), and [src/index.ts](/Users/magnus/repos/hugin/src/index.ts) now read Munin classification, compute effective task sensitivity, fail closed before prompt injection on unsafe runtimes, and write classification-aware artifacts back to Munin.
 - **Pipeline runtime sensitivity limits now enforce at compile time** — [src/pipeline-compiler.ts](/Users/magnus/repos/hugin/src/pipeline-compiler.ts) now derives effective phase sensitivity from pipeline sensitivity plus heuristics/dependencies and rejects private-sensitive cloud phases before decomposition.
@@ -66,6 +75,11 @@
 - **Step 2 live re-test after bug fixes** — all four Step 2 regressions confirmed resolved: `type:*` tags preserved on successful pipeline parent, `on-dep-failure:continue` survives task completion, missing-runtime error message clear, result formatting clean.
 - **AGENTS.md fixed and committed** — corrected Codex→claude substitution errors introduced during generation (runtime names, script paths, env var descriptions, allowed submitters).
 - **Bug reports and tickets committed and pushed** — `3a4c7a7` on `codex/step1-live-eval`.
+
+- **Critical security hardening implemented and deployed** — removed the legacy Claude spawn executor, added a first-pass outbound allowlist (`fetch` + git remote host checks + service address-family narrowing), and introduced a shared sensitivity model in [src/sensitivity.ts](/Users/magnus/repos/hugin/src/sensitivity.ts) plus first-pass egress controls in [src/egress-policy.ts](/Users/magnus/repos/hugin/src/egress-policy.ts).
+- **Context-ref classification enforcement is now live** — [src/context-loader.ts](/Users/magnus/repos/hugin/src/context-loader.ts), [src/munin-client.ts](/Users/magnus/repos/hugin/src/munin-client.ts), and [src/index.ts](/Users/magnus/repos/hugin/src/index.ts) now read Munin classification, compute effective task sensitivity, fail closed before prompt injection on unsafe runtimes, and write classification-aware artifacts back to Munin.
+- **Pipeline runtime sensitivity limits now enforce at compile time** — [src/pipeline-compiler.ts](/Users/magnus/repos/hugin/src/pipeline-compiler.ts) now derives effective phase sensitivity from pipeline sensitivity plus heuristics/dependencies and rejects private-sensitive cloud phases before decomposition.
+- **Live validation record added** — [docs/security-critical-holes-live-evaluation.md](/Users/magnus/repos/hugin/docs/security-critical-holes-live-evaluation.md) captures the standalone private-ref denial, the private pipeline compile-time rejection, the live-found `private -> client-confidential` mapping fix, and the current first-pass egress posture.
 
 ## Previous Sessions
 - **Step 3 resume-from-failed-phase implemented locally** — added pipeline parent `resume-requested` handling in [src/index.ts](/Users/magnus/repos/hugin/src/index.ts), a pure resume planner in [src/pipeline-ops.ts](/Users/magnus/repos/hugin/src/pipeline-ops.ts), and logic to reset only non-completed phases while keeping successful phases intact.
