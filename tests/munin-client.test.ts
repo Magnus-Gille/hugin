@@ -121,6 +121,32 @@ describe("MuninClient", () => {
     });
   });
 
+  it("passes classification through memory_write", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(rpcResponse({ ok: true }));
+
+    const client = new MuninClient({
+      baseUrl: "http://munin.test",
+      apiKey: "test-key",
+      minRequestSpacingMs: 0,
+    });
+
+    await client.write(
+      "tasks/demo",
+      "result",
+      "hello",
+      ["type:test"],
+      undefined,
+      "private",
+    );
+
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(request).toBeDefined();
+    const body = JSON.parse(String((request as RequestInit).body));
+    expect(body.params.arguments.classification).toBe("private");
+  });
+
   it("supports bare-array batch-read responses", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       rpcResponseNoSpace([

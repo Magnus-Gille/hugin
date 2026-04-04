@@ -4,6 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import express from "express";
 import {
+  buildDefaultEgressHosts,
+  installFetchEgressPolicy,
+  isGitRemoteAllowed,
+} from "./egress-policy.js";
+import {
   MuninClient,
   type MuninEntry,
   type MuninClientConfig,
@@ -56,7 +61,22 @@ import {
   type TaskExecutionBodyKind,
   type TaskExecutionPipelineContext,
   type TaskExecutionRuntimeMetadata,
+  type TaskExecutionSensitivity,
 } from "./task-result-schema.js";
+import {
+  buildSensitivityAssessment,
+  buildSensitivityPolicyError,
+  classifyContextSensitivity,
+  classifyPromptSensitivity,
+  compareSensitivity,
+  getDispatcherRuntimeMaxSensitivity,
+  parseSensitivity,
+  sensitivitySchema,
+  sensitivityToMuninClassification,
+  sensitivityToTag,
+  type Sensitivity,
+  type SensitivityAssessment,
+} from "./sensitivity.js";
 
 const HUGIN_HOME = path.join(process.env.HOME || "/home/magnus", ".hugin");
 const LOG_DIR = path.join(HUGIN_HOME, "logs");
@@ -76,7 +96,6 @@ const config = {
   defaultTimeoutMs: parseInt(process.env.HUGIN_DEFAULT_TIMEOUT_MS || "300000"),
   workspace: process.env.HUGIN_WORKSPACE || "/home/magnus/workspace",
   maxOutputChars: parseInt(process.env.HUGIN_MAX_OUTPUT_CHARS || "50000"),
-  claudeExecutor: (process.env.HUGIN_CLAUDE_EXECUTOR || "sdk") as "sdk" | "spawn",
   allowedSubmitters: (process.env.HUGIN_ALLOWED_SUBMITTERS || "Codex,Codex-desktop,ratatoskr,Codex-web,Codex-mobile,claude-code,claude-desktop,claude-web,claude-mobile,hugin")
     .split(",")
     .map((s) => s.trim())
@@ -84,7 +103,19 @@ const config = {
   ollamaPiUrl: process.env.OLLAMA_PI_URL || "http://127.0.0.1:11434",
   ollamaLaptopUrl: process.env.OLLAMA_LAPTOP_URL || "",
   ollamaDefaultModel: process.env.OLLAMA_DEFAULT_MODEL || "qwen2.5:3b",
+  extraAllowedEgressHosts: (process.env.HUGIN_ALLOWED_EGRESS_HOSTS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
 };
+
+const legacyClaudeExecutor = process.env.HUGIN_CLAUDE_EXECUTOR?.trim().toLowerCase();
+if (legacyClaudeExecutor && legacyClaudeExecutor !== "sdk") {
+  console.error(
+    `HUGIN_CLAUDE_EXECUTOR=${legacyClaudeExecutor} is no longer supported; Claude tasks now always use the Agent SDK`,
+  );
+  process.exit(1);
+}
 
 if (!config.muninApiKey) {
   console.error("MUNIN_API_KEY is required");
@@ -141,6 +172,14 @@ const munin = createMuninClient();
 // slot so a long Retry-After on background work cannot delay them past expiry.
 const leaseMunin = createMuninClient();
 const cancelWatchMunin = createMuninClient();
+const egressPolicy = installFetchEgressPolicy(
+  buildDefaultEgressHosts({
+    muninUrl: config.muninUrl,
+    ollamaPiUrl: config.ollamaPiUrl,
+    ollamaLaptopUrl: config.ollamaLaptopUrl,
+    extraHosts: config.extraAllowedEgressHosts,
+  }),
+);
 
 // --- Task parsing ---
 
@@ -161,6 +200,10 @@ interface TaskConfig {
   fallback?: "claude" | "none";
   contextRefs?: string[];
   contextBudget?: number;
+  declaredSensitivity?: Sensitivity;
+  effectiveSensitivity?: Sensitivity;
+  sensitivityAssessment?: SensitivityAssessment;
+  contextResolution?: Awaited<ReturnType<typeof resolveContextRefs>>;
   pipeline?: TaskExecutionPipelineContext;
 }
 
@@ -261,6 +304,9 @@ function parseTask(content: string): TaskConfig | null {
   const contextBudgetStr = content.match(
     /\*\*Context-budget:\*\*\s*(\d+)/i
   )?.[1];
+  const declaredSensitivityRaw = content.match(
+    /\*\*Sensitivity:\*\*\s*(public|internal|private)/i
+  )?.[1]?.trim()?.toLowerCase();
   const pipelineId = content.match(
     /\*\*Pipeline:\*\*\s*(.+)/i
   )?.[1]?.trim();
@@ -317,6 +363,9 @@ function parseTask(content: string): TaskConfig | null {
       ? contextRefsRaw.split(",").map((r) => r.trim()).filter(Boolean)
       : undefined,
     contextBudget: contextBudgetStr ? parseInt(contextBudgetStr) : undefined,
+    declaredSensitivity: declaredSensitivityRaw
+      ? sensitivitySchema.parse(declaredSensitivityRaw)
+      : undefined,
     pipeline:
       pipelineId && pipelinePhase
         ? {
@@ -343,6 +392,93 @@ function parseTask(content: string): TaskConfig | null {
   };
 }
 
+function buildTaskSensitivitySnapshot(
+  assessment: SensitivityAssessment | undefined,
+): TaskExecutionSensitivity | undefined {
+  if (!assessment) return undefined;
+  return {
+    declared: assessment.declared,
+    effective: assessment.effective,
+    mismatch: assessment.mismatch,
+  };
+}
+
+function getDeclaredSensitivityFromContent(
+  content: string,
+): Sensitivity | undefined {
+  return parseSensitivity(
+    content.match(/\*\*Sensitivity:\*\*\s*(public|internal|private)/i)?.[1],
+  );
+}
+
+function getTaskArtifactClassification(
+  task: Pick<TaskConfig, "effectiveSensitivity" | "declaredSensitivity" | "pipeline"> | undefined,
+  content?: string,
+): string | undefined {
+  const sensitivity =
+    task?.effectiveSensitivity ||
+    task?.pipeline?.sensitivity ||
+    task?.declaredSensitivity ||
+    (content ? getDeclaredSensitivityFromContent(content) : undefined);
+  return sensitivity ? sensitivityToMuninClassification(sensitivity) : undefined;
+}
+
+function getTaskSensitivityAssessment(task: TaskConfig): SensitivityAssessment {
+  const declared = task.declaredSensitivity;
+  const baseline = task.pipeline?.sensitivity || "internal";
+  const contextSensitivity = classifyContextSensitivity(task.context, task.workingDir);
+  const promptSensitivity = classifyPromptSensitivity(task.prompt);
+  const refsSensitivity = task.contextResolution?.maxSensitivity;
+  return buildSensitivityAssessment({
+    declared,
+    baseline,
+    context: contextSensitivity,
+    prompt: promptSensitivity,
+    refs: refsSensitivity,
+  });
+}
+
+function getTaskRuntimeLabel(task: TaskConfig): string {
+  if (task.runtime !== "ollama") return task.runtime;
+  return task.ollamaHost ? `ollama:${task.ollamaHost}` : "ollama";
+}
+
+async function assessTaskSecurity(task: TaskConfig): Promise<SensitivityAssessment> {
+  if (task.contextRefs?.length) {
+    task.contextResolution = await resolveContextRefs(
+      task.contextRefs,
+      task.contextBudget,
+      munin,
+    );
+  }
+
+  const assessment = getTaskSensitivityAssessment(task);
+  task.effectiveSensitivity = assessment.effective;
+  task.sensitivityAssessment = assessment;
+  return assessment;
+}
+
+function getSecurityViolationForTask(
+  task: TaskConfig,
+  assessment: SensitivityAssessment,
+): string | null {
+  const runtimeMax = getDispatcherRuntimeMaxSensitivity(task.runtime);
+  if (compareSensitivity(assessment.effective, runtimeMax) > 0) {
+    const deniedRef =
+      task.contextResolution?.refs.find(
+        (ref) => compareSensitivity(ref.sensitivity, runtimeMax) > 0,
+      );
+    return buildSensitivityPolicyError({
+      runtimeLabel: getTaskRuntimeLabel(task),
+      runtimeMax,
+      effective: assessment.effective,
+      deniedRef: deniedRef?.ref,
+      deniedClassification: deniedRef?.classification,
+    });
+  }
+  return null;
+}
+
 // --- Log directory ---
 
 function ensureLogDir(): void {
@@ -355,13 +491,16 @@ function extractTaskId(namespace: string): string {
 
 async function writeStructuredTaskResult(
   taskNs: string,
-  result: StructuredTaskResult
+  result: StructuredTaskResult,
+  classification?: string,
 ): Promise<void> {
   await munin.write(
     taskNs,
     "result-structured",
     JSON.stringify(buildStructuredTaskResult(result), null, 2),
-    ["type:task-result", "type:task-result-structured"]
+    ["type:task-result", "type:task-result-structured"],
+    undefined,
+    classification,
   );
 }
 
@@ -449,6 +588,7 @@ function createFailureStructuredResult(
     pipeline?: TaskExecutionPipelineContext;
     runtimeMetadata?: TaskExecutionRuntimeMetadata;
     approval?: TaskExecutionApprovalMetadata;
+    sensitivity?: TaskExecutionSensitivity;
   }
 ): StructuredTaskResult {
   const completedAt = options.completedAt || new Date().toISOString();
@@ -476,6 +616,7 @@ function createFailureStructuredResult(
     runtimeMetadata: options.runtimeMetadata,
     pipeline: options.pipeline,
     approval: options.approval,
+    sensitivity: options.sensitivity,
   });
 }
 
@@ -603,6 +744,7 @@ function createCancelledStructuredResult(
     bodyKind?: TaskExecutionBodyKind;
     bodyText?: string;
     approval?: TaskExecutionApprovalMetadata;
+    sensitivity?: TaskExecutionSensitivity;
   }
 ): StructuredTaskResult {
   const completedAt = options.completedAt || new Date().toISOString();
@@ -630,6 +772,7 @@ function createCancelledStructuredResult(
     runtimeMetadata: options.runtimeMetadata,
     pipeline: options.pipeline,
     approval: options.approval,
+    sensitivity: options.sensitivity,
   });
 }
 
@@ -758,6 +901,25 @@ async function postTaskGitPush(workingDir: string): Promise<void> {
 
   if (!isAhead) return;
 
+  const remoteUrl = await new Promise<string | null>((resolve) => {
+    const child = spawn("git", ["remote", "get-url", "--push", "origin"], {
+      cwd: workingDir,
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, HOME: "/home/magnus" },
+    });
+    let out = "";
+    child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
+    child.on("close", (code) => resolve(code === 0 ? out.trim() : null));
+    child.on("error", () => resolve(null));
+  });
+
+  if (!remoteUrl || !isGitRemoteAllowed(remoteUrl, egressPolicy.allowedHosts)) {
+    console.warn(
+      `Post-task git push skipped in ${workingDir}: remote is missing or not allowed by egress policy`,
+    );
+    return;
+  }
+
   console.log(`Post-task: unpushed commits detected in ${workingDir}, running git push`);
   await new Promise<void>((resolve) => {
     const child = spawn("git", ["push"], {
@@ -794,6 +956,9 @@ function spawnRuntime(
   task: TaskConfig,
   ctx: SpawnContext
 ): Promise<{ exitCode: number | "TIMEOUT"; output: string; logFile: string }> {
+  if (task.runtime !== "codex") {
+    throw new Error(`Spawn executor no longer supports runtime "${task.runtime}"`);
+  }
   return new Promise((resolve) => {
     const taskId = extractTaskId(ctx.taskNs);
     const logFile = path.join(LOG_DIR, `${taskId}.log`);
@@ -817,10 +982,7 @@ function spawnRuntime(
       ].join("\n")
     );
 
-    const cmd =
-      task.runtime === "codex"
-        ? ["codex", ["exec", "--full-auto", task.prompt]]
-        : ["claude", ["-p", "--dangerously-skip-permissions", "--verbose", task.prompt]];
+    const cmd = ["codex", ["exec", "--full-auto", task.prompt]];
 
     const child = spawn(cmd[0] as string, cmd[1] as string[], {
       cwd: task.workingDir,
@@ -961,11 +1123,13 @@ function buildClaimTags(
   const runtimeTag = baseTags.find((t) => t.startsWith("runtime:"));
   const typeTags = baseTags.filter((t) => t.startsWith("type:"));
   const authorityTags = baseTags.filter((t) => t.startsWith("authority:"));
+  const sensitivityTags = baseTags.filter((t) => t.startsWith("sensitivity:"));
   return [
     lifecycle,
     ...(runtimeTag ? [runtimeTag] : []),
     ...typeTags,
     ...authorityTags,
+    ...sensitivityTags,
     `claimed_by:${workerId}`,
     `lease_expires:${leaseExpiry()}`,
   ];
@@ -1193,19 +1357,28 @@ async function failBlockedTask(
   entry: MuninEntry & { found: true },
   errorMessage: string
 ): Promise<void> {
+  const task = parseTask(entry.content);
+  if (task && !task.sensitivityAssessment) {
+    task.sensitivityAssessment = getTaskSensitivityAssessment(task);
+    task.effectiveSensitivity = task.sensitivityAssessment.effective;
+  }
+  const classification = getTaskArtifactClassification(task || undefined, entry.content);
   await munin.write(
     taskNs,
     "status",
     entry.content,
     buildTerminalStatusTags("failed", entry.tags),
-    entry.updated_at
+    entry.updated_at,
+    classification
   );
   await munin.write(
     taskNs,
     "result",
-    `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`
+    `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`,
+    undefined,
+    undefined,
+    classification
   );
-  const task = parseTask(entry.content);
   const runtime = (
     entry.tags.find((tag) => tag.startsWith("runtime:")) || "runtime:claude"
   ).replace(/^runtime:/, "") as DispatcherRuntime;
@@ -1219,7 +1392,9 @@ async function failBlockedTask(
       group: task?.group,
       sequence: task?.sequence,
       pipeline: task?.pipeline,
-    })
+      sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
+    }),
+    classification,
   );
   await munin.log(taskNs, `Failed due to dependency state: ${errorMessage}`);
   await refreshPipelineSummaryFromContent(entry.content);
@@ -1376,6 +1551,11 @@ async function markTaskCancelled(
   }
 ): Promise<void> {
   const task = parseTask(entry.content);
+  if (task && !task.sensitivityAssessment) {
+    task.sensitivityAssessment = getTaskSensitivityAssessment(task);
+    task.effectiveSensitivity = task.sensitivityAssessment.effective;
+  }
+  const classification = getTaskArtifactClassification(task || undefined, entry.content);
   const completedAt = options.completedAt || new Date().toISOString();
   const runtime = getRuntimeFromTags(entry.tags);
   let approvalMetadata: TaskExecutionApprovalMetadata | undefined;
@@ -1416,9 +1596,12 @@ async function markTaskCancelled(
       replyTo: task?.replyTo,
       replyFormat: task?.replyFormat,
       group: task?.group,
-      sequence: task?.sequence,
-      body: options.body,
-    })
+        sequence: task?.sequence,
+        body: options.body,
+    }),
+    undefined,
+    undefined,
+    classification
   );
 
   if (runtime !== "pipeline") {
@@ -1440,7 +1623,9 @@ async function markTaskCancelled(
         approval: approvalMetadata,
         bodyKind: options.bodyKind,
         bodyText: options.bodyText,
-      })
+        sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
+      }),
+      classification,
     );
   }
 
@@ -1449,7 +1634,8 @@ async function markTaskCancelled(
     "status",
     entry.content,
     buildTerminalStatusTags("cancelled", entry.tags),
-    entry.updated_at
+    entry.updated_at,
+    classification
   );
   await munin.log(taskNs, `Task cancelled: ${reason}`);
   if (task?.pipeline?.pipelineId) {
@@ -1825,17 +2011,27 @@ async function failTaskWithMessage(
     entry.tags.find((tag) => tag.startsWith("runtime:")) ||
     "runtime:claude"
   ).replace(/^runtime:/, "") as DispatcherRuntime | "pipeline";
+  const task = parseTask(entry.content);
+  if (task && !task.sensitivityAssessment) {
+    task.sensitivityAssessment = getTaskSensitivityAssessment(task);
+    task.effectiveSensitivity = task.sensitivityAssessment.effective;
+  }
+  const classification = getTaskArtifactClassification(task || undefined, entry.content);
   await munin.write(
     taskNs,
     "status",
     entry.content,
     buildTerminalStatusTags("failed", entry.tags, runtimeTagOverride),
-    entry.updated_at
+    entry.updated_at,
+    classification
   );
   await munin.write(
     taskNs,
     "result",
-    `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`
+    `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`,
+    undefined,
+    undefined,
+    classification
   );
   if (runtime !== "pipeline") {
     await writeStructuredTaskResult(
@@ -1843,7 +2039,9 @@ async function failTaskWithMessage(
       createFailureStructuredResult(taskNs, runtime, errorMessage, {
         executor: "dispatcher",
         resultSource: "dispatcher",
-      })
+        sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
+      }),
+      classification,
     );
   }
 }
@@ -1962,6 +2160,54 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     return { hadTask: true, queueDepth };
   }
 
+  if (declaredRuntime !== "pipeline" && parsedTask) {
+    const sensitivityAssessment = await assessTaskSecurity(parsedTask);
+    const securityViolation = getSecurityViolationForTask(
+      parsedTask,
+      sensitivityAssessment,
+    );
+    if (securityViolation) {
+      const classification = getTaskArtifactClassification(parsedTask);
+      await munin.write(
+        taskNs,
+        "status",
+        entry.content,
+        buildTerminalStatusTags("failed", entry.tags),
+        entry.updated_at,
+        classification,
+      );
+      await munin.write(
+        taskNs,
+        "result",
+        `## Result\n\n- **Exit code:** -1\n- **Error:** ${securityViolation}\n`,
+        undefined,
+        undefined,
+        classification,
+      );
+      await writeStructuredTaskResult(
+        taskNs,
+        createFailureStructuredResult(taskNs, parsedTask.runtime, securityViolation, {
+          executor: "dispatcher",
+          resultSource: "security-policy",
+          replyTo: parsedTask.replyTo,
+          replyFormat: parsedTask.replyFormat,
+          group: parsedTask.group,
+          sequence: parsedTask.sequence,
+          pipeline: parsedTask.pipeline,
+          sensitivity: buildTaskSensitivitySnapshot(sensitivityAssessment),
+        }),
+        classification,
+      );
+      await munin.log(
+        taskNs,
+        `Task rejected by security policy: ${securityViolation}`,
+      );
+      await promoteDependents(extractTaskId(taskNs));
+      await refreshPipelineSummaryFromContent(entry.content);
+      return { hadTask: true, queueDepth };
+    }
+  }
+
   if (
     declaredRuntime !== "pipeline" &&
     parsedTask &&
@@ -2025,6 +2271,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     }
 
     currentTaskConfig = task;
+    const taskClassification = getTaskArtifactClassification(task);
+    const taskSensitivitySnapshot = buildTaskSensitivitySnapshot(
+      task.sensitivityAssessment,
+    );
     let approvalMetadata: TaskExecutionApprovalMetadata | undefined;
     if (task.pipeline?.authority === "gated") {
       const [approvalRequestEntry, approvalDecisionEntry] = await Promise.all([
@@ -2053,8 +2303,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     startCancellationWatch();
 
     const isOllama = task.runtime === "ollama";
-    const useSdk = task.runtime === "claude" && config.claudeExecutor === "sdk";
-    const executorLabel = isOllama ? "ollama" : useSdk ? "agent-sdk" : "spawn";
+    const isClaude = task.runtime === "claude";
+    const executorLabel = isOllama ? "ollama" : isClaude ? "agent-sdk" : "spawn";
 
     // Capture quota before task execution (skip for ollama — it's Claude-specific)
     const quotaBefore = isOllama ? { q5: null, q7: null } : await fetchQuota();
@@ -2088,21 +2338,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     const host = await resolveOllamaHost(ollamaModel, task.ollamaHost);
 
     // Resolve context refs if specified
-    let contextResolution = null;
-    if (task.contextRefs && task.contextRefs.length > 0) {
-      contextResolution = await resolveContextRefs(
-        task.contextRefs,
-        task.contextBudget,
-        munin,
-      );
-    }
+    const contextResolution = task.contextResolution || null;
 
     if (!host) {
       // No host available — check fallback
       const reason = `No ollama host available for model "${ollamaModel}"`;
       console.warn(`${reason} — task ${taskNs}`);
 
-      if (task.fallback === "claude") {
+      if (
+        task.fallback === "claude" &&
+        compareSensitivity(task.effectiveSensitivity || "internal", "internal") <= 0
+      ) {
         console.log(`Falling back to Claude for task ${taskNs} (reason: host_unreachable)`);
         fallbackTriggered = true;
         fallbackReason = "host_unreachable";
@@ -2157,7 +2403,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       const isInfraFailure = ollamaResult.exitCode === 1 &&
         ollamaResult.output.match(/\[Ollama (HTTP|error:)/);
 
-      if (isInfraFailure && task.fallback === "claude") {
+      if (
+        isInfraFailure &&
+        task.fallback === "claude" &&
+        compareSensitivity(task.effectiveSensitivity || "internal", "internal") <= 0
+      ) {
         console.log(`Ollama infra failure, falling back to Claude for task ${taskNs}`);
         fallbackTriggered = true;
         fallbackReason = "ollama_error";
@@ -2237,7 +2487,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       };
     }
     currentOllamaAbort = null;
-    } else if (useSdk) {
+    } else if (isClaude) {
     console.log(`Using Agent SDK executor for task ${taskNs}`);
     const sdkAbort = new AbortController();
     currentSdkAbort = sdkAbort;
@@ -2271,7 +2521,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
               "```",
               partialOutput || "(no output captured)",
               "```",
-            ].join("\n"));
+            ].join("\n"), undefined, undefined, taskClassification);
           } catch (err) {
             console.error("Failed to write partial result on timeout:", err);
           }
@@ -2338,10 +2588,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let resultBody: string;
     let resultSource: string;
 
-    if ((useSdk || isOllama) && resultText) {
+    if ((isClaude || isOllama) && resultText) {
       resultSource = effectiveExecutor;
       resultBody = `### Response\n\n${resultText}`;
-    } else if (!useSdk && !isOllama) {
+    } else if (!isClaude && !isOllama) {
       const hookResult = readHookResult(taskId);
       if (hookResult) {
         resultSource = "hook";
@@ -2357,7 +2607,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     }
 
     // Write result to Munin (skip if timeout already wrote partial result via SDK)
-    if (!(isTimeout && useSdk)) {
+    if (!(isTimeout && isClaude)) {
       await munin.write(
         taskNs,
         "result",
@@ -2376,7 +2626,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           group: task.group,
           sequence: task.sequence,
           body: resultBody,
-        })
+        }),
+        undefined,
+        undefined,
+        taskClassification,
       );
     }
 
@@ -2432,7 +2685,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           group: task.group,
           sequence: task.sequence,
           body: resultBody,
-        })
+        }),
+        undefined,
+        undefined,
+        taskClassification,
       );
       await writeStructuredTaskResult(
         taskNs,
@@ -2452,13 +2708,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           approval: approvalMetadata,
           bodyKind: structuredBodyKind,
           bodyText: structuredBodyText,
-        })
+          sensitivity: taskSensitivitySnapshot,
+        }),
+        taskClassification,
       );
       await munin.write(
         taskNs,
         "status",
         entry.content,
-        buildTerminalStatusTags("cancelled", entry.tags, `runtime:${task.runtime}`)
+        buildTerminalStatusTags("cancelled", entry.tags, `runtime:${task.runtime}`),
+        undefined,
+        taskClassification,
       );
       await munin.log(
         taskNs,
@@ -2492,7 +2752,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           runtimeMetadata,
           pipeline: task.pipeline,
           approval: approvalMetadata,
-        })
+          sensitivity: taskSensitivitySnapshot,
+        }),
+        taskClassification,
       );
 
       await munin.write(
@@ -2500,6 +2762,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         "status",
         entry.content,
         buildTerminalStatusTags(ok ? "completed" : "failed", entry.tags, `runtime:${task.runtime}`)
+        ,
+        undefined,
+        taskClassification
       );
 
       await munin.log(
@@ -2649,6 +2914,10 @@ app.get("/health", (_req, res) => {
     queue_depth: lastQueueDepth,
     blocked_tasks: lastBlockedTaskCount,
     ollama_hosts: getHostStatus(),
+    egress_policy: {
+      enabled: egressPolicy.enabled,
+      allowed_hosts: egressPolicy.allowedHosts,
+    },
   });
 });
 
@@ -2764,8 +3033,9 @@ const server = app.listen(config.port, config.host, () => {
   console.log(`Hugin health endpoint: http://${config.host}:${config.port}/health`);
   console.log(`Munin: ${config.muninUrl}`);
   console.log(`Workspace: ${config.workspace}`);
-  console.log(`Claude executor: ${config.claudeExecutor} (set HUGIN_CLAUDE_EXECUTOR=spawn to use legacy)`);
+  console.log("Claude executor: agent-sdk");
   console.log(`Allowed submitters: ${config.allowedSubmitters.includes("*") ? "* (all)" : config.allowedSubmitters.join(", ")}`);
+  console.log(`Egress policy: allowlist (${egressPolicy.allowedHosts.join(", ")})`);
 });
 
 // Check Munin is reachable before starting poll loop

@@ -88,6 +88,7 @@ Phase: synthesize
       "type:pipeline",
       "type:pipeline-phase",
       "authority:autonomous",
+      "sensitivity:internal",
     ]);
     expect(drafts[1]?.tags).toEqual([
       "blocked",
@@ -95,6 +96,7 @@ Phase: synthesize
       "type:pipeline",
       "type:pipeline-phase",
       "authority:autonomous",
+      "sensitivity:internal",
       "on-dep-failure:continue",
       "depends-on:20260402-improve-munin-ux-explore",
     ]);
@@ -229,6 +231,41 @@ Phase: notify
     Notify.
 `)
     ).toThrow(/unknown side effect/);
+  });
+
+  it("rejects private-sensitive cloud phases", () => {
+    expect(() =>
+      makePipeline(`## Task: Private review
+
+- **Runtime:** pipeline
+- **Sensitivity:** private
+
+### Pipeline
+
+Phase: review
+  Runtime: claude-sdk
+  Prompt: |
+    Review the private notes.
+`)
+    ).toThrow(/max allowed: internal/);
+  });
+
+  it("allows private-sensitive local ollama phases", () => {
+    const pipeline = makePipeline(`## Task: Private review
+
+- **Runtime:** pipeline
+- **Sensitivity:** private
+
+### Pipeline
+
+Phase: review
+  Runtime: ollama-pi
+  Prompt: |
+    Review the private notes.
+`);
+
+    expect(pipeline.phases[0]?.effectiveSensitivity).toBe("private");
+    expect(pipeline.phases[0]?.runtime).toBe("ollama-pi");
   });
 
   it("renders parent routing metadata in the decomposition result", () => {

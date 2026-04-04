@@ -1,7 +1,7 @@
 # Hugin v2 Engineering Plan
 
 **Source:** [hugin-v2-pipeline-orchestrator.md](/Users/magnus/repos/hugin/docs/hugin-v2-pipeline-orchestrator.md)  
-**Status:** Phases 1-4 complete and live-validated; Bet 1 closed  
+**Status:** Phases 1-4 complete and live-validated; security precondition closed; Phase 5 started  
 **Date:** 2026-04-04
 
 ## Goal
@@ -132,6 +132,19 @@ Do not start routing work until all of these are true:
 - Build a local rule-based classifier.
 - Implement monotonic sensitivity propagation across pipeline inputs.
 
+**Detailed implementation plan**
+- [phase5-sensitivity-classification-engineering-plan.md](/Users/magnus/repos/hugin/docs/phase5-sensitivity-classification-engineering-plan.md)
+
+**Security precondition**
+- Before normal Phase 5 implementation, close the critical holes in [security-critical-holes-engineering-plan.md](/Users/magnus/repos/hugin/docs/security-critical-holes-engineering-plan.md).
+- Sequence them as:
+  1. remove the legacy Claude spawn executor
+  2. apply outbound egress filtering
+  3. start Phase 5 with context-ref classification enforcement as Step 0
+
+**Status**
+- Security precondition complete and live-validated. Phase 5 Step 0 is now implemented: shared sensitivity substrate, context-ref classification enforcement, runtime sensitivity limits, and classification-aware Munin artifact writes. See [security-critical-holes-live-evaluation.md](/Users/magnus/repos/hugin/docs/security-critical-holes-live-evaluation.md).
+
 **Evaluation step required**
 - Yes. Validate on a corpus of representative public, internal, and private tasks before enabling automatic routing.
 
@@ -165,4 +178,4 @@ Do not start routing work until all of these are true:
 
 ## Current recommendation
 
-Bet 1 is closed. The next implementation target is **Phase 5: sensitivity classification**, followed by a short live soak that mixes normal, cancelled, resumed, and gated pipelines under realistic Munin traffic.
+Bet 1 is closed and the critical pre-Phase-5 security hardening pass is now live. The next implementation target is the **remaining Phase 5 sensitivity work** beyond Step 0: broader standalone/pipeline propagation, richer artifact audit trail, and the representative corpus evaluation before any Phase 6 routing.

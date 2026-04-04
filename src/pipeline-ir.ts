@@ -1,7 +1,8 @@
 import { z } from "zod";
+import { sensitivitySchema, type Sensitivity } from "./sensitivity.js";
 
-export const pipelineSensitivitySchema = z.enum(["public", "internal", "private"]);
-export type PipelineSensitivity = z.infer<typeof pipelineSensitivitySchema>;
+export const pipelineSensitivitySchema = sensitivitySchema;
+export type PipelineSensitivity = Sensitivity;
 
 export const pipelineAuthoritySchema = z.enum(["autonomous", "gated"]);
 export type PipelineAuthority = z.infer<typeof pipelineAuthoritySchema>;
@@ -76,6 +77,7 @@ export const pipelinePhaseIRSchema = z.object({
   timeout: z.number().int().positive().optional(),
   authority: pipelineAuthoritySchema,
   sideEffects: z.array(pipelineSideEffectIdSchema).default([]),
+  declaredSensitivity: pipelineSensitivitySchema.optional(),
   effectiveSensitivity: pipelineSensitivitySchema,
 });
 
@@ -86,6 +88,7 @@ export const pipelineIRSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
   sourceTaskNamespace: z.string().min(1),
+  declaredSensitivity: pipelineSensitivitySchema.optional(),
   sensitivity: pipelineSensitivitySchema,
   replyTo: z.string().min(1).optional(),
   replyFormat: z.string().min(1).optional(),
@@ -102,4 +105,5 @@ export interface PipelinePhaseTaskDraft {
   namespace: string;
   content: string;
   tags: string[];
+  classification: PipelineSensitivity;
 }

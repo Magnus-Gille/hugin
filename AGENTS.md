@@ -18,7 +18,7 @@ Part of the Grimnir system: **Munin** (memory/brain), **Mímir** (file archive),
 1. Polls Munin every 30s for entries in `tasks/` namespace with tag `pending`
 2. Claims a task (updates tags to `running` with compare-and-swap)
 3. Executes via the configured runtime:
-   - `claude` (default): Agent SDK `query()` for structured results (or legacy `claude -p` spawn via `HUGIN_CLAUDE_EXECUTOR=spawn`)
+   - `claude` (default): Agent SDK `query()` for structured results
    - `codex`: `codex exec --full-auto` spawn
    - `ollama`: Calls ollama's OpenAI-compatible API with streaming. Supports context injection via `Context-refs` and infra-only fallback to claude.
 4. Captures output (SDK message events or stdout/stderr) + streams to per-task log file
@@ -73,7 +73,7 @@ Content format:
 **Ollama-specific fields:**
 - `Ollama-host:` — prefer a specific host (`pi` for local, `laptop` for remote via Tailscale). Default: auto-select.
 - `Fallback:` — `claude` to fall back to claude on infra failures (host unreachable, 5xx); `none` (default) to fail without fallback. Semantic failure (model responds but poorly) is never retried — that's experiment data.
-- `Context-refs:` — comma-separated Munin references (`namespace/key`) to fetch and inject into the prompt. The task producer decides what context; Hugin just fetches and concatenates.
+- `Context-refs:` — comma-separated Munin references (`namespace/key`) to fetch and inject into the prompt. Hugin enforces Munin classification against the task/runtime trust boundary before injecting them.
 - `Context-budget:` — max characters for injected context (default 8000). Truncated from end if exceeded.
 
 **Type tags:** Tags matching `type:*` (e.g., `type:research`, `type:email`) are carried forward through the task lifecycle (pending → running → completed/failed).
@@ -149,7 +149,6 @@ MUNIN_API_KEY=<same key Munin uses>
 | `HUGIN_DEFAULT_TIMEOUT_MS` | `300000` | Default task timeout (ms) |
 | `HUGIN_WORKSPACE` | `/home/magnus/workspace` | Default working directory |
 | `HUGIN_MAX_OUTPUT_CHARS` | `50000` | Max output chars to capture |
-| `HUGIN_CLAUDE_EXECUTOR` | `sdk` | Claude executor: `sdk` (Agent SDK) or `spawn` (legacy CLI) |
 | `HUGIN_ALLOWED_SUBMITTERS` | `Codex,Codex-desktop,ratatoskr,Codex-web,Codex-mobile,claude-code,claude-desktop,claude-web,claude-mobile,hugin` | Comma-separated list of allowed `Submitted by:` values. Includes both current Codex-facing names and legacy `claude-*` names during the transition. Set to `*` to allow all. |
 | `OLLAMA_PI_URL` | `http://127.0.0.1:11434` | Ollama endpoint on Pi (local) |
 | `OLLAMA_LAPTOP_URL` | — | Ollama endpoint on laptop (via Tailscale, empty = disabled) |

@@ -7,6 +7,11 @@
  */
 
 import type { MuninClient } from "./munin-client.js";
+import {
+  muninClassificationToSensitivity,
+  namespaceFallbackSensitivity,
+  type Sensitivity,
+} from "./sensitivity.js";
 
 const DEFAULT_BUDGET_CHARS = 8_000;
 
@@ -23,6 +28,16 @@ export interface ContextResolution {
   totalChars: number;
   /** Whether truncation was applied */
   truncated: boolean;
+  /** Maximum sensitivity across resolved refs */
+  maxSensitivity?: Sensitivity;
+  /** Per-ref metadata */
+  refs: Array<{
+    ref: string;
+    namespace: string;
+    key: string;
+    classification?: string;
+    sensitivity: Sensitivity;
+  }>;
 }
 
 /**
@@ -48,15 +63,17 @@ function parseRef(ref: string): { namespace: string; key: string } | null {
  * Resolve context references from Munin and concatenate into a single string.
  */
 export async function resolveContextRefs(
-  refs: string[],
+  refList: string[],
   budget: number | undefined,
   munin: MuninClient,
 ): Promise<ContextResolution> {
   const maxChars = budget ?? DEFAULT_BUDGET_CHARS;
-  const refsRequested = refs.map((r) => r.trim()).filter(Boolean);
+  const refsRequested = refList.map((r) => r.trim()).filter(Boolean);
   const refsResolved: string[] = [];
   const refsMissing: string[] = [];
   const sections: string[] = [];
+  const resolvedRefs: ContextResolution["refs"] = [];
+  let maxSensitivity: Sensitivity | undefined;
 
   for (const refStr of refsRequested) {
     const parsed = parseRef(refStr);
@@ -69,8 +86,21 @@ export async function resolveContextRefs(
     try {
       const entry = await munin.read(parsed.namespace, parsed.key);
       if (entry) {
+        const sensitivity =
+          muninClassificationToSensitivity(entry.classification) ||
+          namespaceFallbackSensitivity(parsed.namespace);
         refsResolved.push(refStr);
         sections.push(`### ${refStr}\n${entry.content}`);
+        resolvedRefs.push({
+          ref: refStr,
+          namespace: parsed.namespace,
+          key: parsed.key,
+          classification: entry.classification,
+          sensitivity,
+        });
+        if (!maxSensitivity || sensitivity === "private" || (sensitivity === "internal" && maxSensitivity === "public")) {
+          maxSensitivity = sensitivity;
+        }
       } else {
         refsMissing.push(refStr);
         console.warn(`Context ref not found in Munin: ${refStr}`);
@@ -93,5 +123,7 @@ export async function resolveContextRefs(
     refsMissing,
     totalChars,
     truncated,
+    maxSensitivity,
+    refs: resolvedRefs,
   };
 }

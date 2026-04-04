@@ -3,8 +3,9 @@ import {
   buildPipelineDecompositionResult,
   compilePipelineTask,
 } from "./pipeline-compiler.js";
-import type { PipelineIR } from "./pipeline-ir.js";
+import type { PipelineIR, PipelineSensitivity } from "./pipeline-ir.js";
 import type { MuninEntry, MuninReadRequest, MuninReadResult } from "./munin-client.js";
+import { sensitivityToMuninClassification } from "./sensitivity.js";
 import {
   buildPipelineParentSuccessTags,
   buildTerminalStatusTags,
@@ -17,7 +18,8 @@ export interface PipelineDispatchClient {
     key: string,
     content: string,
     tags?: string[],
-    expectedUpdatedAt?: string
+    expectedUpdatedAt?: string,
+    classification?: string
   ): Promise<unknown>;
   log(namespace: string, content: string, tags?: string[]): Promise<void>;
 }
@@ -45,7 +47,12 @@ function getFoundBatchEntry(
 
 async function cancelCreatedChildren(
   client: PipelineDispatchClient,
-  createdDrafts: Array<{ namespace: string; content: string; tags: string[] }>
+  createdDrafts: Array<{
+    namespace: string;
+    content: string;
+    tags: string[];
+    classification: PipelineSensitivity;
+  }>
 ): Promise<void> {
   for (const draft of createdDrafts) {
     try {
@@ -53,12 +60,17 @@ async function cancelCreatedChildren(
         draft.namespace,
         "status",
         draft.content,
-        buildTerminalStatusTags("cancelled", draft.tags)
+        buildTerminalStatusTags("cancelled", draft.tags),
+        undefined,
+        sensitivityToMuninClassification(draft.classification)
       );
       await client.write(
         draft.namespace,
         "result",
-        "## Result\n\n- **Exit code:** CANCELLED\n- **Error:** Pipeline decomposition aborted before parent commit\n"
+        "## Result\n\n- **Exit code:** CANCELLED\n- **Error:** Pipeline decomposition aborted before parent commit\n",
+        undefined,
+        undefined,
+        sensitivityToMuninClassification(draft.classification)
       );
       await client.log(
         draft.namespace,
@@ -117,11 +129,20 @@ export async function handlePipelineTask(
       taskNs,
       "spec",
       JSON.stringify(pipeline, null, 2),
-      ["type:pipeline", "type:pipeline-spec"]
+      ["type:pipeline", "type:pipeline-spec"],
+      undefined,
+      sensitivityToMuninClassification(pipeline.sensitivity)
     );
 
     for (const draft of phaseDrafts) {
-      await client.write(draft.namespace, "status", draft.content, draft.tags);
+      await client.write(
+        draft.namespace,
+        "status",
+        draft.content,
+        draft.tags,
+        undefined,
+        sensitivityToMuninClassification(draft.classification)
+      );
       createdDrafts.push(draft);
     }
 
@@ -130,9 +151,17 @@ export async function handlePipelineTask(
       "status",
       entry.content,
       buildPipelineParentSuccessTags(entry.tags),
-      entry.updated_at
+      entry.updated_at,
+      sensitivityToMuninClassification(pipeline.sensitivity)
     );
-    await client.write(taskNs, "result", buildPipelineDecompositionResult(pipeline));
+    await client.write(
+      taskNs,
+      "result",
+      buildPipelineDecompositionResult(pipeline),
+      undefined,
+      undefined,
+      sensitivityToMuninClassification(pipeline.sensitivity)
+    );
     decompositionCommitted = true;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

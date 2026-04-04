@@ -50,6 +50,9 @@ ssh "$REMOTE" "mkdir -p /home/$DEPLOY_USER/workspace"
 echo "==> Restarting service..."
 ssh "$REMOTE" "sudo systemctl restart hugin && sleep 2 && sudo systemctl status hugin --no-pager"
 
+echo "==> Health check..."
+ssh "$REMOTE" "curl -fsS http://127.0.0.1:3032/health"
+
 echo ""
 echo "Deploy complete!"
 echo "Health check: curl http://$PI_HOST:3032/health"

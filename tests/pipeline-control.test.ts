@@ -379,6 +379,7 @@ describe("pipeline control handlers", () => {
       "type:pipeline",
       "type:pipeline-phase",
       "authority:autonomous",
+      "sensitivity:internal",
       "pending",
     ]);
     expect(client.get(drafts[1]!.namespace, "result")?.content).toContain(

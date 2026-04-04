@@ -4,6 +4,7 @@ import {
   pipelineSideEffectIdSchema,
   pipelineSensitivitySchema,
 } from "./pipeline-ir.js";
+import { sensitivitySchema } from "./sensitivity.js";
 
 export const taskExecutionOutcomeSchema = z.enum([
   "completed",
@@ -67,6 +68,15 @@ export type TaskExecutionRuntimeMetadata = z.infer<
   typeof taskExecutionRuntimeMetadataSchema
 >;
 
+export const taskExecutionSensitivitySchema = z.object({
+  declared: sensitivitySchema.optional(),
+  effective: sensitivitySchema,
+  mismatch: z.boolean().default(false),
+});
+export type TaskExecutionSensitivity = z.infer<
+  typeof taskExecutionSensitivitySchema
+>;
+
 export const structuredTaskResultSchema = z.object({
   schemaVersion: z.literal(1),
   taskId: z.string().min(1),
@@ -96,6 +106,7 @@ export const structuredTaskResultSchema = z.object({
   runtimeMetadata: taskExecutionRuntimeMetadataSchema.optional(),
   pipeline: taskExecutionPipelineContextSchema.optional(),
   approval: taskExecutionApprovalMetadataSchema.optional(),
+  sensitivity: taskExecutionSensitivitySchema.optional(),
 });
 export type StructuredTaskResult = z.infer<typeof structuredTaskResultSchema>;
 

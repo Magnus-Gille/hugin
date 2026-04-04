@@ -15,6 +15,7 @@ import {
   structuredTaskResultSchema,
   type StructuredTaskResult,
 } from "./task-result-schema.js";
+import { sensitivityToMuninClassification } from "./sensitivity.js";
 
 interface LoggerLike {
   log(...args: unknown[]): void;
@@ -29,7 +30,8 @@ export interface PipelineSummaryClient {
     key: string,
     content: string,
     tags?: string[],
-    expectedUpdatedAt?: string
+    expectedUpdatedAt?: string,
+    classification?: string
   ): Promise<unknown>;
 }
 
@@ -193,7 +195,9 @@ export class PipelineSummaryManager {
           pipelineNs,
           "summary",
           JSON.stringify(summary, null, 2),
-          ["type:pipeline", "type:pipeline-summary"]
+          ["type:pipeline", "type:pipeline-summary"],
+          undefined,
+          sensitivityToMuninClassification(pipeline.sensitivity)
         );
       }
       this.pipelineSummaryFingerprints.set(pipelineId, nextFingerprint);

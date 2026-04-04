@@ -9,6 +9,7 @@ export interface MuninEntry {
   key: string;
   content: string;
   tags: string[];
+  classification?: string;
   created_at: string;
   updated_at: string;
 }
@@ -20,6 +21,7 @@ export interface MuninQueryResult {
   entry_type: string;
   content_preview: string;
   tags: string[];
+  classification?: string;
   created_at: string;
   updated_at: string;
 }
@@ -238,11 +240,13 @@ export class MuninClient {
     key: string,
     content: string,
     tags?: string[],
-    expectedUpdatedAt?: string
+    expectedUpdatedAt?: string,
+    classification?: string,
   ): Promise<unknown> {
     const args: Record<string, unknown> = { namespace, key, content };
     if (tags) args.tags = tags;
     if (expectedUpdatedAt) args.expected_updated_at = expectedUpdatedAt;
+    if (classification) args.classification = classification;
     return this.callTool("memory_write", args);
   }
 

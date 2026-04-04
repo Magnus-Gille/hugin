@@ -13,12 +13,23 @@ import {
   pipelineSideEffectIdSchema,
 } from "./pipeline-ir.js";
 import { buildRoutingMetadataLines } from "./result-format.js";
+import {
+  buildSensitivityAssessment,
+  buildSensitivityPolicyError,
+  classifyContextSensitivity,
+  classifyPromptSensitivity,
+  getPipelineRuntimeMaxSensitivity,
+  maxSensitivity,
+  parseSensitivity,
+  sensitivityToTag,
+} from "./sensitivity.js";
 import { MAX_DEPENDENCIES } from "./task-graph.js";
 
 interface ParsedPipelinePhase {
   name: string;
   dependsOn: string[];
   runtime: string;
+  sensitivity?: string;
   context?: string;
   timeout?: number;
   authority?: string;
@@ -60,12 +71,7 @@ function readNumberField(content: string, field: string): number | undefined {
 }
 
 function assertValidSensitivity(value: string | undefined): PipelineSensitivity {
-  if (!value) return "internal";
-  const lowered = value.trim().toLowerCase();
-  if (lowered === "public" || lowered === "internal" || lowered === "private") {
-    return lowered;
-  }
-  throw new Error(`Unsupported pipeline sensitivity "${value}"`);
+  return parseSensitivity(value, "internal") || "internal";
 }
 
 function slugifyPhaseName(name: string): string {
@@ -141,6 +147,10 @@ function parsePipelineBody(body: string): ParsedPipelinePhase[] {
           break;
         case "Context":
           phase.context = rawValue.trim();
+          index++;
+          break;
+        case "Sensitivity":
+          phase.sensitivity = rawValue.trim();
           index++;
           break;
         case "Timeout": {
@@ -345,6 +355,50 @@ function validateAuthority(
   throw new Error(`Phase "${phaseName}" uses unsupported authority "${authority}"`);
 }
 
+function computePhaseEffectiveSensitivities(
+  phases: ParsedPipelinePhase[],
+  pipelineSensitivity: PipelineSensitivity,
+): Map<string, PipelineSensitivity> {
+  const byName = new Map(phases.map((phase) => [phase.name, phase]));
+  const computed = new Map<string, PipelineSensitivity>();
+
+  const visit = (phaseName: string): PipelineSensitivity => {
+    const cached = computed.get(phaseName);
+    if (cached) return cached;
+
+    const phase = byName.get(phaseName);
+    if (!phase) {
+      throw new Error(`Internal pipeline compiler error for missing phase "${phaseName}"`);
+    }
+
+    const declared = parseSensitivity(phase.sensitivity);
+    const contextSensitivity = classifyContextSensitivity(phase.context, undefined);
+    const promptSensitivity = classifyPromptSensitivity(phase.prompt);
+    const inheritedSensitivity = phase.dependsOn.reduce<PipelineSensitivity | undefined>(
+      (current, dependencyName) =>
+        maxSensitivity(current, visit(dependencyName)),
+      undefined,
+    );
+
+    const assessment = buildSensitivityAssessment({
+      declared,
+      baseline: pipelineSensitivity,
+      context: contextSensitivity,
+      prompt: promptSensitivity,
+      inherited: inheritedSensitivity,
+    });
+
+    computed.set(phaseName, assessment.effective);
+    return assessment.effective;
+  };
+
+  for (const phase of phases) {
+    visit(phase.name);
+  }
+
+  return computed;
+}
+
 export function compilePipelineTask(
   pipelineId: string,
   sourceTaskNamespace: string,
@@ -363,6 +417,10 @@ export function compilePipelineTask(
   for (const phase of parsed.phases) {
     phaseIdByName.set(phase.name, `${pipelineId}-${slugifyPhaseName(phase.name)}`);
   }
+  const phaseSensitivities = computePhaseEffectiveSensitivities(
+    parsed.phases,
+    parsed.sensitivity,
+  );
 
   const phases: PipelinePhaseIR[] = parsed.phases.map((phase) => {
     if (!phase.prompt) {
@@ -378,6 +436,18 @@ export function compilePipelineTask(
 
     const sideEffects = validateSideEffects(phase.name, phase.sideEffects);
     const authority = validateAuthority(phase.name, phase.authority, sideEffects);
+    const declaredSensitivity = parseSensitivity(phase.sensitivity);
+    const effectiveSensitivity = phaseSensitivities.get(phase.name) || parsed.sensitivity;
+    const runtimeMaxSensitivity = getPipelineRuntimeMaxSensitivity(runtime.id);
+    if (maxSensitivity(effectiveSensitivity, runtimeMaxSensitivity) !== runtimeMaxSensitivity) {
+      throw new Error(
+        buildSensitivityPolicyError({
+          runtimeLabel: runtime.id,
+          runtimeMax: runtimeMaxSensitivity,
+          effective: effectiveSensitivity,
+        }),
+      );
+    }
     const dependencyTaskIds = phase.dependsOn.map((dependency) => {
       const dependencyTaskId = phaseIdByName.get(dependency);
       if (!dependencyTaskId) {
@@ -403,7 +473,8 @@ export function compilePipelineTask(
       timeout: phase.timeout,
       authority,
       sideEffects,
-      effectiveSensitivity: parsed.sensitivity,
+      declaredSensitivity,
+      effectiveSensitivity,
     };
   });
 
@@ -412,6 +483,7 @@ export function compilePipelineTask(
     id: pipelineId,
     title: parsed.title,
     sourceTaskNamespace,
+    declaredSensitivity: parsed.sensitivity,
     sensitivity: parsed.sensitivity,
     replyTo: parsed.replyTo,
     replyFormat: parsed.replyFormat,
@@ -443,6 +515,7 @@ function buildPhaseTaskContent(
     `- **Pipeline:** ${pipeline.id}`,
     `- **Pipeline phase:** ${phase.name}`,
     `- **Pipeline submitted by:** ${pipeline.submittedBy}`,
+    `- **Sensitivity:** ${phase.effectiveSensitivity}`,
     `- **Pipeline sensitivity:** ${phase.effectiveSensitivity}`,
     `- **Pipeline authority:** ${phase.authority}`,
     ...(phase.sideEffects.length > 0
@@ -470,6 +543,7 @@ export function buildPhaseTaskDrafts(pipeline: PipelineIR): PipelinePhaseTaskDra
       "type:pipeline",
       "type:pipeline-phase",
       `authority:${phase.authority}`,
+      sensitivityToTag(phase.effectiveSensitivity),
       ...(phase.onDependencyFailure === "continue" ? ["on-dep-failure:continue"] : []),
       ...phase.dependencyTaskIds.map((taskId) => `depends-on:${taskId}`),
     ];
@@ -478,6 +552,7 @@ export function buildPhaseTaskDrafts(pipeline: PipelineIR): PipelinePhaseTaskDra
       namespace: phase.taskNamespace,
       content: buildPhaseTaskContent(pipeline, phase, index),
       tags,
+      classification: phase.effectiveSensitivity,
     };
   });
 }

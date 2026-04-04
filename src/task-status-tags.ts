@@ -3,6 +3,7 @@ import { ON_DEP_FAILURE_PREFIX } from "./task-graph.js";
 const RUNTIME_PREFIX = "runtime:";
 const TYPE_PREFIX = "type:";
 const AUTHORITY_PREFIX = "authority:";
+const SENSITIVITY_PREFIX = "sensitivity:";
 
 function dedupeTags(tags: string[]): string[] {
   const seen = new Set<string>();
@@ -26,12 +27,14 @@ function getPersistentTags(tags: string[], runtimeFallback?: string): string[] {
   const typeTags = tags.filter((tag) => tag.startsWith(TYPE_PREFIX));
   const policyTags = tags.filter((tag) => tag.startsWith(ON_DEP_FAILURE_PREFIX));
   const authorityTags = tags.filter((tag) => tag.startsWith(AUTHORITY_PREFIX));
+  const sensitivityTags = tags.filter((tag) => tag.startsWith(SENSITIVITY_PREFIX));
 
   return dedupeTags([
     ...(runtimeTag ? [runtimeTag] : []),
     ...typeTags,
     ...policyTags,
     ...authorityTags,
+    ...sensitivityTags,
   ]);
 }
 

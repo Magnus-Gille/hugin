@@ -235,6 +235,7 @@ describe("handlePipelineTask", () => {
       "type:pipeline",
       "type:pipeline-phase",
       "authority:autonomous",
+      "sensitivity:internal",
     ]);
     expect(exploreStatus?.content).toContain("- **Pipeline:** 20260403-valid-pipeline");
 
@@ -248,6 +249,7 @@ describe("handlePipelineTask", () => {
       "type:pipeline",
       "type:pipeline-phase",
       "authority:autonomous",
+      "sensitivity:internal",
       "on-dep-failure:continue",
       "depends-on:20260403-valid-pipeline-explore",
     ]);
@@ -401,6 +403,7 @@ Phase: Explore
       "type:pipeline",
       "type:pipeline-phase",
       "authority:autonomous",
+      "sensitivity:internal",
     ]);
     expect(
       client.get(compiled.phases[0]!.taskNamespace, "result")?.content
