@@ -40,6 +40,11 @@ export interface OllamaExecutorOptions {
   abortController?: AbortController;
 }
 
+// --- Constants ---
+
+/** Minimum streaming timeout floor to prevent near-zero or negative timeouts after a slow initial fetch. */
+const MIN_STREAM_TIMEOUT_MS = 5_000;
+
 // --- System prompt ---
 
 const SYSTEM_PROMPT =
@@ -147,11 +152,20 @@ export async function executeOllamaTask(
       let buffer = "";
       let timedOut = false;
 
-      // Set up streaming timeout (the initial fetch may succeed but streaming can hang)
+      // Set up streaming timeout (the initial fetch may succeed but streaming can hang).
+      // Apply a minimum floor so a slow initial connect can't leave near-zero or negative
+      // remaining time, which would fire the timer on the next tick and immediately cancel.
+      const rawRemainingMs = task.timeoutMs - (Date.now() - startMs);
+      const remainingMs = Math.max(MIN_STREAM_TIMEOUT_MS, rawRemainingMs);
+      if (rawRemainingMs < MIN_STREAM_TIMEOUT_MS) {
+        appendOutput(
+          `[Ollama stream timeout floored to ${MIN_STREAM_TIMEOUT_MS}ms (raw remaining: ${rawRemainingMs}ms)]\n`,
+        );
+      }
       const streamTimer = setTimeout(() => {
         timedOut = true;
         reader.cancel().catch(() => {});
-      }, task.timeoutMs - (Date.now() - startMs));
+      }, remainingMs);
 
       try {
         while (true) {
