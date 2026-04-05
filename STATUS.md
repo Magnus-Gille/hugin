@@ -1,6 +1,6 @@
 # Hugin — Status
 
-**Last session:** 2026-04-04 (Issue triage, bug fixes, deploy)
+**Last session:** 2026-04-05 (AI user testing, bug fixes, operational hardening)
 **Branch:** main
 
 ## Plan Status
@@ -15,10 +15,25 @@
 - **Bet 1 status** — closed. Phases 1-4 are implemented and live-validated on `huginmunin`.
 
 ## Completed This Session
-- **Issue triage** — reviewed all 14 open GitHub issues. Closed 6: #1 (running tags work correctly), #2 (mDNS fallback added), #7 (egress filtering already implemented), #8 (classification ceiling already implemented), #9 (legacy executor already removed), #14 (prompt sensitivity false positive fixed). 8 issues remain open.
-- **Bug fix: mDNS fallback** (#2, ccbb9b1) — `deploy-pi.sh` and `sync-claude-config.sh` now auto-detect mDNS and fall back to Tailscale IP `100.97.117.37`.
-- **Bug fix: prompt sensitivity false positive** (#14, ccbb9b1) — `classifyPromptSensitivity()` now strips code blocks, inline code, and namespace paths before keyword matching. Tasks mentioning `clients/invoices` in specs no longer trigger `private` classification.
-- **Created `/issues` skill** — global skill for checking GitHub issues on the current repo. Supports listing, filtering by label, viewing single issues, and searching.
+- **AI user testing review** — 3 Claude models (Opus, Sonnet, Haiku) did code review + hands-on task submission. Codex CLI did separate doc-focused review. All 3 hands-on ollama tasks completed successfully (8-9/10 ratings). Reviews at `docs/ai-user-testing-review.md` and `docs/ai-user-testing-review-codex.md`.
+- **4 bug/enhancement fixes landed** (from dispatched tasks, rebased onto main):
+  - #16 (0bfa4e6) — Missing dependencies now treated as failed instead of blocking forever
+  - #17 (06807bd) — Ollama streaming timeout has 5s minimum floor
+  - #18 (4eff369) — Context-refs now fetched via readBatch() instead of sequential reads
+  - #19 (2dfa515) — Shared helpers extracted to task-helpers.ts module
+- **postTaskGitPush hardened** (#20, 64bcba1) — now does `git fetch + rebase` before pushing, preventing cascade failures when Pi repo is behind remote
+- **Root cause analysis** of dispatched task failures: Pi repo was 4 commits behind remote, all tasks committed but couldn't push, cascade failure. Filed #20, #21, #22.
+- **submit-task skill updated** — added Phase 0 repo sync step to code task template
+- **Doc fixes** — CLAUDE.md updated (pipeline runtime, Sensitivity field, result-structured, path contract). Stale phase 4/5 engineering plan headers corrected.
+- **7 new issues filed** — #16-#22 (bugs, enhancements, operational)
+- **Test suite at 159 tests**, all passing. Deployed to Pi.
+
+## Previous Session
+- **AI user testing review completed (Codex)** — ran a repo-local AI-agent usability pass on `55195cf` using Codex CLI plus `gpt-5.4-mini`/`low` and `gpt-5.4`/`xhigh` sub-agents.
+- **Issue triage** — reviewed all 14 open GitHub issues. Closed 6: #1, #2, #7, #8, #9, #14. 8 issues remained open.
+- **Bug fix: mDNS fallback** (#2, ccbb9b1) — `deploy-pi.sh` and `sync-claude-config.sh` now auto-detect mDNS and fall back to Tailscale IP.
+- **Bug fix: prompt sensitivity false positive** (#14, ccbb9b1) — `classifyPromptSensitivity()` now strips code blocks, inline code, and namespace paths before keyword matching.
+- **Created `/issues` skill** — global skill for checking GitHub issues on the current repo.
 - **Test suite at 154 tests**, all passing. Deployed to Pi.
 
 ## Previous Session
