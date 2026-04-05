@@ -77,37 +77,50 @@ export async function resolveContextRefs(
   const resolvedRefs: ContextResolution["refs"] = [];
   let maxSens: Sensitivity | undefined;
 
-  for (const refStr of refsRequested) {
+  // Parse all refs upfront, flagging invalid ones immediately
+  const parsedRefs = refsRequested.map((refStr) => {
     const parsed = parseRef(refStr);
     if (!parsed) {
       console.warn(`Invalid context ref syntax: "${refStr}" (expected namespace/key)`);
       refsMissing.push(refStr);
-      continue;
     }
+    return { refStr, parsed };
+  });
 
-    try {
-      const entry = await munin.read(parsed.namespace, parsed.key);
-      if (entry) {
-        const sensitivity =
-          muninClassificationToSensitivity(entry.classification) ||
-          namespaceFallbackSensitivity(parsed.namespace);
-        refsResolved.push(refStr);
-        sections.push(`### ${refStr}\n${entry.content}`);
-        resolvedRefs.push({
-          ref: refStr,
-          namespace: parsed.namespace,
-          key: parsed.key,
-          classification: entry.classification,
-          sensitivity,
-        });
-        maxSens = maxSensitivity(maxSens, sensitivity);
-      } else {
-        refsMissing.push(refStr);
-        console.warn(`Context ref not found in Munin: ${refStr}`);
-      }
-    } catch (err) {
+  const validRefs = parsedRefs.filter(
+    (r): r is { refStr: string; parsed: { namespace: string; key: string } } => r.parsed !== null,
+  );
+
+  // Fetch all valid refs in a single batch call
+  const batchResults =
+    validRefs.length > 0
+      ? await munin.readBatch(
+          validRefs.map(({ parsed }) => ({ namespace: parsed.namespace, key: parsed.key })),
+        )
+      : [];
+
+  // Process results in order, preserving per-ref classification and sensitivity
+  for (let i = 0; i < validRefs.length; i++) {
+    const { refStr, parsed } = validRefs[i];
+    const result = batchResults[i];
+
+    if (result.found) {
+      const sensitivity =
+        muninClassificationToSensitivity(result.classification) ||
+        namespaceFallbackSensitivity(parsed.namespace);
+      refsResolved.push(refStr);
+      sections.push(`### ${refStr}\n${result.content}`);
+      resolvedRefs.push({
+        ref: refStr,
+        namespace: parsed.namespace,
+        key: parsed.key,
+        classification: result.classification,
+        sensitivity,
+      });
+      maxSens = maxSensitivity(maxSens, sensitivity);
+    } else {
       refsMissing.push(refStr);
-      console.warn(`Error reading context ref ${refStr}:`, err);
+      console.warn(`Context ref not found in Munin: ${refStr}`);
     }
   }
 
