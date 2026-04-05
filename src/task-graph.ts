@@ -83,9 +83,19 @@ export function evaluateBlockedTask(
   }
 
   const allCompleted = failedIds.length === 0 && waitingIds.length === 0 && missingIds.length === 0;
-  const allTerminal = waitingIds.length === 0 && missingIds.length === 0;
-  const shouldFail = failedIds.length > 0 && policy === "fail";
+  // missing deps are terminal (they will never resolve), so don't count them as waiting
+  const allTerminal = waitingIds.length === 0;
+  const shouldFail = (failedIds.length > 0 || missingIds.length > 0) && policy === "fail";
   const shouldPromote = allCompleted || (policy === "continue" && allTerminal);
+
+  let failureReason: string | undefined;
+  if (shouldFail) {
+    if (failedIds.length > 0) {
+      failureReason = `Dependency ${failedIds[0]} failed`;
+    } else {
+      failureReason = `Dependency ${missingIds[0]} not found`;
+    }
+  }
 
   return {
     dependencyIds,
@@ -98,6 +108,6 @@ export function evaluateBlockedTask(
     allTerminal,
     shouldPromote,
     shouldFail,
-    failureReason: shouldFail ? `Dependency ${failedIds[0]} failed` : undefined,
+    failureReason,
   };
 }

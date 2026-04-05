@@ -121,14 +121,52 @@ describe("blocked task evaluation", () => {
     expect(evaluation.failureReason).toContain(String(MAX_DEPENDENCIES));
   });
 
-  it("does not promote when a dependency is missing", () => {
+  it("fails when a dependency is missing and policy is fail (default)", () => {
     const evaluation = evaluateBlockedTask(
       ["blocked", "depends-on:task-a"],
       {}
     );
 
     expect(evaluation.shouldPromote).toBe(false);
-    expect(evaluation.shouldFail).toBe(false);
+    expect(evaluation.shouldFail).toBe(true);
     expect(evaluation.missingIds).toEqual(["task-a"]);
+    expect(evaluation.failureReason).toContain("task-a");
+    expect(evaluation.failureReason).toContain("not found");
+  });
+
+  it("promotes when a dependency is missing and policy is continue", () => {
+    const evaluation = evaluateBlockedTask(
+      ["blocked", "depends-on:task-a", "on-dep-failure:continue"],
+      {}
+    );
+
+    expect(evaluation.shouldFail).toBe(false);
+    expect(evaluation.shouldPromote).toBe(true);
+    expect(evaluation.allTerminal).toBe(true);
+    expect(evaluation.missingIds).toEqual(["task-a"]);
+  });
+
+  it("fails when mix of completed and missing deps and policy is fail", () => {
+    const evaluation = evaluateBlockedTask(
+      ["blocked", "depends-on:task-a", "depends-on:task-b"],
+      { "task-a": "completed" }
+    );
+
+    expect(evaluation.shouldFail).toBe(true);
+    expect(evaluation.shouldPromote).toBe(false);
+    expect(evaluation.completedIds).toEqual(["task-a"]);
+    expect(evaluation.missingIds).toEqual(["task-b"]);
+    expect(evaluation.failureReason).toContain("task-b");
+    expect(evaluation.failureReason).toContain("not found");
+  });
+
+  it("failureReason mentions the missing dependency id", () => {
+    const evaluation = evaluateBlockedTask(
+      ["blocked", "depends-on:typo-task-xyz"],
+      {}
+    );
+
+    expect(evaluation.shouldFail).toBe(true);
+    expect(evaluation.failureReason).toBe("Dependency typo-task-xyz not found");
   });
 });
