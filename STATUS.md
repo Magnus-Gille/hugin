@@ -1,6 +1,6 @@
 # Hugin — Status
 
-**Last session:** 2026-04-05 (AI user testing, bug fixes, operational hardening)
+**Last session:** 2026-04-05 (agent orchestration research tasks)
 **Branch:** main
 
 ## Plan Status
@@ -15,6 +15,13 @@
 - **Bet 1 status** — closed. Phases 1-4 are implemented and live-validated on `huginmunin`.
 
 ## Completed This Session
+- **Agent orchestration research dispatched** — submitted two Hugin tasks for cross-disciplinary research on agent orchestration, swarm intelligence, and related fields (biology, economics, distributed systems, org theory).
+  - First task (`20260404-212219-agent-orchestration-research`) failed due to Pi Claude API rate limit.
+  - Combined research+design task (`20260405-143948-design-orchestration-experiments`) succeeded — committed as `a76a64d`.
+  - Report at `docs/research/agent-orchestration-experiments.md` with 3 experiment proposals.
+- **RemoteTrigger API explored** — attempted to schedule delayed task submission via remote triggers, API field format not yet documented/figured out.
+
+## Previous Session
 - **AI user testing review** — 3 Claude models (Opus, Sonnet, Haiku) did code review + hands-on task submission. Codex CLI did separate doc-focused review. All 3 hands-on ollama tasks completed successfully (8-9/10 ratings). Reviews at `docs/ai-user-testing-review.md` and `docs/ai-user-testing-review-codex.md`.
 - **4 bug/enhancement fixes landed** (from dispatched tasks, rebased onto main):
   - #16 (0bfa4e6) — Missing dependencies now treated as failed instead of blocking forever
