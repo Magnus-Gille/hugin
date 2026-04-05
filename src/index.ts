@@ -14,6 +14,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
+import { getFoundBatchEntry, extractTaskId } from "./task-helpers.js";
 import { executeSdkTask } from "./sdk-executor.js";
 import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus } from "./ollama-hosts.js";
@@ -486,10 +487,6 @@ function ensureLogDir(): void {
   fs.mkdirSync(LOG_DIR, { recursive: true });
 }
 
-function extractTaskId(namespace: string): string {
-  return namespace.replace(/^tasks\//, "");
-}
-
 async function writeStructuredTaskResult(
   taskNs: string,
   result: StructuredTaskResult,
@@ -503,12 +500,6 @@ async function writeStructuredTaskResult(
     undefined,
     classification,
   );
-}
-
-function getFoundBatchEntry(
-  entry: MuninReadResult | undefined
-): (MuninEntry & { found: true }) | null {
-  return entry && entry.found ? entry : null;
 }
 
 async function refreshPipelineSummary(pipelineId: string): Promise<void> {

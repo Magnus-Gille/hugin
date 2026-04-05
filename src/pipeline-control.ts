@@ -15,6 +15,7 @@ import type {
   MuninReadRequest,
   MuninReadResult,
 } from "./munin-client.js";
+import { getFoundBatchEntry, extractTaskId } from "./task-helpers.js";
 import type {
   TaskExecutionBodyKind,
   TaskExecutionRuntimeMetadata,
@@ -73,9 +74,6 @@ export interface PipelineControlHooks {
   refreshPipelineSummary(pipelineId: string): Promise<void>;
 }
 
-function extractTaskId(namespace: string): string {
-  return namespace.replace(/^tasks\//, "");
-}
 
 function extractRoutingMetadataFromContent(content: string): {
   replyTo?: string;
@@ -92,11 +90,6 @@ function extractRoutingMetadataFromContent(content: string): {
   };
 }
 
-function getFoundBatchEntry(
-  entry: MuninReadResult | undefined
-): (MuninEntry & { found: true }) | null {
-  return entry && entry.found ? entry : null;
-}
 
 function isTerminalTaskStatus(tags: string[]): boolean {
   return (

@@ -3,6 +3,7 @@ import type {
   MuninReadRequest,
   MuninReadResult,
 } from "./munin-client.js";
+import { getFoundBatchEntry } from "./task-helpers.js";
 import { pipelineIRSchema, type PipelineIR } from "./pipeline-ir.js";
 import {
   buildPipelineExecutionSummary,
@@ -43,11 +44,6 @@ function getBatchResultKey(namespace: string, key: string): string {
   return `${namespace}::${key}`;
 }
 
-function getFoundBatchEntry(
-  entry: MuninReadResult | undefined
-): (MuninEntry & { found: true }) | null {
-  return entry && entry.found ? entry : null;
-}
 
 function parseErrorMessageFromResult(content: string | undefined): string | undefined {
   if (!content) return undefined;

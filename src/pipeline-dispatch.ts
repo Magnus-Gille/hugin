@@ -5,6 +5,7 @@ import {
 } from "./pipeline-compiler.js";
 import type { PipelineIR, PipelineSensitivity } from "./pipeline-ir.js";
 import type { MuninEntry, MuninReadRequest, MuninReadResult } from "./munin-client.js";
+import { getFoundBatchEntry, extractTaskId } from "./task-helpers.js";
 import { sensitivityToMuninClassification } from "./sensitivity.js";
 import {
   buildPipelineParentSuccessTags,
@@ -35,15 +36,6 @@ export interface PipelineDispatchHooks {
   refreshPipelineSummary(pipelineId: string): Promise<void>;
 }
 
-function extractTaskId(namespace: string): string {
-  return namespace.replace(/^tasks\//, "");
-}
-
-function getFoundBatchEntry(
-  entry: MuninReadResult | undefined
-): (MuninEntry & { found: true }) | null {
-  return entry && entry.found ? entry : null;
-}
 
 async function cancelCreatedChildren(
   client: PipelineDispatchClient,
