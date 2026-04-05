@@ -40,7 +40,7 @@ Content format:
 ```markdown
 ## Task: <title>
 
-- **Runtime:** claude | codex | ollama
+- **Runtime:** claude | codex | ollama | pipeline
 - **Context:** repo:heimdall
 - **Working dir:** /home/magnus/workspace
 - **Timeout:** 300000
@@ -53,6 +53,7 @@ Content format:
 - **Fallback:** claude | none
 - **Context-refs:** meta/conventions/status, projects/heimdall/status
 - **Context-budget:** 8000
+- **Sensitivity:** internal
 - **Group:** batch-20260323
 - **Sequence:** 1
 
@@ -64,7 +65,7 @@ Content format:
 - `repo:<name>` → `/home/magnus/repos/<name>`
 - `scratch` → `/home/magnus/scratch` (non-code tasks)
 - `files` → `/home/magnus/mimir`
-- Raw absolute paths are passed through unchanged
+- Raw absolute paths under `/home/magnus/` are passed through; paths outside this prefix are rejected and fall back to the default workspace
 
 **Reply routing:** `Reply-to:` and `Reply-format:` are forwarded in the result for downstream consumers (e.g., Ratatoskr).
 
@@ -78,7 +79,13 @@ Content format:
 
 **Type tags:** Tags matching `type:*` (e.g., `type:research`, `type:email`) are carried forward through the task lifecycle (pending → running → completed/failed).
 
-Results are written to the same namespace under key `result`.
+**Sensitivity:** Optional `Sensitivity: public | internal | private` field. If omitted, Hugin infers sensitivity from the prompt (keyword detection), context path, and any context-refs. Cloud runtimes (claude, codex) are capped at `internal`; local runtimes (ollama) allow `private`. Tasks that exceed their runtime's sensitivity ceiling are rejected.
+
+**Pipeline tasks:** Use `Runtime: pipeline` with a `### Pipeline` section instead of `### Prompt`. Pipeline phases use runtime IDs (`claude-sdk`, `codex-spawn`, `ollama-pi`, `ollama-laptop`) which differ from standalone runtime names.
+
+**Results:** Written to the same namespace under two keys:
+- `result` — human-readable markdown with exit code, timestamps, duration, and response body
+- `result-structured` — machine-readable JSON (Zod-validated) with schema version, lifecycle metadata, runtime metadata (requested vs effective model/host), sensitivity audit, and structured body. Prefer this for programmatic consumption.
 
 ## Project structure
 
@@ -109,7 +116,7 @@ hugin/
 │   ├── task-status-tags.ts       # Tag manipulation helpers for task lifecycle
 │   ├── task-graph.ts             # Task dependency graph for pipelines
 │   └── result-format.ts          # Result formatting utilities
-├── tests/                        # 16 test files mirroring src/
+├── tests/                        # 17 test files mirroring src/
 ├── docs/                         # Engineering plans, evaluations, security docs
 │   └── security/                 # Threat models and security assessments
 └── scripts/

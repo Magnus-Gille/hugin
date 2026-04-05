@@ -1,7 +1,7 @@
 # Phase 5 Engineering Plan: Sensitivity Classification
 
 **Parent plan:** [hugin-v2-engineering-plan.md](/Users/magnus/repos/hugin/docs/hugin-v2-engineering-plan.md)  
-**Status:** Step 0 implemented; remaining work planned  
+**Status:** Core classification implemented and live (standalone + pipeline sensitivity, prompt/context/refs detection, runtime ceilings). Remaining: corpus evaluation, Phase 6 routing.  
 **Date:** 2026-04-04
 
 **Sequencing note:** The first executable slice of this phase was delivered through [security-critical-holes-engineering-plan.md](/Users/magnus/repos/hugin/docs/security-critical-holes-engineering-plan.md): context-ref classification enforcement landed as Phase 5 Step 0 after legacy Claude spawn removal and outbound egress filtering. The remaining sections below are still open.

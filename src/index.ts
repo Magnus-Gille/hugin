@@ -913,6 +913,59 @@ async function postTaskGitPush(workingDir: string): Promise<void> {
   }
 
   console.log(`Post-task: unpushed commits detected in ${workingDir}, running git push`);
+
+  // Fetch + rebase before pushing to handle diverged branches (#20)
+  const fetchRebaseOk = await new Promise<boolean>((resolve) => {
+    const child = spawn("git", ["fetch", "origin"], {
+      cwd: workingDir,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, HOME: "/home/magnus" },
+    });
+    let output = "";
+    child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
+    child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
+    child.on("close", (fetchCode) => {
+      if (fetchCode !== 0) {
+        console.warn(`Post-task git fetch failed (exit ${fetchCode}) in ${workingDir}: ${output.trim()}`);
+        resolve(false);
+        return;
+      }
+
+      // Rebase local commits on top of fetched remote
+      const rebaseChild = spawn("git", ["rebase", "origin/main"], {
+        cwd: workingDir,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, HOME: "/home/magnus" },
+      });
+      let rebaseOutput = "";
+      rebaseChild.stdout?.on("data", (d: Buffer) => (rebaseOutput += d.toString()));
+      rebaseChild.stderr?.on("data", (d: Buffer) => (rebaseOutput += d.toString()));
+      rebaseChild.on("close", (rebaseCode) => {
+        if (rebaseCode !== 0) {
+          console.warn(`Post-task git rebase failed (exit ${rebaseCode}) in ${workingDir}: ${rebaseOutput.trim()}`);
+          // Abort the failed rebase to leave the repo in a clean state
+          const abortChild = spawn("git", ["rebase", "--abort"], {
+            cwd: workingDir,
+            stdio: "ignore",
+            env: { ...process.env, HOME: "/home/magnus" },
+          });
+          abortChild.on("close", () => resolve(false));
+          abortChild.on("error", () => resolve(false));
+          return;
+        }
+        console.log(`Post-task git rebase: ok (${workingDir})`);
+        resolve(true);
+      });
+      rebaseChild.on("error", () => resolve(false));
+    });
+    child.on("error", () => resolve(false));
+  });
+
+  if (!fetchRebaseOk) {
+    console.warn(`Post-task git push skipped in ${workingDir}: fetch/rebase failed`);
+    return;
+  }
+
   await new Promise<void>((resolve) => {
     const child = spawn("git", ["push"], {
       cwd: workingDir,

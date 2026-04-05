@@ -1,7 +1,7 @@
 # Phase 4 Engineering Plan: Human Gates for Side Effects
 
 **Parent plan:** [hugin-v2-engineering-plan.md](/Users/magnus/repos/hugin/docs/hugin-v2-engineering-plan.md)  
-**Status:** Planned, not implemented  
+**Status:** Implemented and live-validated (see STATUS.md)  
 **Date:** 2026-04-04
 
 ## Goal
