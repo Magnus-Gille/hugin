@@ -1145,13 +1145,15 @@ function spawnRuntime(
 // --- Lease helpers ---
 
 function leaseExpiry(): string {
-  return new Date(Date.now() + LEASE_DURATION_MS).toISOString();
+  return String(Date.now() + LEASE_DURATION_MS);
 }
 
 function parseLeaseExpiry(tags: string[]): number | null {
   const tag = tags.find((t) => t.startsWith("lease_expires:"));
   if (!tag) return null;
-  const ts = new Date(tag.slice("lease_expires:".length)).getTime();
+  const raw = tag.slice("lease_expires:".length);
+  // Support both epoch-millis (new) and ISO 8601 (legacy)
+  const ts = /^\d+$/.test(raw) ? Number(raw) : new Date(raw).getTime();
   return Number.isNaN(ts) ? null : ts;
 }
 
@@ -1197,8 +1199,12 @@ function startLeaseRenewal(taskNs: string, entryContent: string, baseTags: strin
     }
     try {
       const renewedTags = buildClaimTags(baseTags, "running");
-      await leaseMunin.write(taskNs, "status", entryContent, renewedTags);
-      console.log(`Lease renewed for ${taskNs} (expires: ${leaseExpiry()})`);
+      const renewResult = await leaseMunin.write(taskNs, "status", entryContent, renewedTags) as Record<string, unknown>;
+      if (renewResult && !renewResult.ok) {
+        console.error(`Lease renewal write returned error for ${taskNs}:`, JSON.stringify(renewResult));
+      } else {
+        console.log(`Lease renewed for ${taskNs} (expires: ${leaseExpiry()})`);
+      }
     } catch (err) {
       console.error(`Lease renewal failed for ${taskNs}:`, err);
     }
@@ -2268,13 +2274,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   // Claim the task with compare-and-swap, attaching worker identity and lease
   const claimTags = buildClaimTags(entry.tags, "running");
   try {
-    await munin.write(
+    const claimResult = await munin.write(
       taskNs,
       "status",
       entry.content,
       claimTags,
       entry.updated_at
-    );
+    ) as Record<string, unknown>;
+    if (claimResult && !claimResult.ok) {
+      console.error(`Claim write returned error for ${taskNs}:`, JSON.stringify(claimResult));
+      return { hadTask: false, queueDepth };
+    }
   } catch (err) {
     console.log(`Failed to claim ${taskNs} (concurrent claim?):`, err);
     return { hadTask: false, queueDepth };
