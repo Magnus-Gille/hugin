@@ -1,0 +1,6 @@
+[Unit]
+Description=Sync git repos under /home/magnus/repos with GitHub
+
+[Service]
+Type=oneshot
+ExecStart=/home/magnus/repos/hugin/scripts/sync-repos.sh

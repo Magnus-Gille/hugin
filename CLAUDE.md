@@ -125,7 +125,10 @@ hugin/
     ├── submit-stale-status-review.sh
     ├── sync-claude-config.sh     # Sync ~/.claude/ config to Pi
     ├── update-cli.sh             # Auto-update CLI tools (daily cron)
-    └── on-task-stop.mjs          # Task stop hook
+    ├── on-task-stop.mjs          # Task stop hook
+    ├── sync-repos.sh             # Periodic git pull for all repos (15min timer)
+    ├── sync-repos.service        # systemd user service for sync-repos
+    └── sync-repos.timer          # systemd user timer (every 15 minutes)
 ```
 
 ## How to build
