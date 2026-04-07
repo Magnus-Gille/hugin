@@ -1378,19 +1378,21 @@ async function recoverStaleTasks(): Promise<void> {
       const runtime = (runtimeTag || "runtime:claude").replace(
         /^runtime:/,
         ""
-      ) as DispatcherRuntime;
-      await writeStructuredTaskResult(
-        result.namespace,
-        createFailureStructuredResult(
+      ) as DispatcherRuntime | "pipeline";
+      if (runtime !== "pipeline") {
+        await writeStructuredTaskResult(
           result.namespace,
-          runtime,
-          `Task recovered (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)`,
-          {
-            executor: "dispatcher",
-            resultSource: "recovery",
-          }
-        )
-      );
+          createFailureStructuredResult(
+            result.namespace,
+            runtime,
+            `Task recovered (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)`,
+            {
+              executor: "dispatcher",
+              resultSource: "recovery",
+            }
+          )
+        );
+      }
       await munin.log(
         result.namespace,
         `Task recovered as failed (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)`
