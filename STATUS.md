@@ -1,6 +1,6 @@
 # Hugin — Status
 
-**Last session:** 2026-04-07 (Phase 5 corpus evaluation, issue triage, Hugin task dispatch)
+**Last session:** 2026-04-07 (Phase 6 router implementation)
 **Branch:** main
 
 ## Plan Status
@@ -9,22 +9,26 @@
 - **Phase 3: Structured results and pipeline operations** — done and live-validated.
 - **Phase 4: Human gates for side effects** — done and live-validated.
 - **Critical pre-Phase-5 security hardening** — done and live-validated.
-- **Phase 5: Sensitivity classification** — **DONE.** Corpus evaluation passed (19/19, zero under-classifications). Report at `docs/phase5-corpus-evaluation.md`.
-- **Phase 6: Router (`Runtime: auto`)** — engineering plan needed. Two ultraplan attempts timed out.
+- **Phase 5: Sensitivity classification** — done and corpus-evaluated (19/19).
+- **Phase 6: Router (`Runtime: auto`)** — **DONE.** Implemented and deployed. Live evaluation pending (7 evaluation tasks defined in `docs/phase6-router-engineering-plan.md`). Plan at `docs/phase6-router-engineering-plan.md`.
 - **Phase 7: Methodology templates** — not started.
-- **Bet 1 status** — closed. Phases 1-4 are implemented and live-validated on `huginmunin`.
+- **Bet 1 status** — closed.
+- **Bet 2 status** — implementation complete. Live evaluation gate pending.
 
 ## Completed This Session
-- **Phase 5 corpus evaluation PASSED** — designed and ran 18 synthetic tasks (15 standalone + 3 pipelines) on `huginmunin`. 19/19 passed with zero under-classifications. Validated: baseline ratcheting, mismatch detection, context-ref classification, prompt keyword detection, pipeline dependency propagation. Two infra issues (SIGTERM, namespace slug) — not classification bugs. Report: `docs/phase5-corpus-evaluation.md` (5aad66e).
-- **Dependency-propagation test added** — `tests/pipeline-compiler.test.ts` now covers the 3-phase chain (gather→analyze→summarize) where sensitivity inherits through the DAG. 160 tests passing.
-- **Issues #16-#20 closed** — verified fixes in codebase, closed with commit references.
-- **Issue #3 (Phase 5) closed** — corpus evaluation passed.
-- **Issues #6 and #22 dispatched to Hugin and completed:**
-  - #6: Operator guide for approval-decision artifacts → `docs/operator-guide-approval-decisions.md` (8c737a7)
-  - #22: Periodic git pull cron → `scripts/sync-repos.sh` + systemd timer (4b1c64d)
-- **Issues #15 and #21 dispatched to Hugin** — systemd install and pre-task repo sync. Pending completion.
-- **Pi `.env` fixed** — changed `OLLAMA_DEFAULT_MODEL` from `qwen3.5:35b-a3b` (impossible on 8GB Pi) back to `qwen2.5:3b`.
-- **Corpus scripts committed** — `scripts/submit-phase5-corpus.sh` and `scripts/verify-phase5-corpus.sh` for future reruns.
+- **Phase 6 router implemented** — deterministic runtime routing with pure filter/rank chain (trust → availability → capability → model affinity → cost/size). Two new modules: `src/router.ts` (pure function) and `src/runtime-registry.ts` (canonical runtime definitions). Both standalone tasks and pipeline phases share the same router. Commit: c3fb0f1.
+- **Engineering plan adopted** — previous ultraplan output (`sorted-seeking-bubble-ultraplan.md`) validated against codebase and committed as `docs/phase6-router-engineering-plan.md`.
+- **Code review feedback addressed** — dispatcher-level integration tests for `Runtime: auto` (8 tests), routing failure hardcode fix, 3 follow-up issues filed (#23, #24, #25).
+- **Filed ultraplan bug** — [anthropics/claude-code#44766](https://github.com/anthropics/claude-code/issues/44766) — remote session offers "implement here" but can't push.
+- **Deployed to Pi** — huginmunin running Phase 6 code.
+- **204 tests passing**, up from 160.
+
+## Next Steps
+- **Bet 2 live evaluation** — run the 7 evaluation tasks from the engineering plan on huginmunin
+- **Follow-up issues from review:** #23 (consolidate sensitivity enforcement), #24 (unify registries), #25 (routing:auto tag)
+- **Open issues:** #5 (Phase 7), #10-13 (security), #15 (systemd install), #21 (pre-task repo sync)
+
+## Previous Session
 
 ## Previous Session
 - **Agent orchestration research dispatched** — submitted two Hugin tasks for cross-disciplinary research on agent orchestration, swarm intelligence, and related fields (biology, economics, distributed systems, org theory).
