@@ -17,7 +17,7 @@ import {
 import { getFoundBatchEntry, extractTaskId } from "./task-helpers.js";
 import { executeSdkTask } from "./sdk-executor.js";
 import { executeOllamaTask } from "./ollama-executor.js";
-import { configureHosts, resolveOllamaHost, getHostStatus } from "./ollama-hosts.js";
+import { configureHosts, resolveOllamaHost, getHostStatus, probeAllHosts } from "./ollama-hosts.js";
 import { resolveContextRefs } from "./context-loader.js";
 import {
   pipelineSideEffectIdSchema,
@@ -2242,7 +2242,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // Auto-route: resolve concrete runtime before security check (defense-in-depth)
     if (parsedTask.autoRouted) {
       try {
-        const ollamaHosts = getHostStatus();
+        const ollamaHosts = await probeAllHosts();
         const candidates = buildRuntimeCandidates(ollamaHosts);
         const decision = routeTask({
           effectiveSensitivity: sensitivityAssessment.effective,
@@ -2389,7 +2389,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         taskNs,
         entry,
         queueDepth,
-        getHostStatus(),
+        await probeAllHosts(),
       );
       stopLeaseRenewal();
       stopCancellationWatch();

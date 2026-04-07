@@ -135,6 +135,16 @@ export async function resolveOllamaHost(
 }
 
 /**
+ * Probe all known hosts and return fresh status.
+ * Use this before routing decisions that depend on availability.
+ */
+export async function probeAllHosts(): Promise<OllamaHost[]> {
+  const entries = Array.from(hosts.values());
+  await Promise.all(entries.map((h) => probeHost(h)));
+  return entries;
+}
+
+/**
  * Get current status of all known hosts (for health/debug endpoint).
  */
 export function getHostStatus(): OllamaHost[] {

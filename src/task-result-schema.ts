@@ -21,7 +21,7 @@ export const taskExecutionBodyKindSchema = z.enum([
 ]);
 export type TaskExecutionBodyKind = z.infer<typeof taskExecutionBodyKindSchema>;
 
-export const dispatcherRuntimeSchema = z.enum(["claude", "codex", "ollama"]);
+export const dispatcherRuntimeSchema = z.enum(["claude", "codex", "ollama", "auto"]);
 export type DispatcherRuntime = z.infer<typeof dispatcherRuntimeSchema>;
 
 export const taskExecutionPipelineContextSchema = z.object({
