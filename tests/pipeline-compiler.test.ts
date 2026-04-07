@@ -294,6 +294,43 @@ Phase: explore
     expect(result).toContain("- **Sequence:** 4");
   });
 
+  it("propagates private sensitivity through dependency edges", () => {
+    const pipeline = makePipeline(`## Task: Dependency sensitivity propagation
+
+- **Runtime:** pipeline
+- **Sensitivity:** internal
+
+### Pipeline
+
+Phase: gather
+  Runtime: ollama-pi
+  Sensitivity: private
+  Prompt: |
+    Gather private data.
+
+Phase: analyze
+  Runtime: ollama-pi
+  Depends-on: gather
+  Prompt: |
+    Analyze the gathered data.
+
+Phase: summarize
+  Runtime: ollama-pi
+  Depends-on: analyze
+  Prompt: |
+    Summarize everything.
+`);
+
+    // gather: declared private → effective private
+    expect(pipeline.phases.find(p => p.name === "gather")?.effectiveSensitivity).toBe("private");
+    // analyze: no declared sensitivity, depends on gather (private) → inherits private
+    expect(pipeline.phases.find(p => p.name === "analyze")?.effectiveSensitivity).toBe("private");
+    // summarize: no declared sensitivity, depends on analyze (private via inheritance) → inherits private
+    expect(pipeline.phases.find(p => p.name === "summarize")?.effectiveSensitivity).toBe("private");
+    // pipeline-level declared sensitivity stays as declared (internal)
+    expect(pipeline.sensitivity).toBe("internal");
+  });
+
   it("rejects missing phase runtimes with a direct error", () => {
     expect(() =>
       makePipeline(`## Task: Missing runtime
