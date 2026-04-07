@@ -79,6 +79,8 @@ export const pipelinePhaseIRSchema = z.object({
   sideEffects: z.array(pipelineSideEffectIdSchema).default([]),
   declaredSensitivity: pipelineSensitivitySchema.optional(),
   effectiveSensitivity: pipelineSensitivitySchema,
+  autoRouted: z.boolean().optional(),
+  routingReason: z.string().min(1).optional(),
 });
 
 export type PipelinePhaseIR = z.infer<typeof pipelinePhaseIRSchema>;

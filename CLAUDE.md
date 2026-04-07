@@ -40,7 +40,7 @@ Content format:
 ```markdown
 ## Task: <title>
 
-- **Runtime:** claude | codex | ollama | pipeline
+- **Runtime:** claude | codex | ollama | pipeline | auto
 - **Context:** repo:heimdall
 - **Working dir:** /home/magnus/workspace
 - **Timeout:** 300000
@@ -54,6 +54,7 @@ Content format:
 - **Context-refs:** meta/conventions/status, projects/heimdall/status
 - **Context-budget:** 8000
 - **Sensitivity:** internal
+- **Capabilities:** tools, code, structured-output
 - **Group:** batch-20260323
 - **Sequence:** 1
 
@@ -81,7 +82,9 @@ Content format:
 
 **Sensitivity:** Optional `Sensitivity: public | internal | private` field. If omitted, Hugin infers sensitivity from the prompt (keyword detection), context path, and any context-refs. Cloud runtimes (claude, codex) are capped at `internal`; local runtimes (ollama) allow `private`. Tasks that exceed their runtime's sensitivity ceiling are rejected.
 
-**Pipeline tasks:** Use `Runtime: pipeline` with a `### Pipeline` section instead of `### Prompt`. Pipeline phases use runtime IDs (`claude-sdk`, `codex-spawn`, `ollama-pi`, `ollama-laptop`) which differ from standalone runtime names.
+**Auto-routing:** Use `Runtime: auto` to let Hugin select the runtime. The router filters by trust tier (sensitivity ceiling), availability (ollama host probes), and capabilities, then ranks by cost (free > subscription), trust (trusted > semi-trusted), and model size. Optional `Capabilities: tools, code, structured-output` narrows candidates. Explicit runtimes remain the default — `auto` is opt-in. Routing decisions are logged and included in structured results.
+
+**Pipeline tasks:** Use `Runtime: pipeline` with a `### Pipeline` section instead of `### Prompt`. Pipeline phases use runtime IDs (`claude-sdk`, `codex-spawn`, `ollama-pi`, `ollama-laptop`, or `auto`) which differ from standalone runtime names. Per-phase `Capabilities:` is supported.
 
 **Results:** Written to the same namespace under two keys:
 - `result` — human-readable markdown with exit code, timestamps, duration, and response body
@@ -102,6 +105,8 @@ hugin/
 │   ├── ollama-hosts.ts           # Lazy host resolution with negative caching
 │   ├── context-loader.ts         # Context-refs resolver with classification metadata
 │   ├── munin-client.ts           # HTTP client for Munin JSON-RPC API
+│   ├── router.ts                 # Runtime auto-routing (pure function, filter/rank chain)
+│   ├── runtime-registry.ts       # Canonical runtime definitions (trust, cost, capabilities)
 │   ├── sensitivity.ts            # Shared sensitivity model (public/internal/private lattice)
 │   ├── egress-policy.ts          # Fetch egress controls (host allowlist)
 │   ├── pipeline-ir.ts            # Pipeline intermediate representation and schema
@@ -116,7 +121,7 @@ hugin/
 │   ├── task-status-tags.ts       # Tag manipulation helpers for task lifecycle
 │   ├── task-graph.ts             # Task dependency graph for pipelines
 │   └── result-format.ts          # Result formatting utilities
-├── tests/                        # 17 test files mirroring src/
+├── tests/                        # 19 test files mirroring src/
 ├── docs/                         # Engineering plans, evaluations, security docs
 │   └── security/                 # Threat models and security assessments
 └── scripts/

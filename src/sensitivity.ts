@@ -174,6 +174,7 @@ export function sensitivityToMuninClassification(
 export function getDispatcherRuntimeMaxSensitivity(
   runtime: "claude" | "codex" | "ollama",
 ): Sensitivity {
+  // Delegates to trust-tier semantics: ollama = trusted (private), cloud = semi-trusted (internal)
   switch (runtime) {
     case "ollama":
       return "private";
@@ -185,6 +186,7 @@ export function getDispatcherRuntimeMaxSensitivity(
 }
 
 export function getPipelineRuntimeMaxSensitivity(runtimeId: string): Sensitivity {
+  // Delegates to trust-tier semantics: ollama-* = trusted (private), cloud = semi-trusted (internal)
   if (runtimeId === "ollama-pi" || runtimeId === "ollama-laptop") {
     return "private";
   }

@@ -56,6 +56,11 @@ export type TaskExecutionApprovalMetadata = z.infer<
   typeof taskExecutionApprovalMetadataSchema
 >;
 
+export const routingEliminationSchema = z.object({
+  id: z.string().min(1),
+  reason: z.string().min(1),
+});
+
 export const taskExecutionRuntimeMetadataSchema = z.object({
   requestedModel: z.string().min(1).optional(),
   effectiveModel: z.string().min(1).optional(),
@@ -63,6 +68,9 @@ export const taskExecutionRuntimeMetadataSchema = z.object({
   effectiveHost: z.string().min(1).optional(),
   fallbackTriggered: z.boolean().optional(),
   fallbackReason: z.string().min(1).optional(),
+  autoRouted: z.boolean().optional(),
+  routingReason: z.string().min(1).optional(),
+  eliminatedRuntimes: z.array(routingEliminationSchema).optional(),
 });
 export type TaskExecutionRuntimeMetadata = z.infer<
   typeof taskExecutionRuntimeMetadataSchema

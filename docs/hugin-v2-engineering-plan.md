@@ -1,7 +1,7 @@
 # Hugin v2 Engineering Plan
 
 **Source:** [hugin-v2-pipeline-orchestrator.md](/Users/magnus/repos/hugin/docs/hugin-v2-pipeline-orchestrator.md)  
-**Status:** Phases 1-4 complete and live-validated; security precondition closed; Phase 5 started  
+**Status:** Phases 1-5 complete and live-validated; security precondition closed; Phase 6 in progress  
 **Date:** 2026-04-04
 
 ## Goal
@@ -156,6 +156,9 @@ Do not start routing work until all of these are true:
 - Rank candidates with simple deterministic rules first.
 - Keep explicit runtimes as the default path.
 
+**Detailed implementation plan**
+- [phase6-router-engineering-plan.md](/Users/magnus/repos/hugin/docs/phase6-router-engineering-plan.md)
+
 **Evaluation step required**
 - Yes. This is the Bet 2 gate: routed tasks must match or beat manually chosen runtimes with zero sensitivity violations.
 
@@ -178,4 +181,4 @@ Do not start routing work until all of these are true:
 
 ## Current recommendation
 
-Bet 1 is closed and the critical pre-Phase-5 security hardening pass is now live. The next implementation target is the **remaining Phase 5 sensitivity work** beyond Step 0: broader standalone/pipeline propagation, richer artifact audit trail, and the representative corpus evaluation before any Phase 6 routing.
+Bet 1 is closed. Phase 5 sensitivity classification is complete and corpus-evaluated (19/19, zero under-classifications). The next implementation target is **Phase 6: Router** — deterministic runtime selection using `Runtime: auto`.

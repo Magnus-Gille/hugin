@@ -16,6 +16,8 @@ export interface TaskResultDocumentInput extends ResultRoutingMetadata {
   body: string;
   costUsd?: number | null;
   timedOut?: boolean;
+  autoRouted?: boolean;
+  routingReason?: string;
 }
 
 export function buildRoutingMetadataLines(metadata: ResultRoutingMetadata): string[] {
@@ -52,6 +54,10 @@ export function buildTaskResultDocument(input: TaskResultDocumentInput): string 
 
   if (input.costUsd !== null && input.costUsd !== undefined) {
     lines.push(`- **Cost:** $${input.costUsd.toFixed(4)}`);
+  }
+
+  if (input.autoRouted && input.routingReason) {
+    lines.push(`- **Auto-routed:** ${input.routingReason}`);
   }
 
   lines.push(...buildRoutingMetadataLines(input));

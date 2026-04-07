@@ -28,9 +28,13 @@ function resolveContext(raw: string): string {
   }
 }
 
+type RuntimeCapability = "tools" | "code" | "structured-output";
+
 function parseTask(content: string, workspace = "/home/magnus/workspace") {
-  const runtime =
-    content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama)/i)?.[1]?.toLowerCase() as
+  const declaredRuntimeRaw =
+    content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|auto)/i)?.[1]?.toLowerCase();
+  const isAutoRoute = declaredRuntimeRaw === "auto";
+  const runtime = (isAutoRoute ? undefined : declaredRuntimeRaw) as
       | "claude"
       | "codex"
       | "ollama"
@@ -76,18 +80,31 @@ function parseTask(content: string, workspace = "/home/magnus/workspace") {
     /\*\*Context-budget:\*\*\s*(\d+)/i
   )?.[1];
 
+  const capabilitiesRaw = content.match(
+    /\*\*Capabilities:\*\*\s*(.+)/i
+  )?.[1]?.trim();
+
   const promptMatch = content.match(/###\s*Prompt\s*\n([\s\S]+)$/i);
   const prompt = promptMatch?.[1]?.trim();
 
-  if (!prompt || !runtime) return null;
+  if (!prompt || (!runtime && !isAutoRoute)) return null;
 
   const resolvedDir = contextRaw
     ? resolveContext(contextRaw)
     : workingDir || workspace;
 
+  const validCapabilities: RuntimeCapability[] = [];
+  if (capabilitiesRaw) {
+    for (const cap of capabilitiesRaw.split(",").map((c: string) => c.trim()).filter(Boolean)) {
+      if (cap === "tools" || cap === "code" || cap === "structured-output") {
+        validCapabilities.push(cap);
+      }
+    }
+  }
+
   return {
     prompt,
-    runtime: runtime || "claude",
+    runtime: runtime || "claude",  // placeholder for auto — overwritten by router
     workingDir: resolvedDir,
     context: contextRaw || undefined,
     timeoutMs: timeoutStr ? parseInt(timeoutStr) : 300000,
@@ -104,6 +121,8 @@ function parseTask(content: string, workspace = "/home/magnus/workspace") {
       ? contextRefsRaw.split(",").map((r: string) => r.trim()).filter(Boolean)
       : undefined,
     contextBudget: contextBudgetStr ? parseInt(contextBudgetStr) : undefined,
+    capabilities: validCapabilities.length > 0 ? validCapabilities : undefined,
+    autoRouted: isAutoRoute || undefined,
   };
 }
 
@@ -631,5 +650,134 @@ describe("submitter validation", () => {
     expect(isSubmitterAllowed("bot-a", custom)).toBe(true);
     expect(isSubmitterAllowed("Codex", custom)).toBe(false);
     expect(isSubmitterAllowed("claude-code", custom)).toBe(false);
+  });
+});
+
+describe("auto-routing task parsing", () => {
+  it("should parse Runtime: auto as autoRouted task", () => {
+    const content = `## Task: Auto test
+
+- **Runtime:** auto
+- **Sensitivity:** internal
+- **Submitted by:** claude-code
+
+### Prompt
+Do something automatically`;
+
+    const task = parseTask(content);
+    expect(task).not.toBeNull();
+    expect(task!.autoRouted).toBe(true);
+    expect(task!.runtime).toBe("claude"); // placeholder
+    expect(task!.prompt).toBe("Do something automatically");
+  });
+
+  it("should parse Capabilities field on auto-routed task", () => {
+    const content = `## Task: Capable auto
+
+- **Runtime:** auto
+- **Capabilities:** tools, code
+
+### Prompt
+Write some code`;
+
+    const task = parseTask(content);
+    expect(task).not.toBeNull();
+    expect(task!.autoRouted).toBe(true);
+    expect(task!.capabilities).toEqual(["tools", "code"]);
+  });
+
+  it("should parse Capabilities: structured-output", () => {
+    const content = `## Task: Structured
+
+- **Runtime:** auto
+- **Capabilities:** structured-output
+
+### Prompt
+Return JSON`;
+
+    const task = parseTask(content);
+    expect(task!.capabilities).toEqual(["structured-output"]);
+  });
+
+  it("should ignore invalid capability values", () => {
+    const content = `## Task: Bad caps
+
+- **Runtime:** auto
+- **Capabilities:** tools, invalid-cap, code
+
+### Prompt
+Do it`;
+
+    const task = parseTask(content);
+    expect(task!.capabilities).toEqual(["tools", "code"]);
+  });
+
+  it("should leave capabilities undefined when not specified", () => {
+    const content = `## Task: No caps
+
+- **Runtime:** auto
+
+### Prompt
+Do it`;
+
+    const task = parseTask(content);
+    expect(task!.capabilities).toBeUndefined();
+  });
+
+  it("should not set autoRouted for explicit runtimes", () => {
+    const content = `## Task: Explicit
+
+- **Runtime:** claude
+
+### Prompt
+Do it`;
+
+    const task = parseTask(content);
+    expect(task!.autoRouted).toBeUndefined();
+  });
+
+  it("should parse Capabilities on explicit runtime task", () => {
+    const content = `## Task: Explicit with caps
+
+- **Runtime:** claude
+- **Capabilities:** tools
+
+### Prompt
+Do it`;
+
+    const task = parseTask(content);
+    expect(task!.autoRouted).toBeUndefined();
+    expect(task!.capabilities).toEqual(["tools"]);
+  });
+
+  it("should parse auto task with all fields", () => {
+    const content = `## Task: Full auto
+
+- **Runtime:** auto
+- **Context:** repo:hugin
+- **Sensitivity:** internal
+- **Capabilities:** tools, code
+- **Model:** qwen2.5:7b
+- **Timeout:** 120000
+- **Submitted by:** claude-code
+- **Submitted at:** 2026-04-07T10:00:00Z
+- **Reply-to:** telegram:12345
+- **Reply-format:** summary
+- **Group:** test-batch
+- **Sequence:** 1
+
+### Prompt
+Implement the feature`;
+
+    const task = parseTask(content);
+    expect(task).not.toBeNull();
+    expect(task!.autoRouted).toBe(true);
+    expect(task!.capabilities).toEqual(["tools", "code"]);
+    expect(task!.model).toBe("qwen2.5:7b");
+    expect(task!.context).toBe("repo:hugin");
+    expect(task!.workingDir).toBe("/home/magnus/repos/hugin");
+    expect(task!.replyTo).toBe("telegram:12345");
+    expect(task!.group).toBe("test-batch");
+    expect(task!.sequence).toBe(1);
   });
 });

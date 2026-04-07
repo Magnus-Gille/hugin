@@ -4,12 +4,31 @@ import {
   buildPipelineDecompositionResult,
   compilePipelineTask,
 } from "../src/pipeline-compiler.js";
+import type { OllamaHost } from "../src/ollama-hosts.js";
 
-function makePipeline(content: string) {
+const defaultOllamaHosts: OllamaHost[] = [
+  {
+    name: "pi",
+    baseUrl: "http://127.0.0.1:11434",
+    available: true,
+    models: ["qwen2.5:3b"],
+    lastChecked: Date.now(),
+  },
+  {
+    name: "laptop",
+    baseUrl: "http://100.1.2.3:11434",
+    available: false,
+    models: [],
+    lastChecked: Date.now(),
+  },
+];
+
+function makePipeline(content: string, ollamaHosts?: OllamaHost[]) {
   return compilePipelineTask(
     "20260402-improve-munin-ux",
     "tasks/20260402-improve-munin-ux",
-    content
+    content,
+    ollamaHosts ?? defaultOllamaHosts,
   );
 }
 
@@ -106,11 +125,11 @@ Phase: synthesize
     expect(drafts[1]?.content).toContain("**Depends on phases:** explore");
   });
 
-  it("rejects Runtime: auto until routing exists", () => {
-    expect(() =>
-      makePipeline(`## Task: Invalid
+  it("routes Runtime: auto to a concrete runtime at compile time", () => {
+    const pipeline = makePipeline(`## Task: Auto-routed
 
 - **Runtime:** pipeline
+- **Sensitivity:** internal
 
 ### Pipeline
 
@@ -118,8 +137,12 @@ Phase: explore
   Runtime: auto
   Prompt: |
     Explore.
-`)
-    ).toThrow(/Runtime: auto/);
+`);
+    // auto should resolve to a concrete runtime
+    expect(pipeline.phases[0]?.runtime).toBeTruthy();
+    expect(pipeline.phases[0]?.runtime).not.toBe("auto");
+    expect(pipeline.phases[0]?.autoRouted).toBe(true);
+    expect(pipeline.phases[0]?.routingReason).toBeTruthy();
   });
 
   it("rejects unknown dependency references", () => {
@@ -344,5 +367,79 @@ Phase: explore
     Explore.
 `)
     ).toThrow(/missing a Runtime field/);
+  });
+
+  it("auto-routes private pipeline phase to trusted runtime only", () => {
+    const pipeline = makePipeline(`## Task: Private auto
+
+- **Runtime:** pipeline
+- **Sensitivity:** private
+
+### Pipeline
+
+Phase: review
+  Runtime: auto
+  Prompt: |
+    Review private notes.
+`);
+    // Private must route to trusted (ollama)
+    expect(pipeline.phases[0]?.dispatcherRuntime).toBe("ollama");
+    expect(pipeline.phases[0]?.autoRouted).toBe(true);
+  });
+
+  it("compiles pipeline with mixed auto and explicit phases", () => {
+    const pipeline = makePipeline(`## Task: Mixed routing
+
+- **Runtime:** pipeline
+- **Sensitivity:** internal
+
+### Pipeline
+
+Phase: gather
+  Runtime: ollama-pi
+  Prompt: |
+    Gather data.
+
+Phase: analyze
+  Depends-on: gather
+  Runtime: auto
+  Prompt: |
+    Analyze.
+
+Phase: report
+  Depends-on: analyze
+  Runtime: claude-sdk
+  Prompt: |
+    Report.
+`);
+    expect(pipeline.phases).toHaveLength(3);
+    // First phase: explicit
+    expect(pipeline.phases[0]?.runtime).toBe("ollama-pi");
+    expect(pipeline.phases[0]?.autoRouted).toBeUndefined();
+    // Second phase: auto-routed
+    expect(pipeline.phases[1]?.autoRouted).toBe(true);
+    expect(pipeline.phases[1]?.runtime).not.toBe("auto");
+    // Third phase: explicit
+    expect(pipeline.phases[2]?.runtime).toBe("claude-sdk");
+    expect(pipeline.phases[2]?.autoRouted).toBeUndefined();
+  });
+
+  it("auto-routes with Capabilities: filtering", () => {
+    const pipeline = makePipeline(`## Task: Capable auto
+
+- **Runtime:** pipeline
+- **Sensitivity:** internal
+
+### Pipeline
+
+Phase: code-task
+  Runtime: auto
+  Capabilities: tools, code
+  Prompt: |
+    Write code.
+`);
+    // tools+code should route to claude-sdk or codex (not ollama which has no capabilities)
+    expect(["claude", "codex"]).toContain(pipeline.phases[0]?.dispatcherRuntime);
+    expect(pipeline.phases[0]?.autoRouted).toBe(true);
   });
 });

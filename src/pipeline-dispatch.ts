@@ -5,6 +5,7 @@ import {
 } from "./pipeline-compiler.js";
 import type { PipelineIR, PipelineSensitivity } from "./pipeline-ir.js";
 import type { MuninEntry, MuninReadRequest, MuninReadResult } from "./munin-client.js";
+import type { OllamaHost } from "./ollama-hosts.js";
 import { getFoundBatchEntry, extractTaskId } from "./task-helpers.js";
 import { sensitivityToMuninClassification } from "./sensitivity.js";
 import {
@@ -79,13 +80,14 @@ export async function handlePipelineTask(
   hooks: PipelineDispatchHooks,
   taskNs: string,
   entry: MuninEntry & { found: true },
-  queueDepth: number
+  queueDepth: number,
+  ollamaHosts?: OllamaHost[],
 ): Promise<{ hadTask: boolean; queueDepth: number }> {
   const pipelineId = extractTaskId(taskNs);
   let pipeline: PipelineIR;
 
   try {
-    pipeline = compilePipelineTask(pipelineId, taskNs, entry.content);
+    pipeline = compilePipelineTask(pipelineId, taskNs, entry.content, ollamaHosts);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await hooks.failTaskWithMessage(

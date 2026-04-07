@@ -78,6 +78,11 @@ import {
   type Sensitivity,
   type SensitivityAssessment,
 } from "./sensitivity.js";
+import { routeTask, type RouterDecision } from "./router.js";
+import {
+  buildRuntimeCandidates,
+  type RuntimeCapability,
+} from "./runtime-registry.js";
 
 const HUGIN_HOME = path.join(process.env.HOME || "/home/magnus", ".hugin");
 const LOG_DIR = path.join(HUGIN_HOME, "logs");
@@ -207,12 +212,15 @@ interface TaskConfig {
   sensitivityAssessment?: SensitivityAssessment;
   contextResolution?: Awaited<ReturnType<typeof resolveContextRefs>>;
   pipeline?: TaskExecutionPipelineContext;
+  capabilities?: RuntimeCapability[];
+  autoRouted?: boolean;
+  routingDecision?: RouterDecision;
 }
 
-type DeclaredRuntime = TaskConfig["runtime"] | "pipeline";
+type DeclaredRuntime = TaskConfig["runtime"] | "pipeline" | "auto";
 
 function parseDeclaredRuntime(content: string): DeclaredRuntime | undefined {
-  return content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|pipeline)/i)?.[1]?.toLowerCase() as
+  return content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|pipeline|auto)/i)?.[1]?.toLowerCase() as
     | DeclaredRuntime
     | undefined;
 }
@@ -261,7 +269,9 @@ function resolveContext(raw: string): string {
 }
 
 function parseTask(content: string): TaskConfig | null {
-  const runtime = parseDeclaredRuntime(content) as
+  const declaredRuntimeRaw = parseDeclaredRuntime(content);
+  const isAutoRoute = declaredRuntimeRaw === "auto";
+  const runtime = (isAutoRoute ? undefined : declaredRuntimeRaw) as
       | "claude"
       | "codex"
       | "ollama"
@@ -335,20 +345,33 @@ function parseTask(content: string): TaskConfig | null {
     /\*\*Depends on phases:\*\*\s*(.+)/i
   )?.[1]?.trim();
 
+  const capabilitiesRaw = content.match(
+    /\*\*Capabilities:\*\*\s*(.+)/i
+  )?.[1]?.trim();
+
   // Extract prompt from ### Prompt section
   const promptMatch = content.match(/###\s*Prompt\s*\n([\s\S]+)$/i);
   const prompt = promptMatch?.[1]?.trim();
 
-  if (!prompt || !runtime) return null;
+  if (!prompt || (!runtime && !isAutoRoute)) return null;
 
   // Resolution priority: Context > Working dir > config.workspace
   const resolvedDir = contextRaw
     ? resolveContext(contextRaw)
     : workingDir || config.workspace;
 
+  const validCapabilities: RuntimeCapability[] = [];
+  if (capabilitiesRaw) {
+    for (const cap of capabilitiesRaw.split(",").map((c) => c.trim()).filter(Boolean)) {
+      if (cap === "tools" || cap === "code" || cap === "structured-output") {
+        validCapabilities.push(cap);
+      }
+    }
+  }
+
   return {
     prompt,
-    runtime: runtime || "claude",
+    runtime: runtime || "claude",  // temporary for auto — overwritten by router
     workingDir: resolvedDir,
     context: contextRaw || undefined,
     timeoutMs: timeoutStr ? parseInt(timeoutStr) : config.defaultTimeoutMs,
@@ -368,6 +391,8 @@ function parseTask(content: string): TaskConfig | null {
     declaredSensitivity: declaredSensitivityRaw
       ? sensitivitySchema.parse(declaredSensitivityRaw)
       : undefined,
+    capabilities: validCapabilities.length > 0 ? validCapabilities : undefined,
+    autoRouted: isAutoRoute || undefined,
     pipeline:
       pipelineId && pipelinePhase
         ? {
@@ -2213,6 +2238,58 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
   if (declaredRuntime !== "pipeline" && parsedTask) {
     const sensitivityAssessment = await assessTaskSecurity(parsedTask);
+
+    // Auto-route: resolve concrete runtime before security check (defense-in-depth)
+    if (parsedTask.autoRouted) {
+      try {
+        const ollamaHosts = getHostStatus();
+        const candidates = buildRuntimeCandidates(ollamaHosts);
+        const decision = routeTask({
+          effectiveSensitivity: sensitivityAssessment.effective,
+          capabilities: parsedTask.capabilities,
+          preferredModel: parsedTask.model,
+          availableRuntimes: candidates,
+        });
+        parsedTask.runtime = decision.selectedRuntime.dispatcherRuntime;
+        parsedTask.routingDecision = decision;
+        if (decision.selectedRuntime.ollamaHost) {
+          parsedTask.ollamaHost = decision.selectedRuntime.ollamaHost;
+        }
+        if (decision.selectedRuntime.defaultModel && !parsedTask.model) {
+          parsedTask.model = decision.selectedRuntime.defaultModel;
+        }
+        console.log(
+          `Auto-routed task ${taskNs} → ${decision.selectedRuntime.id} (${decision.reason})`,
+        );
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.error(`Auto-routing failed for ${taskNs}: ${errorMsg}`);
+        const classification = getTaskArtifactClassification(parsedTask);
+        await failTaskWithMessage(taskNs, entry, `Auto-routing failed: ${errorMsg}`);
+        await writeStructuredTaskResult(
+          taskNs,
+          createFailureStructuredResult(taskNs, parsedTask.runtime, `Auto-routing failed: ${errorMsg}`, {
+            executor: "dispatcher",
+            resultSource: "router",
+            replyTo: parsedTask.replyTo,
+            replyFormat: parsedTask.replyFormat,
+            group: parsedTask.group,
+            sequence: parsedTask.sequence,
+            pipeline: parsedTask.pipeline,
+            sensitivity: buildTaskSensitivitySnapshot(sensitivityAssessment),
+            runtimeMetadata: {
+              autoRouted: true,
+              routingReason: `routing failed: ${errorMsg}`,
+            },
+          }),
+          classification,
+        );
+        await promoteDependents(extractTaskId(taskNs));
+        await refreshPipelineSummaryFromContent(entry.content);
+        return { hadTask: true, queueDepth };
+      }
+    }
+
     const securityViolation = getSecurityViolationForTask(
       parsedTask,
       sensitivityAssessment,
@@ -2311,7 +2388,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         },
         taskNs,
         entry,
-        queueDepth
+        queueDepth,
+        getHostStatus(),
       );
       stopLeaseRenewal();
       stopCancellationWatch();
@@ -2681,6 +2759,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           group: task.group,
           sequence: task.sequence,
           body: resultBody,
+          autoRouted: task.autoRouted,
+          routingReason: task.routingDecision?.reason,
         }),
         undefined,
         undefined,
@@ -2694,7 +2774,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       resultSource === "stdout"
         ? output || "(no output)"
         : resultText || output || "(no output)";
-    const runtimeMetadata: TaskExecutionRuntimeMetadata | undefined =
+    const baseRuntimeMetadata: TaskExecutionRuntimeMetadata | undefined =
       isOllama
         ? {
             requestedModel: task.model || config.ollamaDefaultModel,
@@ -2722,6 +2802,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
               effectiveModel: task.model,
             }
           : undefined;
+
+    const runtimeMetadata: TaskExecutionRuntimeMetadata | undefined =
+      task.autoRouted && task.routingDecision
+        ? {
+            ...baseRuntimeMetadata,
+            autoRouted: true,
+            routingReason: task.routingDecision.reason,
+            eliminatedRuntimes: task.routingDecision.eliminated,
+          }
+        : baseRuntimeMetadata;
 
     if (isCancelled && cancellation) {
       await munin.write(

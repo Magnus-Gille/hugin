@@ -13,6 +13,11 @@ import {
   pipelineSideEffectIdSchema,
 } from "./pipeline-ir.js";
 import { buildRoutingMetadataLines } from "./result-format.js";
+import { routeTask } from "./router.js";
+import {
+  buildRuntimeCandidates,
+  type RuntimeCapability,
+} from "./runtime-registry.js";
 import {
   buildSensitivityAssessment,
   buildSensitivityPolicyError,
@@ -24,6 +29,7 @@ import {
   sensitivityToTag,
 } from "./sensitivity.js";
 import { MAX_DEPENDENCIES } from "./task-graph.js";
+import type { OllamaHost } from "./ollama-hosts.js";
 
 interface ParsedPipelinePhase {
   name: string;
@@ -34,6 +40,7 @@ interface ParsedPipelinePhase {
   timeout?: number;
   authority?: string;
   sideEffects: string[];
+  capabilities: string[];
   onDependencyFailure: PipelineDependencyFailure;
   prompt?: string;
 }
@@ -117,6 +124,7 @@ function parsePipelineBody(body: string): ParsedPipelinePhase[] {
       dependsOn: [],
       runtime: "",
       sideEffects: [],
+      capabilities: [],
       onDependencyFailure: "fail",
     };
     index++;
@@ -168,6 +176,10 @@ function parsePipelineBody(body: string): ParsedPipelinePhase[] {
           break;
         case "Side-effects":
           phase.sideEffects = parseCommaList(rawValue);
+          index++;
+          break;
+        case "Capabilities":
+          phase.capabilities = parseCommaList(rawValue);
           index++;
           break;
         case "On-dep-failure": {
@@ -300,13 +312,13 @@ function validateAcyclic(phases: ParsedPipelinePhase[]): void {
   }
 }
 
-function validateRuntimeId(phaseName: string, runtime: string): PipelineRuntimeId {
+function validateRuntimeId(phaseName: string, runtime: string): PipelineRuntimeId | "auto" {
   const normalized = runtime.trim();
   if (!normalized) {
     throw new Error(`Phase "${phaseName}" is missing a Runtime field`);
   }
   if (normalized === "auto") {
-    throw new Error(`Phase "${phaseName}" uses Runtime: auto, which is deferred until Step 6`);
+    return "auto";
   }
 
   const parsed = pipelineRuntimeIdSchema.safeParse(normalized);
@@ -402,7 +414,8 @@ function computePhaseEffectiveSensitivities(
 export function compilePipelineTask(
   pipelineId: string,
   sourceTaskNamespace: string,
-  content: string
+  content: string,
+  ollamaHosts?: OllamaHost[],
 ): PipelineIR {
   const parsed = parsePipelineDocument(content);
   if (parsed.phases.length === 0) {
@@ -427,17 +440,44 @@ export function compilePipelineTask(
       throw new Error(`Phase "${phase.name}" is missing a prompt`);
     }
 
-    const runtimeId = validateRuntimeId(phase.name, phase.runtime);
-    const runtime = PIPELINE_RUNTIME_REGISTRY[runtimeId];
+    const runtimeIdOrAuto = validateRuntimeId(phase.name, phase.runtime);
+    const sideEffects = validateSideEffects(phase.name, phase.sideEffects);
+    const authority = validateAuthority(phase.name, phase.authority, sideEffects);
+    const declaredSensitivity = parseSensitivity(phase.sensitivity);
+    const effectiveSensitivity = phaseSensitivities.get(phase.name) || parsed.sensitivity;
+
+    let resolvedRuntimeId: PipelineRuntimeId;
+    let autoRouted: boolean | undefined;
+    let routingReason: string | undefined;
+
+    if (runtimeIdOrAuto === "auto") {
+      // Route at compile time
+      const candidates = buildRuntimeCandidates(ollamaHosts || []);
+      const validCapabilities: RuntimeCapability[] = [];
+      for (const cap of phase.capabilities) {
+        if (cap === "tools" || cap === "code" || cap === "structured-output") {
+          validCapabilities.push(cap);
+        }
+      }
+      const decision = routeTask({
+        effectiveSensitivity,
+        capabilities: validCapabilities.length > 0 ? validCapabilities : undefined,
+        availableRuntimes: candidates,
+      });
+      resolvedRuntimeId = decision.selectedRuntime.id as PipelineRuntimeId;
+      autoRouted = true;
+      routingReason = decision.reason;
+    } else {
+      resolvedRuntimeId = runtimeIdOrAuto;
+    }
+
+    const runtime = PIPELINE_RUNTIME_REGISTRY[resolvedRuntimeId];
     const taskId = phaseIdByName.get(phase.name);
     if (!runtime || !taskId) {
       throw new Error(`Internal pipeline compiler error for phase "${phase.name}"`);
     }
 
-    const sideEffects = validateSideEffects(phase.name, phase.sideEffects);
-    const authority = validateAuthority(phase.name, phase.authority, sideEffects);
-    const declaredSensitivity = parseSensitivity(phase.sensitivity);
-    const effectiveSensitivity = phaseSensitivities.get(phase.name) || parsed.sensitivity;
+    // Defense-in-depth: verify sensitivity even after routing
     const runtimeMaxSensitivity = getPipelineRuntimeMaxSensitivity(runtime.id);
     if (maxSensitivity(effectiveSensitivity, runtimeMaxSensitivity) !== runtimeMaxSensitivity) {
       throw new Error(
@@ -475,6 +515,8 @@ export function compilePipelineTask(
       sideEffects,
       declaredSensitivity,
       effectiveSensitivity,
+      autoRouted,
+      routingReason,
     };
   });
 
