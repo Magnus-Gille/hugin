@@ -1,6 +1,6 @@
 # Hugin — Status
 
-**Last session:** 2026-04-05 (agent orchestration research tasks)
+**Last session:** 2026-04-07 (Phase 5 corpus evaluation, issue triage, Hugin task dispatch)
 **Branch:** main
 
 ## Plan Status
@@ -9,12 +9,24 @@
 - **Phase 3: Structured results and pipeline operations** — done and live-validated.
 - **Phase 4: Human gates for side effects** — done and live-validated.
 - **Critical pre-Phase-5 security hardening** — done and live-validated.
-- **Phase 5: Sensitivity classification** — started. Step 0 is done; remaining propagation and corpus-evaluation work is still open.
-- **Phase 6: Router (`Runtime: auto`)** — not started.
+- **Phase 5: Sensitivity classification** — **DONE.** Corpus evaluation passed (19/19, zero under-classifications). Report at `docs/phase5-corpus-evaluation.md`.
+- **Phase 6: Router (`Runtime: auto`)** — engineering plan needed. Two ultraplan attempts timed out.
 - **Phase 7: Methodology templates** — not started.
 - **Bet 1 status** — closed. Phases 1-4 are implemented and live-validated on `huginmunin`.
 
 ## Completed This Session
+- **Phase 5 corpus evaluation PASSED** — designed and ran 18 synthetic tasks (15 standalone + 3 pipelines) on `huginmunin`. 19/19 passed with zero under-classifications. Validated: baseline ratcheting, mismatch detection, context-ref classification, prompt keyword detection, pipeline dependency propagation. Two infra issues (SIGTERM, namespace slug) — not classification bugs. Report: `docs/phase5-corpus-evaluation.md` (5aad66e).
+- **Dependency-propagation test added** — `tests/pipeline-compiler.test.ts` now covers the 3-phase chain (gather→analyze→summarize) where sensitivity inherits through the DAG. 160 tests passing.
+- **Issues #16-#20 closed** — verified fixes in codebase, closed with commit references.
+- **Issue #3 (Phase 5) closed** — corpus evaluation passed.
+- **Issues #6 and #22 dispatched to Hugin and completed:**
+  - #6: Operator guide for approval-decision artifacts → `docs/operator-guide-approval-decisions.md` (8c737a7)
+  - #22: Periodic git pull cron → `scripts/sync-repos.sh` + systemd timer (4b1c64d)
+- **Issues #15 and #21 dispatched to Hugin** — systemd install and pre-task repo sync. Pending completion.
+- **Pi `.env` fixed** — changed `OLLAMA_DEFAULT_MODEL` from `qwen3.5:35b-a3b` (impossible on 8GB Pi) back to `qwen2.5:3b`.
+- **Corpus scripts committed** — `scripts/submit-phase5-corpus.sh` and `scripts/verify-phase5-corpus.sh` for future reruns.
+
+## Previous Session
 - **Agent orchestration research dispatched** — submitted two Hugin tasks for cross-disciplinary research on agent orchestration, swarm intelligence, and related fields (biology, economics, distributed systems, org theory).
   - First task (`20260404-212219-agent-orchestration-research`) failed due to Pi Claude API rate limit.
   - Combined research+design task (`20260405-143948-design-orchestration-experiments`) succeeded — committed as `a76a64d`.
