@@ -48,7 +48,7 @@ export const RUNTIME_REGISTRY: readonly RuntimeDefinition[] = [
     modelSize: "small",
     capabilities: [],
     ollamaHost: "pi",
-    defaultModel: "qwen2.5:3b",
+    defaultModel: "qwen3.5:2b",
   },
   {
     id: "ollama-laptop",

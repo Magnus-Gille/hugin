@@ -50,7 +50,7 @@ export const PIPELINE_RUNTIME_REGISTRY: Record<PipelineRuntimeId, PipelineRuntim
     id: "ollama-pi",
     dispatcherRuntime: "ollama",
     ollamaHost: "pi",
-    defaultModel: "qwen2.5:3b",
+    defaultModel: "qwen3.5:2b",
   },
   "ollama-laptop": {
     id: "ollama-laptop",

@@ -108,7 +108,7 @@ const config = {
     .filter(Boolean),
   ollamaPiUrl: process.env.OLLAMA_PI_URL || "http://127.0.0.1:11434",
   ollamaLaptopUrl: process.env.OLLAMA_LAPTOP_URL || "",
-  ollamaDefaultModel: process.env.OLLAMA_DEFAULT_MODEL || "qwen2.5:3b",
+  ollamaDefaultModel: process.env.OLLAMA_DEFAULT_MODEL || "qwen3.5:2b",
   extraAllowedEgressHosts: (process.env.HUGIN_ALLOWED_EGRESS_HOSTS || "")
     .split(",")
     .map((value) => value.trim())

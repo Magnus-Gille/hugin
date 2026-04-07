@@ -82,7 +82,7 @@ describe("buildRuntimeCandidates", () => {
     name: "pi",
     baseUrl: "http://127.0.0.1:11434",
     available: true,
-    models: ["qwen2.5:3b", "llama3.2:1b"],
+    models: ["qwen3.5:2b", "llama3.2:1b"],
     lastChecked: Date.now(),
   };
 
@@ -115,7 +115,7 @@ describe("buildRuntimeCandidates", () => {
     const candidates = buildRuntimeCandidates([piOnline, laptopOffline]);
     const pi = candidates.find((c) => c.id === "ollama-pi");
     expect(pi?.available).toBe(true);
-    expect(pi?.models).toEqual(["qwen2.5:3b", "llama3.2:1b"]);
+    expect(pi?.models).toEqual(["qwen3.5:2b", "llama3.2:1b"]);
   });
 
   it("marks ollama host as unavailable when probe says so", () => {

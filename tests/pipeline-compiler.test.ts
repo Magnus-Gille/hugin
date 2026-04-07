@@ -11,7 +11,7 @@ const defaultOllamaHosts: OllamaHost[] = [
     name: "pi",
     baseUrl: "http://127.0.0.1:11434",
     available: true,
-    models: ["qwen2.5:3b"],
+    models: ["qwen3.5:2b"],
     lastChecked: Date.now(),
   },
   {
@@ -72,7 +72,7 @@ Phase: debate
     expect(pipeline.phases[1]?.dependencyTaskIds).toEqual([
       "20260402-improve-munin-ux-explore",
     ]);
-    expect(pipeline.phases[0]?.model).toBe("qwen2.5:3b");
+    expect(pipeline.phases[0]?.model).toBe("qwen3.5:2b");
     expect(pipeline.phases[1]?.context).toBe("repo:hugin");
     expect(pipeline.phases[1]?.timeout).toBe(60000);
   });
@@ -119,7 +119,7 @@ Phase: synthesize
       "on-dep-failure:continue",
       "depends-on:20260402-improve-munin-ux-explore",
     ]);
-    expect(drafts[0]?.content).toContain("**Model:** qwen2.5:3b");
+    expect(drafts[0]?.content).toContain("**Model:** qwen3.5:2b");
     expect(drafts[1]?.content).toContain("**Pipeline:** 20260402-improve-munin-ux");
     expect(drafts[1]?.content).toContain("**Depends on task ids:** 20260402-improve-munin-ux-explore");
     expect(drafts[1]?.content).toContain("**Depends on phases:** explore");
