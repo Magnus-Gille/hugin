@@ -14,7 +14,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, syncRepoBeforeTask } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, syncRepoBeforeTask } from "./task-helpers.js";
 import { executeSdkTask } from "./sdk-executor.js";
 import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus, probeAllHosts } from "./ollama-hosts.js";
@@ -2166,8 +2166,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     limit: 10,
   });
 
-  // Select the oldest pending task (FIFO ordering by created_at)
-  const taskResult = pickEarliestTask(results);
+  // Query running tasks to support group sequencing checks
+  const { results: runningResults } = await munin.query({
+    query: "task",
+    tags: ["running"],
+    namespace: "tasks/",
+    entry_type: "state",
+    limit: 50,
+  });
+
+  // Select the next eligible task respecting Group/Sequence ordering (FIFO within eligible set)
+  const taskResult = selectNextTask(results, runningResults);
   if (!taskResult) return { hadTask: false, queueDepth: 0 };
 
   const taskNs = taskResult.namespace;
