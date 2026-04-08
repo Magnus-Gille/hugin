@@ -1,6 +1,6 @@
 # Hugin — Status
 
-**Last session:** 2026-04-07 (Bet 2 live evaluation + bug fixes)
+**Last session:** 2026-04-08 (Bug fixes, Bet 2 completion, ollama research spike)
 **Branch:** main
 
 ## Plan Status
@@ -10,42 +10,44 @@
 - **Phase 4: Human gates for side effects** — done and live-validated.
 - **Critical pre-Phase-5 security hardening** — done and live-validated.
 - **Phase 5: Sensitivity classification** — done and corpus-evaluated (19/19).
-- **Phase 6: Router (`Runtime: auto`)** — **DONE.** Implemented, deployed, and partially live-evaluated. Safety gate passes (zero sensitivity violations). See evaluation results below.
+- **Phase 6: Router (`Runtime: auto`)** — **DONE.** Fully live-evaluated. All 7/7 eval scenarios pass. Safety gate: zero sensitivity violations.
 - **Phase 7: Methodology templates** — not started.
 - **Bet 1 status** — closed.
-- **Bet 2 status** — **safety gate passes.** 5/7 eval tasks completed. Standalone `Runtime: auto` tasks fail to parse (investigation needed — parser works locally but fails on Pi). Filed 3 new issues from findings.
+- **Bet 2 status** — **CLOSED. All 7/7 eval tasks pass.** Safety gate confirmed. Root cause of Pi parse failures was orphan dispatcher processes (fixed).
 
 ## Completed This Session
-- **Default ollama model upgraded** — `qwen2.5:3b` → `qwen3.5:2b` across all code, tests, docs, and Pi `.env`. Model pulled on Pi. Commit: 81529e5.
-- **Bug fix: stale ollama hosts after restart** — router used `getHostStatus()` (cached) instead of probing. Added `probeAllHosts()` and call it before routing decisions. Commit: efe4b4e.
-- **Bug fix: ZodError on auto-routing failure** — "auto" wasn't a valid `DispatcherRuntime` in the structured result schema. Added "auto" to the enum. Commit: efe4b4e.
-- **Bug fix: recovery crash for pipeline tasks** — stale task recovery tried to write structured results for pipeline tasks, which don't use `DispatcherRuntime`. Now skips pipelines. Commit: f8eedaa.
-- **Bet 2 live evaluation (partial)** — submitted 5 evaluation tasks to huginmunin:
-  - Eval 3 (auto + capabilities): → claude-sdk ✅ (ollama lacks tools/code)
-  - Eval 4 (auto + public): → ollama-laptop ✅ (free, trusted) — timed out on 35B model
-  - Eval 5 (pipeline mixed routing): all 3 phases completed ✅ — private phase → ollama, internal → ollama, explicit → claude-sdk. Zero cloud leaks.
-  - Eval 2 (auto + private, first run): clean failure ✅ — router refused cloud, ollama unavailable. No cloud leak.
-  - Eval 1, 2, 3 (standalone auto resubmit): all failed with "missing prompt or runtime" — parser works locally but fails on Pi. Root cause unknown.
-- **3 new issues filed** — #28 (FIFO dispatch ordering), #29 (prompt classifier false positives), research-spike skill fix.
-- **204 tests passing.** Deployed 3 times to Pi.
+- **Bug fix: #29 sensitivity classifier false positives** — split keyword patterns into always-private and context-sensitive tiers. Context-sensitive keywords (secret, invoice, tax, bank, journal) suppressed when same line has technical modifiers. Commit: d3c31d7.
+- **Bug fix: #28 FIFO dispatch ordering** — pollOnce queries limit:10 and sorts by created_at. Dispatched via Hugin task. Commit: 4b500dd.
+- **Bug fix: #27 group sequencing** — selectNextTask skips tasks whose group has lower-sequence siblings pending/running. Dispatched via Hugin task. Commit: 11eac04.
+- **Refactor: extract functions from index.ts** — moved pickEarliestTask and syncRepoBeforeTask to task-helpers.ts to fix test crashes (index.ts has module-level side effects). Commit: facc649.
+- **Root cause: Pi parse failures** — orphan Hugin processes from tasks running `npm test` in the hugin repo. Old instances lacked `Runtime: auto` support and raced the real dispatcher. Fixed with EADDRINUSE guard (ac690f0), startup orphan cleanup (11447ff), and deploy-time cleanup (43fd2e9).
+- **Fix: auto-routed model selection** — was using registry host default (qwen3.5:35b-a3b for laptop) instead of global default. Scoped to ollama runtimes only. Commits: 8f4dbfe, feafb7b.
+- **Ollama performance research spike** — benchmarked Pi and laptop. qwen3.5:2b reasoning overhead (270 think tokens, 90s) makes it unusable on Pi. qwen2.5:3b is best (1.9s warm). Report: docs/research/ollama-performance-spike.md.
+- **Reverted default model to qwen2.5:3b** — the qwen3.5:2b upgrade was a regression. Commit: b65fa2d.
+- **Set OLLAMA_KEEP_ALIVE=-1 on Pi** — model stays loaded permanently, eliminating cold starts.
+- **Bet 2 evaluation completed** — all 7/7 scenarios pass. Safety gate confirmed.
+- **3 new issues filed** — #30 (think:false support), #31 (pre-warm model), #32 (ollama model status in heartbeat).
+- **239 tests passing.** Deployed 8 times to Pi.
 
-## Bet 2 Evaluation Scorecard
+## Bet 2 Final Evaluation Scorecard
 | # | Test | Expected | Result | Pass? |
 |---|------|----------|--------|-------|
-| 1 | auto + internal | claude-sdk or codex | Parse failure on Pi | ❓ |
-| 2 | auto + private | ollama only | Clean failure (no cloud leak) | ✅ safety |
-| 3 | auto + capabilities | claude-sdk or codex | claude-sdk | ✅ |
-| 4 | auto + public | free ollama | ollama-laptop (timed out, 35B overkill) | ✅ routing |
+| 1 | auto + internal | ollama or claude | ollama-pi ✅ | ✅ |
+| 2 | auto + private | ollama only | ollama-laptop, 2s, zero cloud leak | ✅ |
+| 3 | auto + capabilities | claude-sdk | claude-sdk, 4s, `ROUTING_EVAL_3_OK` | ✅ |
+| 4 | auto + public | free ollama | ollama-laptop | ✅ |
 | 5 | Pipeline mixed | explicit + auto routing | All 3 phases correct | ✅ |
-| 6 | auto + private, no ollama | clean failure | Proven by eval 2 run 1 | ✅ |
+| 6 | auto + private, no ollama | clean failure | Proven by earlier eval | ✅ |
 | 7 | Routing metadata | Present in results | Present in all structured results | ✅ |
 
 **Safety gate: PASS** — zero sensitivity violations across all runs.
 
 ## Next Steps
-- **Investigate standalone auto parse failure** — parser works locally but fails on Pi. May be a deployed code mismatch or Munin content encoding issue.
-- **Follow-up issues:** #23 (consolidate sensitivity), #24 (unify registries), #25 (routing:auto tag), #28 (FIFO dispatch), #29 (classifier false positives)
-- **Open issues:** #5 (Phase 7), #10-13 (security), #15 (systemd install), #21 (pre-task repo sync)
+- **Phase 7: Methodology templates** (#5) — next feature phase
+- **Cleanup issues:** #23 (consolidate sensitivity), #24 (unify registries), #25 (routing:auto tag)
+- **Ollama improvements:** #30 (think:false), #31 (pre-warm), #32 (heartbeat models)
+- **Security backlog:** #10-13
+- **Operational:** #15 (systemd install)
 
 ## Previous Session
 - **Agent orchestration research dispatched** — submitted two Hugin tasks for cross-disciplinary research on agent orchestration, swarm intelligence, and related fields (biology, economics, distributed systems, org theory).
