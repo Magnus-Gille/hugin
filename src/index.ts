@@ -3260,6 +3260,15 @@ const server = app.listen(config.port, config.host, () => {
   console.log(`Egress policy: allowlist (${egressPolicy.allowedHosts.join(", ")})`);
 });
 
+server.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(`Port ${config.port} already in use — another Hugin instance is running. Exiting.`);
+  } else {
+    console.error(`Server error: ${err.message}`);
+  }
+  process.exit(1);
+});
+
 // Check Munin is reachable before starting poll loop
 munin.health().then((ok) => {
   if (!ok) {
