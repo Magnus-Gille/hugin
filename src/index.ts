@@ -2422,6 +2422,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       console.error(`Claim write returned error for ${taskNs}:`, JSON.stringify(claimResult));
       return { hadTask: false, queueDepth };
     }
+    // Update entry.updated_at so subsequent CAS writes (failTaskWithMessage, etc.) use the fresh timestamp
+    if (claimResult && typeof claimResult.updated_at === "string") {
+      entry.updated_at = claimResult.updated_at;
+    }
   } catch (err) {
     console.log(`Failed to claim ${taskNs} (concurrent claim?):`, err);
     return { hadTask: false, queueDepth };
