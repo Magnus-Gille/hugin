@@ -55,6 +55,17 @@ echo "  Cron installed: daily at 04:00"
 echo "==> Ensuring workspace directory exists..."
 ssh "$REMOTE" "mkdir -p /home/$DEPLOY_USER/workspace"
 
+echo "==> Killing orphan Hugin processes..."
+ssh "$REMOTE" "SYSPID=\$(systemctl show hugin --property=MainPID --value 2>/dev/null || echo 0)
+for pid in \$(pgrep -f 'node dist/index.js'); do
+  if [ \"\$pid\" = \"\$SYSPID\" ]; then continue; fi
+  CWD=\$(readlink /proc/\$pid/cwd 2>/dev/null || echo '')
+  if [ \"\$CWD\" = '$REMOTE_DIR' ]; then
+    echo \"  Killing orphan Hugin PID \$pid\"
+    kill \"\$pid\" 2>/dev/null || true
+  fi
+done"
+
 echo "==> Restarting service..."
 ssh "$REMOTE" "sudo systemctl restart hugin && sleep 2 && sudo systemctl status hugin --no-pager"
 
