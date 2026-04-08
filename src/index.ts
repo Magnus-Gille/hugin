@@ -2315,7 +2315,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         if (decision.selectedRuntime.ollamaHost) {
           parsedTask.ollamaHost = decision.selectedRuntime.ollamaHost;
         }
-        if (!parsedTask.model) {
+        if (!parsedTask.model && decision.selectedRuntime.dispatcherRuntime === "ollama") {
           parsedTask.model = config.ollamaDefaultModel;
         }
         console.log(
