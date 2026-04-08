@@ -1310,6 +1310,44 @@ function stopCancellationWatch(): void {
   }
 }
 
+// --- Orphan dispatcher cleanup ---
+// Tasks running in the hugin repo (e.g. npm test, npm run dev) can leave behind
+// node processes that act as rogue dispatchers, racing the real one for tasks.
+// Kill any node dist/index.js processes in our working directory except ourselves.
+
+async function killOrphanDispatchers(): Promise<void> {
+  if (os.platform() !== "linux") return; // Only relevant on the Pi
+
+  try {
+    const myPid = process.pid;
+    const cwd = process.cwd();
+    const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn("pgrep", ["-f", "node dist/index.js"], { stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      child.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));
+      child.stderr?.on("data", (d: Buffer) => (stderr += d.toString()));
+      child.on("close", () => resolve({ stdout, stderr }));
+      child.on("error", reject);
+    });
+
+    const pids = stdout.trim().split("\n").filter(Boolean).map(Number).filter((p) => p !== myPid && !isNaN(p));
+    for (const pid of pids) {
+      try {
+        const pidCwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+        if (pidCwd === cwd) {
+          console.log(`Killing orphan Hugin process PID ${pid}`);
+          process.kill(pid, "SIGTERM");
+        }
+      } catch {
+        // Process may have exited between pgrep and readlink
+      }
+    }
+  } catch {
+    // pgrep not available or no matches — fine
+  }
+}
+
 // --- Stale task recovery ---
 // Recover tasks whose lease has expired. Tasks claimed by this worker are always
 // recovered (we just restarted, so they're orphaned). Tasks claimed by other
@@ -3032,6 +3070,9 @@ async function pollLoop(): Promise<void> {
   console.log(
     `Hugin dispatcher started (poll interval: ${config.pollIntervalMs}ms)`
   );
+
+  // Kill orphan Hugin processes from previous runs (e.g. spawned by tasks in this repo)
+  await killOrphanDispatchers();
 
   // Recover any tasks left running from a previous crash
   await recoverStaleTasks();
