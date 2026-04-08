@@ -42,7 +42,7 @@ const ollamaPi = makeCandidate({
   modelSize: "small",
   capabilities: [],
   ollamaHost: "pi",
-  models: ["qwen3.5:2b"],
+  models: ["qwen2.5:3b"],
 });
 
 const ollamaLaptop = makeCandidate({
@@ -208,7 +208,7 @@ describe("routeTask", () => {
     it("preferred model on available host wins", () => {
       const input: RouterInput = {
         effectiveSensitivity: "internal",
-        preferredModel: "qwen3.5:2b",
+        preferredModel: "qwen2.5:3b",
         availableRuntimes: allRuntimes,
       };
       const decision = routeTask(input);
@@ -231,7 +231,7 @@ describe("routeTask", () => {
     it("model affinity respects trust filtering", () => {
       const input: RouterInput = {
         effectiveSensitivity: "private",
-        preferredModel: "qwen3.5:2b",
+        preferredModel: "qwen2.5:3b",
         availableRuntimes: allRuntimes,
       };
       const decision = routeTask(input);

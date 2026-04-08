@@ -43,7 +43,7 @@ TASK_CONTENT=$(cat <<TASK_EOF
 
 - **Runtime:** ollama
 - **Context:** scratch
-- **Model:** qwen3.5:2b
+- **Model:** qwen2.5:3b
 - **Fallback:** claude
 - **Timeout:** 300000
 - **Submitted by:** hugin
