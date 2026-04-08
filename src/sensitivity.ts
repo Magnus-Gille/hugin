@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+  RUNTIME_REGISTRY,
+  getRuntimeMaxSensitivity,
+  getRegistryEntryById,
+} from "./runtime-registry.js";
+import type { DispatcherRuntime } from "./runtime-registry.js";
 
 export const sensitivitySchema = z.enum(["public", "internal", "private"]);
 export type Sensitivity = z.infer<typeof sensitivitySchema>;
@@ -198,25 +204,17 @@ export function sensitivityToMuninClassification(
 }
 
 export function getDispatcherRuntimeMaxSensitivity(
-  runtime: "claude" | "codex" | "ollama",
+  runtime: DispatcherRuntime,
 ): Sensitivity {
-  // Delegates to trust-tier semantics: ollama = trusted (private), cloud = semi-trusted (internal)
-  switch (runtime) {
-    case "ollama":
-      return "private";
-    case "claude":
-    case "codex":
-    default:
-      return "internal";
-  }
+  const def = RUNTIME_REGISTRY.find((r) => r.dispatcherRuntime === runtime);
+  if (!def) return "internal";
+  return getRuntimeMaxSensitivity(def.trustTier);
 }
 
 export function getPipelineRuntimeMaxSensitivity(runtimeId: string): Sensitivity {
-  // Delegates to trust-tier semantics: ollama-* = trusted (private), cloud = semi-trusted (internal)
-  if (runtimeId === "ollama-pi" || runtimeId === "ollama-laptop") {
-    return "private";
-  }
-  return "internal";
+  const def = getRegistryEntryById(runtimeId);
+  if (!def) return "internal";
+  return getRuntimeMaxSensitivity(def.trustTier);
 }
 
 export function buildSensitivityAssessment(input: {
