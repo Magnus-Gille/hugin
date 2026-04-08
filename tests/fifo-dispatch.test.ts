@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { pickEarliestTask } from "../src/index.js";
+import { pickEarliestTask } from "../src/task-helpers.js";
 import type { MuninQueryResult } from "../src/munin-client.js";
 
 function makeResult(

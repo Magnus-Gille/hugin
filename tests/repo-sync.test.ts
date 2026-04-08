@@ -39,7 +39,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 // Import after mocking
-const { syncRepoBeforeTask } = await import("../src/index.js");
+const { syncRepoBeforeTask } = await import("../src/task-helpers.js");
 
 beforeEach(() => {
   spawnCalls.length = 0;
