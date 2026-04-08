@@ -27,7 +27,10 @@
 - **Set OLLAMA_KEEP_ALIVE=-1 on Pi** — model stays loaded permanently, eliminating cold starts.
 - **Bet 2 evaluation completed** — all 7/7 scenarios pass. Safety gate confirmed.
 - **3 new issues filed** — #30 (think:false support), #31 (pre-warm model), #32 (ollama model status in heartbeat).
-- **239 tests passing.** Deployed 8 times to Pi.
+- **Fix: CAS conflict after task claim** — `entry.updated_at` wasn't refreshed after claiming, causing `failTaskWithMessage` to silently fail (CAS reject). Tasks got stuck as `running` forever. Commit: c8ae08c.
+- **Fix: Pi repo drift** — deploy script now runs `git reset --hard origin/main` after rsync. Enabled `sync-repos.timer` (15-min periodic pull). Commit: db7a1b6.
+- **Resubmitted cleanup batch** — 5 tasks (#23, #24, #25, #31, #32) as group `20260408-cleanup-v2`. First batch failed from stale repo (pre-fix).
+- **239 tests passing.** Deployed 10 times to Pi.
 
 ## Bet 2 Final Evaluation Scorecard
 | # | Test | Expected | Result | Pass? |
