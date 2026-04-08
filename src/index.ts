@@ -2260,17 +2260,36 @@ async function emitHeartbeat(queueDepth: number, blockedTasks: number): Promise<
 
 // --- Poll loop ---
 
+/**
+ * Given a batch of Munin query results, return the pending task with the
+ * earliest created_at timestamp (FIFO ordering).  Only "status" entries are
+ * considered — other keys are internal bookkeeping entries that the dispatcher
+ * should not act on.
+ *
+ * ISO-8601 timestamps sort correctly as strings, so a plain lexicographic
+ * compare is sufficient.
+ */
+export function pickEarliestTask(
+  results: import("./munin-client.js").MuninQueryResult[]
+): import("./munin-client.js").MuninQueryResult | undefined {
+  const statusEntries = results.filter((r) => r.key === "status");
+  if (statusEntries.length === 0) return undefined;
+  return statusEntries.reduce((earliest, r) =>
+    r.created_at < earliest.created_at ? r : earliest
+  );
+}
+
 async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   const { results, total } = await munin.query({
     query: "task",
     tags: ["pending"],
     namespace: "tasks/",
     entry_type: "state",
-    limit: 1,
+    limit: 10,
   });
 
-  // Find the first result that has key "status"
-  const taskResult = results.find((r) => r.key === "status");
+  // Select the oldest pending task (FIFO ordering by created_at)
+  const taskResult = pickEarliestTask(results);
   if (!taskResult) return { hadTask: false, queueDepth: 0 };
 
   const taskNs = taskResult.namespace;

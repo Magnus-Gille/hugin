@@ -48,10 +48,6 @@
 - **Open issues:** #5 (Phase 7), #10-13 (security), #15 (systemd install), #21 (pre-task repo sync)
 
 ## Previous Session
-
-## Previous Session
-
-## Previous Session
 - **Agent orchestration research dispatched** — submitted two Hugin tasks for cross-disciplinary research on agent orchestration, swarm intelligence, and related fields (biology, economics, distributed systems, org theory).
   - First task (`20260404-212219-agent-orchestration-research`) failed due to Pi Claude API rate limit.
   - Combined research+design task (`20260405-143948-design-orchestration-experiments`) succeeded — committed as `a76a64d`.
