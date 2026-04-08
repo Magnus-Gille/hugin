@@ -2277,8 +2277,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         if (decision.selectedRuntime.ollamaHost) {
           parsedTask.ollamaHost = decision.selectedRuntime.ollamaHost;
         }
-        if (decision.selectedRuntime.defaultModel && !parsedTask.model) {
-          parsedTask.model = decision.selectedRuntime.defaultModel;
+        if (!parsedTask.model) {
+          parsedTask.model = config.ollamaDefaultModel;
         }
         console.log(
           `Auto-routed task ${taskNs} → ${decision.selectedRuntime.id} (${decision.reason})`,
