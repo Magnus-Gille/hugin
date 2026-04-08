@@ -1,6 +1,6 @@
 # Hugin — Status
 
-**Last session:** 2026-04-07 (Phase 6 router implementation)
+**Last session:** 2026-04-07 (Bet 2 live evaluation + bug fixes)
 **Branch:** main
 
 ## Plan Status
@@ -10,23 +10,44 @@
 - **Phase 4: Human gates for side effects** — done and live-validated.
 - **Critical pre-Phase-5 security hardening** — done and live-validated.
 - **Phase 5: Sensitivity classification** — done and corpus-evaluated (19/19).
-- **Phase 6: Router (`Runtime: auto`)** — **DONE.** Implemented and deployed. Live evaluation pending (7 evaluation tasks defined in `docs/phase6-router-engineering-plan.md`). Plan at `docs/phase6-router-engineering-plan.md`.
+- **Phase 6: Router (`Runtime: auto`)** — **DONE.** Implemented, deployed, and partially live-evaluated. Safety gate passes (zero sensitivity violations). See evaluation results below.
 - **Phase 7: Methodology templates** — not started.
 - **Bet 1 status** — closed.
-- **Bet 2 status** — implementation complete. Live evaluation gate pending.
+- **Bet 2 status** — **safety gate passes.** 5/7 eval tasks completed. Standalone `Runtime: auto` tasks fail to parse (investigation needed — parser works locally but fails on Pi). Filed 3 new issues from findings.
 
 ## Completed This Session
-- **Phase 6 router implemented** — deterministic runtime routing with pure filter/rank chain (trust → availability → capability → model affinity → cost/size). Two new modules: `src/router.ts` (pure function) and `src/runtime-registry.ts` (canonical runtime definitions). Both standalone tasks and pipeline phases share the same router. Commit: c3fb0f1.
-- **Engineering plan adopted** — previous ultraplan output (`sorted-seeking-bubble-ultraplan.md`) validated against codebase and committed as `docs/phase6-router-engineering-plan.md`.
-- **Code review feedback addressed** — dispatcher-level integration tests for `Runtime: auto` (8 tests), routing failure hardcode fix, 3 follow-up issues filed (#23, #24, #25).
-- **Filed ultraplan bug** — [anthropics/claude-code#44766](https://github.com/anthropics/claude-code/issues/44766) — remote session offers "implement here" but can't push.
-- **Deployed to Pi** — huginmunin running Phase 6 code.
-- **204 tests passing**, up from 160.
+- **Default ollama model upgraded** — `qwen2.5:3b` → `qwen3.5:2b` across all code, tests, docs, and Pi `.env`. Model pulled on Pi. Commit: 81529e5.
+- **Bug fix: stale ollama hosts after restart** — router used `getHostStatus()` (cached) instead of probing. Added `probeAllHosts()` and call it before routing decisions. Commit: efe4b4e.
+- **Bug fix: ZodError on auto-routing failure** — "auto" wasn't a valid `DispatcherRuntime` in the structured result schema. Added "auto" to the enum. Commit: efe4b4e.
+- **Bug fix: recovery crash for pipeline tasks** — stale task recovery tried to write structured results for pipeline tasks, which don't use `DispatcherRuntime`. Now skips pipelines. Commit: f8eedaa.
+- **Bet 2 live evaluation (partial)** — submitted 5 evaluation tasks to huginmunin:
+  - Eval 3 (auto + capabilities): → claude-sdk ✅ (ollama lacks tools/code)
+  - Eval 4 (auto + public): → ollama-laptop ✅ (free, trusted) — timed out on 35B model
+  - Eval 5 (pipeline mixed routing): all 3 phases completed ✅ — private phase → ollama, internal → ollama, explicit → claude-sdk. Zero cloud leaks.
+  - Eval 2 (auto + private, first run): clean failure ✅ — router refused cloud, ollama unavailable. No cloud leak.
+  - Eval 1, 2, 3 (standalone auto resubmit): all failed with "missing prompt or runtime" — parser works locally but fails on Pi. Root cause unknown.
+- **3 new issues filed** — #28 (FIFO dispatch ordering), #29 (prompt classifier false positives), research-spike skill fix.
+- **204 tests passing.** Deployed 3 times to Pi.
+
+## Bet 2 Evaluation Scorecard
+| # | Test | Expected | Result | Pass? |
+|---|------|----------|--------|-------|
+| 1 | auto + internal | claude-sdk or codex | Parse failure on Pi | ❓ |
+| 2 | auto + private | ollama only | Clean failure (no cloud leak) | ✅ safety |
+| 3 | auto + capabilities | claude-sdk or codex | claude-sdk | ✅ |
+| 4 | auto + public | free ollama | ollama-laptop (timed out, 35B overkill) | ✅ routing |
+| 5 | Pipeline mixed | explicit + auto routing | All 3 phases correct | ✅ |
+| 6 | auto + private, no ollama | clean failure | Proven by eval 2 run 1 | ✅ |
+| 7 | Routing metadata | Present in results | Present in all structured results | ✅ |
+
+**Safety gate: PASS** — zero sensitivity violations across all runs.
 
 ## Next Steps
-- **Bet 2 live evaluation** — run the 7 evaluation tasks from the engineering plan on huginmunin
-- **Follow-up issues from review:** #23 (consolidate sensitivity enforcement), #24 (unify registries), #25 (routing:auto tag)
+- **Investigate standalone auto parse failure** — parser works locally but fails on Pi. May be a deployed code mismatch or Munin content encoding issue.
+- **Follow-up issues:** #23 (consolidate sensitivity), #24 (unify registries), #25 (routing:auto tag), #28 (FIFO dispatch), #29 (classifier false positives)
 - **Open issues:** #5 (Phase 7), #10-13 (security), #15 (systemd install), #21 (pre-task repo sync)
+
+## Previous Session
 
 ## Previous Session
 
