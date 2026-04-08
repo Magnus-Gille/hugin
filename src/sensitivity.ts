@@ -9,22 +9,33 @@ const SENSITIVITY_ORDER: Record<Sensitivity, number> = {
   private: 2,
 };
 
-const PRIVATE_PROMPT_PATTERNS = [
+/** Unambiguous private-data keywords — any match triggers private classification. */
+const ALWAYS_PRIVATE_PATTERNS = [
   /\bpassword\b/i,
   /\bapi[- ]?key\b/i,
-  /\bsecret\b/i,
   /\bbearer token\b/i,
   /\bprivate key\b/i,
   /\bmedical\b/i,
   /\bsalary\b/i,
-  /\bbank\b/i,
-  /\binvoice\b/i,
-  /\btax\b/i,
   /\bpassport\b/i,
-  /\bjournal\b/i,
   /\bdiary\b/i,
   /\bpersonal notes?\b/i,
 ];
+
+/**
+ * Keywords that appear in both private-data and technical-discussion contexts.
+ * Matched per-line: suppressed when the same line contains a technical modifier.
+ */
+const CONTEXT_SENSITIVE_PATTERNS = [
+  /\bsecret\b/i,
+  /\binvoice\b/i,
+  /\btax\b/i,
+  /\bbank\b/i,
+  /\bjournal\b/i,
+];
+
+/** Words that signal a keyword is being discussed, not contained. */
+const TECHNICAL_CONTEXT = /\b(?:handling|scanning|management|rotation|module|system|API|integration|processing|calculation|architecture|endpoint|schema|service|engine|middleware|template|pipeline|detection|verification|authentication|authorization|signing|encryption|hashing|registry|configuration|systemd|SDK|CLI|framework|protocol)\b/i;
 
 const PRIVATE_PATH_PREFIXES = [
   "/home/magnus/mimir",
@@ -91,9 +102,24 @@ export function classifyPromptSensitivity(
 ): Sensitivity | undefined {
   if (!prompt) return undefined;
   const stripped = stripCodeAndPaths(prompt);
-  return PRIVATE_PROMPT_PATTERNS.some((pattern) => pattern.test(stripped))
-    ? "private"
-    : undefined;
+
+  // Unambiguous patterns — any match across the full text is private
+  if (ALWAYS_PRIVATE_PATTERNS.some((p) => p.test(stripped))) {
+    return "private";
+  }
+
+  // Context-sensitive patterns — check per line, suppress when technical context is present
+  const lines = stripped.split("\n");
+  for (const line of lines) {
+    if (
+      CONTEXT_SENSITIVE_PATTERNS.some((p) => p.test(line)) &&
+      !TECHNICAL_CONTEXT.test(line)
+    ) {
+      return "private";
+    }
+  }
+
+  return undefined;
 }
 
 export function classifyContextSensitivity(

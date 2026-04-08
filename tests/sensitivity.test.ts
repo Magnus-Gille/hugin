@@ -47,6 +47,53 @@ describe("sensitivity helpers", () => {
     ).toBe("private");
   });
 
+  it("suppresses context-sensitive keywords in technical discussion (#29)", () => {
+    // Security architecture discussion
+    expect(
+      classifyPromptSensitivity("auth model, secret handling, sandboxing"),
+    ).toBeUndefined();
+    expect(
+      classifyPromptSensitivity("secret scanning tools comparison"),
+    ).toBeUndefined();
+    expect(
+      classifyPromptSensitivity("secret rotation and management best practices"),
+    ).toBeUndefined();
+    // Financial software discussion
+    expect(
+      classifyPromptSensitivity("invoice processing system design"),
+    ).toBeUndefined();
+    expect(
+      classifyPromptSensitivity("compare tax calculation engine implementations"),
+    ).toBeUndefined();
+    expect(
+      classifyPromptSensitivity("bank API integration architecture"),
+    ).toBeUndefined();
+    // System logs
+    expect(
+      classifyPromptSensitivity("read the systemd journal for errors"),
+    ).toBeUndefined();
+    // But bare keywords without technical context still trigger
+    expect(
+      classifyPromptSensitivity("what's in my bank account"),
+    ).toBe("private");
+    expect(
+      classifyPromptSensitivity("check the tax return for 2025"),
+    ).toBe("private");
+    expect(
+      classifyPromptSensitivity("summarize my journal"),
+    ).toBe("private");
+  });
+
+  it("still catches unambiguous private-data patterns regardless of context", () => {
+    // "password" is always private even in technical context
+    expect(
+      classifyPromptSensitivity("password handling module"),
+    ).toBe("private");
+    expect(
+      classifyPromptSensitivity("api key rotation system"),
+    ).toBe("private");
+  });
+
   it("maps Munin classifications conservatively", () => {
     expect(muninClassificationToSensitivity("public")).toBe("public");
     expect(muninClassificationToSensitivity("internal")).toBe("internal");
