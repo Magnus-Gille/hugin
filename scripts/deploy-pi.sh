@@ -55,6 +55,9 @@ echo "  Cron installed: daily at 04:00"
 echo "==> Ensuring workspace directory exists..."
 ssh "$REMOTE" "mkdir -p /home/$DEPLOY_USER/workspace"
 
+echo "==> Syncing Pi git repo..."
+ssh "$REMOTE" "cd $REMOTE_DIR && git fetch origin && git reset --hard origin/main"
+
 echo "==> Killing orphan Hugin processes..."
 ssh "$REMOTE" "SYSPID=\$(systemctl show hugin --property=MainPID --value 2>/dev/null || echo 0)
 for pid in \$(pgrep -f 'node dist/index.js'); do
