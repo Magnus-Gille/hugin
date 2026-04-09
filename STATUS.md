@@ -1,6 +1,6 @@
 # Hugin — Status
 
-**Last session:** 2026-04-09 (Zombie process root cause fixed, #34)
+**Last session:** 2026-04-09 (Cleanup batch + #33 session-id rotation)
 **Branch:** main
 
 ## Plan Status
@@ -15,7 +15,17 @@
 - **Bet 1 status** — closed.
 - **Bet 2 status** — **CLOSED. All 7/7 eval tasks pass.** Safety gate confirmed. Root cause of Pi parse failures was orphan dispatcher processes (fixed).
 
-## Completed This Session (2026-04-09)
+## Completed This Session (2026-04-09, afternoon)
+- **Closed 4 stalled cleanup issues (#24, #25, #31, #32)** in one batch — tasks dispatched in the `20260408-cleanup-v2` group hadn't landed (blocked by the zombie crash loop), so implemented manually. Commit: d0b0fca.
+  - **#24** registry unification: deleted `PIPELINE_RUNTIME_REGISTRY` from `pipeline-ir.ts`, `pipeline-compiler.ts` now uses `getRegistryEntryById` from `runtime-registry.ts`.
+  - **#25** `routing:auto` tag: at claim time, auto-routed tasks get `routing:auto` added and `runtime:auto` replaced with the resolved runtime. Required also adding `routing:` to the preserved tag families in `buildClaimTags` (index.ts) and `getPersistentTags` (task-status-tags.ts) — both filtered tags to a fixed allowlist that would have stripped it. Fix commit: 36175d9.
+  - **#31** pre-warm ollama: `warmModel()` in `ollama-hosts.ts` fires a zero-prompt `/api/generate` with `keep_alive: "1h"` on the pi host at dispatcher startup (fire-and-forget). Verified live: `qwen2.5:3b` in `/api/ps` with `expires_at` matching.
+  - **#32** loaded models in heartbeat: `getLoadedModels()` queries `/api/ps` on each available host and adds `ollama_loaded` to the heartbeat. First deploy showed empty result because `probeAllHosts` is only called during auto-routing — fix commit a62f0a8 now probes availability inside `getLoadedModels` first.
+- **Fix: MCP session-id rotation (#33)** — `MuninClient` previously generated one session UUID per process, so every MCP call across the dispatcher's entire lifetime carried the same `mcp-session-id`. Munin's 5-minute outcome-correlation window never fired (zero outcomes in production). Fix: added `setSessionId()` to the client, and rotate to a fresh UUID before each task claim and again in the `pollOnce` finally block. All MCP calls made during one task execution now share one session; background poll/heartbeat calls get a different one. Test added. Commit: 2543665.
+- **Skills update: debate-codex and review-pr-codex pin `gpt-5.4 / xhigh`** — adversarial reviews now explicitly pass `-m gpt-5.4 -c model_reasoning_effort='"xhigh"'` instead of inheriting the everyday `config.toml` defaults. Verified live. Skills repo commit: 89d7209.
+- **All 240 tests passing** (+1 new session-id test). Deployed 3 times to Pi in this session.
+
+## Completed Previous Session (2026-04-09, morning)
 - **Fix: zombie Hugin processes (#34)** — root cause was dual systemd service registration. deploy-pi.sh was installing to `/etc/systemd/system/` (system-level, crash-looped 542+ times) while user-level service at `~/.config/systemd/user/` held port 3032. Fix: idempotent migration block removes legacy system-level service; deploy now installs user-level only. Also fixed: `ReadWritePaths` too narrow (task logs would fail), `hugin.service` had wrong directives for user-level (`User=magnus`, `WantedBy=multi-user.target`), `shutdown()` didn't await child exit before `process.exit`. Adversarial debate in `debate/zombie-procs-*`. Commit: be6bd87.
 
 ## Completed Previous Session (2026-04-08)
@@ -50,10 +60,10 @@
 
 ## Next Steps
 - **Phase 7: Methodology templates** (#5) — next feature phase
-- **Cleanup issues:** #24 (unify registries), #25 (routing:auto tag) — #23 closed by 7c0669a
-- **Ollama improvements:** #30 (think:false), #31 (pre-warm), #32 (heartbeat models)
-- **Security backlog:** #10-13
-- **Operational:** #15 (systemd install) — verify if superseded by #34 fix
+- **Ollama: #30 (think:false support)** — pairs naturally with ollama perf work; may unlock qwen3.5:2b by disabling the 270-token reasoning overhead
+- **#15 systemd install** — quick check whether it's superseded by #34 fix; close or reopen
+- **#26 autonomous dependency bump PRs** — infra/automation
+- **Security backlog:** #10 (prompt injection scanning for context-refs), #11 (task signing), #12 (provenance tagging), #13 (exfiltration detection)
 
 ## Previous Session
 - **Agent orchestration research dispatched** — submitted two Hugin tasks for cross-disciplinary research on agent orchestration, swarm intelligence, and related fields (biology, economics, distributed systems, org theory).
