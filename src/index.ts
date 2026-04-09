@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { type Server } from "node:http";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -147,6 +148,7 @@ let currentTaskConfig: TaskConfig | null = null;
 let currentChild: ChildProcess | null = null;
 let currentSdkAbort: AbortController | null = null;
 let currentOllamaAbort: AbortController | null = null;
+let server: Server;
 let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
 let cancelWatchTimer: ReturnType<typeof setInterval> | null = null;
 let lastQueueDepth = 0;
@@ -3153,6 +3155,18 @@ async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   console.log(`Received ${signal}, shutting down (worker: ${workerId})...`);
   shuttingDown = true;
+
+  // Hard deadline: force exit after 30s regardless of cleanup state.
+  // Unref'd so it doesn't keep the process alive if everything exits cleanly first.
+  const exitTimer = setTimeout(() => {
+    console.error("Shutdown timed out after 30s — forcing exit");
+    process.exit(1);
+  }, 30_000);
+  exitTimer.unref();
+
+  // Release the port immediately so a replacement instance can start.
+  server?.close();
+
   stopLeaseRenewal();
   stopCancellationWatch();
 
@@ -3219,17 +3233,27 @@ async function shutdown(signal: string): Promise<void> {
     currentOllamaAbort.abort();
   }
 
-  if (currentChild) {
+  if (currentChild && !currentChild.killed) {
     console.log("Forwarding signal to running task...");
     currentChild.kill("SIGTERM");
-    // Give the child 30s to finish
-    setTimeout(() => {
-      if (currentChild && !currentChild.killed) {
-        console.log("Force killing child process");
-        currentChild.kill("SIGKILL");
-      }
-    }, 30000);
+    // Wait for child to exit before we do, so it is not orphaned.
+    // SIGKILL after 10s if it ignores SIGTERM; the outer 30s hard timer handles total deadline.
+    await new Promise<void>((resolve) => {
+      const killTimer = setTimeout(() => {
+        if (currentChild && !currentChild.killed) {
+          console.log("Force killing child process");
+          currentChild.kill("SIGKILL");
+        }
+        resolve();
+      }, 10_000);
+      currentChild!.once("exit", () => {
+        clearTimeout(killTimer);
+        resolve();
+      });
+    });
   }
+
+  process.exit(0);
 }
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
@@ -3255,7 +3279,7 @@ if (config.ollamaLaptopUrl) {
 }
 console.log(`Ollama default model: ${config.ollamaDefaultModel}`);
 
-const server = app.listen(config.port, config.host, () => {
+server = app.listen(config.port, config.host, () => {
   console.log(`Hugin health endpoint: http://${config.host}:${config.port}/health`);
   console.log(`Munin: ${config.muninUrl}`);
   console.log(`Workspace: ${config.workspace}`);

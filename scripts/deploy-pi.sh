@@ -32,8 +32,27 @@ rsync -av --delete \
 echo "==> Installing dependencies on Pi..."
 ssh "$REMOTE" "cd $REMOTE_DIR && npm install --omit=dev"
 
-echo "==> Installing systemd service..."
-ssh "$REMOTE" "sudo cp $REMOTE_DIR/hugin.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable hugin"
+echo "==> Removing legacy system-level service (one-time migration, idempotent)..."
+ssh "$REMOTE" "
+  if systemctl is-enabled hugin.service --quiet 2>/dev/null; then
+    sudo systemctl stop hugin.service 2>/dev/null || true
+    sudo systemctl disable hugin.service 2>/dev/null || true
+    sudo rm -f /etc/systemd/system/hugin.service
+    sudo systemctl daemon-reload
+    echo '  Legacy system-level hugin.service removed'
+  else
+    echo '  No legacy system-level service found, skipping'
+  fi
+"
+
+echo "==> Installing user-level systemd service..."
+ssh "$REMOTE" "
+  mkdir -p ~/.config/systemd/user
+  cp $REMOTE_DIR/hugin.service ~/.config/systemd/user/hugin.service
+  XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
+  XDG_RUNTIME_DIR=/run/user/1000 systemctl --user enable hugin.service
+  loginctl enable-linger magnus 2>/dev/null || true
+"
 
 echo "==> Checking for .env file..."
 if ssh "$REMOTE" "test -f $REMOTE_DIR/.env"; then
@@ -59,7 +78,7 @@ echo "==> Syncing Pi git repo..."
 ssh "$REMOTE" "cd $REMOTE_DIR && git fetch origin && git reset --hard origin/main"
 
 echo "==> Killing orphan Hugin processes..."
-ssh "$REMOTE" "SYSPID=\$(systemctl show hugin --property=MainPID --value 2>/dev/null || echo 0)
+ssh "$REMOTE" "SYSPID=\$(XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show hugin.service --property=MainPID --value 2>/dev/null || echo 0)
 for pid in \$(pgrep -f 'node dist/index.js'); do
   if [ \"\$pid\" = \"\$SYSPID\" ]; then continue; fi
   CWD=\$(readlink /proc/\$pid/cwd 2>/dev/null || echo '')
@@ -70,7 +89,7 @@ for pid in \$(pgrep -f 'node dist/index.js'); do
 done"
 
 echo "==> Restarting service..."
-ssh "$REMOTE" "sudo systemctl restart hugin && sleep 2 && sudo systemctl status hugin --no-pager"
+ssh "$REMOTE" "XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart hugin.service && sleep 2 && XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status hugin.service --no-pager"
 
 echo "==> Health check..."
 ssh "$REMOTE" "curl -fsS http://127.0.0.1:3032/health"
@@ -78,4 +97,4 @@ ssh "$REMOTE" "curl -fsS http://127.0.0.1:3032/health"
 echo ""
 echo "Deploy complete!"
 echo "Health check: curl http://$PI_HOST:3032/health"
-echo "Logs: ssh $PI_HOST journalctl -u hugin -f"
+echo "Logs: ssh $PI_HOST journalctl --user -u hugin.service -f"

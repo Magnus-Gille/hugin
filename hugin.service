@@ -1,11 +1,10 @@
 [Unit]
 Description=Hugin Task Dispatcher
-After=network-online.target munin-memory.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=magnus
 WorkingDirectory=/home/magnus/repos/hugin
 ExecStart=/usr/bin/node dist/index.js
 Restart=always
@@ -21,4 +20,4 @@ PrivateTmp=false
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
