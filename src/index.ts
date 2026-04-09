@@ -18,7 +18,7 @@ import {
 import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, syncRepoBeforeTask } from "./task-helpers.js";
 import { executeSdkTask } from "./sdk-executor.js";
 import { executeOllamaTask } from "./ollama-executor.js";
-import { configureHosts, resolveOllamaHost, getHostStatus, probeAllHosts } from "./ollama-hosts.js";
+import { configureHosts, resolveOllamaHost, getHostStatus, probeAllHosts, warmModel, getLoadedModels } from "./ollama-hosts.js";
 import { resolveContextRefs } from "./context-loader.js";
 import {
   pipelineSideEffectIdSchema,
@@ -2180,6 +2180,8 @@ async function emitHeartbeat(queueDepth: number, blockedTasks: number): Promise<
     };
     if (currentTaskConfig?.group) heartbeat.group = currentTaskConfig.group;
     if (currentTaskConfig?.sequence !== undefined) heartbeat.sequence = currentTaskConfig.sequence;
+    const loadedModels = await getLoadedModels();
+    if (Object.keys(loadedModels).length > 0) heartbeat.ollama_loaded = loadedModels;
     await munin.write("tasks/_heartbeat", "status", JSON.stringify(heartbeat), ["heartbeat"]);
   } catch (err) {
     console.error("Heartbeat write failed:", err);
@@ -2411,7 +2413,13 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   );
 
   // Claim the task with compare-and-swap, attaching worker identity and lease
-  const claimTags = buildClaimTags(entry.tags, "running");
+  // For auto-routed tasks: replace runtime:auto with the resolved runtime and add routing:auto
+  const tagsForClaim = parsedTask?.autoRouted && parsedTask.runtime
+    ? entry.tags
+        .map((t) => (t === "runtime:auto" ? `runtime:${parsedTask!.runtime}` : t))
+        .concat("routing:auto")
+    : entry.tags;
+  const claimTags = buildClaimTags(tagsForClaim, "running");
   try {
     const claimResult = await munin.write(
       taskNs,
@@ -3088,6 +3096,9 @@ async function pollLoop(): Promise<void> {
 
   // Clean up old log files
   await rotateOldLogs();
+
+  // Pre-warm ollama default model to avoid cold-start latency on first task (fire-and-forget)
+  warmModel(config.ollamaDefaultModel).catch(() => {});
 
   let pollCount = 0;
   while (!shuttingDown) {

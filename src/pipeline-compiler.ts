@@ -1,5 +1,4 @@
 import {
-  PIPELINE_RUNTIME_REGISTRY,
   pipelineIRSchema,
   pipelineRuntimeIdSchema,
   type PipelineAuthority,
@@ -16,6 +15,7 @@ import { buildRoutingMetadataLines } from "./result-format.js";
 import { routeTask } from "./router.js";
 import {
   buildRuntimeCandidates,
+  getRegistryEntryById,
   type RuntimeCapability,
 } from "./runtime-registry.js";
 import {
@@ -471,7 +471,7 @@ export function compilePipelineTask(
       resolvedRuntimeId = runtimeIdOrAuto;
     }
 
-    const runtime = PIPELINE_RUNTIME_REGISTRY[resolvedRuntimeId];
+    const runtime = getRegistryEntryById(resolvedRuntimeId);
     const taskId = phaseIdByName.get(phase.name);
     if (!runtime || !taskId) {
       throw new Error(`Internal pipeline compiler error for phase "${phase.name}"`);
@@ -501,7 +501,7 @@ export function compilePipelineTask(
       slug: slugifyPhaseName(phase.name),
       taskId,
       taskNamespace: `tasks/${taskId}`,
-      runtime: runtime.id,
+      runtime: resolvedRuntimeId,
       dispatcherRuntime: runtime.dispatcherRuntime,
       ollamaHost: runtime.ollamaHost,
       model: runtime.defaultModel,

@@ -150,3 +150,41 @@ export async function probeAllHosts(): Promise<OllamaHost[]> {
 export function getHostStatus(): OllamaHost[] {
   return Array.from(hosts.values());
 }
+
+/**
+ * Pre-warm a model on the pi host to avoid cold-start latency on first task.
+ * Uses keep_alive to hold the model in memory. Fire-and-forget — caller should catch errors.
+ */
+export async function warmModel(model: string): Promise<void> {
+  const host = hosts.get("pi");
+  if (!host) return;
+  await fetch(`${host.baseUrl}/api/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model, prompt: "", keep_alive: "1h" }),
+    signal: AbortSignal.timeout(60_000),
+  });
+}
+
+/**
+ * Return models currently loaded in memory on each available host (/api/ps).
+ * Best-effort — per-host errors are silently ignored.
+ */
+export async function getLoadedModels(): Promise<Record<string, string[]>> {
+  const result: Record<string, string[]> = {};
+  for (const [name, host] of hosts) {
+    if (!host.available) continue;
+    try {
+      const res = await fetch(`${host.baseUrl}/api/ps`, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { models?: Array<{ name: string }> };
+        result[name] = (data.models || []).map((m) => m.name);
+      }
+    } catch {
+      // best-effort
+    }
+  }
+  return result;
+}

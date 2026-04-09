@@ -30,35 +30,6 @@ export const pipelineRuntimeIdSchema = z.enum([
 ]);
 export type PipelineRuntimeId = z.infer<typeof pipelineRuntimeIdSchema>;
 
-export interface PipelineRuntimeDefinition {
-  id: PipelineRuntimeId;
-  dispatcherRuntime: "claude" | "codex" | "ollama";
-  ollamaHost?: "pi" | "laptop";
-  defaultModel?: string;
-}
-
-export const PIPELINE_RUNTIME_REGISTRY: Record<PipelineRuntimeId, PipelineRuntimeDefinition> = {
-  "claude-sdk": {
-    id: "claude-sdk",
-    dispatcherRuntime: "claude",
-  },
-  "codex-spawn": {
-    id: "codex-spawn",
-    dispatcherRuntime: "codex",
-  },
-  "ollama-pi": {
-    id: "ollama-pi",
-    dispatcherRuntime: "ollama",
-    ollamaHost: "pi",
-    defaultModel: "qwen2.5:3b",
-  },
-  "ollama-laptop": {
-    id: "ollama-laptop",
-    dispatcherRuntime: "ollama",
-    ollamaHost: "laptop",
-    defaultModel: "qwen3.5:35b-a3b",
-  },
-};
 
 export const pipelinePhaseIRSchema = z.object({
   name: z.string().min(1),
