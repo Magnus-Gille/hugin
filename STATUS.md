@@ -61,7 +61,6 @@
 ## Next Steps
 - **Phase 7: Methodology templates** (#5) — next feature phase
 - **Ollama: #30 (think:false support)** — pairs naturally with ollama perf work; may unlock qwen3.5:2b by disabling the 270-token reasoning overhead
-- **#15 systemd install** — quick check whether it's superseded by #34 fix; close or reopen
 - **#26 autonomous dependency bump PRs** — infra/automation
 - **Security backlog:** #10 (prompt injection scanning for context-refs), #11 (task signing), #12 (provenance tagging), #13 (exfiltration detection)
 
