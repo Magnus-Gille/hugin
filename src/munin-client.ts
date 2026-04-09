@@ -100,6 +100,20 @@ export class MuninClient {
     this.nextRequestAt = 0;
   }
 
+  /**
+   * Override the current mcp-session-id header value. Used by the dispatcher to
+   * scope a session to a single task execution so Munin's correlation window
+   * can associate queries with their outcomes.
+   */
+  setSessionId(id: string): void {
+    this.sessionId = id;
+  }
+
+  /** Return the currently active session ID (for logging/tests). */
+  getSessionId(): string {
+    return this.sessionId;
+  }
+
   private deferNextRequest(delayMs: number): void {
     this.nextRequestAt = Math.max(this.nextRequestAt, Date.now() + Math.max(0, delayMs));
   }

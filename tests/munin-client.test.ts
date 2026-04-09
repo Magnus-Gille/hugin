@@ -354,6 +354,38 @@ describe("MuninClient", () => {
     ).rejects.toThrow("Munin readBatch result mismatch");
   });
 
+  it("sends a stable mcp-session-id header by default and rotates on setSessionId", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () =>
+        rpcResponse({ found: false, namespace: "tasks/a", key: "status" })
+      );
+
+    const client = new MuninClient({
+      baseUrl: "http://munin.test",
+      apiKey: "test-key",
+      minRequestSpacingMs: 0,
+    });
+
+    const initialSession = client.getSessionId();
+    expect(initialSession).toMatch(/^[0-9a-f-]{36}$/);
+
+    await client.read("tasks/a", "status");
+    await client.read("tasks/a", "status");
+
+    const headers1 = (fetchMock.mock.calls[0]?.[1] as RequestInit).headers as Record<string, string>;
+    const headers2 = (fetchMock.mock.calls[1]?.[1] as RequestInit).headers as Record<string, string>;
+    expect(headers1["mcp-session-id"]).toBe(initialSession);
+    expect(headers2["mcp-session-id"]).toBe(initialSession);
+
+    client.setSessionId("task-scoped-session");
+    expect(client.getSessionId()).toBe("task-scoped-session");
+
+    await client.read("tasks/a", "status");
+    const headers3 = (fetchMock.mock.calls[2]?.[1] as RequestInit).headers as Record<string, string>;
+    expect(headers3["mcp-session-id"]).toBe("task-scoped-session");
+  });
+
   it("does not serialize requests across separate client instances", async () => {
     let resolveFirst!: (value: Response) => void;
     const firstResponse = new Promise<Response>((resolve) => {

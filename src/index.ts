@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { type Server } from "node:http";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -2422,6 +2423,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         .concat("routing:auto")
     : entry.tags;
   const claimTags = buildClaimTags(tagsForClaim, "running");
+
+  // Rotate the mcp-session-id so all MCP calls for this task execution share
+  // one stable session (enables Munin's outcome-aware retrieval and telemetry
+  // session-flow analysis). A fresh ID is set again in the finally block below.
+  munin.setSessionId(randomUUID());
   try {
     const claimResult = await munin.write(
       taskNs,
@@ -3079,6 +3085,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     currentCancellation = null;
     currentTask = null;
     currentTaskConfig = null;
+    // Rotate session off the task scope so subsequent poll/heartbeat writes
+    // don't pollute the task's session window.
+    munin.setSessionId(randomUUID());
   }
 }
 
