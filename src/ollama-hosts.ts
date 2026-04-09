@@ -168,11 +168,13 @@ export async function warmModel(model: string): Promise<void> {
 
 /**
  * Return models currently loaded in memory on each available host (/api/ps).
- * Best-effort — per-host errors are silently ignored.
+ * Best-effort — per-host errors are silently ignored. Probes availability first
+ * (via positive/negative cache) so the result reflects current host state.
  */
 export async function getLoadedModels(): Promise<Record<string, string[]>> {
   const result: Record<string, string[]> = {};
-  for (const [name, host] of hosts) {
+  const probed = await probeAllHosts();
+  for (const host of probed) {
     if (!host.available) continue;
     try {
       const res = await fetch(`${host.baseUrl}/api/ps`, {
@@ -180,7 +182,7 @@ export async function getLoadedModels(): Promise<Record<string, string[]>> {
       });
       if (res.ok) {
         const data = (await res.json()) as { models?: Array<{ name: string }> };
-        result[name] = (data.models || []).map((m) => m.name);
+        result[host.name] = (data.models || []).map((m) => m.name);
       }
     } catch {
       // best-effort
