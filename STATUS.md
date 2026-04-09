@@ -1,6 +1,6 @@
 # Hugin — Status
 
-**Last session:** 2026-04-08 (Bug fixes, Bet 2 completion, ollama research spike)
+**Last session:** 2026-04-09 (Zombie process root cause fixed, #34)
 **Branch:** main
 
 ## Plan Status
@@ -15,7 +15,10 @@
 - **Bet 1 status** — closed.
 - **Bet 2 status** — **CLOSED. All 7/7 eval tasks pass.** Safety gate confirmed. Root cause of Pi parse failures was orphan dispatcher processes (fixed).
 
-## Completed This Session
+## Completed This Session (2026-04-09)
+- **Fix: zombie Hugin processes (#34)** — root cause was dual systemd service registration. deploy-pi.sh was installing to `/etc/systemd/system/` (system-level, crash-looped 542+ times) while user-level service at `~/.config/systemd/user/` held port 3032. Fix: idempotent migration block removes legacy system-level service; deploy now installs user-level only. Also fixed: `ReadWritePaths` too narrow (task logs would fail), `hugin.service` had wrong directives for user-level (`User=magnus`, `WantedBy=multi-user.target`), `shutdown()` didn't await child exit before `process.exit`. Adversarial debate in `debate/zombie-procs-*`. Commit: be6bd87.
+
+## Completed Previous Session (2026-04-08)
 - **Bug fix: #29 sensitivity classifier false positives** — split keyword patterns into always-private and context-sensitive tiers. Context-sensitive keywords (secret, invoice, tax, bank, journal) suppressed when same line has technical modifiers. Commit: d3c31d7.
 - **Bug fix: #28 FIFO dispatch ordering** — pollOnce queries limit:10 and sorts by created_at. Dispatched via Hugin task. Commit: 4b500dd.
 - **Bug fix: #27 group sequencing** — selectNextTask skips tasks whose group has lower-sequence siblings pending/running. Dispatched via Hugin task. Commit: 11eac04.
@@ -47,10 +50,10 @@
 
 ## Next Steps
 - **Phase 7: Methodology templates** (#5) — next feature phase
-- **Cleanup issues:** #23 (consolidate sensitivity), #24 (unify registries), #25 (routing:auto tag)
+- **Cleanup issues:** #24 (unify registries), #25 (routing:auto tag) — #23 closed by 7c0669a
 - **Ollama improvements:** #30 (think:false), #31 (pre-warm), #32 (heartbeat models)
 - **Security backlog:** #10-13
-- **Operational:** #15 (systemd install)
+- **Operational:** #15 (systemd install) — verify if superseded by #34 fix
 
 ## Previous Session
 - **Agent orchestration research dispatched** — submitted two Hugin tasks for cross-disciplinary research on agent orchestration, swarm intelligence, and related fields (biology, economics, distributed systems, org theory).
