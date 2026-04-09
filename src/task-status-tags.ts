@@ -4,6 +4,7 @@ const RUNTIME_PREFIX = "runtime:";
 const TYPE_PREFIX = "type:";
 const AUTHORITY_PREFIX = "authority:";
 const SENSITIVITY_PREFIX = "sensitivity:";
+const ROUTING_PREFIX = "routing:";
 
 function dedupeTags(tags: string[]): string[] {
   const seen = new Set<string>();
@@ -28,6 +29,7 @@ function getPersistentTags(tags: string[], runtimeFallback?: string): string[] {
   const policyTags = tags.filter((tag) => tag.startsWith(ON_DEP_FAILURE_PREFIX));
   const authorityTags = tags.filter((tag) => tag.startsWith(AUTHORITY_PREFIX));
   const sensitivityTags = tags.filter((tag) => tag.startsWith(SENSITIVITY_PREFIX));
+  const routingTags = tags.filter((tag) => tag.startsWith(ROUTING_PREFIX));
 
   return dedupeTags([
     ...(runtimeTag ? [runtimeTag] : []),
@@ -35,6 +37,7 @@ function getPersistentTags(tags: string[], runtimeFallback?: string): string[] {
     ...policyTags,
     ...authorityTags,
     ...sensitivityTags,
+    ...routingTags,
   ]);
 }
 

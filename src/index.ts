@@ -1200,12 +1200,14 @@ function buildClaimTags(
   const typeTags = baseTags.filter((t) => t.startsWith("type:"));
   const authorityTags = baseTags.filter((t) => t.startsWith("authority:"));
   const sensitivityTags = baseTags.filter((t) => t.startsWith("sensitivity:"));
+  const routingTags = baseTags.filter((t) => t.startsWith("routing:"));
   return [
     lifecycle,
     ...(runtimeTag ? [runtimeTag] : []),
     ...typeTags,
     ...authorityTags,
     ...sensitivityTags,
+    ...routingTags,
     `claimed_by:${workerId}`,
     `lease_expires:${leaseExpiry()}`,
   ];
