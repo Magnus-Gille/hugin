@@ -84,13 +84,68 @@ describe("sensitivity helpers", () => {
     ).toBe("private");
   });
 
-  it("still catches unambiguous private-data patterns regardless of context", () => {
-    // "password" is always private even in technical context
+  it("still catches truly unambiguous private-data patterns", () => {
+    // Vocabulary that does not appear in technical discussion
     expect(
-      classifyPromptSensitivity("password handling module"),
+      classifyPromptSensitivity("summarize my medical history"),
     ).toBe("private");
     expect(
+      classifyPromptSensitivity("draft a salary negotiation email"),
+    ).toBe("private");
+    expect(
+      classifyPromptSensitivity("copy the number from my passport"),
+    ).toBe("private");
+    expect(
+      classifyPromptSensitivity("what's in my diary this week"),
+    ).toBe("private");
+  });
+
+  it("suppresses credential vocabulary in technical discussion", () => {
+    // Research and code work about auth systems must not trip sensitivity
+    expect(
+      classifyPromptSensitivity("password handling module"),
+    ).toBeUndefined();
+    expect(
       classifyPromptSensitivity("api key rotation system"),
+    ).toBeUndefined();
+    expect(
+      classifyPromptSensitivity("compare bearer token management frameworks"),
+    ).toBeUndefined();
+    expect(
+      classifyPromptSensitivity("private key signing service architecture"),
+    ).toBeUndefined();
+    // Real research-spike content from Grimnir workflows
+    expect(
+      classifyPromptSensitivity("Auth model (API key? OAuth? scopes?)"),
+    ).toBeUndefined();
+    expect(
+      classifyPromptSensitivity(
+        "Evaluate the OAuth 2.1 and API key auth story for the managed-agents API",
+      ),
+    ).toBeUndefined();
+    // But a bare credential reference with no technical framing still trips
+    expect(
+      classifyPromptSensitivity("my password is in the notes app"),
+    ).toBe("private");
+  });
+
+  it("always flags secret-shaped credential strings regardless of context", () => {
+    // Real credentials must trip even inside code fences or technical framing
+    expect(
+      classifyPromptSensitivity("rotate this token: sk-ant-1234567890abcdefghij"),
+    ).toBe("private");
+    expect(
+      classifyPromptSensitivity(
+        "example in the docs:\n```\nghp_1234567890abcdefghijklmnopqrstuvwxyz12\n```",
+      ),
+    ).toBe("private");
+    expect(
+      classifyPromptSensitivity("AWS key AKIA1234567890ABCDEF for the CI role"),
+    ).toBe("private");
+    expect(
+      classifyPromptSensitivity(
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...",
+      ),
     ).toBe("private");
   });
 

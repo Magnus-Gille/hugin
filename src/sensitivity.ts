@@ -15,17 +15,44 @@ const SENSITIVITY_ORDER: Record<Sensitivity, number> = {
   private: 2,
 };
 
-/** Unambiguous private-data keywords — any match triggers private classification. */
+/**
+ * Unambiguous private-data keywords — any match triggers private classification.
+ * These are words that do not come up in legitimate technical discussion.
+ */
 const ALWAYS_PRIVATE_PATTERNS = [
-  /\bpassword\b/i,
-  /\bapi[- ]?key\b/i,
-  /\bbearer token\b/i,
-  /\bprivate key\b/i,
   /\bmedical\b/i,
   /\bsalary\b/i,
   /\bpassport\b/i,
   /\bdiary\b/i,
   /\bpersonal notes?\b/i,
+];
+
+/**
+ * Credential-adjacent vocabulary. Matches actual secrets if the line is a raw
+ * dump, but must be suppressed in technical discussion (research on auth
+ * systems, code work on secret-handling modules, debates about API auth).
+ * Matched per-line with the same technical-context suppression as
+ * CONTEXT_SENSITIVE_PATTERNS.
+ */
+const TECHNICAL_PRIVATE_PATTERNS = [
+  /\bpassword\b/i,
+  /\bapi[- ]?key\b/i,
+  /\bbearer token\b/i,
+  /\bprivate key\b/i,
+];
+
+/**
+ * Actual secret-shaped strings. These match real credentials and have near-zero
+ * false-positive rate — any match is always private regardless of context.
+ */
+const SECRET_SHAPED_PATTERNS = [
+  /\bsk-[A-Za-z0-9_-]{20,}\b/,             // OpenAI / Anthropic API keys
+  /\bghp_[A-Za-z0-9]{20,}\b/,              // GitHub personal access tokens
+  /\bgho_[A-Za-z0-9]{20,}\b/,              // GitHub OAuth tokens
+  /\bgithub_pat_[A-Za-z0-9_]{22,}\b/,      // GitHub fine-grained PATs
+  /\bAKIA[0-9A-Z]{16}\b/,                  // AWS access keys
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/,      // Slack tokens
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,    // PEM private keys
 ];
 
 /**
@@ -107,20 +134,31 @@ export function classifyPromptSensitivity(
   prompt: string | undefined,
 ): Sensitivity | undefined {
   if (!prompt) return undefined;
+
+  // Secret-shaped strings are scanned against the RAW text, before stripping
+  // code blocks — a real key pasted into a code fence is still a real key.
+  if (SECRET_SHAPED_PATTERNS.some((p) => p.test(prompt))) {
+    return "private";
+  }
+
   const stripped = stripCodeAndPaths(prompt);
 
-  // Unambiguous patterns — any match across the full text is private
+  // Unambiguous vocabulary — any match across the full text is private
   if (ALWAYS_PRIVATE_PATTERNS.some((p) => p.test(stripped))) {
     return "private";
   }
 
-  // Context-sensitive patterns — check per line, suppress when technical context is present
+  // Credential-adjacent and context-sensitive keywords — check per line,
+  // suppress when the same line contains a technical modifier.
   const lines = stripped.split("\n");
   for (const line of lines) {
-    if (
-      CONTEXT_SENSITIVE_PATTERNS.some((p) => p.test(line)) &&
-      !TECHNICAL_CONTEXT.test(line)
-    ) {
+    const hasTechnicalContext = TECHNICAL_CONTEXT.test(line);
+    if (hasTechnicalContext) continue;
+
+    if (TECHNICAL_PRIVATE_PATTERNS.some((p) => p.test(line))) {
+      return "private";
+    }
+    if (CONTEXT_SENSITIVE_PATTERNS.some((p) => p.test(line))) {
       return "private";
     }
   }
