@@ -44,9 +44,12 @@ const TECHNICAL_PRIVATE_PATTERNS = [
 /**
  * Actual secret-shaped strings. These match real credentials and have near-zero
  * false-positive rate — any match is always private regardless of context.
+ *
+ * `sk-` is restricted to known provider prefixes so that all-lowercase slug
+ * identifiers like `sk-telemetry-auth-pipeline-id` do not false-positive.
  */
 const SECRET_SHAPED_PATTERNS = [
-  /\bsk-[A-Za-z0-9_-]{20,}\b/,             // OpenAI / Anthropic API keys
+  /\bsk-(?:ant|proj|svcacct|live|test|or)-[A-Za-z0-9_-]{16,}\b/, // Anthropic / OpenAI / OpenRouter API keys
   /\bghp_[A-Za-z0-9]{20,}\b/,              // GitHub personal access tokens
   /\bgho_[A-Za-z0-9]{20,}\b/,              // GitHub OAuth tokens
   /\bgithub_pat_[A-Za-z0-9_]{22,}\b/,      // GitHub fine-grained PATs
@@ -54,6 +57,39 @@ const SECRET_SHAPED_PATTERNS = [
   /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/,      // Slack tokens
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,    // PEM private keys
 ];
+
+/**
+ * A credential keyword followed by an apparent value — e.g. `password: hunter2`,
+ * `api key = xyz`, `bearer token is eyJ...`, `the API key for prod is sk-...`.
+ * These must always classify as private, even on lines that also contain
+ * technical-context words, because the presence of an assignment means the
+ * prompt contains the secret itself, not just a discussion of one.
+ *
+ * Up to 40 characters of filler are allowed between the credential keyword and
+ * the value indicator (`:`, `=`, or `is`) so that natural-language assignments
+ * like `API key for prod is sk-xxx` are caught, while staying bounded enough
+ * to avoid matching unrelated mentions in long prose.
+ */
+const CREDENTIAL_KEYWORD = /\b(?:password|api[- ]?key|bearer\s+token|private\s+key)\b/i;
+const CREDENTIAL_VALUE_INDICATOR = /(?:[:=]|\bis\b)\s*\S/i;
+const AUTHORIZATION_HEADER_PATTERN = /\bAuthorization\s*:\s*Bearer\s+\S/i;
+
+function hasCredentialAssignment(text: string): boolean {
+  if (AUTHORIZATION_HEADER_PATTERN.test(text)) return true;
+  // Reset lastIndex on the global-less regexes is unnecessary, but we scan
+  // each line so keyword matches don't span lines.
+  for (const line of text.split("\n")) {
+    const keywordMatch = line.match(CREDENTIAL_KEYWORD);
+    if (!keywordMatch) continue;
+    const afterKeyword = line.slice(
+      (keywordMatch.index ?? 0) + keywordMatch[0].length,
+    );
+    // Allow up to 40 chars of filler before the value indicator.
+    const window = afterKeyword.slice(0, 40 + 10);
+    if (CREDENTIAL_VALUE_INDICATOR.test(window)) return true;
+  }
+  return false;
+}
 
 /**
  * Keywords that appear in both private-data and technical-discussion contexts.
@@ -67,7 +103,13 @@ const CONTEXT_SENSITIVE_PATTERNS = [
   /\bjournal\b/i,
 ];
 
-/** Words that signal a keyword is being discussed, not contained. */
+/**
+ * Words that signal a keyword is being discussed, not contained. `API` stays
+ * in the list — value-bearing credential lines like `my API key is abc123` are
+ * caught earlier by `CREDENTIAL_ASSIGNMENT_PATTERNS` before this suppression
+ * runs, so technical discussion that happens to say `API key` (e.g.
+ * `Auth model (API key? OAuth?)`) remains correctly classified as non-private.
+ */
 const TECHNICAL_CONTEXT = /\b(?:handling|scanning|management|rotation|module|system|API|integration|processing|calculation|architecture|endpoint|schema|service|engine|middleware|template|pipeline|detection|verification|authentication|authorization|signing|encryption|hashing|registry|configuration|systemd|SDK|CLI|framework|protocol)\b/i;
 
 const PRIVATE_PATH_PREFIXES = [
@@ -138,6 +180,15 @@ export function classifyPromptSensitivity(
   // Secret-shaped strings are scanned against the RAW text, before stripping
   // code blocks — a real key pasted into a code fence is still a real key.
   if (SECRET_SHAPED_PATTERNS.some((p) => p.test(prompt))) {
+    return "private";
+  }
+
+  // Credential assignments (`password: hunter2`, `api key = xyz`,
+  // `the API key for prod is sk-...`) are also scanned against the RAW text —
+  // a secret assigned inside a code fence is still a secret. They run before
+  // technical-context suppression so a line like
+  // `rotate auth module password: hunter2` cannot sneak past.
+  if (hasCredentialAssignment(prompt)) {
     return "private";
   }
 

@@ -129,6 +129,54 @@ describe("sensitivity helpers", () => {
     ).toBe("private");
   });
 
+  it("flags credential assignments even next to technical nouns (#35 codex review)", () => {
+    // Bare "API key" mentions must trip — "API" is no longer a technical-context word
+    expect(
+      classifyPromptSensitivity("my API key is abc123"),
+    ).toBe("private");
+    expect(
+      classifyPromptSensitivity("API key: xyz"),
+    ).toBe("private");
+    // Value-bearing credential lines must trip even with technical modifiers
+    expect(
+      classifyPromptSensitivity("rotate auth module password: hunter2"),
+    ).toBe("private");
+    expect(
+      classifyPromptSensitivity("auth service bearer token: eyJhbGciOiJIUzI1NiJ9"),
+    ).toBe("private");
+    expect(
+      classifyPromptSensitivity("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9"),
+    ).toBe("private");
+    // Natural-language assignment with filler between keyword and value
+    expect(
+      classifyPromptSensitivity("the API key for prod is sk-1234"),
+    ).toBe("private");
+    // Credential discussion without a value still passes
+    expect(
+      classifyPromptSensitivity("compare bearer token management frameworks"),
+    ).toBeUndefined();
+    expect(
+      classifyPromptSensitivity("password handling module design"),
+    ).toBeUndefined();
+  });
+
+  it("does not false-positive on slug-like sk- identifiers (#35 codex review)", () => {
+    // All-lowercase sk- slugs without known provider prefix must not trip
+    expect(
+      classifyPromptSensitivity("sk-telemetry-auth-pipeline-id"),
+    ).toBeUndefined();
+    expect(
+      classifyPromptSensitivity("slug: sk-user-onboarding-flow-prod"),
+    ).toBeUndefined();
+    // Real provider-prefixed keys still trip
+    expect(
+      classifyPromptSensitivity("sk-ant-api03-1234567890abcdefghij"),
+    ).toBe("private");
+    expect(
+      classifyPromptSensitivity("sk-proj-1234567890abcdefghij"),
+    ).toBe("private");
+  });
+
   it("always flags secret-shaped credential strings regardless of context", () => {
     // Real credentials must trip even inside code fences or technical framing
     expect(
