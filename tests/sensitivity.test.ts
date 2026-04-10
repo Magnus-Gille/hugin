@@ -130,12 +130,12 @@ describe("sensitivity helpers", () => {
   });
 
   it("flags credential assignments even next to technical nouns (#35 codex review)", () => {
-    // Bare "API key" mentions must trip — "API" is no longer a technical-context word
+    // Bare "API key" mentions with a digit-containing value must trip
     expect(
       classifyPromptSensitivity("my API key is abc123"),
     ).toBe("private");
     expect(
-      classifyPromptSensitivity("API key: xyz"),
+      classifyPromptSensitivity("API key: abc123"),
     ).toBe("private");
     // Value-bearing credential lines must trip even with technical modifiers
     expect(
@@ -175,6 +175,70 @@ describe("sensitivity helpers", () => {
     expect(
       classifyPromptSensitivity("sk-proj-1234567890abcdefghij"),
     ).toBe("private");
+  });
+
+  it("catches bare sk- secrets without provider prefix (#35 codex round 2)", () => {
+    // Legacy/generic sk- keys with entropy (uppercase or digits) must trip
+    // via the SECRET_SHAPED_PATTERNS entropy fallback
+    expect(
+      classifyPromptSensitivity(
+        "legacy key sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN",
+      ),
+    ).toBe("private");
+    expect(
+      classifyPromptSensitivity(
+        "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN",
+      ),
+    ).toBe("private");
+    // But long all-lowercase slugs without entropy stay non-private
+    expect(
+      classifyPromptSensitivity(
+        "sk-some-very-long-namespace-slug-without-caps-or-digits",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("scans all credential keywords and spans line breaks (#35 codex round 2)", () => {
+    // Finding 2a: value-bearing credential later in long line (first keyword
+    // has no value in its window, but second keyword does)
+    expect(
+      classifyPromptSensitivity(
+        "API key auth design and implementation notes before the prod password: hunter2",
+      ),
+    ).toBe("private");
+    // Finding 2b: newlines between keyword and value must be normalized
+    expect(
+      classifyPromptSensitivity("API key rotation settings\n: abc123"),
+    ).toBe("private");
+    expect(
+      classifyPromptSensitivity("API key for prod\nis abc123"),
+    ).toBe("private");
+  });
+
+  it("rejects descriptive prose as credential assignment (#35 codex round 2)", () => {
+    // Finding 3: value indicator followed by a plain English word must not trip
+    expect(
+      classifyPromptSensitivity("The API key is required for this endpoint."),
+    ).toBeUndefined();
+    expect(
+      classifyPromptSensitivity("The password is hashed using argon2."),
+    ).toBeUndefined();
+    expect(
+      classifyPromptSensitivity("The private key is encrypted at rest."),
+    ).toBeUndefined();
+    expect(
+      classifyPromptSensitivity("The bearer token is managed by the SDK."),
+    ).toBeUndefined();
+    // Placeholder syntax is also not a secret
+    expect(
+      classifyPromptSensitivity("password: $SECRET_VAR"),
+    ).toBeUndefined();
+    expect(
+      classifyPromptSensitivity("api key: ${API_KEY}"),
+    ).toBeUndefined();
+    expect(
+      classifyPromptSensitivity("password: <YOUR_PASSWORD>"),
+    ).toBeUndefined();
   });
 
   it("always flags secret-shaped credential strings regardless of context", () => {

@@ -45,11 +45,15 @@ const TECHNICAL_PRIVATE_PATTERNS = [
  * Actual secret-shaped strings. These match real credentials and have near-zero
  * false-positive rate — any match is always private regardless of context.
  *
- * `sk-` is restricted to known provider prefixes so that all-lowercase slug
- * identifiers like `sk-telemetry-auth-pipeline-id` do not false-positive.
+ * Two layers for `sk-`: a prefix allowlist (Anthropic / OpenAI / OpenRouter)
+ * and a generic entropy fallback that requires ≥32 chars plus at least one
+ * uppercase letter or digit. Slugs like `sk-telemetry-auth-pipeline-id` are
+ * all-lowercase and short, so they never trigger; legacy `sk-...` secrets
+ * that don't match the allowlist still get caught by the entropy fallback.
  */
 const SECRET_SHAPED_PATTERNS = [
-  /\bsk-(?:ant|proj|svcacct|live|test|or)-[A-Za-z0-9_-]{16,}\b/, // Anthropic / OpenAI / OpenRouter API keys
+  /\bsk-(?:ant|proj|svcacct|live|test|or)-[A-Za-z0-9_-]{16,}\b/, // Prefixed provider keys
+  /\bsk-(?=[A-Za-z0-9_-]*[A-Z\d])[A-Za-z0-9_-]{32,}\b/,          // Generic sk- with entropy
   /\bghp_[A-Za-z0-9]{20,}\b/,              // GitHub personal access tokens
   /\bgho_[A-Za-z0-9]{20,}\b/,              // GitHub OAuth tokens
   /\bgithub_pat_[A-Za-z0-9_]{22,}\b/,      // GitHub fine-grained PATs
@@ -59,34 +63,74 @@ const SECRET_SHAPED_PATTERNS = [
 ];
 
 /**
- * A credential keyword followed by an apparent value — e.g. `password: hunter2`,
- * `api key = xyz`, `bearer token is eyJ...`, `the API key for prod is sk-...`.
- * These must always classify as private, even on lines that also contain
- * technical-context words, because the presence of an assignment means the
- * prompt contains the secret itself, not just a discussion of one.
+ * A credential keyword followed by an apparent secret value — e.g.
+ * `password: hunter2`, `api key = abc123`, `bearer token is eyJ...`,
+ * `the API key for prod is sk-...`. These must always classify as private,
+ * even on lines that also contain technical-context words, because the
+ * presence of an assignment means the prompt contains the secret itself,
+ * not just a discussion of one.
  *
- * Up to 40 characters of filler are allowed between the credential keyword and
- * the value indicator (`:`, `=`, or `is`) so that natural-language assignments
- * like `API key for prod is sk-xxx` are caught, while staying bounded enough
- * to avoid matching unrelated mentions in long prose.
+ * Three guardrails against round-2 Codex review findings:
+ *   1. Global keyword regex + `matchAll` so every credential occurrence on
+ *      the line is scanned, not just the first. Catches patterns like
+ *      `API key auth design notes ... password: hunter2`.
+ *   2. Newlines normalized to spaces so `API key rotation\n: abc123` and
+ *      `API key for prod\nis abc123` are still caught.
+ *   3. The value after the indicator must contain a digit to count as a
+ *      secret. Rejects descriptive prose like `is required`, `is hashed`,
+ *      `is encrypted` that would otherwise false-positive. Accepts the
+ *      limitation that pure-alphabetic passwords (e.g. `swordfish`) are
+ *      missed — real secrets almost always contain digits.
  */
-const CREDENTIAL_KEYWORD = /\b(?:password|api[- ]?key|bearer\s+token|private\s+key)\b/i;
-const CREDENTIAL_VALUE_INDICATOR = /(?:[:=]|\bis\b)\s*\S/i;
-const AUTHORIZATION_HEADER_PATTERN = /\bAuthorization\s*:\s*Bearer\s+\S/i;
+const CREDENTIAL_KEYWORD = /\b(?:password|api[- ]?key|bearer\s+token|private\s+key)\b/gi;
+const CREDENTIAL_VALUE_INDICATOR = /(?:[:=]|\bis\b)\s*(\S+)/i;
+const AUTHORIZATION_HEADER_PATTERN = /\bAuthorization\s*:\s*Bearer\s+(\S+)/i;
+
+/**
+ * Detects a credential keyword followed by a placeholder value like
+ * `password: $SECRET_VAR`, `api key: ${API_KEY}`, or `password: <YOUR_PASSWORD>`.
+ * Lines matching this pattern are documentation/templates, not credential
+ * leaks, and should be exempted from the per-line credential-keyword check.
+ */
+const CREDENTIAL_PLACEHOLDER_ASSIGNMENT =
+  /\b(?:password|api[- ]?key|bearer\s+token|private\s+key)\b[^:=\n]{0,20}[:=]\s*(?:\$\{?[A-Za-z_]|<[A-Za-z_])/i;
+
+/**
+ * Heuristic: does `value` look like an actual secret, or is it descriptive
+ * prose? Real secrets almost always contain at least one digit. Placeholder
+ * syntax (`$VAR`, `${VAR}`, `<TOKEN>`) is explicitly excluded.
+ */
+function isSecretShapedValue(value: string | undefined): boolean {
+  if (!value) return false;
+  // Trim leading/trailing quotes/backticks to look at the actual token
+  const stripped = value.replace(/^["'`]+|["'`]+$/g, "");
+  if (!stripped) return false;
+  // Common placeholder patterns — not secrets
+  if (/^<[^>]*>$/.test(stripped)) return false;
+  if (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(stripped)) return false;
+  // Must contain at least one digit to look like a secret value
+  return /\d/.test(stripped);
+}
 
 function hasCredentialAssignment(text: string): boolean {
-  if (AUTHORIZATION_HEADER_PATTERN.test(text)) return true;
-  // Reset lastIndex on the global-less regexes is unnecessary, but we scan
-  // each line so keyword matches don't span lines.
-  for (const line of text.split("\n")) {
-    const keywordMatch = line.match(CREDENTIAL_KEYWORD);
-    if (!keywordMatch) continue;
-    const afterKeyword = line.slice(
-      (keywordMatch.index ?? 0) + keywordMatch[0].length,
+  // Handle `Authorization: Bearer <token>` specifically — the header form
+  // doesn't go through the credential-keyword loop.
+  const authMatch = text.match(AUTHORIZATION_HEADER_PATTERN);
+  if (authMatch && isSecretShapedValue(authMatch[1])) return true;
+
+  // Collapse newlines so a keyword on one line and its value on the next
+  // are still caught by the 60-char window.
+  const normalized = text.replace(/\r?\n/g, " ");
+
+  // Scan every credential keyword occurrence, not just the first per line.
+  for (const match of normalized.matchAll(CREDENTIAL_KEYWORD)) {
+    const afterKeyword = normalized.slice(
+      (match.index ?? 0) + match[0].length,
     );
-    // Allow up to 40 chars of filler before the value indicator.
-    const window = afterKeyword.slice(0, 40 + 10);
-    if (CREDENTIAL_VALUE_INDICATOR.test(window)) return true;
+    const window = afterKeyword.slice(0, 60);
+    const indicatorMatch = window.match(CREDENTIAL_VALUE_INDICATOR);
+    if (!indicatorMatch) continue;
+    if (isSecretShapedValue(indicatorMatch[1])) return true;
   }
   return false;
 }
@@ -104,13 +148,17 @@ const CONTEXT_SENSITIVE_PATTERNS = [
 ];
 
 /**
- * Words that signal a keyword is being discussed, not contained. `API` stays
- * in the list — value-bearing credential lines like `my API key is abc123` are
- * caught earlier by `CREDENTIAL_ASSIGNMENT_PATTERNS` before this suppression
- * runs, so technical discussion that happens to say `API key` (e.g.
- * `Auth model (API key? OAuth?)`) remains correctly classified as non-private.
+ * Words that signal a keyword is being discussed, not contained. Includes
+ * both -ing and -ed forms of the common security verbs so that descriptive
+ * sentences like `the password is hashed` or `the private key is encrypted`
+ * don't fall through to the per-line credential check.
+ *
+ * `API` stays in the list — value-bearing credential lines like
+ * `my API key is abc123` are caught earlier by `hasCredentialAssignment`
+ * before this suppression runs, so pure technical discussion that says
+ * `API key` (e.g. `Auth model (API key? OAuth?)`) remains non-private.
  */
-const TECHNICAL_CONTEXT = /\b(?:handling|scanning|management|rotation|module|system|API|integration|processing|calculation|architecture|endpoint|schema|service|engine|middleware|template|pipeline|detection|verification|authentication|authorization|signing|encryption|hashing|registry|configuration|systemd|SDK|CLI|framework|protocol)\b/i;
+const TECHNICAL_CONTEXT = /\b(?:handling|handled|scanning|scanned|management|managed|rotation|rotated|module|system|API|integration|integrated|processing|processed|calculation|calculated|architecture|endpoint|schema|service|engine|middleware|template|pipeline|detection|detected|verification|verified|authentication|authenticated|authorization|authorized|signing|signed|encryption|encrypted|hashing|hashed|registry|registered|configuration|configured|systemd|SDK|CLI|framework|protocol|required|optional|generated|stored|provided|available)\b/i;
 
 const PRIVATE_PATH_PREFIXES = [
   "/home/magnus/mimir",
@@ -200,11 +248,16 @@ export function classifyPromptSensitivity(
   }
 
   // Credential-adjacent and context-sensitive keywords — check per line,
-  // suppress when the same line contains a technical modifier.
+  // suppress when the same line contains a technical modifier or is a
+  // placeholder-style template assignment.
   const lines = stripped.split("\n");
   for (const line of lines) {
     const hasTechnicalContext = TECHNICAL_CONTEXT.test(line);
     if (hasTechnicalContext) continue;
+
+    // Lines like `password: $SECRET_VAR` or `api key: <YOUR_KEY>` are
+    // templates/docs, not credential leaks — skip them.
+    if (CREDENTIAL_PLACEHOLDER_ASSIGNMENT.test(line)) continue;
 
     if (TECHNICAL_PRIVATE_PATTERNS.some((p) => p.test(line))) {
       return "private";
