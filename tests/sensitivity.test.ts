@@ -215,6 +215,33 @@ describe("sensitivity helpers", () => {
     ).toBe("private");
   });
 
+  it("resists Unicode/whitespace bypasses (#35 codex round 3)", () => {
+    // Tab instead of space between keyword parts
+    expect(
+      classifyPromptSensitivity("api\tkey: abc123"),
+    ).toBe("private");
+    // Non-breaking space (NBSP, U+00A0)
+    expect(
+      classifyPromptSensitivity("api\u00A0key: abc123"),
+    ).toBe("private");
+    // Zero-width space (U+200B) inside the keyword
+    expect(
+      classifyPromptSensitivity("api\u200Bkey: abc123"),
+    ).toBe("private");
+    // Zero-width space inside a known provider-prefix secret
+    expect(
+      classifyPromptSensitivity("sk-\u200Bproj-1234567890abcdefghij"),
+    ).toBe("private");
+    // Cyrillic 'а' homoglyph replacing Latin 'a' in password
+    expect(
+      classifyPromptSensitivity("p\u0430ssword: hunter2"),
+    ).toBe("private");
+    // Fullwidth ASCII should NFKC-fold to plain ASCII
+    expect(
+      classifyPromptSensitivity("ＡＰＩ key: abc123"),
+    ).toBe("private");
+  });
+
   it("rejects descriptive prose as credential assignment (#35 codex round 2)", () => {
     // Finding 3: value indicator followed by a plain English word must not trip
     expect(

@@ -220,27 +220,96 @@ function stripCodeAndPaths(text: string): string {
     .replace(/\b[\w-]+\/[\w/*-]+/g, ""); // namespace/path patterns like clients/invoices
 }
 
+/**
+ * Cyrillic and Greek letters that are visually indistinguishable from Latin
+ * letters commonly used in credential vocabulary (password, api, key, bearer,
+ * token, private, secret, etc.). Covers the common homoglyph-bypass vector
+ * without pulling in the full Unicode confusables database.
+ */
+const HOMOGLYPH_MAP: Record<string, string> = {
+  // Cyrillic lowercase
+  "\u0430": "a", "\u0435": "e", "\u043E": "o", "\u0440": "p",
+  "\u0441": "c", "\u0443": "y", "\u0445": "x", "\u0456": "i",
+  "\u0458": "j", "\u0455": "s", "\u04BB": "h",
+  // Cyrillic uppercase
+  "\u0410": "A", "\u0412": "B", "\u0415": "E", "\u041A": "K",
+  "\u041C": "M", "\u041D": "H", "\u041E": "O", "\u0420": "P",
+  "\u0421": "C", "\u0422": "T", "\u0425": "X", "\u0406": "I",
+  "\u0408": "J", "\u0405": "S",
+  // Greek lowercase
+  "\u03B1": "a", "\u03BF": "o", "\u03C1": "p", "\u03B5": "e",
+  "\u03C4": "t", "\u03BD": "v", "\u03BA": "k",
+  // Greek uppercase (that look Latin)
+  "\u0391": "A", "\u0392": "B", "\u0395": "E", "\u0396": "Z",
+  "\u0397": "H", "\u0399": "I", "\u039A": "K", "\u039C": "M",
+  "\u039D": "N", "\u039F": "O", "\u03A1": "P", "\u03A4": "T",
+  "\u03A5": "Y", "\u03A7": "X",
+};
+
+const HOMOGLYPH_RE = new RegExp(
+  `[${Object.keys(HOMOGLYPH_MAP).join("")}]`,
+  "g",
+);
+
+/**
+ * Normalize a prompt before classification so zero-width characters,
+ * non-breaking spaces, tabs, and Unicode homoglyphs don't provide a bypass
+ * path around the ASCII-only regexes below. Without this, attacks like
+ * `api\u200Bkey: hunter2` or `pаssword: hunter2` (Cyrillic `а`) evade the
+ * credential-keyword detector.
+ *
+ *   1. NFKC folds compatibility characters (e.g. Unicode `ＡＰＩ` → `API`).
+ *   2. Zero-width and bidi control characters are stripped entirely.
+ *   3. Common Cyrillic/Greek homoglyphs are folded to their Latin look-alike.
+ *   4. All Unicode whitespace (tabs, NBSP, em-space, etc.) is collapsed
+ *      to a single ASCII space, except for newlines which are preserved
+ *      because the per-line loop depends on them.
+ */
+function normalizeForClassification(text: string): string {
+  return text
+    .normalize("NFKC")
+    // Strip zero-width, bidi marks, and other format/control characters.
+    // \u200B–\u200F: zero-width + LRM/RLM
+    // \u202A–\u202E: bidi embedding/override
+    // \u2060–\u206F: word joiner + invisible format
+    // \uFEFF: BOM / ZWNBSP
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "")
+    // Fold Cyrillic/Greek homoglyphs to their Latin look-alikes.
+    .replace(HOMOGLYPH_RE, (c) => HOMOGLYPH_MAP[c] ?? c)
+    // Collapse non-newline Unicode whitespace (tabs, NBSP, em-space, etc.)
+    // to ASCII space. Newlines are preserved so per-line scanning still works.
+    .replace(/[^\S\n]+/g, " ");
+}
+
 export function classifyPromptSensitivity(
   prompt: string | undefined,
 ): Sensitivity | undefined {
   if (!prompt) return undefined;
 
-  // Secret-shaped strings are scanned against the RAW text, before stripping
-  // code blocks — a real key pasted into a code fence is still a real key.
-  if (SECRET_SHAPED_PATTERNS.some((p) => p.test(prompt))) {
+  // Normalize Unicode, strip zero-width characters, and collapse non-newline
+  // whitespace so homoglyph/ZWSP/NBSP/tab-based bypasses can't evade the
+  // ASCII-only regexes below. All subsequent checks run on the normalized
+  // string — there is no "raw" fallback because the pre-normalization text
+  // would reopen the bypass.
+  const normalized = normalizeForClassification(prompt);
+
+  // Secret-shaped strings are scanned against the normalized text before
+  // stripping code blocks — a real key pasted into a code fence is still a
+  // real key.
+  if (SECRET_SHAPED_PATTERNS.some((p) => p.test(normalized))) {
     return "private";
   }
 
   // Credential assignments (`password: hunter2`, `api key = xyz`,
-  // `the API key for prod is sk-...`) are also scanned against the RAW text —
-  // a secret assigned inside a code fence is still a secret. They run before
-  // technical-context suppression so a line like
+  // `the API key for prod is sk-...`) are also scanned against the
+  // normalized text — a secret assigned inside a code fence is still a
+  // secret. They run before technical-context suppression so a line like
   // `rotate auth module password: hunter2` cannot sneak past.
-  if (hasCredentialAssignment(prompt)) {
+  if (hasCredentialAssignment(normalized)) {
     return "private";
   }
 
-  const stripped = stripCodeAndPaths(prompt);
+  const stripped = stripCodeAndPaths(normalized);
 
   // Unambiguous vocabulary — any match across the full text is private
   if (ALWAYS_PRIVATE_PATTERNS.some((p) => p.test(stripped))) {
