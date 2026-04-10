@@ -110,13 +110,19 @@ const config = {
     .map((s) => s.trim())
     .filter(Boolean),
   // Submitters allowed to override a detector-raised sensitivity with an
-  // explicit `declared` value on the task front-matter. Defaults to the same
-  // list as `allowedSubmitters` since Hugin today is single-user; narrow
-  // this once family/agent principals can submit tasks.
+  // explicit `declared` value on the task front-matter. Narrower than
+  // `allowedSubmitters` on purpose: agent principals (hugin, ratatoskr) are
+  // excluded so that a prompt-injected or misbehaving agent cannot self-
+  // escalate its own classifier by submitting a task with `Sensitivity:
+  // internal`. Only human-driven clients — Claude Code/Desktop/Web/Mobile
+  // and the various Codex CLIs — are trusted to set declared sensitivity,
+  // on the assumption that the owner is operating them directly.
+  //
+  // If ratatoskr or hugin start failing often enough that auto-override is
+  // worth the risk, add them to HUGIN_OWNER_SUBMITTERS explicitly.
   ownerSubmitters: (
     process.env.HUGIN_OWNER_SUBMITTERS ??
-    process.env.HUGIN_ALLOWED_SUBMITTERS ??
-    "Codex,Codex-desktop,ratatoskr,Codex-web,Codex-mobile,claude-code,claude-desktop,claude-web,claude-mobile,hugin"
+    "Codex,Codex-desktop,Codex-web,Codex-mobile,claude-code,claude-desktop,claude-web,claude-mobile"
   )
     .split(",")
     .map((s) => s.trim())
