@@ -1,7 +1,58 @@
 # Hugin — Status
 
-**Last session:** 2026-04-09 (Cleanup batch + #33 session-id rotation)
-**Branch:** main
+**Last session:** 2026-04-10 (PR #35 merged, PR #37 owner-override opened)
+**Branch:** feat/owner-override (PR #37 open against main)
+
+## Completed This Session (2026-04-10)
+
+### PR #35 — sensitivity classifier robustness (MERGED, `f98278d`)
+Three rounds of codex adversarial review. Each round's findings fixed or formally deferred:
+- **Round 1 fix (`e5ebcdd`):** Credential assignment detection with `hasCredentialAssignment()` helper, 60-char window, placeholder rejection, `-ed` form additions to `TECHNICAL_CONTEXT`.
+- **Round 2 fix (`f57d01b`):** `matchAll` scan across multiple credential keywords per line, newline normalization, `isSecretShapedValue()` entropy fallback, `CREDENTIAL_PLACEHOLDER_ASSIGNMENT` guard in per-line loop.
+- **Round 3 narrow fix (`38c1005`):** `normalizeForClassification()` — NFKC + zero-width/bidi stripping + Cyrillic/Greek homoglyph map + whitespace collapse. Defeats tab/NBSP/ZWSP/fullwidth/Cyrillic-`а` bypasses.
+- **Round 3 Findings 1 & 3 deferred to #36** — alphabetic-only secret detection and RFC-example JWT false positives are in fundamental tension that regex cannot resolve. Owner-override is the architectural fix.
+
+### PR #37 — owner-override escape hatch (OPEN)
+Closes #36. Two commits on `feat/owner-override`:
+- **`67997c3` feat:** `detectPromptSensitivity()` returning `{ sensitivity, hardPrivate }`. Only `SECRET_SHAPED_PATTERNS` is hard. `buildSensitivityAssessment` gains `allowOwnerOverride` + `hardPrivate` inputs; when set, `effective` clamps DOWN to `declared` unless hard. `mismatch` still fires on detector disagreement even when override is honored (audit trail). Pipeline compiler + dispatch threaded through. `assessTaskSecurity` warns on every applied override.
+- **`0b307e8` security:** `HUGIN_OWNER_SUBMITTERS` default narrowed — `hugin` and `ratatoskr` removed. Only human-driven clients (claude-code/desktop/web/mobile, Codex*) trusted to declare sensitivity by default. Agent principals must be explicitly added via env var if they need override access.
+
+### Security model (documented in PR body)
+- This is a policy knob, not a tamper-proof gate. Check is string match on self-reported `Submitted by` front-matter.
+- Protects against: accidental misclassification, out-of-allowlist submitters, secret-shaped strings (hardPrivate), agent self-escalation (via default exclusion).
+- Does NOT protect against: prompt-injected Claude Code holding the Bearer token, compromised tools with `MUNIN_API_KEY`. In those cases the attacker had Munin write access and could `memory_read` private data directly — the override doesn't meaningfully expand blast radius.
+- Future hardening (not in #37): bind owner identity to Munin OAuth principal, out-of-band consent, rate limiting, dedicated audit log.
+
+### Tests
+- 259/259 passing (248 before #37 + 11 new in `tests/sensitivity.test.ts`)
+- New coverage: detectPromptSensitivity hard/soft split, override happy path, hard-private block, missing-declared guard, detector<=declared, legacy behavior, real-world #36 case (research prompt with auth vocabulary), counter-case (real `sk-ant-…` still blocked)
+
+## Active PRs
+- **#37 feat/owner-override** — open, ready to merge. No CI gates configured. Self-review on the diff is the last step before merging + deploying.
+
+## Pending Follow-ups
+- **Merge #37** after review on GitHub.
+- **Deploy to Pi** after merge. Restart will invalidate any active MCP sessions (known issue).
+- **Resubmit `tasks/20260409-133844-managed-agents-fit`** with `**Sensitivity:** internal` front-matter once the override is live. The existing failed entry stays as history — no cleanup needed.
+- **Monitor override usage** — every applied override emits `[sensitivity] owner override` warning. If no overrides fire in a week, the detector is precise enough. If many fire, mine them for classifier tuning targets.
+
+## Plan Status
+- **Phase 1: Dependency-aware task joins** — done and live-validated.
+- **Phase 2: Pipeline compiler and decomposition** — done and live-validated.
+- **Phase 3: Structured results and pipeline operations** — done and live-validated.
+- **Phase 4: Human gates for side effects** — done and live-validated.
+- **Critical pre-Phase-5 security hardening** — done and live-validated.
+- **Phase 5: Sensitivity classification** — done and corpus-evaluated (19/19). Hardening in flight via #35 (merged) + #37 (open).
+- **Phase 6: Router (`Runtime: auto`)** — **DONE.** Fully live-evaluated. All 7/7 eval scenarios pass. Safety gate: zero sensitivity violations.
+- **Phase 7: Methodology templates** — not started.
+- **Bet 1 status** — closed.
+- **Bet 2 status** — **CLOSED. All 7/7 eval tasks pass.** Safety gate confirmed. Root cause of Pi parse failures was orphan dispatcher processes (fixed).
+
+---
+
+## Previous Sessions (kept for history)
+
+### 2026-04-09 (afternoon, Cleanup batch + #33 session-id rotation)
 
 ## Plan Status
 - **Phase 1: Dependency-aware task joins** — done and live-validated.
