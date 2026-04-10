@@ -251,6 +251,27 @@ function parseSubmittedByField(content: string): string {
   return content.match(/\*\*Submitted by:\*\*\s*(.+)/i)?.[1]?.trim() || "unknown";
 }
 
+// Accepts an allowlist entry as a match if the submitter equals it
+// (case-insensitive) or extends it with a `-<host>` suffix — e.g.
+// `Claude-Code-laptop` matches `claude-code`. Hosts like `laptop` and `pi`
+// are informational; the trust decision belongs to the base identity.
+function isSubmitterAllowed(
+  submittedBy: string,
+  allowedSubmitters: readonly string[],
+): boolean {
+  if (allowedSubmitters.includes("*")) return true;
+  const normalized = submittedBy.trim().toLowerCase();
+  if (!normalized) return false;
+  return allowedSubmitters.some((entry) => {
+    const entryLower = entry.trim().toLowerCase();
+    if (!entryLower) return false;
+    return (
+      normalized === entryLower ||
+      normalized.startsWith(`${entryLower}-`)
+    );
+  });
+}
+
 function parsePipelineSideEffectsField(content: string): PipelineSideEffectId[] {
   const raw = content.match(/\*\*Pipeline side-effects:\*\*\s*(.+)/i)?.[1]?.trim();
   if (!raw) return [];
@@ -474,7 +495,7 @@ function getTaskArtifactClassification(
 
 function isOwnerSubmitter(submittedBy: string | undefined): boolean {
   if (!submittedBy) return false;
-  return config.ownerSubmitters.includes(submittedBy);
+  return isSubmitterAllowed(submittedBy, config.ownerSubmitters);
 }
 
 function getTaskSensitivityAssessment(task: TaskConfig): SensitivityAssessment {
@@ -2316,10 +2337,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
   // Validate submitter against allowlist
   const submittedBy = parseSubmittedByField(entry.content);
-  if (
-    !config.allowedSubmitters.includes("*") &&
-    !config.allowedSubmitters.includes(submittedBy)
-  ) {
+  if (!isSubmitterAllowed(submittedBy, config.allowedSubmitters)) {
     console.warn(
       `Rejecting task ${taskNs}: submitter "${submittedBy}" not in allowed list [${config.allowedSubmitters.join(", ")}]`
     );

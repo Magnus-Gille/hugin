@@ -607,10 +607,17 @@ describe("submitter validation", () => {
     submittedBy: string,
     allowedSubmitters: string[]
   ): boolean {
-    return (
-      allowedSubmitters.includes("*") ||
-      allowedSubmitters.includes(submittedBy)
-    );
+    if (allowedSubmitters.includes("*")) return true;
+    const normalized = submittedBy.trim().toLowerCase();
+    if (!normalized) return false;
+    return allowedSubmitters.some((entry) => {
+      const entryLower = entry.trim().toLowerCase();
+      if (!entryLower) return false;
+      return (
+        normalized === entryLower ||
+        normalized.startsWith(`${entryLower}-`)
+      );
+    });
   }
 
   const defaultAllowed = [
@@ -634,10 +641,31 @@ describe("submitter validation", () => {
     expect(isSubmitterAllowed("claude-desktop", defaultAllowed)).toBe(true);
   });
 
+  it("should match case-insensitively", () => {
+    expect(isSubmitterAllowed("CODEX", defaultAllowed)).toBe(true);
+    expect(isSubmitterAllowed("Claude-Code", defaultAllowed)).toBe(true);
+    expect(isSubmitterAllowed("HUGIN", defaultAllowed)).toBe(true);
+  });
+
+  it("should accept -<host> suffix variants", () => {
+    // Real regression: a laptop claude-code session submitted as
+    // "Claude-Code-laptop" and was rejected.
+    expect(isSubmitterAllowed("Claude-Code-laptop", defaultAllowed)).toBe(true);
+    expect(isSubmitterAllowed("claude-code-pi", defaultAllowed)).toBe(true);
+    expect(isSubmitterAllowed("Codex-desktop-laptop", defaultAllowed)).toBe(true);
+  });
+
   it("should reject unknown submitters", () => {
     expect(isSubmitterAllowed("unknown", defaultAllowed)).toBe(false);
     expect(isSubmitterAllowed("attacker", defaultAllowed)).toBe(false);
     expect(isSubmitterAllowed("", defaultAllowed)).toBe(false);
+  });
+
+  it("should require a `-` boundary for suffix matches", () => {
+    // `huginx` must not pass by merely sharing letters with `hugin`:
+    // only a literal `-` boundary counts as a host suffix separator.
+    expect(isSubmitterAllowed("huginx", defaultAllowed)).toBe(false);
+    expect(isSubmitterAllowed("codex", ["Codex-desktop"])).toBe(false);
   });
 
   it("should allow all when wildcard is present", () => {
@@ -648,6 +676,7 @@ describe("submitter validation", () => {
   it("should work with custom allowlist", () => {
     const custom = ["bot-a", "bot-b"];
     expect(isSubmitterAllowed("bot-a", custom)).toBe(true);
+    expect(isSubmitterAllowed("bot-a-laptop", custom)).toBe(true);
     expect(isSubmitterAllowed("Codex", custom)).toBe(false);
     expect(isSubmitterAllowed("claude-code", custom)).toBe(false);
   });
