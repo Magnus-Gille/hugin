@@ -1,7 +1,7 @@
 # Hugin — Status
 
-**Last session:** 2026-04-10 (PR #35 merged, PR #37 owner-override opened)
-**Branch:** feat/owner-override (PR #37 open against main)
+**Last session:** 2026-04-10 (PR #35 + PR #37 merged; owner-override live on main)
+**Branch:** main
 
 ## Completed This Session (2026-04-10)
 
@@ -12,10 +12,11 @@ Three rounds of codex adversarial review. Each round's findings fixed or formall
 - **Round 3 narrow fix (`38c1005`):** `normalizeForClassification()` — NFKC + zero-width/bidi stripping + Cyrillic/Greek homoglyph map + whitespace collapse. Defeats tab/NBSP/ZWSP/fullwidth/Cyrillic-`а` bypasses.
 - **Round 3 Findings 1 & 3 deferred to #36** — alphabetic-only secret detection and RFC-example JWT false positives are in fundamental tension that regex cannot resolve. Owner-override is the architectural fix.
 
-### PR #37 — owner-override escape hatch (OPEN)
-Closes #36. Two commits on `feat/owner-override`:
+### PR #37 — owner-override escape hatch (MERGED, `38bac07`)
+Closes #36. Squash-merged. Three commits on `feat/owner-override` before merge:
 - **`67997c3` feat:** `detectPromptSensitivity()` returning `{ sensitivity, hardPrivate }`. Only `SECRET_SHAPED_PATTERNS` is hard. `buildSensitivityAssessment` gains `allowOwnerOverride` + `hardPrivate` inputs; when set, `effective` clamps DOWN to `declared` unless hard. `mismatch` still fires on detector disagreement even when override is honored (audit trail). Pipeline compiler + dispatch threaded through. `assessTaskSecurity` warns on every applied override.
 - **`0b307e8` security:** `HUGIN_OWNER_SUBMITTERS` default narrowed — `hugin` and `ratatoskr` removed. Only human-driven clients (claude-code/desktop/web/mobile, Codex*) trusted to declare sensitivity by default. Agent principals must be explicitly added via env var if they need override access.
+- **`62f292c` docs:** STATUS.md update folded into PR.
 
 ### Security model (documented in PR body)
 - This is a policy knob, not a tamper-proof gate. Check is string match on self-reported `Submitted by` front-matter.
@@ -28,13 +29,17 @@ Closes #36. Two commits on `feat/owner-override`:
 - New coverage: detectPromptSensitivity hard/soft split, override happy path, hard-private block, missing-declared guard, detector<=declared, legacy behavior, real-world #36 case (research prompt with auth vocabulary), counter-case (real `sk-ant-…` still blocked)
 
 ## Active PRs
-- **#37 feat/owner-override** — open, ready to merge. No CI gates configured. Self-review on the diff is the last step before merging + deploying.
+- None.
 
 ## Pending Follow-ups
-- **Merge #37** after review on GitHub.
-- **Deploy to Pi** after merge. Restart will invalidate any active MCP sessions (known issue).
-- **Resubmit `tasks/20260409-133844-managed-agents-fit`** with `**Sensitivity:** internal` front-matter once the override is live. The existing failed entry stays as history — no cleanup needed.
-- **Monitor override usage** — every applied override emits `[sensitivity] owner override` warning. If no overrides fire in a week, the detector is precise enough. If many fire, mine them for classifier tuning targets.
+- **Deploy to Pi.** `main` is ahead of deployed code by `f98278d` + `38bac07`. Restart will invalidate any active MCP sessions (known issue).
+- **Monitor override usage** post-deploy — every applied override emits `[sensitivity] owner override` warning. If no overrides fire in a week, the detector is precise enough. If many fire, mine them for classifier tuning targets.
+- **`managed-agents-fit` research** — no longer needed. Prior research at `~/mimir/research/managed-agents-fit.md` (2026-04-09) already covers it with a "reject adoption, cherry-pick design ideas" verdict. The failed Munin task entry stays as history.
+
+## Next Session Options
+- **#30 `think:false` for ollama reasoning models** — small, clear scope, big Pi win (90s → 2s on qwen3.5:2b). See `docs/research/ollama-performance-spike.md`.
+- **#5 Phase 7: Methodology templates** — biggest value unlock. Managed-agents research flags "outcome grader pattern" as design input.
+- **Stale-tracker sweep** — cheap roadmap hygiene. This session already found 2 stale trackers (gille-ai#1 banner, heimdall#4 favicon) that were both fixed weeks ago. Worth a one-pass sweep across all "Todo" items.
 
 ## Plan Status
 - **Phase 1: Dependency-aware task joins** — done and live-validated.
