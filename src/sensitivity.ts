@@ -15,18 +15,125 @@ const SENSITIVITY_ORDER: Record<Sensitivity, number> = {
   private: 2,
 };
 
-/** Unambiguous private-data keywords — any match triggers private classification. */
+/**
+ * Unambiguous private-data keywords — any match triggers private classification.
+ * These are words that do not come up in legitimate technical discussion.
+ */
 const ALWAYS_PRIVATE_PATTERNS = [
-  /\bpassword\b/i,
-  /\bapi[- ]?key\b/i,
-  /\bbearer token\b/i,
-  /\bprivate key\b/i,
   /\bmedical\b/i,
   /\bsalary\b/i,
   /\bpassport\b/i,
   /\bdiary\b/i,
   /\bpersonal notes?\b/i,
 ];
+
+/**
+ * Credential-adjacent vocabulary. Matches actual secrets if the line is a raw
+ * dump, but must be suppressed in technical discussion (research on auth
+ * systems, code work on secret-handling modules, debates about API auth).
+ * Matched per-line with the same technical-context suppression as
+ * CONTEXT_SENSITIVE_PATTERNS.
+ */
+const TECHNICAL_PRIVATE_PATTERNS = [
+  /\bpassword\b/i,
+  /\bapi[- ]?key\b/i,
+  /\bbearer token\b/i,
+  /\bprivate key\b/i,
+];
+
+/**
+ * Actual secret-shaped strings. These match real credentials and have near-zero
+ * false-positive rate — any match is always private regardless of context.
+ *
+ * Two layers for `sk-`: a prefix allowlist (Anthropic / OpenAI / OpenRouter)
+ * and a generic entropy fallback that requires ≥32 chars plus at least one
+ * uppercase letter or digit. Slugs like `sk-telemetry-auth-pipeline-id` are
+ * all-lowercase and short, so they never trigger; legacy `sk-...` secrets
+ * that don't match the allowlist still get caught by the entropy fallback.
+ */
+const SECRET_SHAPED_PATTERNS = [
+  /\bsk-(?:ant|proj|svcacct|live|test|or)-[A-Za-z0-9_-]{16,}\b/, // Prefixed provider keys
+  /\bsk-(?=[A-Za-z0-9_-]*[A-Z\d])[A-Za-z0-9_-]{32,}\b/,          // Generic sk- with entropy
+  /\bghp_[A-Za-z0-9]{20,}\b/,              // GitHub personal access tokens
+  /\bgho_[A-Za-z0-9]{20,}\b/,              // GitHub OAuth tokens
+  /\bgithub_pat_[A-Za-z0-9_]{22,}\b/,      // GitHub fine-grained PATs
+  /\bAKIA[0-9A-Z]{16}\b/,                  // AWS access keys
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/,      // Slack tokens
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,    // PEM private keys
+];
+
+/**
+ * A credential keyword followed by an apparent secret value — e.g.
+ * `password: hunter2`, `api key = abc123`, `bearer token is eyJ...`,
+ * `the API key for prod is sk-...`. These must always classify as private,
+ * even on lines that also contain technical-context words, because the
+ * presence of an assignment means the prompt contains the secret itself,
+ * not just a discussion of one.
+ *
+ * Three guardrails against round-2 Codex review findings:
+ *   1. Global keyword regex + `matchAll` so every credential occurrence on
+ *      the line is scanned, not just the first. Catches patterns like
+ *      `API key auth design notes ... password: hunter2`.
+ *   2. Newlines normalized to spaces so `API key rotation\n: abc123` and
+ *      `API key for prod\nis abc123` are still caught.
+ *   3. The value after the indicator must contain a digit to count as a
+ *      secret. Rejects descriptive prose like `is required`, `is hashed`,
+ *      `is encrypted` that would otherwise false-positive. Accepts the
+ *      limitation that pure-alphabetic passwords (e.g. `swordfish`) are
+ *      missed — real secrets almost always contain digits.
+ */
+const CREDENTIAL_KEYWORD = /\b(?:password|api[- ]?key|bearer\s+token|private\s+key)\b/gi;
+const CREDENTIAL_VALUE_INDICATOR = /(?:[:=]|\bis\b)\s*(\S+)/i;
+const AUTHORIZATION_HEADER_PATTERN = /\bAuthorization\s*:\s*Bearer\s+(\S+)/i;
+
+/**
+ * Detects a credential keyword followed by a placeholder value like
+ * `password: $SECRET_VAR`, `api key: ${API_KEY}`, or `password: <YOUR_PASSWORD>`.
+ * Lines matching this pattern are documentation/templates, not credential
+ * leaks, and should be exempted from the per-line credential-keyword check.
+ */
+const CREDENTIAL_PLACEHOLDER_ASSIGNMENT =
+  /\b(?:password|api[- ]?key|bearer\s+token|private\s+key)\b[^:=\n]{0,20}[:=]\s*(?:\$\{?[A-Za-z_]|<[A-Za-z_])/i;
+
+/**
+ * Heuristic: does `value` look like an actual secret, or is it descriptive
+ * prose? Real secrets almost always contain at least one digit. Placeholder
+ * syntax (`$VAR`, `${VAR}`, `<TOKEN>`) is explicitly excluded.
+ */
+function isSecretShapedValue(value: string | undefined): boolean {
+  if (!value) return false;
+  // Trim leading/trailing quotes/backticks to look at the actual token
+  const stripped = value.replace(/^["'`]+|["'`]+$/g, "");
+  if (!stripped) return false;
+  // Common placeholder patterns — not secrets
+  if (/^<[^>]*>$/.test(stripped)) return false;
+  if (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(stripped)) return false;
+  // Must contain at least one digit to look like a secret value
+  return /\d/.test(stripped);
+}
+
+function hasCredentialAssignment(text: string): boolean {
+  // Handle `Authorization: Bearer <token>` specifically — the header form
+  // doesn't go through the credential-keyword loop.
+  const authMatch = text.match(AUTHORIZATION_HEADER_PATTERN);
+  if (authMatch && isSecretShapedValue(authMatch[1])) return true;
+
+  // Collapse newlines so a keyword on one line and its value on the next
+  // are still caught by the 60-char window.
+  const normalized = text.replace(/\r?\n/g, " ");
+
+  // Scan every credential keyword occurrence, not just the first per line.
+  for (const match of normalized.matchAll(CREDENTIAL_KEYWORD)) {
+    const afterKeyword = normalized.slice(
+      (match.index ?? 0) + match[0].length,
+    );
+    const window = afterKeyword.slice(0, 60);
+    const indicatorMatch = window.match(CREDENTIAL_VALUE_INDICATOR);
+    if (!indicatorMatch) continue;
+    if (isSecretShapedValue(indicatorMatch[1])) return true;
+  }
+  return false;
+}
 
 /**
  * Keywords that appear in both private-data and technical-discussion contexts.
@@ -40,8 +147,18 @@ const CONTEXT_SENSITIVE_PATTERNS = [
   /\bjournal\b/i,
 ];
 
-/** Words that signal a keyword is being discussed, not contained. */
-const TECHNICAL_CONTEXT = /\b(?:handling|scanning|management|rotation|module|system|API|integration|processing|calculation|architecture|endpoint|schema|service|engine|middleware|template|pipeline|detection|verification|authentication|authorization|signing|encryption|hashing|registry|configuration|systemd|SDK|CLI|framework|protocol)\b/i;
+/**
+ * Words that signal a keyword is being discussed, not contained. Includes
+ * both -ing and -ed forms of the common security verbs so that descriptive
+ * sentences like `the password is hashed` or `the private key is encrypted`
+ * don't fall through to the per-line credential check.
+ *
+ * `API` stays in the list — value-bearing credential lines like
+ * `my API key is abc123` are caught earlier by `hasCredentialAssignment`
+ * before this suppression runs, so pure technical discussion that says
+ * `API key` (e.g. `Auth model (API key? OAuth?)`) remains non-private.
+ */
+const TECHNICAL_CONTEXT = /\b(?:handling|handled|scanning|scanned|management|managed|rotation|rotated|module|system|API|integration|integrated|processing|processed|calculation|calculated|architecture|endpoint|schema|service|engine|middleware|template|pipeline|detection|detected|verification|verified|authentication|authenticated|authorization|authorized|signing|signed|encryption|encrypted|hashing|hashed|registry|registered|configuration|configured|systemd|SDK|CLI|framework|protocol|required|optional|generated|stored|provided|available)\b/i;
 
 const PRIVATE_PATH_PREFIXES = [
   "/home/magnus/mimir",
@@ -103,24 +220,118 @@ function stripCodeAndPaths(text: string): string {
     .replace(/\b[\w-]+\/[\w/*-]+/g, ""); // namespace/path patterns like clients/invoices
 }
 
+/**
+ * Cyrillic and Greek letters that are visually indistinguishable from Latin
+ * letters commonly used in credential vocabulary (password, api, key, bearer,
+ * token, private, secret, etc.). Covers the common homoglyph-bypass vector
+ * without pulling in the full Unicode confusables database.
+ */
+const HOMOGLYPH_MAP: Record<string, string> = {
+  // Cyrillic lowercase
+  "\u0430": "a", "\u0435": "e", "\u043E": "o", "\u0440": "p",
+  "\u0441": "c", "\u0443": "y", "\u0445": "x", "\u0456": "i",
+  "\u0458": "j", "\u0455": "s", "\u04BB": "h",
+  // Cyrillic uppercase
+  "\u0410": "A", "\u0412": "B", "\u0415": "E", "\u041A": "K",
+  "\u041C": "M", "\u041D": "H", "\u041E": "O", "\u0420": "P",
+  "\u0421": "C", "\u0422": "T", "\u0425": "X", "\u0406": "I",
+  "\u0408": "J", "\u0405": "S",
+  // Greek lowercase
+  "\u03B1": "a", "\u03BF": "o", "\u03C1": "p", "\u03B5": "e",
+  "\u03C4": "t", "\u03BD": "v", "\u03BA": "k",
+  // Greek uppercase (that look Latin)
+  "\u0391": "A", "\u0392": "B", "\u0395": "E", "\u0396": "Z",
+  "\u0397": "H", "\u0399": "I", "\u039A": "K", "\u039C": "M",
+  "\u039D": "N", "\u039F": "O", "\u03A1": "P", "\u03A4": "T",
+  "\u03A5": "Y", "\u03A7": "X",
+};
+
+const HOMOGLYPH_RE = new RegExp(
+  `[${Object.keys(HOMOGLYPH_MAP).join("")}]`,
+  "g",
+);
+
+/**
+ * Normalize a prompt before classification so zero-width characters,
+ * non-breaking spaces, tabs, and Unicode homoglyphs don't provide a bypass
+ * path around the ASCII-only regexes below. Without this, attacks like
+ * `api\u200Bkey: hunter2` or `pаssword: hunter2` (Cyrillic `а`) evade the
+ * credential-keyword detector.
+ *
+ *   1. NFKC folds compatibility characters (e.g. Unicode `ＡＰＩ` → `API`).
+ *   2. Zero-width and bidi control characters are stripped entirely.
+ *   3. Common Cyrillic/Greek homoglyphs are folded to their Latin look-alike.
+ *   4. All Unicode whitespace (tabs, NBSP, em-space, etc.) is collapsed
+ *      to a single ASCII space, except for newlines which are preserved
+ *      because the per-line loop depends on them.
+ */
+function normalizeForClassification(text: string): string {
+  return text
+    .normalize("NFKC")
+    // Strip zero-width, bidi marks, and other format/control characters.
+    // \u200B–\u200F: zero-width + LRM/RLM
+    // \u202A–\u202E: bidi embedding/override
+    // \u2060–\u206F: word joiner + invisible format
+    // \uFEFF: BOM / ZWNBSP
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "")
+    // Fold Cyrillic/Greek homoglyphs to their Latin look-alikes.
+    .replace(HOMOGLYPH_RE, (c) => HOMOGLYPH_MAP[c] ?? c)
+    // Collapse non-newline Unicode whitespace (tabs, NBSP, em-space, etc.)
+    // to ASCII space. Newlines are preserved so per-line scanning still works.
+    .replace(/[^\S\n]+/g, " ");
+}
+
 export function classifyPromptSensitivity(
   prompt: string | undefined,
 ): Sensitivity | undefined {
   if (!prompt) return undefined;
-  const stripped = stripCodeAndPaths(prompt);
 
-  // Unambiguous patterns — any match across the full text is private
+  // Normalize Unicode, strip zero-width characters, and collapse non-newline
+  // whitespace so homoglyph/ZWSP/NBSP/tab-based bypasses can't evade the
+  // ASCII-only regexes below. All subsequent checks run on the normalized
+  // string — there is no "raw" fallback because the pre-normalization text
+  // would reopen the bypass.
+  const normalized = normalizeForClassification(prompt);
+
+  // Secret-shaped strings are scanned against the normalized text before
+  // stripping code blocks — a real key pasted into a code fence is still a
+  // real key.
+  if (SECRET_SHAPED_PATTERNS.some((p) => p.test(normalized))) {
+    return "private";
+  }
+
+  // Credential assignments (`password: hunter2`, `api key = xyz`,
+  // `the API key for prod is sk-...`) are also scanned against the
+  // normalized text — a secret assigned inside a code fence is still a
+  // secret. They run before technical-context suppression so a line like
+  // `rotate auth module password: hunter2` cannot sneak past.
+  if (hasCredentialAssignment(normalized)) {
+    return "private";
+  }
+
+  const stripped = stripCodeAndPaths(normalized);
+
+  // Unambiguous vocabulary — any match across the full text is private
   if (ALWAYS_PRIVATE_PATTERNS.some((p) => p.test(stripped))) {
     return "private";
   }
 
-  // Context-sensitive patterns — check per line, suppress when technical context is present
+  // Credential-adjacent and context-sensitive keywords — check per line,
+  // suppress when the same line contains a technical modifier or is a
+  // placeholder-style template assignment.
   const lines = stripped.split("\n");
   for (const line of lines) {
-    if (
-      CONTEXT_SENSITIVE_PATTERNS.some((p) => p.test(line)) &&
-      !TECHNICAL_CONTEXT.test(line)
-    ) {
+    const hasTechnicalContext = TECHNICAL_CONTEXT.test(line);
+    if (hasTechnicalContext) continue;
+
+    // Lines like `password: $SECRET_VAR` or `api key: <YOUR_KEY>` are
+    // templates/docs, not credential leaks — skip them.
+    if (CREDENTIAL_PLACEHOLDER_ASSIGNMENT.test(line)) continue;
+
+    if (TECHNICAL_PRIVATE_PATTERNS.some((p) => p.test(line))) {
+      return "private";
+    }
+    if (CONTEXT_SENSITIVE_PATTERNS.some((p) => p.test(line))) {
       return "private";
     }
   }
