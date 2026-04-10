@@ -23,6 +23,7 @@ import {
   buildSensitivityPolicyError,
   classifyContextSensitivity,
   classifyPromptSensitivity,
+  detectPromptSensitivity,
   getPipelineRuntimeMaxSensitivity,
   maxSensitivity,
   parseSensitivity,
@@ -370,6 +371,7 @@ function validateAuthority(
 function computePhaseEffectiveSensitivities(
   phases: ParsedPipelinePhase[],
   pipelineSensitivity: PipelineSensitivity,
+  options?: { allowOwnerOverride?: boolean },
 ): Map<string, PipelineSensitivity> {
   const byName = new Map(phases.map((phase) => [phase.name, phase]));
   const computed = new Map<string, PipelineSensitivity>();
@@ -385,7 +387,7 @@ function computePhaseEffectiveSensitivities(
 
     const declared = parseSensitivity(phase.sensitivity);
     const contextSensitivity = classifyContextSensitivity(phase.context, undefined);
-    const promptSensitivity = classifyPromptSensitivity(phase.prompt);
+    const promptDetection = detectPromptSensitivity(phase.prompt);
     const inheritedSensitivity = phase.dependsOn.reduce<PipelineSensitivity | undefined>(
       (current, dependencyName) =>
         maxSensitivity(current, visit(dependencyName)),
@@ -396,9 +398,17 @@ function computePhaseEffectiveSensitivities(
       declared,
       baseline: pipelineSensitivity,
       context: contextSensitivity,
-      prompt: promptSensitivity,
+      prompt: promptDetection.sensitivity,
       inherited: inheritedSensitivity,
+      hardPrivate: promptDetection.hardPrivate,
+      allowOwnerOverride: options?.allowOwnerOverride,
     });
+
+    if (assessment.override?.applied) {
+      console.warn(
+        `[sensitivity] owner override on phase "${phase.name}": declared=${assessment.declared} detector=${assessment.override.detectorMax} -> effective=${assessment.effective}`,
+      );
+    }
 
     computed.set(phaseName, assessment.effective);
     return assessment.effective;
@@ -411,11 +421,22 @@ function computePhaseEffectiveSensitivities(
   return computed;
 }
 
+export interface CompilePipelineOptions {
+  /**
+   * When true, the phase sensitivity assessor honors owner-override — a
+   * phase's `declared` sensitivity can cap the detector's soft signals.
+   * Hard-private (secret-shaped) matches are still unoverridable. Caller
+   * must gate this on the submitter principal.
+   */
+  allowOwnerOverride?: boolean;
+}
+
 export function compilePipelineTask(
   pipelineId: string,
   sourceTaskNamespace: string,
   content: string,
   ollamaHosts?: OllamaHost[],
+  options?: CompilePipelineOptions,
 ): PipelineIR {
   const parsed = parsePipelineDocument(content);
   if (parsed.phases.length === 0) {
@@ -433,6 +454,7 @@ export function compilePipelineTask(
   const phaseSensitivities = computePhaseEffectiveSensitivities(
     parsed.phases,
     parsed.sensitivity,
+    { allowOwnerOverride: options?.allowOwnerOverride },
   );
 
   const phases: PipelinePhaseIR[] = parsed.phases.map((phase) => {

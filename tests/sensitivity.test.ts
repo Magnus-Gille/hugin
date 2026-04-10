@@ -3,6 +3,7 @@ import {
   buildSensitivityAssessment,
   classifyContextSensitivity,
   classifyPromptSensitivity,
+  detectPromptSensitivity,
   getDispatcherRuntimeMaxSensitivity,
   muninClassificationToSensitivity,
   sensitivityToMuninClassification,
@@ -317,5 +318,147 @@ describe("sensitivity helpers", () => {
     expect(getDispatcherRuntimeMaxSensitivity("claude")).toBe("internal");
     expect(getDispatcherRuntimeMaxSensitivity("codex")).toBe("internal");
     expect(getDispatcherRuntimeMaxSensitivity("ollama")).toBe("private");
+  });
+
+  describe("detectPromptSensitivity (#36)", () => {
+    it("flags secret-shaped matches as hardPrivate", () => {
+      expect(
+        detectPromptSensitivity("sk-ant-api03-1234567890abcdefghij"),
+      ).toEqual({ sensitivity: "private", hardPrivate: true });
+      expect(
+        detectPromptSensitivity("AWS key AKIA1234567890ABCDEF"),
+      ).toEqual({ sensitivity: "private", hardPrivate: true });
+      expect(
+        detectPromptSensitivity(
+          "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...",
+        ),
+      ).toEqual({ sensitivity: "private", hardPrivate: true });
+    });
+
+    it("flags credential assignments as soft private (overridable)", () => {
+      // Shape-based heuristic, not entropy — the owner should be able to
+      // override these (e.g. RFC examples, documentation).
+      const r = detectPromptSensitivity("API key: abc123");
+      expect(r.sensitivity).toBe("private");
+      expect(r.hardPrivate).toBe(false);
+    });
+
+    it("flags always-private vocabulary as soft private", () => {
+      const r = detectPromptSensitivity("summarize my medical history");
+      expect(r.sensitivity).toBe("private");
+      expect(r.hardPrivate).toBe(false);
+    });
+
+    it("returns hardPrivate=false when nothing matches", () => {
+      expect(detectPromptSensitivity("build a weather dashboard")).toEqual({
+        sensitivity: undefined,
+        hardPrivate: false,
+      });
+    });
+  });
+
+  describe("owner override (#36)", () => {
+    it("caps effective at declared when override allowed and detector is soft", () => {
+      const a = buildSensitivityAssessment({
+        declared: "internal",
+        baseline: "internal",
+        prompt: "private",
+        allowOwnerOverride: true,
+      });
+      expect(a.effective).toBe("internal");
+      expect(a.mismatch).toBe(true);
+      expect(a.override?.applied).toBe(true);
+      expect(a.override?.detectorMax).toBe("private");
+      expect(a.reasons.some((r) => r.startsWith("owner-override:"))).toBe(
+        true,
+      );
+    });
+
+    it("refuses to override hard-private (secret-shaped) matches", () => {
+      const a = buildSensitivityAssessment({
+        declared: "internal",
+        baseline: "internal",
+        prompt: "private",
+        hardPrivate: true,
+        allowOwnerOverride: true,
+      });
+      expect(a.effective).toBe("private");
+      expect(a.mismatch).toBe(true);
+      expect(a.override).toBeUndefined();
+      expect(a.reasons).toContain("owner-override-blocked:hard-private");
+    });
+
+    it("ignores allowOwnerOverride without a declared value", () => {
+      const a = buildSensitivityAssessment({
+        baseline: "internal",
+        prompt: "private",
+        allowOwnerOverride: true,
+      });
+      expect(a.effective).toBe("private");
+      expect(a.override).toBeUndefined();
+    });
+
+    it("does not apply override when detector <= declared", () => {
+      const a = buildSensitivityAssessment({
+        declared: "private",
+        baseline: "internal",
+        prompt: "internal",
+        allowOwnerOverride: true,
+      });
+      expect(a.effective).toBe("private");
+      expect(a.mismatch).toBe(false);
+      expect(a.override).toBeUndefined();
+    });
+
+    it("preserves legacy monotonic behavior when override not requested", () => {
+      const a = buildSensitivityAssessment({
+        declared: "internal",
+        baseline: "internal",
+        prompt: "private",
+      });
+      expect(a.effective).toBe("private");
+      expect(a.mismatch).toBe(true);
+      expect(a.override).toBeUndefined();
+    });
+
+    it("allows owner to route a false-positive research task as internal", () => {
+      // Real-world case from #36: a research spike that mentions "API key"
+      // vocabulary gets flagged as private by the classifier. Owner knows
+      // better and declares internal — override should kick in.
+      const detection = detectPromptSensitivity(
+        "Evaluate the OAuth 2.1 and API key story for the managed-agents API. The bearer token value for this example is mF_9.B5f-4.1JqM.",
+      );
+      const a = buildSensitivityAssessment({
+        declared: "internal",
+        baseline: "internal",
+        prompt: detection.sensitivity,
+        hardPrivate: detection.hardPrivate,
+        allowOwnerOverride: true,
+      });
+      // Detector still tripped (credential assignment heuristic), but the
+      // match is soft so owner-override lowers it to internal.
+      expect(detection.sensitivity).toBe("private");
+      expect(detection.hardPrivate).toBe(false);
+      expect(a.effective).toBe("internal");
+      expect(a.override?.applied).toBe(true);
+    });
+
+    it("blocks owner override when a real-looking secret is in the prompt", () => {
+      // Counter-case: the prompt contains an actual-looking API key, so
+      // detection is hard. Owner's declared=internal should be rejected.
+      const detection = detectPromptSensitivity(
+        "rotate this token: sk-ant-api03-1234567890abcdefghij",
+      );
+      expect(detection.hardPrivate).toBe(true);
+      const a = buildSensitivityAssessment({
+        declared: "internal",
+        baseline: "internal",
+        prompt: detection.sensitivity,
+        hardPrivate: detection.hardPrivate,
+        allowOwnerOverride: true,
+      });
+      expect(a.effective).toBe("private");
+      expect(a.override).toBeUndefined();
+    });
   });
 });

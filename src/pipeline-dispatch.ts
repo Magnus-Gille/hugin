@@ -82,12 +82,15 @@ export async function handlePipelineTask(
   entry: MuninEntry & { found: true },
   queueDepth: number,
   ollamaHosts?: OllamaHost[],
+  options?: { allowOwnerOverride?: boolean },
 ): Promise<{ hadTask: boolean; queueDepth: number }> {
   const pipelineId = extractTaskId(taskNs);
   let pipeline: PipelineIR;
 
   try {
-    pipeline = compilePipelineTask(pipelineId, taskNs, entry.content, ollamaHosts);
+    pipeline = compilePipelineTask(pipelineId, taskNs, entry.content, ollamaHosts, {
+      allowOwnerOverride: options?.allowOwnerOverride,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await hooks.failTaskWithMessage(
