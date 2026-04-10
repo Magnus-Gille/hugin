@@ -177,8 +177,26 @@ const INTERNAL_PATH_PREFIXES = [
 export interface SensitivityAssessment {
   declared?: Sensitivity;
   effective: Sensitivity;
+  /**
+   * True when the detector signals were strictly higher than the declared
+   * sensitivity. This is audit-facing: owner overrides still set `mismatch`
+   * so that false-positives can be mined and the classifier tuned. See
+   * {@link override} to check whether the effective value was actually
+   * lowered by an owner override.
+   */
   mismatch: boolean;
   reasons: string[];
+  /**
+   * Present only when an owner override was applied — the effective value
+   * was clamped DOWN to `declared` because the detector's signals were
+   * soft-private and the caller opted in via `allowOwnerOverride`. The
+   * `detectorMax` field records what the detector would have returned
+   * without the override, so audit logs can surface the false positive.
+   */
+  override?: {
+    applied: true;
+    detectorMax: Sensitivity;
+  };
 }
 
 export function compareSensitivity(a: Sensitivity, b: Sensitivity): number {
@@ -281,10 +299,23 @@ function normalizeForClassification(text: string): string {
     .replace(/[^\S\n]+/g, " ");
 }
 
-export function classifyPromptSensitivity(
+/**
+ * Detection result for a prompt. `hardPrivate` is true only when a
+ * high-confidence secret-shape pattern matched (real-looking API keys,
+ * PEM headers, etc). Those matches are NEVER overridable by an owner,
+ * even with `allowOwnerOverride`. Everything else — keyword matches,
+ * credential-assignment heuristics, always-private vocabulary — is
+ * soft-private and can be lowered by an explicit owner declaration.
+ */
+export interface PromptSensitivityDetection {
+  sensitivity: Sensitivity | undefined;
+  hardPrivate: boolean;
+}
+
+export function detectPromptSensitivity(
   prompt: string | undefined,
-): Sensitivity | undefined {
-  if (!prompt) return undefined;
+): PromptSensitivityDetection {
+  if (!prompt) return { sensitivity: undefined, hardPrivate: false };
 
   // Normalize Unicode, strip zero-width characters, and collapse non-newline
   // whitespace so homoglyph/ZWSP/NBSP/tab-based bypasses can't evade the
@@ -295,25 +326,27 @@ export function classifyPromptSensitivity(
 
   // Secret-shaped strings are scanned against the normalized text before
   // stripping code blocks — a real key pasted into a code fence is still a
-  // real key.
+  // real key. These are hard-private: not overridable.
   if (SECRET_SHAPED_PATTERNS.some((p) => p.test(normalized))) {
-    return "private";
+    return { sensitivity: "private", hardPrivate: true };
   }
 
   // Credential assignments (`password: hunter2`, `api key = xyz`,
   // `the API key for prod is sk-...`) are also scanned against the
   // normalized text — a secret assigned inside a code fence is still a
   // secret. They run before technical-context suppression so a line like
-  // `rotate auth module password: hunter2` cannot sneak past.
+  // `rotate auth module password: hunter2` cannot sneak past. Soft-private:
+  // a shape-based heuristic, so the owner can override (e.g. an RFC example
+  // or a task that legitimately documents credential handling).
   if (hasCredentialAssignment(normalized)) {
-    return "private";
+    return { sensitivity: "private", hardPrivate: false };
   }
 
   const stripped = stripCodeAndPaths(normalized);
 
   // Unambiguous vocabulary — any match across the full text is private
   if (ALWAYS_PRIVATE_PATTERNS.some((p) => p.test(stripped))) {
-    return "private";
+    return { sensitivity: "private", hardPrivate: false };
   }
 
   // Credential-adjacent and context-sensitive keywords — check per line,
@@ -329,14 +362,24 @@ export function classifyPromptSensitivity(
     if (CREDENTIAL_PLACEHOLDER_ASSIGNMENT.test(line)) continue;
 
     if (TECHNICAL_PRIVATE_PATTERNS.some((p) => p.test(line))) {
-      return "private";
+      return { sensitivity: "private", hardPrivate: false };
     }
     if (CONTEXT_SENSITIVE_PATTERNS.some((p) => p.test(line))) {
-      return "private";
+      return { sensitivity: "private", hardPrivate: false };
     }
   }
 
-  return undefined;
+  return { sensitivity: undefined, hardPrivate: false };
+}
+
+/**
+ * Backwards-compatible wrapper around {@link detectPromptSensitivity}
+ * for callers that only need the sensitivity level.
+ */
+export function classifyPromptSensitivity(
+  prompt: string | undefined,
+): Sensitivity | undefined {
+  return detectPromptSensitivity(prompt).sensitivity;
 }
 
 export function classifyContextSensitivity(
@@ -435,11 +478,24 @@ export function buildSensitivityAssessment(input: {
   prompt?: Sensitivity;
   refs?: Sensitivity;
   inherited?: Sensitivity;
+  /**
+   * True when the `prompt` signal came from a high-confidence secret-shape
+   * pattern (real-looking API keys, PEM headers, etc). Hard-private signals
+   * cannot be overridden by the owner even when `allowOwnerOverride` is set.
+   */
+  hardPrivate?: boolean;
+  /**
+   * Allow the owner to cap the effective sensitivity at `declared` when the
+   * detector's soft signals would otherwise raise it higher. Requires an
+   * explicit `declared` value and is ignored when `hardPrivate` is true.
+   * Callers must gate this on principal identity — only the owner (or an
+   * allowlisted equivalent) should pass `true`.
+   */
+  allowOwnerOverride?: boolean;
 }): SensitivityAssessment {
   const baseline = input.baseline || "internal";
-  const effective = maxSensitivity(
+  const detectorMax = maxSensitivity(
     baseline,
-    input.declared,
     input.context,
     input.prompt,
     input.refs,
@@ -454,13 +510,43 @@ export function buildSensitivityAssessment(input: {
     input.inherited ? `inherited:${input.inherited}` : undefined,
   ].filter((value): value is string => Boolean(value));
 
-  return {
+  const detectorExceedsDeclared =
+    Boolean(input.declared) && compareSensitivity(detectorMax, input.declared!) > 0;
+
+  // Owner override: cap the effective level at `declared` when the
+  // detector would have raised it, but ONLY if the signal is soft.
+  // Hard-private (secret-shaped) matches are never overridable.
+  const overrideApplied =
+    Boolean(input.allowOwnerOverride) &&
+    Boolean(input.declared) &&
+    !input.hardPrivate &&
+    detectorExceedsDeclared;
+
+  const effective: Sensitivity = overrideApplied
+    ? input.declared!
+    : maxSensitivity(detectorMax, input.declared);
+
+  if (overrideApplied) {
+    reasons.push(`owner-override:${input.declared}<${detectorMax}`);
+  } else if (input.allowOwnerOverride && input.hardPrivate && detectorExceedsDeclared) {
+    reasons.push(`owner-override-blocked:hard-private`);
+  }
+
+  const assessment: SensitivityAssessment = {
     declared: input.declared,
     effective,
-    mismatch:
-      Boolean(input.declared) && compareSensitivity(effective, input.declared!) > 0,
+    // Mismatch reflects the *detector's* disagreement with `declared`,
+    // regardless of whether the override was honored. This keeps the
+    // audit trail surfacing every false-positive we tune against.
+    mismatch: detectorExceedsDeclared,
     reasons,
   };
+
+  if (overrideApplied) {
+    assessment.override = { applied: true, detectorMax };
+  }
+
+  return assessment;
 }
 
 export function buildSensitivityPolicyError(input: {

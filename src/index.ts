@@ -72,6 +72,7 @@ import {
   classifyContextSensitivity,
   classifyPromptSensitivity,
   compareSensitivity,
+  detectPromptSensitivity,
   getDispatcherRuntimeMaxSensitivity,
   parseSensitivity,
   sensitivitySchema,
@@ -105,6 +106,24 @@ const config = {
   workspace: process.env.HUGIN_WORKSPACE || "/home/magnus/workspace",
   maxOutputChars: parseInt(process.env.HUGIN_MAX_OUTPUT_CHARS || "50000"),
   allowedSubmitters: (process.env.HUGIN_ALLOWED_SUBMITTERS || "Codex,Codex-desktop,ratatoskr,Codex-web,Codex-mobile,claude-code,claude-desktop,claude-web,claude-mobile,hugin")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+  // Submitters allowed to override a detector-raised sensitivity with an
+  // explicit `declared` value on the task front-matter. Narrower than
+  // `allowedSubmitters` on purpose: agent principals (hugin, ratatoskr) are
+  // excluded so that a prompt-injected or misbehaving agent cannot self-
+  // escalate its own classifier by submitting a task with `Sensitivity:
+  // internal`. Only human-driven clients — Claude Code/Desktop/Web/Mobile
+  // and the various Codex CLIs — are trusted to set declared sensitivity,
+  // on the assumption that the owner is operating them directly.
+  //
+  // If ratatoskr or hugin start failing often enough that auto-override is
+  // worth the risk, add them to HUGIN_OWNER_SUBMITTERS explicitly.
+  ownerSubmitters: (
+    process.env.HUGIN_OWNER_SUBMITTERS ??
+    "Codex,Codex-desktop,Codex-web,Codex-mobile,claude-code,claude-desktop,claude-web,claude-mobile"
+  )
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
@@ -453,18 +472,25 @@ function getTaskArtifactClassification(
   return sensitivity ? sensitivityToMuninClassification(sensitivity) : undefined;
 }
 
+function isOwnerSubmitter(submittedBy: string | undefined): boolean {
+  if (!submittedBy) return false;
+  return config.ownerSubmitters.includes(submittedBy);
+}
+
 function getTaskSensitivityAssessment(task: TaskConfig): SensitivityAssessment {
   const declared = task.declaredSensitivity;
   const baseline = task.pipeline?.sensitivity || "internal";
   const contextSensitivity = classifyContextSensitivity(task.context, task.workingDir);
-  const promptSensitivity = classifyPromptSensitivity(task.prompt);
+  const promptDetection = detectPromptSensitivity(task.prompt);
   const refsSensitivity = task.contextResolution?.maxSensitivity;
   return buildSensitivityAssessment({
     declared,
     baseline,
     context: contextSensitivity,
-    prompt: promptSensitivity,
+    prompt: promptDetection.sensitivity,
     refs: refsSensitivity,
+    hardPrivate: promptDetection.hardPrivate,
+    allowOwnerOverride: isOwnerSubmitter(task.submittedBy),
   });
 }
 
@@ -485,6 +511,15 @@ async function assessTaskSecurity(task: TaskConfig): Promise<SensitivityAssessme
   const assessment = getTaskSensitivityAssessment(task);
   task.effectiveSensitivity = assessment.effective;
   task.sensitivityAssessment = assessment;
+
+  if (assessment.override?.applied) {
+    // Owner override is visible in logs so we can mine false positives and
+    // tune the classifier. Never silent.
+    console.warn(
+      `[sensitivity] owner override: submitter="${task.submittedBy}" declared=${assessment.declared} detector=${assessment.override.detectorMax} -> effective=${assessment.effective} reasons=[${assessment.reasons.join(", ")}]`,
+    );
+  }
+
   return assessment;
 }
 
@@ -2472,6 +2507,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         entry,
         queueDepth,
         await probeAllHosts(),
+        { allowOwnerOverride: isOwnerSubmitter(submittedBy) },
       );
       stopLeaseRenewal();
       stopCancellationWatch();
