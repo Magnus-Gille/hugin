@@ -1,9 +1,20 @@
 # Hugin — Status
 
-**Last session:** 2026-04-10 (PR #35 + PR #37 merged; owner-override live on main)
+**Last session:** 2026-04-11 (submitter allowlist host-suffix fix, deployed to Pi)
 **Branch:** main
 
-## Completed This Session (2026-04-10)
+## Completed This Session (2026-04-11)
+
+### Fix: host-suffixed submitter variants (`63277f5`, deployed)
+A Claude Code laptop session submitting as `Claude-Code-laptop` was rejected by the allowlist (strict exact-match, list only had `claude-code`). The task showed up as a failed LoCoMo baseline research spike.
+
+- **Fix:** new `isSubmitterAllowed()` helper in `src/index.ts` does case-insensitive exact match OR `<entry>-<host>` prefix match. So `Claude-Code-laptop` now matches `claude-code`. Wired into both the submitter allowlist check and `isOwnerSubmitter()` (owner-override path).
+- **Word-boundary safety:** the suffix match requires a literal `-` separator, so `huginx` does not match `hugin` and `codex` does not match `Codex-desktop`. `Codex`-like bare entries still do catch-all their `-<host>` variants — this is intended since `Codex` is already trusted.
+- **Tests:** `tests/dispatcher.test.ts` local helper updated to mirror prod logic. New cases for case-insensitivity, `-<host>` suffix (the regression), and word-boundary. 262/262 passing.
+- **Deployed:** committed, pushed, `./scripts/deploy-pi.sh` ran clean. Pi health green, `hugin.service` active since 21:29:56 CEST on 2026-04-10. Allowed submitters line in journal unchanged (still lists the canonical entries — the new matching logic just relaxes comparison).
+- **Note:** the failed LoCoMo baseline task entry was not re-run. To retry, resubmit or flip its tag back to `pending`.
+
+## Completed Previous Session (2026-04-10)
 
 ### PR #35 — sensitivity classifier robustness (MERGED, `f98278d`)
 Three rounds of codex adversarial review. Each round's findings fixed or formally deferred:
