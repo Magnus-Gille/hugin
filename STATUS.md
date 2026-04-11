@@ -1,11 +1,29 @@
 # Hugin — Status
 
-**Last session:** 2026-04-11 (submitter allowlist host-suffix fix, deployed to Pi)
+**Last session:** 2026-04-11 (silent write-failure fix + stuck LoCoMo task recovered, deployed)
 **Branch:** main
 
-## Completed This Session (2026-04-11)
+## Completed This Session (2026-04-11 — afternoon)
 
-### Fix: host-suffixed submitter variants (`63277f5`, deployed)
+### Fix: silent Munin write rejections + task artifact classification clamping (`1ef43e2`, PR #41, deployed)
+
+A LoCoMo-baseline research task submitted 2026-04-10 completed successfully on Hugin (exit 0, 404s, $3.84) but sat as `running` for 18+ hours with "No result yet" in the UI. Root-caused, fixed, and recovered.
+
+**Root cause — two bugs stacked:**
+1. **`munin.write()` silently swallowed `{ok: false}` rejections.** `src/munin-client.ts` returned the raw envelope; post-task call sites in `src/index.ts` (`result`, `result-structured`, terminal `status` flip) never checked `ok`. The subsequent `munin.log("Task completed in 404s...")` succeeded because `memory_log` takes no classification, so systemd journal and Munin's log stream both claimed completion while state was never updated. (Filed as #39.)
+2. **Owner-override downgraded task artifact classification below the `tasks/*` namespace floor.** The task declared `Sensitivity: public`; detector inferred `internal`; the owner-override escape hatch from #36/#37 lowered effective to `public`. `getTaskArtifactClassification()` piped that straight into `sensitivityToMuninClassification`, producing writes at `classification: public` against a namespace whose floor is `internal`. Munin rejected every post-task write with `validation_error: "Classification \"public\" is below namespace floor \"internal\"..."`. Confirmed with a diagnostic probe write. (Filed as #40.)
+
+**Fix (PR #41, squash-merged, `1ef43e2`):**
+- `src/munin-client.ts` — `write()` throws `Munin write rejected for {ns}/{key}: {error} — {message}` on `{ok: false}`. Return type narrowed to `Record<string, unknown>`. Any future write rejection now propagates to `pollLoop`'s existing `catch (err) { console.error("Poll error:", err) }`.
+- `src/index.ts` — `getTaskArtifactClassification()` clamps up to `namespaceFallbackSensitivity("tasks/")` (= `internal`). Owner-override tasks continue to run at effective `public` (runtime trust unchanged); only artifact storage classification is clamped up. Claim and lease-renewal sites simplified — the manual `!ok` checks are now redundant (their existing try/catches handle the throw path).
+- **Tests:** `tests/munin-client.test.ts` asserts `write()` rejects on `{ok: false}` with the classification-floor error message. `tests/sensitivity.test.ts` adds regression tests for the clamp invariant (`max(public, tasks-floor) = internal`, `max(private, tasks-floor) = private`). 265/265 passing.
+- **Deployed:** `./scripts/deploy-pi.sh huginmunin.local` clean — worker `hugin-huginmunin-606190`, up since 16:28:05 CEST, health green, polling. The mid-flight `fort-gille-c6-tech-paths` task actually finished at 16:21 before the redeploy (classified `internal`, no bug) and was unaffected.
+
+**Stuck task recovered manually:** wrote `tasks/20260410-181800-locomo-baseline/result` (classification `internal`, with a recovery note referencing #39/#40/#41 and the response body extracted from `/home/magnus/.hugin/logs/20260410-181800-locomo-baseline.log`) and flipped `status` tags from `["running", ...]` to `["completed", "runtime:claude", "type:research", "recovered:hugin-39"]`. Task now shows as Completed in the UI.
+
+**Impact assessment:** The silent-swallow bug would also have masked CAS conflicts, tag validation errors, and any other Munin-side rejection. Fix is reliability-critical for the whole task lifecycle, not just owner-override cases. Owner-override tasks remain the most likely trigger going forward.
+
+### Fix: host-suffixed submitter variants (`63277f5`, deployed — earlier session)
 A Claude Code laptop session submitting as `Claude-Code-laptop` was rejected by the allowlist (strict exact-match, list only had `claude-code`). The task showed up as a failed LoCoMo baseline research spike.
 
 - **Fix:** new `isSubmitterAllowed()` helper in `src/index.ts` does case-insensitive exact match OR `<entry>-<host>` prefix match. So `Claude-Code-laptop` now matches `claude-code`. Wired into both the submitter allowlist check and `isOwnerSubmitter()` (owner-override path).
