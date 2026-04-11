@@ -256,12 +256,24 @@ export class MuninClient {
     tags?: string[],
     expectedUpdatedAt?: string,
     classification?: string,
-  ): Promise<unknown> {
+  ): Promise<Record<string, unknown>> {
     const args: Record<string, unknown> = { namespace, key, content };
     if (tags) args.tags = tags;
     if (expectedUpdatedAt) args.expected_updated_at = expectedUpdatedAt;
     if (classification) args.classification = classification;
-    return this.callTool("memory_write", args);
+    const result = (await this.callTool("memory_write", args)) as
+      | Record<string, unknown>
+      | undefined
+      | null;
+    if (result && result.ok === false) {
+      const error = typeof result.error === "string" ? result.error : "unknown";
+      const message =
+        typeof result.message === "string" ? result.message : JSON.stringify(result);
+      throw new Error(
+        `Munin write rejected for ${namespace}/${key}: ${error} — ${message}`,
+      );
+    }
+    return (result ?? {}) as Record<string, unknown>;
   }
 
   async readBatch(reads: MuninReadRequest[]): Promise<MuninReadResult[]> {

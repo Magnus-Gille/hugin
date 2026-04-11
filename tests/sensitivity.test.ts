@@ -5,7 +5,9 @@ import {
   classifyPromptSensitivity,
   detectPromptSensitivity,
   getDispatcherRuntimeMaxSensitivity,
+  maxSensitivity,
   muninClassificationToSensitivity,
+  namespaceFallbackSensitivity,
   sensitivityToMuninClassification,
 } from "../src/sensitivity.js";
 
@@ -459,6 +461,30 @@ describe("sensitivity helpers", () => {
       });
       expect(a.effective).toBe("private");
       expect(a.override).toBeUndefined();
+    });
+  });
+
+  describe("tasks/* namespace floor clamping", () => {
+    // Regression: an owner-override task with effective sensitivity "public"
+    // used to produce a Munin write at classification "public", which Munin
+    // rejects below the `tasks/*` floor of `internal`. Hugin silently
+    // swallowed the rejection, leaving the task stuck as `running` forever.
+    // The fix clamps artifact classification up to the namespace floor.
+    it("clamps public effective sensitivity up to the tasks/* floor", () => {
+      const floor = namespaceFallbackSensitivity("tasks/");
+      expect(floor).toBe("internal");
+      expect(maxSensitivity("public", floor)).toBe("internal");
+      expect(sensitivityToMuninClassification(maxSensitivity("public", floor))).toBe(
+        "internal",
+      );
+    });
+
+    it("preserves private effective sensitivity through the clamp", () => {
+      const floor = namespaceFallbackSensitivity("tasks/");
+      expect(maxSensitivity("private", floor)).toBe("private");
+      expect(sensitivityToMuninClassification(maxSensitivity("private", floor))).toBe(
+        "client-confidential",
+      );
     });
   });
 });

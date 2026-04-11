@@ -147,6 +147,27 @@ describe("MuninClient", () => {
     expect(body.params.arguments.classification).toBe("private");
   });
 
+  it("throws when memory_write responds with ok:false", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      rpcResponse({
+        ok: false,
+        error: "validation_error",
+        message:
+          'Classification "public" is below namespace floor "internal" for "tasks/demo".',
+      }),
+    );
+
+    const client = new MuninClient({
+      baseUrl: "http://munin.test",
+      apiKey: "test-key",
+      minRequestSpacingMs: 0,
+    });
+
+    await expect(
+      client.write("tasks/demo", "result", "hello", undefined, undefined, "public"),
+    ).rejects.toThrow(/validation_error.*namespace floor/);
+  });
+
   it("supports bare-array batch-read responses", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       rpcResponseNoSpace([
