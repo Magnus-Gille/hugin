@@ -74,6 +74,8 @@ import {
   compareSensitivity,
   detectPromptSensitivity,
   getDispatcherRuntimeMaxSensitivity,
+  maxSensitivity,
+  namespaceFallbackSensitivity,
   parseSensitivity,
   sensitivitySchema,
   sensitivityToMuninClassification,
@@ -490,7 +492,14 @@ function getTaskArtifactClassification(
     task?.pipeline?.sensitivity ||
     task?.declaredSensitivity ||
     (content ? getDeclaredSensitivityFromContent(content) : undefined);
-  return sensitivity ? sensitivityToMuninClassification(sensitivity) : undefined;
+  if (!sensitivity) return undefined;
+  // Clamp up to the tasks/* namespace floor. Owner-overridden tasks can
+  // legitimately carry effective sensitivity `public`, but Munin rejects
+  // writes below a namespace's floor — and task artifacts always land in
+  // `tasks/*`, whose floor is `internal`. Without clamping, the write is
+  // rejected and (prior to the write-ok check) silently dropped.
+  const clamped = maxSensitivity(sensitivity, namespaceFallbackSensitivity("tasks/"));
+  return sensitivityToMuninClassification(clamped);
 }
 
 function isOwnerSubmitter(submittedBy: string | undefined): boolean {
@@ -1287,12 +1296,8 @@ function startLeaseRenewal(taskNs: string, entryContent: string, baseTags: strin
     }
     try {
       const renewedTags = buildClaimTags(baseTags, "running");
-      const renewResult = await leaseMunin.write(taskNs, "status", entryContent, renewedTags) as Record<string, unknown>;
-      if (renewResult && !renewResult.ok) {
-        console.error(`Lease renewal write returned error for ${taskNs}:`, JSON.stringify(renewResult));
-      } else {
-        console.log(`Lease renewed for ${taskNs} (expires: ${leaseExpiry()})`);
-      }
+      await leaseMunin.write(taskNs, "status", entryContent, renewedTags);
+      console.log(`Lease renewed for ${taskNs} (expires: ${leaseExpiry()})`);
     } catch (err) {
       console.error(`Lease renewal failed for ${taskNs}:`, err);
     }
@@ -2488,13 +2493,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       entry.content,
       claimTags,
       entry.updated_at
-    ) as Record<string, unknown>;
-    if (claimResult && !claimResult.ok) {
-      console.error(`Claim write returned error for ${taskNs}:`, JSON.stringify(claimResult));
-      return { hadTask: false, queueDepth };
-    }
+    );
     // Update entry.updated_at so subsequent CAS writes (failTaskWithMessage, etc.) use the fresh timestamp
-    if (claimResult && typeof claimResult.updated_at === "string") {
+    if (typeof claimResult.updated_at === "string") {
       entry.updated_at = claimResult.updated_at;
     }
   } catch (err) {
