@@ -1,9 +1,30 @@
 # Hugin — Status
 
-**Last session:** 2026-04-11 (silent write-failure fix + stuck LoCoMo task recovered, deployed)
+**Last session:** 2026-04-12 (evening — git-fetch retry/bypass, CI pipeline, branch protection)
 **Branch:** main
 
-## Completed This Session (2026-04-11 — afternoon)
+## Completed This Session (2026-04-12 — evening)
+
+### Fix: pre-task git fetch retry + bypass system SSH config (#42, PR #43, `a59c8e3`, deployed)
+
+A Heimdall research-spike task failed before execution because `syncRepoBeforeTask` hit an OpenSSH strict-modes error on `/etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf` inside the systemd-user service context. Grimnir-bot auth was fine; the failure was an SSH-environment quirk, not an access problem. The UI showed exit -1 with "git fetch origin failed in /home/magnus/repos/heimdall".
+
+**Fix (two layers):**
+1. **Non-fatal fetch:** new `fetch-failed` action in `RepoSyncResult`. Dispatcher logs a warning and proceeds with local state instead of killing the task. Diverged-history pull still fails (correctness path unchanged).
+2. **Retry + SSH-config bypass:** `syncRepoBeforeTask` retries fetch up to 3 total attempts (500ms, then 2s backoff). Retries set `GIT_SSH_COMMAND='ssh -F /home/magnus/.ssh/config'` to skip the system SSH config entirely, neutralizing the strict-modes bug class. Verified on Pi that grimnir-bot still authenticates against `Magnus-Gille/heimdall` with the bypass.
+
+**Tests:** 3 new cases in `tests/repo-sync.test.ts` (first-attempt success skips retry, retry succeeds with bypass, all fail → `fetch-failed`). Retry delays injectable via options arg to keep suite fast. 266/266 passing. `Closes #42`.
+
+### CI pipeline added (PR #44, `98dcc57`)
+`.github/workflows/ci.yml` — runs on push to main and on PRs. Checkout → setup Node 20 (matches Pi runtime) → `npm ci` → `npm run build` → `npm test`. Concurrency group cancels superseded runs. First run went green in 22s. CI was missing on PR #43 (which predated this workflow).
+
+### Branch protection on main
+Required status check: `build-test` must pass. `strict: true` (up-to-date branches only). Linear history required. Force-push + deletion blocked. `enforce_admins: false` and PR reviews not required (solo dev). PRs now need green CI before the Merge button activates.
+
+### Issue filed earlier today: lease-reaper missing (#38)
+A second stuck-task scenario surfaced: `tasks/20260410-181800-locomo-baseline` sat as `running` with an expired lease for 2.5+ hours while Hugin was alive and polling (`current_task: null`). Root cause: the dispatcher has no mechanism to reap tasks whose `lease_expires` is in the past. Filed as #38, added to Grimnir Roadmap board. No code changes.
+
+## Completed Previous Session (2026-04-11 — afternoon)
 
 ### Fix: silent Munin write rejections + task artifact classification clamping (`1ef43e2`, PR #41, deployed)
 
