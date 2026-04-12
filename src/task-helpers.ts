@@ -114,6 +114,8 @@ export interface RepoSyncResult {
   error?: string;
   /** Set when dirty worktree state was auto-stashed to unblock the pull (#45). */
   autoStashed?: boolean;
+  /** Label of the auto-stash entry, when one was created. Surfaced so operators can recover. */
+  stashLabel?: string;
 }
 
 export interface SyncRepoOptions {
@@ -245,14 +247,18 @@ export async function syncRepoBeforeTask(
     return { action: "up-to-date", commitsBehind: 0 };
   }
 
-  // Attempt fast-forward pull
-  const firstPull = await runGitPullFfOnly(workingDir);
-  if (firstPull.ok) {
+  // Attempt fast-forward against the already-fetched ref. We use `git merge
+  // --ff-only origin/main` rather than `git pull` so we don't accidentally
+  // trigger another network fetch — that would make the failure signal
+  // ambiguous (network/SSH blip vs. real ff conflict) and could route a
+  // perfectly-clean repo through the auto-stash path unnecessarily.
+  const firstMerge = await runGitMergeFfOnly(workingDir);
+  if (firstMerge.ok) {
     console.log(`Pre-task repo sync: ${workingDir} synced ${commitsBehind} commits from origin`);
     return { action: "synced", commitsBehind };
   }
 
-  // Pull failed. Most common cause on the task dispatcher is a dirty worktree
+  // Merge failed. Most common cause on the task dispatcher is a dirty worktree
   // left by a prior task (crash, timeout, un-committed tool edits, tool
   // artifacts like .claude/ or .playwright-mcp/). Auto-stash and retry (#45).
   // Actual divergence — local commits on main not in origin — still falls
@@ -280,12 +286,13 @@ export async function syncRepoBeforeTask(
     `Pre-task repo sync: auto-stashed dirty state in ${workingDir} (${label}) to unblock fast-forward`,
   );
 
-  const secondPull = await runGitPullFfOnly(workingDir);
-  if (!secondPull.ok) {
+  const secondMerge = await runGitMergeFfOnly(workingDir);
+  if (!secondMerge.ok) {
     return {
       action: "failed",
       commitsBehind,
       autoStashed: true,
+      stashLabel: label,
       error: `Working directory ${workingDir} is ${commitsBehind} commits behind origin/main and cannot fast-forward even after auto-stashing dirty state (stash: ${label}). Manual intervention required.`,
     };
   }
@@ -293,12 +300,12 @@ export async function syncRepoBeforeTask(
   console.log(
     `Pre-task repo sync: ${workingDir} synced ${commitsBehind} commits from origin (auto-stashed prior dirty state as ${label})`,
   );
-  return { action: "synced", commitsBehind, autoStashed: true };
+  return { action: "synced", commitsBehind, autoStashed: true, stashLabel: label };
 }
 
-function runGitPullFfOnly(workingDir: string): Promise<{ ok: boolean; output: string }> {
+function runGitMergeFfOnly(workingDir: string): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolve) => {
-    const child = spawn("git", ["pull", "--ff-only"], {
+    const child = spawn("git", ["merge", "--ff-only", "origin/main"], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, HOME: "/home/magnus" },
@@ -308,7 +315,7 @@ function runGitPullFfOnly(workingDir: string): Promise<{ ok: boolean; output: st
     child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
     child.on("close", (code) => {
       if (code !== 0) {
-        console.warn(`Pre-task git pull --ff-only failed (exit ${code}) in ${workingDir}: ${output.trim()}`);
+        console.warn(`Pre-task git merge --ff-only failed (exit ${code}) in ${workingDir}: ${output.trim()}`);
       }
       resolve({ ok: code === 0, output });
     });

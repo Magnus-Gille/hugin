@@ -153,7 +153,7 @@ describe("syncRepoBeforeTask", () => {
       { exitCode: 0 },                 // git remote get-url origin
       { exitCode: 0 },                 // git fetch origin
       { exitCode: 0, stdout: "3\n" },  // git rev-list --count: 3 behind
-      { exitCode: 0 },                 // git pull --ff-only
+      { exitCode: 0 },                 // git merge --ff-only origin/main
     ];
 
     const result = await syncRepoBeforeTask("/home/magnus/repos/hugin", {
@@ -161,18 +161,21 @@ describe("syncRepoBeforeTask", () => {
     });
     expect(result.action).toBe("synced");
     expect(result.commitsBehind).toBe(3);
+    expect(result.autoStashed).toBeUndefined();
+    expect(result.stashLabel).toBeUndefined();
     expect(spawnCalls).toHaveLength(5);
-    // Verify the pull used --ff-only
-    expect(spawnCalls[4].args).toContain("--ff-only");
+    // Verify the fast-forward uses merge against the already-fetched ref
+    // (no implicit refetch) per #45 review feedback.
+    expect(spawnCalls[4].args).toEqual(["merge", "--ff-only", "origin/main"]);
   });
 
-  it("fails when ff-pull fails and worktree is clean (real divergence)", async () => {
+  it("fails when ff-merge fails and worktree is clean (real divergence)", async () => {
     spawnBehaviors = [
       { exitCode: 0 },                 // git rev-parse --git-dir
       { exitCode: 0 },                 // git remote get-url origin
       { exitCode: 0 },                 // git fetch origin
       { exitCode: 0, stdout: "5\n" },  // git rev-list --count: 5 behind
-      { exitCode: 1, stderr: "fatal: Not possible to fast-forward" }, // git pull --ff-only fails
+      { exitCode: 1, stderr: "fatal: Not possible to fast-forward" }, // git merge --ff-only fails
       { exitCode: 0, stdout: "" },     // git status --porcelain: clean
     ];
 
@@ -197,13 +200,14 @@ describe("syncRepoBeforeTask", () => {
       { exitCode: 0 },                          // git remote get-url origin
       { exitCode: 0 },                          // git fetch origin
       { exitCode: 0, stdout: "6\n" },           // rev-list --count: 6 behind
-      { exitCode: 1, stderr: "error: Your local changes would be overwritten" }, // first pull fails
+      { exitCode: 1, stderr: "error: Your local changes would be overwritten" }, // first merge fails
       { exitCode: 0, stdout: " M STATUS.md\n?? .claude/\n" },                    // porcelain: dirty
       { exitCode: 0, stdout: "Saved working directory\n" },                       // stash push
-      { exitCode: 0 },                                                           // second pull succeeds
+      { exitCode: 0 },                                                           // second merge succeeds
     ];
 
     const fixedNow = new Date("2026-04-12T22:30:00.000Z");
+    const expectedLabel = "hugin-autosave 2026-04-12T22:30:00Z task=20260412-223000-abcd";
     const result = await syncRepoBeforeTask("/home/magnus/repos/heimdall", {
       fetchRetryDelaysMs: [0, 0],
       taskId: "20260412-223000-abcd",
@@ -213,35 +217,32 @@ describe("syncRepoBeforeTask", () => {
     expect(result.action).toBe("synced");
     expect(result.commitsBehind).toBe(6);
     expect(result.autoStashed).toBe(true);
+    expect(result.stashLabel).toBe(expectedLabel);
 
     // Validate stash invocation
     const stashCall = spawnCalls.find((c) => c.args[0] === "stash");
     expect(stashCall).toBeDefined();
-    expect(stashCall!.args).toEqual([
-      "stash",
-      "push",
-      "-u",
-      "-m",
-      "hugin-autosave 2026-04-12T22:30:00Z task=20260412-223000-abcd",
-    ]);
+    expect(stashCall!.args).toEqual(["stash", "push", "-u", "-m", expectedLabel]);
 
-    // Two ff-only pulls attempted
-    const pullCalls = spawnCalls.filter((c) => c.args[0] === "pull");
-    expect(pullCalls).toHaveLength(2);
-    expect(pullCalls[0].args).toContain("--ff-only");
-    expect(pullCalls[1].args).toContain("--ff-only");
+    // Two ff-only merges attempted against already-fetched ref (no implicit refetch).
+    const mergeCalls = spawnCalls.filter((c) => c.args[0] === "merge");
+    expect(mergeCalls).toHaveLength(2);
+    expect(mergeCalls[0].args).toEqual(["merge", "--ff-only", "origin/main"]);
+    expect(mergeCalls[1].args).toEqual(["merge", "--ff-only", "origin/main"]);
+    // And we did NOT use `git pull` (would trigger an implicit refetch).
+    expect(spawnCalls.find((c) => c.args[0] === "pull")).toBeUndefined();
   });
 
-  it("fails when dirty worktree + stash succeeds but second pull still fails", async () => {
+  it("fails when dirty worktree + stash succeeds but second merge still fails", async () => {
     spawnBehaviors = [
       { exitCode: 0 },                          // rev-parse
       { exitCode: 0 },                          // remote get-url
       { exitCode: 0 },                          // fetch
       { exitCode: 0, stdout: "2\n" },           // rev-list
-      { exitCode: 1, stderr: "ff fail" },       // first pull
+      { exitCode: 1, stderr: "ff fail" },       // first merge --ff-only
       { exitCode: 0, stdout: "?? untracked\n" }, // porcelain: dirty
       { exitCode: 0 },                          // stash push ok
-      { exitCode: 1, stderr: "still fails" },   // second pull fails (real divergence + debris)
+      { exitCode: 1, stderr: "still fails" },   // second merge --ff-only fails (real divergence + debris)
     ];
 
     const result = await syncRepoBeforeTask("/home/magnus/repos/hugin", {
@@ -252,6 +253,7 @@ describe("syncRepoBeforeTask", () => {
 
     expect(result.action).toBe("failed");
     expect(result.autoStashed).toBe(true);
+    expect(result.stashLabel).toBe("hugin-autosave 2026-04-12T22:30:00Z task=t1");
     expect(result.error).toContain("even after auto-stashing");
     expect(result.error).toContain("hugin-autosave 2026-04-12T22:30:00Z task=t1");
   });
@@ -262,7 +264,7 @@ describe("syncRepoBeforeTask", () => {
       { exitCode: 0 },                          // remote get-url
       { exitCode: 0 },                          // fetch
       { exitCode: 0, stdout: "1\n" },           // rev-list
-      { exitCode: 1, stderr: "ff fail" },       // first pull
+      { exitCode: 1, stderr: "ff fail" },       // first merge --ff-only
       { exitCode: 0, stdout: " M foo\n" },       // porcelain: dirty
       { exitCode: 1, stderr: "stash failed" },  // stash push fails
     ];
@@ -273,10 +275,11 @@ describe("syncRepoBeforeTask", () => {
 
     expect(result.action).toBe("failed");
     expect(result.autoStashed).toBeUndefined();
+    expect(result.stashLabel).toBeUndefined();
     expect(result.error).toContain("dirty worktree detected but auto-stash failed");
-    // Only one pull attempt (no retry after stash failure)
-    const pullCalls = spawnCalls.filter((c) => c.args[0] === "pull");
-    expect(pullCalls).toHaveLength(1);
+    // Only one merge attempt (no retry after stash failure)
+    const mergeCalls = spawnCalls.filter((c) => c.args[0] === "merge");
+    expect(mergeCalls).toHaveLength(1);
   });
 
   it("uses correct working directory for all spawn calls", async () => {
