@@ -1,9 +1,29 @@
 # Hugin — Status
 
-**Last session:** 2026-04-12 (evening — git-fetch retry/bypass, CI pipeline, branch protection)
-**Branch:** main
+**Last session:** 2026-04-13 (night — dirty-worktree auto-stash #45, PR #46)
+**Branch:** `fix/dirty-worktree-autostash` (PR #46 open against main)
 
-## Completed This Session (2026-04-12 — evening)
+## Completed This Session (2026-04-12/13 — night)
+
+### Fix: auto-stash dirty worktree before pre-task git sync (#45, PR #46)
+
+A Heimdall "mobile reading mode" task failed with "18 commits behind origin/main and cannot fast-forward. Manual intervention required." Not the same class as last session's fetch-retry bug (#42) — fetch succeeded, the *ff-only pull* refused because the Pi's heimdall worktree was dirty (732 lines across 8 tracked files + untracked `.claude/`, `.playwright-mcp/`). Likely debris from an earlier task that produced changes but didn't commit/push. Every subsequent task on that repo kept failing the same way until a human SSHed in.
+
+**Root cause:** `syncRepoBeforeTask` (`src/task-helpers.ts`) assumed a clean worktree and had no recovery path when prior task debris was present.
+
+**Fix (two commits on PR #46):**
+1. **Initial patch (`71ea945`):** On ff-pull failure, run `git status --porcelain`; if dirty, `git stash push -u -m "hugin-autosave <ts> task=<id>"` (includes untracked) and retry. If still failing, bail with clear error citing the stash label. Stashes are recoverable, nothing is ever lost.
+2. **Codex review fixes (`f8bd8e9`):**
+   - Switched from `git pull --ff-only` to `git merge --ff-only origin/main`. Pull does an implicit refetch — a post-fetch network/SSH blip could have been misread as "dirty worktree" and incorrectly triggered a stash on a clean repo. Merge uses the already-fetched ref, no network.
+   - Added `stashLabel` to `RepoSyncResult`. On success, dispatcher emits a grep-able per-task log line (`git -C <dir> stash list | grep <label>`) so operators with only Munin/Mímir visibility can find the stash without SSH.
+
+**Tests:** 3 new cases (dirty→retry-ok, dirty→retry-fail, stash-fails) + regression assertion that `git pull` is never spawned. `tests/repo-sync.test.ts` 13/13, full suite 269/269.
+
+**Pi recovery (2026-04-12 23:46 CEST):** heimdall stashed (`hugin-autosave 2026-04-12 before mobile-reading-spike retry`) + fast-forwarded. Two stashes preserved on Pi (the new one + a pre-existing `WIP on main: 6d0e872`). The failed Heimdall task can be re-dispatched once PR #46 merges and deploys.
+
+**Still open:** PR #46 awaiting merge + deploy. Once live, the whole class of "prior-task debris blocks next task" is gone.
+
+## Completed Previous Session (2026-04-12 — evening)
 
 ### Fix: pre-task git fetch retry + bypass system SSH config (#42, PR #43, `a59c8e3`, deployed)
 

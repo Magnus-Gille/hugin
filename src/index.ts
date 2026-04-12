@@ -2540,10 +2540,19 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       throw new Error(`Internal dispatcher error: parsed task missing for ${taskNs}`);
     }
 
-    // Pre-task repo sync (#21): ensure local repo is up-to-date before execution
-    const syncResult = await syncRepoBeforeTask(task.workingDir);
+    // Pre-task repo sync (#21, #45): ensure local repo is up-to-date before execution.
+    // On dirty worktree left by a prior task, auto-stash and retry the fast-forward.
+    const syncResult = await syncRepoBeforeTask(task.workingDir, {
+      taskId: extractTaskId(taskNs),
+    });
     if (syncResult.action === "fetch-failed") {
       console.warn(`Pre-task repo fetch failed for ${taskNs} (non-fatal): ${syncResult.error}`);
+    } else if (syncResult.action === "synced" && syncResult.autoStashed) {
+      // Loud, grep-able marker so operators can find the stash via per-task logs
+      // even when they only have Munin/Mímir visibility (no SSH to the Pi).
+      console.warn(
+        `Pre-task repo sync: auto-stashed dirty state for ${taskNs} as "${syncResult.stashLabel}" in ${task.workingDir}. Recover on the Pi with: git -C ${task.workingDir} stash list | grep "${syncResult.stashLabel}"`,
+      );
     } else if (syncResult.action === "failed") {
       console.error(`Pre-task repo sync failed for ${taskNs}: ${syncResult.error}`);
       stopLeaseRenewal();
