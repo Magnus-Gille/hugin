@@ -109,12 +109,49 @@ export function selectNextTask(
 // --- Pre-task repo sync (#21) ---
 
 export interface RepoSyncResult {
-  action: "skipped" | "up-to-date" | "synced" | "failed";
+  action: "skipped" | "up-to-date" | "synced" | "fetch-failed" | "failed";
   commitsBehind?: number;
   error?: string;
 }
 
-export async function syncRepoBeforeTask(workingDir: string): Promise<RepoSyncResult> {
+export interface SyncRepoOptions {
+  /** Backoff in ms before each retry attempt after the first. Defaults to [500, 2000]. */
+  fetchRetryDelaysMs?: number[];
+}
+
+const DEFAULT_FETCH_RETRY_DELAYS_MS = [500, 2000];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function runGitFetch(
+  workingDir: string,
+  bypassSystemSshConfig: boolean,
+): Promise<{ ok: boolean; exitCode: number | null; output: string }> {
+  const home = "/home/magnus";
+  const env: Record<string, string> = { ...process.env as Record<string, string>, HOME: home };
+  if (bypassSystemSshConfig) {
+    env.GIT_SSH_COMMAND = `ssh -F ${home}/.ssh/config`;
+  }
+  return new Promise((resolve) => {
+    const child = spawn("git", ["fetch", "origin"], {
+      cwd: workingDir,
+      stdio: ["ignore", "pipe", "pipe"],
+      env,
+    });
+    let output = "";
+    child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
+    child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
+    child.on("close", (code) => resolve({ ok: code === 0, exitCode: code, output }));
+    child.on("error", () => resolve({ ok: false, exitCode: null, output }));
+  });
+}
+
+export async function syncRepoBeforeTask(
+  workingDir: string,
+  options: SyncRepoOptions = {},
+): Promise<RepoSyncResult> {
   // Only sync repos under /home/magnus/repos/
   if (!workingDir.startsWith("/home/magnus/repos/")) {
     return { action: "skipped" };
@@ -148,27 +185,40 @@ export async function syncRepoBeforeTask(workingDir: string): Promise<RepoSyncRe
     return { action: "skipped" };
   }
 
-  // Fetch from origin
-  const fetchOk = await new Promise<boolean>((resolve) => {
-    const child = spawn("git", ["fetch", "origin"], {
-      cwd: workingDir,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
-    });
-    let output = "";
-    child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
-    child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
-    child.on("close", (code) => {
-      if (code !== 0) {
-        console.warn(`Pre-task git fetch failed (exit ${code}) in ${workingDir}: ${output.trim()}`);
+  // Fetch from origin, with retries.
+  // Attempt 1 uses normal environment; retries bypass the system SSH config
+  // (`ssh -F ~/.ssh/config`) to sidestep strict-modes errors on
+  // /etc/ssh/ssh_config.d/* in the systemd-user service context (see issue #42).
+  const retryDelaysMs = options.fetchRetryDelaysMs ?? DEFAULT_FETCH_RETRY_DELAYS_MS;
+  const totalAttempts = 1 + retryDelaysMs.length;
+  let fetchOk = false;
+  let lastOutput = "";
+  let lastExit: number | null = null;
+  for (let attempt = 0; attempt < totalAttempts; attempt++) {
+    if (attempt > 0) {
+      await sleep(retryDelaysMs[attempt - 1]);
+    }
+    const bypass = attempt > 0;
+    const result = await runGitFetch(workingDir, bypass);
+    if (result.ok) {
+      fetchOk = true;
+      if (attempt > 0) {
+        console.log(`Pre-task git fetch succeeded on attempt ${attempt + 1} (bypass=${bypass}) in ${workingDir}`);
       }
-      resolve(code === 0);
-    });
-    child.on("error", () => resolve(false));
-  });
+      break;
+    }
+    lastOutput = result.output;
+    lastExit = result.exitCode;
+    console.warn(
+      `Pre-task git fetch failed (attempt ${attempt + 1}/${totalAttempts}, exit ${lastExit}, bypass=${bypass}) in ${workingDir}: ${lastOutput.trim()}`,
+    );
+  }
 
   if (!fetchOk) {
-    return { action: "failed", error: `git fetch origin failed in ${workingDir}` };
+    return {
+      action: "fetch-failed",
+      error: `git fetch origin failed in ${workingDir} after ${totalAttempts} attempts — proceeding with local state`,
+    };
   }
 
   // Check how many commits behind
