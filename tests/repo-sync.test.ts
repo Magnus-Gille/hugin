@@ -166,13 +166,14 @@ describe("syncRepoBeforeTask", () => {
     expect(spawnCalls[4].args).toContain("--ff-only");
   });
 
-  it("fails when behind and fast-forward fails (conflicts/dirty worktree)", async () => {
+  it("fails when ff-pull fails and worktree is clean (real divergence)", async () => {
     spawnBehaviors = [
       { exitCode: 0 },                 // git rev-parse --git-dir
       { exitCode: 0 },                 // git remote get-url origin
       { exitCode: 0 },                 // git fetch origin
       { exitCode: 0, stdout: "5\n" },  // git rev-list --count: 5 behind
       { exitCode: 1, stderr: "fatal: Not possible to fast-forward" }, // git pull --ff-only fails
+      { exitCode: 0, stdout: "" },     // git status --porcelain: clean
     ];
 
     const result = await syncRepoBeforeTask("/home/magnus/repos/hugin", {
@@ -182,7 +183,100 @@ describe("syncRepoBeforeTask", () => {
     expect(result.commitsBehind).toBe(5);
     expect(result.error).toContain("5 commits behind origin/main");
     expect(result.error).toContain("cannot fast-forward");
+    expect(result.error).toContain("worktree clean");
     expect(result.error).toContain("Manual intervention required");
+    expect(result.autoStashed).toBeUndefined();
+    // Should NOT have attempted a stash (worktree was clean)
+    const stashCalls = spawnCalls.filter((c) => c.args[0] === "stash");
+    expect(stashCalls).toHaveLength(0);
+  });
+
+  it("auto-stashes dirty worktree and retries fast-forward (#45)", async () => {
+    spawnBehaviors = [
+      { exitCode: 0 },                          // git rev-parse --git-dir
+      { exitCode: 0 },                          // git remote get-url origin
+      { exitCode: 0 },                          // git fetch origin
+      { exitCode: 0, stdout: "6\n" },           // rev-list --count: 6 behind
+      { exitCode: 1, stderr: "error: Your local changes would be overwritten" }, // first pull fails
+      { exitCode: 0, stdout: " M STATUS.md\n?? .claude/\n" },                    // porcelain: dirty
+      { exitCode: 0, stdout: "Saved working directory\n" },                       // stash push
+      { exitCode: 0 },                                                           // second pull succeeds
+    ];
+
+    const fixedNow = new Date("2026-04-12T22:30:00.000Z");
+    const result = await syncRepoBeforeTask("/home/magnus/repos/heimdall", {
+      fetchRetryDelaysMs: [0, 0],
+      taskId: "20260412-223000-abcd",
+      now: () => fixedNow,
+    });
+
+    expect(result.action).toBe("synced");
+    expect(result.commitsBehind).toBe(6);
+    expect(result.autoStashed).toBe(true);
+
+    // Validate stash invocation
+    const stashCall = spawnCalls.find((c) => c.args[0] === "stash");
+    expect(stashCall).toBeDefined();
+    expect(stashCall!.args).toEqual([
+      "stash",
+      "push",
+      "-u",
+      "-m",
+      "hugin-autosave 2026-04-12T22:30:00Z task=20260412-223000-abcd",
+    ]);
+
+    // Two ff-only pulls attempted
+    const pullCalls = spawnCalls.filter((c) => c.args[0] === "pull");
+    expect(pullCalls).toHaveLength(2);
+    expect(pullCalls[0].args).toContain("--ff-only");
+    expect(pullCalls[1].args).toContain("--ff-only");
+  });
+
+  it("fails when dirty worktree + stash succeeds but second pull still fails", async () => {
+    spawnBehaviors = [
+      { exitCode: 0 },                          // rev-parse
+      { exitCode: 0 },                          // remote get-url
+      { exitCode: 0 },                          // fetch
+      { exitCode: 0, stdout: "2\n" },           // rev-list
+      { exitCode: 1, stderr: "ff fail" },       // first pull
+      { exitCode: 0, stdout: "?? untracked\n" }, // porcelain: dirty
+      { exitCode: 0 },                          // stash push ok
+      { exitCode: 1, stderr: "still fails" },   // second pull fails (real divergence + debris)
+    ];
+
+    const result = await syncRepoBeforeTask("/home/magnus/repos/hugin", {
+      fetchRetryDelaysMs: [0, 0],
+      taskId: "t1",
+      now: () => new Date("2026-04-12T22:30:00.000Z"),
+    });
+
+    expect(result.action).toBe("failed");
+    expect(result.autoStashed).toBe(true);
+    expect(result.error).toContain("even after auto-stashing");
+    expect(result.error).toContain("hugin-autosave 2026-04-12T22:30:00Z task=t1");
+  });
+
+  it("fails when dirty worktree but stash itself fails", async () => {
+    spawnBehaviors = [
+      { exitCode: 0 },                          // rev-parse
+      { exitCode: 0 },                          // remote get-url
+      { exitCode: 0 },                          // fetch
+      { exitCode: 0, stdout: "1\n" },           // rev-list
+      { exitCode: 1, stderr: "ff fail" },       // first pull
+      { exitCode: 0, stdout: " M foo\n" },       // porcelain: dirty
+      { exitCode: 1, stderr: "stash failed" },  // stash push fails
+    ];
+
+    const result = await syncRepoBeforeTask("/home/magnus/repos/hugin", {
+      fetchRetryDelaysMs: [0, 0],
+    });
+
+    expect(result.action).toBe("failed");
+    expect(result.autoStashed).toBeUndefined();
+    expect(result.error).toContain("dirty worktree detected but auto-stash failed");
+    // Only one pull attempt (no retry after stash failure)
+    const pullCalls = spawnCalls.filter((c) => c.args[0] === "pull");
+    expect(pullCalls).toHaveLength(1);
   });
 
   it("uses correct working directory for all spawn calls", async () => {

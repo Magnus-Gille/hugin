@@ -2540,8 +2540,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       throw new Error(`Internal dispatcher error: parsed task missing for ${taskNs}`);
     }
 
-    // Pre-task repo sync (#21): ensure local repo is up-to-date before execution
-    const syncResult = await syncRepoBeforeTask(task.workingDir);
+    // Pre-task repo sync (#21, #45): ensure local repo is up-to-date before execution.
+    // On dirty worktree left by a prior task, auto-stash and retry the fast-forward.
+    const syncResult = await syncRepoBeforeTask(task.workingDir, {
+      taskId: extractTaskId(taskNs),
+    });
     if (syncResult.action === "fetch-failed") {
       console.warn(`Pre-task repo fetch failed for ${taskNs} (non-fatal): ${syncResult.error}`);
     } else if (syncResult.action === "failed") {

@@ -112,11 +112,17 @@ export interface RepoSyncResult {
   action: "skipped" | "up-to-date" | "synced" | "fetch-failed" | "failed";
   commitsBehind?: number;
   error?: string;
+  /** Set when dirty worktree state was auto-stashed to unblock the pull (#45). */
+  autoStashed?: boolean;
 }
 
 export interface SyncRepoOptions {
   /** Backoff in ms before each retry attempt after the first. Defaults to [500, 2000]. */
   fetchRetryDelaysMs?: number[];
+  /** Task ID included in the auto-stash label for forensics. */
+  taskId?: string;
+  /** Clock override for deterministic stash labels in tests. */
+  now?: () => Date;
 }
 
 const DEFAULT_FETCH_RETRY_DELAYS_MS = [500, 2000];
@@ -240,7 +246,58 @@ export async function syncRepoBeforeTask(
   }
 
   // Attempt fast-forward pull
-  const pullOk = await new Promise<boolean>((resolve) => {
+  const firstPull = await runGitPullFfOnly(workingDir);
+  if (firstPull.ok) {
+    console.log(`Pre-task repo sync: ${workingDir} synced ${commitsBehind} commits from origin`);
+    return { action: "synced", commitsBehind };
+  }
+
+  // Pull failed. Most common cause on the task dispatcher is a dirty worktree
+  // left by a prior task (crash, timeout, un-committed tool edits, tool
+  // artifacts like .claude/ or .playwright-mcp/). Auto-stash and retry (#45).
+  // Actual divergence — local commits on main not in origin — still falls
+  // through to manual intervention.
+  const dirty = await isWorktreeDirty(workingDir);
+  if (!dirty) {
+    return {
+      action: "failed",
+      commitsBehind,
+      error: `Working directory ${workingDir} is ${commitsBehind} commits behind origin/main and cannot fast-forward (worktree clean — likely local commits on main). Manual intervention required.`,
+    };
+  }
+
+  const now = options.now ?? (() => new Date());
+  const label = buildAutoStashLabel(now(), options.taskId);
+  const stashOk = await runGitStashPush(workingDir, label);
+  if (!stashOk) {
+    return {
+      action: "failed",
+      commitsBehind,
+      error: `Working directory ${workingDir} is ${commitsBehind} commits behind origin/main; dirty worktree detected but auto-stash failed. Manual intervention required.`,
+    };
+  }
+  console.warn(
+    `Pre-task repo sync: auto-stashed dirty state in ${workingDir} (${label}) to unblock fast-forward`,
+  );
+
+  const secondPull = await runGitPullFfOnly(workingDir);
+  if (!secondPull.ok) {
+    return {
+      action: "failed",
+      commitsBehind,
+      autoStashed: true,
+      error: `Working directory ${workingDir} is ${commitsBehind} commits behind origin/main and cannot fast-forward even after auto-stashing dirty state (stash: ${label}). Manual intervention required.`,
+    };
+  }
+
+  console.log(
+    `Pre-task repo sync: ${workingDir} synced ${commitsBehind} commits from origin (auto-stashed prior dirty state as ${label})`,
+  );
+  return { action: "synced", commitsBehind, autoStashed: true };
+}
+
+function runGitPullFfOnly(workingDir: string): Promise<{ ok: boolean; output: string }> {
+  return new Promise((resolve) => {
     const child = spawn("git", ["pull", "--ff-only"], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
@@ -253,19 +310,48 @@ export async function syncRepoBeforeTask(
       if (code !== 0) {
         console.warn(`Pre-task git pull --ff-only failed (exit ${code}) in ${workingDir}: ${output.trim()}`);
       }
+      resolve({ ok: code === 0, output });
+    });
+    child.on("error", () => resolve({ ok: false, output }));
+  });
+}
+
+function isWorktreeDirty(workingDir: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn("git", ["status", "--porcelain"], {
+      cwd: workingDir,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, HOME: "/home/magnus" },
+    });
+    let out = "";
+    child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
+    child.on("close", (code) => resolve(code === 0 && out.trim().length > 0));
+    child.on("error", () => resolve(false));
+  });
+}
+
+function runGitStashPush(workingDir: string, label: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn("git", ["stash", "push", "-u", "-m", label], {
+      cwd: workingDir,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, HOME: "/home/magnus" },
+    });
+    let output = "";
+    child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
+    child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        console.warn(`Auto-stash failed (exit ${code}) in ${workingDir}: ${output.trim()}`);
+      }
       resolve(code === 0);
     });
     child.on("error", () => resolve(false));
   });
+}
 
-  if (!pullOk) {
-    return {
-      action: "failed",
-      commitsBehind,
-      error: `Working directory ${workingDir} is ${commitsBehind} commits behind origin/main and cannot fast-forward. Manual intervention required.`,
-    };
-  }
-
-  console.log(`Pre-task repo sync: ${workingDir} synced ${commitsBehind} commits from origin`);
-  return { action: "synced", commitsBehind };
+function buildAutoStashLabel(now: Date, taskId: string | undefined): string {
+  const ts = now.toISOString().replace(/\.\d{3}Z$/, "Z");
+  const taskPart = taskId ? ` task=${taskId}` : "";
+  return `hugin-autosave ${ts}${taskPart}`;
 }
