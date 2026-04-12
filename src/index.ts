@@ -2542,7 +2542,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
     // Pre-task repo sync (#21): ensure local repo is up-to-date before execution
     const syncResult = await syncRepoBeforeTask(task.workingDir);
-    if (syncResult.action === "failed") {
+    if (syncResult.action === "fetch-failed") {
+      console.warn(`Pre-task repo fetch failed for ${taskNs} (non-fatal): ${syncResult.error}`);
+    } else if (syncResult.action === "failed") {
       console.error(`Pre-task repo sync failed for ${taskNs}: ${syncResult.error}`);
       stopLeaseRenewal();
       stopCancellationWatch();

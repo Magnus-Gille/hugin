@@ -90,10 +90,61 @@ describe("syncRepoBeforeTask", () => {
       { exitCode: 0, stdout: "0\n" },  // git rev-list --count HEAD..origin/main
     ];
 
-    const result = await syncRepoBeforeTask("/home/magnus/repos/hugin");
+    const result = await syncRepoBeforeTask("/home/magnus/repos/hugin", {
+      fetchRetryDelaysMs: [0, 0],
+    });
     expect(result.action).toBe("up-to-date");
     expect(result.commitsBehind).toBe(0);
     expect(spawnCalls).toHaveLength(4);
+    // First fetch attempt should NOT set GIT_SSH_COMMAND
+    const fetchCall = spawnCalls[2];
+    expect((fetchCall.opts.env as Record<string, string>).GIT_SSH_COMMAND).toBeUndefined();
+  });
+
+  it("retries fetch and bypasses system SSH config on retry", async () => {
+    spawnBehaviors = [
+      { exitCode: 0 },                 // git rev-parse --git-dir
+      { exitCode: 0 },                 // git remote get-url origin
+      { exitCode: 128, stderr: "Bad owner or permissions on /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf" }, // fetch #1 fails
+      { exitCode: 0 },                 // fetch #2 succeeds (with bypass)
+      { exitCode: 0, stdout: "0\n" },  // git rev-list --count
+    ];
+
+    const result = await syncRepoBeforeTask("/home/magnus/repos/hugin", {
+      fetchRetryDelaysMs: [0, 0],
+    });
+    expect(result.action).toBe("up-to-date");
+    expect(spawnCalls).toHaveLength(5);
+
+    // Attempt #1: no bypass
+    const firstFetch = spawnCalls[2];
+    expect(firstFetch.args).toEqual(["fetch", "origin"]);
+    expect((firstFetch.opts.env as Record<string, string>).GIT_SSH_COMMAND).toBeUndefined();
+
+    // Attempt #2: bypass system SSH config via -F ~/.ssh/config
+    const secondFetch = spawnCalls[3];
+    expect(secondFetch.args).toEqual(["fetch", "origin"]);
+    expect((secondFetch.opts.env as Record<string, string>).GIT_SSH_COMMAND).toBe(
+      "ssh -F /home/magnus/.ssh/config",
+    );
+  });
+
+  it("fetch-failed only after all retries are exhausted", async () => {
+    spawnBehaviors = [
+      { exitCode: 0 },                 // git rev-parse --git-dir
+      { exitCode: 0 },                 // git remote get-url origin
+      { exitCode: 128, stderr: "fail 1" }, // fetch #1
+      { exitCode: 128, stderr: "fail 2" }, // fetch #2 (retry, bypass)
+      { exitCode: 128, stderr: "fail 3" }, // fetch #3 (retry, bypass)
+    ];
+
+    const result = await syncRepoBeforeTask("/home/magnus/repos/hugin", {
+      fetchRetryDelaysMs: [0, 0],
+    });
+    expect(result.action).toBe("fetch-failed");
+    expect(result.error).toContain("after 3 attempts");
+    // 2 probes + 3 fetch attempts
+    expect(spawnCalls).toHaveLength(5);
   });
 
   it("syncs when behind and fast-forward succeeds", async () => {
@@ -105,7 +156,9 @@ describe("syncRepoBeforeTask", () => {
       { exitCode: 0 },                 // git pull --ff-only
     ];
 
-    const result = await syncRepoBeforeTask("/home/magnus/repos/hugin");
+    const result = await syncRepoBeforeTask("/home/magnus/repos/hugin", {
+      fetchRetryDelaysMs: [0, 0],
+    });
     expect(result.action).toBe("synced");
     expect(result.commitsBehind).toBe(3);
     expect(spawnCalls).toHaveLength(5);
@@ -122,24 +175,14 @@ describe("syncRepoBeforeTask", () => {
       { exitCode: 1, stderr: "fatal: Not possible to fast-forward" }, // git pull --ff-only fails
     ];
 
-    const result = await syncRepoBeforeTask("/home/magnus/repos/hugin");
+    const result = await syncRepoBeforeTask("/home/magnus/repos/hugin", {
+      fetchRetryDelaysMs: [0, 0],
+    });
     expect(result.action).toBe("failed");
     expect(result.commitsBehind).toBe(5);
     expect(result.error).toContain("5 commits behind origin/main");
     expect(result.error).toContain("cannot fast-forward");
     expect(result.error).toContain("Manual intervention required");
-  });
-
-  it("fails when git fetch fails", async () => {
-    spawnBehaviors = [
-      { exitCode: 0 },                 // git rev-parse --git-dir
-      { exitCode: 0 },                 // git remote get-url origin
-      { exitCode: 128, stderr: "fatal: Could not read from remote repository" }, // git fetch fails
-    ];
-
-    const result = await syncRepoBeforeTask("/home/magnus/repos/hugin");
-    expect(result.action).toBe("failed");
-    expect(result.error).toContain("git fetch origin failed");
   });
 
   it("uses correct working directory for all spawn calls", async () => {
@@ -151,7 +194,7 @@ describe("syncRepoBeforeTask", () => {
     ];
 
     const dir = "/home/magnus/repos/my-project";
-    await syncRepoBeforeTask(dir);
+    await syncRepoBeforeTask(dir, { fetchRetryDelaysMs: [0, 0] });
 
     for (const call of spawnCalls) {
       expect(call.opts.cwd).toBe(dir);
