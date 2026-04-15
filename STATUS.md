@@ -1,7 +1,13 @@
 # Hugin — Status
 
-**Last session:** 2026-04-13 (night — dirty-worktree auto-stash #45, PR #46)
-**Branch:** `fix/dirty-worktree-autostash` (PR #46 open against main)
+**Last session:** 2026-04-15 (admin — PR #46 closed)
+**Branch:** `fix/dirty-worktree-autostash` (PR #46 closed without merge)
+
+## Completed This Session (2026-04-15)
+
+### Admin: close PR #46
+
+Closed GitHub PR #46 (`fix/dirty-worktree-autostash` -> `main`) without merge at user request. The branch still exists, but this work is no longer pending review, merge, or deploy.
 
 ## Completed This Session (2026-04-12/13 — night)
 
@@ -19,9 +25,9 @@ A Heimdall "mobile reading mode" task failed with "18 commits behind origin/main
 
 **Tests:** 3 new cases (dirty→retry-ok, dirty→retry-fail, stash-fails) + regression assertion that `git pull` is never spawned. `tests/repo-sync.test.ts` 13/13, full suite 269/269.
 
-**Pi recovery (2026-04-12 23:46 CEST):** heimdall stashed (`hugin-autosave 2026-04-12 before mobile-reading-spike retry`) + fast-forwarded. Two stashes preserved on Pi (the new one + a pre-existing `WIP on main: 6d0e872`). The failed Heimdall task can be re-dispatched once PR #46 merges and deploys.
+**Pi recovery (2026-04-12 23:46 CEST):** heimdall stashed (`hugin-autosave 2026-04-12 before mobile-reading-spike retry`) + fast-forwarded. Two stashes preserved on Pi (the new one + a pre-existing `WIP on main: 6d0e872`). The failed Heimdall task would need a different fix path if this work is revived later.
 
-**Still open:** PR #46 awaiting merge + deploy. Once live, the whole class of "prior-task debris blocks next task" is gone.
+**Current status:** PR #46 was closed on 2026-04-15 without merge, so the dirty-worktree auto-stash change is currently parked on `fix/dirty-worktree-autostash`.
 
 ## Completed Previous Session (2026-04-12 — evening)
 
