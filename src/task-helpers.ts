@@ -106,17 +106,25 @@ export function selectNextTask(
   return undefined;
 }
 
-// --- Pre-task repo sync (#21) ---
+// --- Branch-per-task git flow (#47) ---
 
-export interface RepoSyncResult {
-  action: "skipped" | "up-to-date" | "synced" | "fetch-failed" | "failed";
-  commitsBehind?: number;
+export interface TaskBranchOptions {
+  /** Backoff in ms before each retry attempt after the first. Defaults to [500, 2000]. */
+  fetchRetryDelaysMs?: number[];
+}
+
+export interface TaskBranchResult {
+  /** skipped: not a managed git repo; created: branch ready; fetch-failed: network error, no branch */
+  action: "skipped" | "created" | "fetch-failed";
+  branchName?: string;
   error?: string;
 }
 
-export interface SyncRepoOptions {
-  /** Backoff in ms before each retry attempt after the first. Defaults to [500, 2000]. */
-  fetchRetryDelaysMs?: number[];
+export interface BranchFinalizeResult {
+  action: "skipped" | "no-changes" | "pr-created" | "push-failed";
+  prUrl?: string;
+  branchName?: string;
+  error?: string;
 }
 
 const DEFAULT_FETCH_RETRY_DELAYS_MS = [500, 2000];
@@ -148,16 +156,25 @@ async function runGitFetch(
   });
 }
 
-export async function syncRepoBeforeTask(
+/**
+ * Pre-task: fetch origin and checkout a fresh branch `hugin/<taskId>` from
+ * `origin/main`. Replaces the old `syncRepoBeforeTask` fast-forward approach.
+ *
+ * - Returns `skipped` for non-managed directories (outside /home/magnus/repos/,
+ *   not a git repo, no remote). Task proceeds normally.
+ * - Returns `fetch-failed` on network errors. Task proceeds without branching
+ *   (degraded mode, logged as warning).
+ * - Returns `created` on success with `branchName` set.
+ */
+export async function checkoutTaskBranch(
   workingDir: string,
-  options: SyncRepoOptions = {},
-): Promise<RepoSyncResult> {
-  // Only sync repos under /home/magnus/repos/
+  taskId: string,
+  options: TaskBranchOptions = {},
+): Promise<TaskBranchResult> {
   if (!workingDir.startsWith("/home/magnus/repos/")) {
     return { action: "skipped" };
   }
 
-  // Check if the directory is a git repo
   const isGit = await new Promise<boolean>((resolve) => {
     const child = spawn("git", ["rev-parse", "--git-dir"], {
       cwd: workingDir,
@@ -167,11 +184,8 @@ export async function syncRepoBeforeTask(
     child.on("error", () => resolve(false));
   });
 
-  if (!isGit) {
-    return { action: "skipped" };
-  }
+  if (!isGit) return { action: "skipped" };
 
-  // Check if remote exists
   const hasRemote = await new Promise<boolean>((resolve) => {
     const child = spawn("git", ["remote", "get-url", "origin"], {
       cwd: workingDir,
@@ -181,14 +195,11 @@ export async function syncRepoBeforeTask(
     child.on("error", () => resolve(false));
   });
 
-  if (!hasRemote) {
-    return { action: "skipped" };
-  }
+  if (!hasRemote) return { action: "skipped" };
 
-  // Fetch from origin, with retries.
-  // Attempt 1 uses normal environment; retries bypass the system SSH config
-  // (`ssh -F ~/.ssh/config`) to sidestep strict-modes errors on
-  // /etc/ssh/ssh_config.d/* in the systemd-user service context (see issue #42).
+  // Fetch from origin with retries. Attempt 1 uses normal env; retries bypass
+  // the system SSH config to sidestep strict-mode errors in the systemd-user
+  // context (see issue #42).
   const retryDelaysMs = options.fetchRetryDelaysMs ?? DEFAULT_FETCH_RETRY_DELAYS_MS;
   const totalAttempts = 1 + retryDelaysMs.length;
   let fetchOk = false;
@@ -217,13 +228,103 @@ export async function syncRepoBeforeTask(
   if (!fetchOk) {
     return {
       action: "fetch-failed",
-      error: `git fetch origin failed in ${workingDir} after ${totalAttempts} attempts — proceeding with local state`,
+      error: `git fetch origin failed in ${workingDir} after ${totalAttempts} attempts — proceeding without branch`,
     };
   }
 
-  // Check how many commits behind
-  const commitsBehind = await new Promise<number>((resolve) => {
-    const child = spawn("git", ["rev-list", "--count", "HEAD..origin/main"], {
+  const branchName = `hugin/${taskId}`;
+
+  const checkoutOk = await new Promise<boolean>((resolve) => {
+    const child = spawn("git", ["checkout", "-b", branchName, "origin/main"], {
+      cwd: workingDir,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, HOME: "/home/magnus" },
+    });
+    let output = "";
+    child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
+    child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        console.warn(`Pre-task branch creation failed (exit ${code}) in ${workingDir}: ${output.trim()}`);
+      }
+      resolve(code === 0);
+    });
+    child.on("error", () => resolve(false));
+  });
+
+  if (!checkoutOk) {
+    return {
+      action: "fetch-failed",
+      error: `Failed to create branch ${branchName} in ${workingDir}`,
+    };
+  }
+
+  console.log(`Pre-task: checked out branch ${branchName} from origin/main in ${workingDir}`);
+  return { action: "created", branchName };
+}
+
+/**
+ * Post-task: finalize a task branch.
+ *
+ * 1. Auto-commits any uncommitted changes the task left behind.
+ * 2. If no commits exist on the branch vs origin/main: cleans up the branch
+ *    (read-only tasks like research spikes).
+ * 3. If commits exist: pushes branch and opens a PR against main.
+ *
+ * Returns `pr-created` with `prUrl` on success, `no-changes` if nothing to
+ * deliver, or `push-failed` on git/gh errors (non-fatal: task result is still
+ * written to Munin).
+ */
+export async function finalizeTaskBranch(
+  workingDir: string,
+  branchName: string,
+  prBody: string,
+  allowedEgressHosts: string[],
+): Promise<BranchFinalizeResult> {
+  // Auto-commit uncommitted changes (task may have written files without committing)
+  const isDirty = await new Promise<boolean>((resolve) => {
+    const child = spawn("git", ["status", "--porcelain"], {
+      cwd: workingDir,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, HOME: "/home/magnus" },
+    });
+    let out = "";
+    child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
+    child.on("close", (code) => resolve(code === 0 && out.trim().length > 0));
+    child.on("error", () => resolve(false));
+  });
+
+  if (isDirty) {
+    const addOk = await new Promise<boolean>((resolve) => {
+      const child = spawn("git", ["add", "-A"], {
+        cwd: workingDir,
+        stdio: "ignore",
+        env: { ...process.env, HOME: "/home/magnus" },
+      });
+      child.on("close", (code) => resolve(code === 0));
+      child.on("error", () => resolve(false));
+    });
+
+    if (addOk) {
+      await new Promise<void>((resolve) => {
+        const child = spawn(
+          "git",
+          ["commit", "-m", "hugin: auto-commit task output [skip ci]"],
+          {
+            cwd: workingDir,
+            stdio: "ignore",
+            env: { ...process.env, HOME: "/home/magnus" },
+          },
+        );
+        child.on("close", () => resolve());
+        child.on("error", () => resolve());
+      });
+    }
+  }
+
+  // Count commits on the branch that aren't on origin/main
+  const commitsAhead = await new Promise<number>((resolve) => {
+    const child = spawn("git", ["rev-list", "--count", "origin/main..HEAD"], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, HOME: "/home/magnus" },
@@ -234,14 +335,33 @@ export async function syncRepoBeforeTask(
     child.on("error", () => resolve(0));
   });
 
-  if (commitsBehind === 0) {
-    console.log(`Pre-task repo sync: ${workingDir} is already up to date`);
-    return { action: "up-to-date", commitsBehind: 0 };
+  if (commitsAhead === 0) {
+    console.log(`Post-task: no changes on ${branchName} — cleaning up`);
+    await cleanupLocalBranch(workingDir, branchName);
+    return { action: "no-changes" };
   }
 
-  // Attempt fast-forward pull
-  const pullOk = await new Promise<boolean>((resolve) => {
-    const child = spawn("git", ["pull", "--ff-only"], {
+  // Egress check
+  const remoteUrl = await new Promise<string | null>((resolve) => {
+    const child = spawn("git", ["remote", "get-url", "--push", "origin"], {
+      cwd: workingDir,
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, HOME: "/home/magnus" },
+    });
+    let out = "";
+    child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
+    child.on("close", (code) => resolve(code === 0 ? out.trim() : null));
+    child.on("error", () => resolve(null));
+  });
+
+  if (!remoteUrl || !isRemoteHostAllowed(remoteUrl, allowedEgressHosts)) {
+    console.warn(`Post-task git push skipped in ${workingDir}: remote missing or not in egress allowlist`);
+    return { action: "push-failed", branchName, error: "Remote not allowed by egress policy" };
+  }
+
+  // Push branch
+  const pushOk = await new Promise<boolean>((resolve) => {
+    const child = spawn("git", ["push", "-u", "origin", branchName], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, HOME: "/home/magnus" },
@@ -251,21 +371,104 @@ export async function syncRepoBeforeTask(
     child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
     child.on("close", (code) => {
       if (code !== 0) {
-        console.warn(`Pre-task git pull --ff-only failed (exit ${code}) in ${workingDir}: ${output.trim()}`);
+        console.warn(`Post-task git push failed (exit ${code}) in ${workingDir}: ${output.trim()}`);
       }
       resolve(code === 0);
     });
     child.on("error", () => resolve(false));
   });
 
-  if (!pullOk) {
-    return {
-      action: "failed",
-      commitsBehind,
-      error: `Working directory ${workingDir} is ${commitsBehind} commits behind origin/main and cannot fast-forward. Manual intervention required.`,
-    };
+  if (!pushOk) {
+    return { action: "push-failed", branchName, error: "git push failed" };
   }
 
-  console.log(`Pre-task repo sync: ${workingDir} synced ${commitsBehind} commits from origin`);
-  return { action: "synced", commitsBehind };
+  // Open PR
+  const taskId = branchName.replace(/^hugin\//, "");
+  const prUrl = await createPullRequest(workingDir, branchName, taskId, prBody);
+  if (!prUrl) {
+    return { action: "push-failed", branchName, error: "gh pr create failed" };
+  }
+
+  console.log(`Post-task: PR created: ${prUrl}`);
+  return { action: "pr-created", prUrl, branchName };
+}
+
+async function cleanupLocalBranch(workingDir: string, branchName: string): Promise<void> {
+  // Detach HEAD so we can delete the branch we're on
+  await new Promise<void>((resolve) => {
+    const child = spawn("git", ["checkout", "--detach", "origin/main"], {
+      cwd: workingDir,
+      stdio: "ignore",
+      env: { ...process.env, HOME: "/home/magnus" },
+    });
+    child.on("close", () => resolve());
+    child.on("error", () => resolve());
+  });
+
+  await new Promise<void>((resolve) => {
+    const child = spawn("git", ["branch", "-d", branchName], {
+      cwd: workingDir,
+      stdio: "ignore",
+      env: { ...process.env, HOME: "/home/magnus" },
+    });
+    child.on("close", () => resolve());
+    child.on("error", () => resolve());
+  });
+}
+
+async function createPullRequest(
+  workingDir: string,
+  branchName: string,
+  taskId: string,
+  body: string,
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    const child = spawn(
+      "gh",
+      [
+        "pr", "create",
+        "--base", "main",
+        "--head", branchName,
+        "--title", `hugin: ${taskId}`,
+        "--body", body,
+      ],
+      {
+        cwd: workingDir,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, HOME: "/home/magnus" },
+      },
+    );
+    let out = "";
+    child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
+    child.stderr?.on("data", (d: Buffer) => (out += d.toString()));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        console.warn(`gh pr create failed (exit ${code}): ${out.trim()}`);
+        resolve(null);
+        return;
+      }
+      // gh pr create prints the PR URL as the last line of stdout
+      const lines = out.trim().split("\n");
+      const url = lines[lines.length - 1]?.trim() ?? null;
+      resolve(url?.startsWith("https://") ? url : null);
+    });
+    child.on("error", () => resolve(null));
+  });
+}
+
+function isRemoteHostAllowed(remoteUrl: string, allowedHosts: string[]): boolean {
+  const trimmed = remoteUrl.trim();
+  let host: string | null = null;
+  try {
+    host = new URL(trimmed).hostname.toLowerCase();
+  } catch {
+    const scp = trimmed.match(/^[^@]+@([^:]+):/);
+    if (scp?.[1]) host = scp[1].toLowerCase();
+  }
+  if (!host) return false;
+  return allowedHosts.some((h) => {
+    const n = h.trim().toLowerCase();
+    if (n.startsWith("*.")) return host!.endsWith(n.slice(1));
+    return host === n;
+  });
 }

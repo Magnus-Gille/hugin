@@ -111,6 +111,7 @@ export const structuredTaskResultSchema = z.object({
   bodyKind: taskExecutionBodyKindSchema,
   bodyText: z.string(),
   errorMessage: z.string().min(1).optional(),
+  prUrl: z.string().url().optional(),
   runtimeMetadata: taskExecutionRuntimeMetadataSchema.optional(),
   pipeline: taskExecutionPipelineContextSchema.optional(),
   approval: taskExecutionApprovalMetadataSchema.optional(),

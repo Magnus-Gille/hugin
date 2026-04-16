@@ -8,7 +8,6 @@ import express from "express";
 import {
   buildDefaultEgressHosts,
   installFetchEgressPolicy,
-  isGitRemoteAllowed,
 } from "./egress-policy.js";
 import {
   MuninClient,
@@ -16,7 +15,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, syncRepoBeforeTask } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch } from "./task-helpers.js";
 import { executeSdkTask } from "./sdk-executor.js";
 import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus, probeAllHosts, warmModel, getLoadedModels } from "./ollama-hosts.js";
@@ -956,134 +955,7 @@ function readHookResult(taskId: string): HookResult | null {
   }
 }
 
-// syncRepoBeforeTask and pickEarliestTask are in task-helpers.ts
-
-// --- Post-task git push ---
-
-async function postTaskGitPush(workingDir: string): Promise<void> {
-  // Check if the working directory is a git repo
-  const isGit = await new Promise<boolean>((resolve) => {
-    const child = spawn("git", ["rev-parse", "--git-dir"], {
-      cwd: workingDir,
-      stdio: "ignore",
-    });
-    child.on("close", (code) => resolve(code === 0));
-    child.on("error", () => resolve(false));
-  });
-
-  if (!isGit) return;
-
-  // Check if there are commits ahead of remote
-  const isAhead = await new Promise<boolean>((resolve) => {
-    const child = spawn("git", ["status", "--porcelain=v2", "--branch"], {
-      cwd: workingDir,
-      stdio: ["ignore", "pipe", "ignore"],
-      env: { ...process.env, HOME: "/home/magnus" },
-    });
-    let out = "";
-    child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
-    child.on("close", () => resolve(out.includes("branch.ab +") && !out.includes("branch.ab +0")));
-    child.on("error", () => resolve(false));
-  });
-
-  if (!isAhead) return;
-
-  const remoteUrl = await new Promise<string | null>((resolve) => {
-    const child = spawn("git", ["remote", "get-url", "--push", "origin"], {
-      cwd: workingDir,
-      stdio: ["ignore", "pipe", "ignore"],
-      env: { ...process.env, HOME: "/home/magnus" },
-    });
-    let out = "";
-    child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
-    child.on("close", (code) => resolve(code === 0 ? out.trim() : null));
-    child.on("error", () => resolve(null));
-  });
-
-  if (!remoteUrl || !isGitRemoteAllowed(remoteUrl, egressPolicy.allowedHosts)) {
-    console.warn(
-      `Post-task git push skipped in ${workingDir}: remote is missing or not allowed by egress policy`,
-    );
-    return;
-  }
-
-  console.log(`Post-task: unpushed commits detected in ${workingDir}, running git push`);
-
-  // Fetch + rebase before pushing to handle diverged branches (#20)
-  const fetchRebaseOk = await new Promise<boolean>((resolve) => {
-    const child = spawn("git", ["fetch", "origin"], {
-      cwd: workingDir,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
-    });
-    let output = "";
-    child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
-    child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
-    child.on("close", (fetchCode) => {
-      if (fetchCode !== 0) {
-        console.warn(`Post-task git fetch failed (exit ${fetchCode}) in ${workingDir}: ${output.trim()}`);
-        resolve(false);
-        return;
-      }
-
-      // Rebase local commits on top of fetched remote
-      const rebaseChild = spawn("git", ["rebase", "origin/main"], {
-        cwd: workingDir,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, HOME: "/home/magnus" },
-      });
-      let rebaseOutput = "";
-      rebaseChild.stdout?.on("data", (d: Buffer) => (rebaseOutput += d.toString()));
-      rebaseChild.stderr?.on("data", (d: Buffer) => (rebaseOutput += d.toString()));
-      rebaseChild.on("close", (rebaseCode) => {
-        if (rebaseCode !== 0) {
-          console.warn(`Post-task git rebase failed (exit ${rebaseCode}) in ${workingDir}: ${rebaseOutput.trim()}`);
-          // Abort the failed rebase to leave the repo in a clean state
-          const abortChild = spawn("git", ["rebase", "--abort"], {
-            cwd: workingDir,
-            stdio: "ignore",
-            env: { ...process.env, HOME: "/home/magnus" },
-          });
-          abortChild.on("close", () => resolve(false));
-          abortChild.on("error", () => resolve(false));
-          return;
-        }
-        console.log(`Post-task git rebase: ok (${workingDir})`);
-        resolve(true);
-      });
-      rebaseChild.on("error", () => resolve(false));
-    });
-    child.on("error", () => resolve(false));
-  });
-
-  if (!fetchRebaseOk) {
-    console.warn(`Post-task git push skipped in ${workingDir}: fetch/rebase failed`);
-    return;
-  }
-
-  await new Promise<void>((resolve) => {
-    const child = spawn("git", ["push"], {
-      cwd: workingDir,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
-    });
-    let output = "";
-    child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
-    child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
-    child.on("close", (code) => {
-      if (code === 0) {
-        console.log(`Post-task git push: ok (${workingDir})`);
-      } else {
-        console.warn(`Post-task git push failed (exit ${code}) in ${workingDir}: ${output.trim()}`);
-      }
-      resolve();
-    });
-    child.on("error", (err) => {
-      console.warn(`Post-task git push error in ${workingDir}: ${(err as Error).message}`);
-      resolve();
-    });
-  });
-}
+// checkoutTaskBranch, finalizeTaskBranch, and task selection helpers are in task-helpers.ts
 
 // --- Task execution ---
 
@@ -2540,20 +2412,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       throw new Error(`Internal dispatcher error: parsed task missing for ${taskNs}`);
     }
 
-    // Pre-task repo sync (#21): ensure local repo is up-to-date before execution
-    const syncResult = await syncRepoBeforeTask(task.workingDir);
-    if (syncResult.action === "fetch-failed") {
-      console.warn(`Pre-task repo fetch failed for ${taskNs} (non-fatal): ${syncResult.error}`);
-    } else if (syncResult.action === "failed") {
-      console.error(`Pre-task repo sync failed for ${taskNs}: ${syncResult.error}`);
-      stopLeaseRenewal();
-      stopCancellationWatch();
-      currentTask = null;
-      currentTaskConfig = null;
-      await failTaskWithMessage(taskNs, entry, syncResult.error ?? "Pre-task repo sync failed");
-      await promoteDependents(extractTaskId(taskNs));
-      await refreshPipelineSummaryFromContent(entry.content);
-      return { hadTask: true, queueDepth };
+    // Pre-task: checkout a fresh hugin/<taskId> branch from origin/main (#47)
+    const branchResult = await checkoutTaskBranch(task.workingDir, taskId);
+    if (branchResult.action === "fetch-failed") {
+      console.warn(`Pre-task branch checkout failed for ${taskNs} (non-fatal, proceeding without branch): ${branchResult.error}`);
+    } else if (branchResult.action === "created") {
+      console.log(`Pre-task: branch ${branchResult.branchName} ready in ${task.workingDir}`);
     }
 
     currentTaskConfig = task;
@@ -2860,9 +2724,30 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     const ok = exitCode === 0;
     const isCancelled = cancellation !== null;
 
-    // Safety net: push any commits the task left unpushed
-    if (ok && !isCancelled) {
-      await postTaskGitPush(task.workingDir);
+    // Post-task: finalize branch — auto-commit leftovers, push, open PR (#47)
+    let prUrl: string | undefined;
+    if (ok && !isCancelled && branchResult.action === "created" && branchResult.branchName) {
+      const prBody = [
+        `Automated changes from Hugin task \`${taskId}\`.`,
+        "",
+        `- **Runtime:** ${task.runtime}`,
+        `- **Executor:** ${effectiveExecutor}`,
+        "",
+        "---",
+        "*Created automatically by [Hugin](https://github.com/Magnus-Gille/hugin).*",
+      ].join("\n");
+      const finalizeResult = await finalizeTaskBranch(
+        task.workingDir,
+        branchResult.branchName,
+        prBody,
+        egressPolicy.allowedHosts,
+      );
+      if (finalizeResult.action === "pr-created" && finalizeResult.prUrl) {
+        prUrl = finalizeResult.prUrl;
+        await munin.log(taskNs, `PR created: ${prUrl}`);
+      } else if (finalizeResult.action === "push-failed") {
+        console.warn(`Post-task branch finalization failed for ${taskNs}: ${finalizeResult.error}`);
+      }
     }
 
     console.log(
@@ -2907,6 +2792,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           resultSource,
           logFile: `~/.hugin/logs/${taskId}.log`,
           costUsd,
+          prUrl,
           replyTo: task.replyTo,
           replyFormat: task.replyFormat,
           group: task.group,
@@ -3044,6 +2930,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           group: task.group,
           sequence: task.sequence,
           costUsd: costUsd ?? undefined,
+          prUrl,
           bodyKind: structuredBodyKind,
           bodyText: structuredBodyText,
           errorMessage: ok ? undefined : structuredBodyText,
