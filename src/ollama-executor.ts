@@ -29,11 +29,17 @@ export interface OllamaTaskConfig {
   reasoning?: boolean;
 }
 
-/** Model-family patterns that emit internal thinking tokens by default. */
+/**
+ * Model-family patterns that emit internal thinking tokens by default AND
+ * accept a boolean `think` parameter to disable it. GPT-OSS is intentionally
+ * omitted: it uses level-based reasoning (`"low"`/`"medium"`/`"high"`) and
+ * ignores boolean values — auto-routing it here would silently do nothing.
+ * If/when Hugin adds level-based reasoning support, extend the task schema
+ * first rather than this list.
+ */
 const REASONING_MODEL_PATTERNS: RegExp[] = [
   /^qwen3(?:[.:]|$)/i,
   /^deepseek-r1/i,
-  /^gpt-oss/i,
   /^magistral/i,
 ];
 
@@ -165,9 +171,9 @@ export async function executeOllamaTask(
     };
     if (needsNativeChat) {
       body.think = thinkValue;
-      appendOutput(
-        `[Ollama native /api/chat, think:${thinkValue}]\n`,
-      );
+      // Log-only metadata — must not go through appendOutput(), which would
+      // pollute output/resultText and corrupt tasks that expect clean JSON.
+      logStream.write(`[Ollama native /api/chat, think:${thinkValue}]\n`);
     }
 
     const res = await fetch(`${task.ollamaBaseUrl}${endpoint}`, {
@@ -208,6 +214,69 @@ export async function executeOllamaTask(
         reader.cancel().catch(() => {});
       }, remainingMs);
 
+      const processLine = (line: string): void => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+
+        let data: string;
+        if (needsNativeChat) {
+          // Native /api/chat streams NDJSON — each non-empty line is JSON.
+          data = trimmed;
+        } else {
+          // OpenAI-compat streams SSE: `data: {json}` or `data: [DONE]`.
+          if (!trimmed.startsWith("data: ")) return;
+          data = trimmed.slice(6).trim();
+          if (data === "[DONE]") return;
+        }
+
+        try {
+          const chunk = JSON.parse(data);
+
+          if (needsNativeChat) {
+            const delta = chunk.message?.content;
+            if (delta) appendOutput(delta);
+
+            // Capture thinking trace to the log file only (never into
+            // resultText) so opt-in Reasoning: true stays debuggable without
+            // corrupting machine-readable output.
+            const thinking = chunk.message?.thinking;
+            if (thinking) logStream.write(`[thinking] ${thinking}`);
+
+            // Native endpoint embeds usage + timing in the final (done:true)
+            // chunk instead of a separate usage object.
+            if (chunk.done) {
+              if (typeof chunk.prompt_eval_count === "number") {
+                promptTokens = chunk.prompt_eval_count;
+              }
+              if (typeof chunk.eval_count === "number") {
+                completionTokens = chunk.eval_count;
+              }
+              if (promptTokens !== null || completionTokens !== null) {
+                totalTokens = (promptTokens ?? 0) + (completionTokens ?? 0);
+              }
+              if (typeof chunk.total_duration === "number") {
+                inferenceMs = Math.round(chunk.total_duration / 1_000_000);
+              }
+              if (typeof chunk.load_duration === "number") {
+                loadMs = Math.round(chunk.load_duration / 1_000_000);
+              }
+            }
+          } else {
+            const delta = chunk.choices?.[0]?.delta?.content;
+            if (delta) appendOutput(delta);
+
+            // OpenAI-compat usage arrives on the final chunk.
+            if (chunk.usage) {
+              promptTokens = chunk.usage.prompt_tokens ?? null;
+              completionTokens = chunk.usage.completion_tokens ?? null;
+              totalTokens = chunk.usage.total_tokens ?? null;
+            }
+          }
+        } catch {
+          // Skip malformed chunks
+        }
+      };
+
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -217,63 +286,15 @@ export async function executeOllamaTask(
           const lines = buffer.split("\n");
           buffer = lines.pop() || "";
 
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed) continue;
-
-            let data: string;
-            if (needsNativeChat) {
-              // Native /api/chat streams NDJSON — each non-empty line is JSON.
-              data = trimmed;
-            } else {
-              // OpenAI-compat streams SSE: `data: {json}` or `data: [DONE]`.
-              if (!trimmed.startsWith("data: ")) continue;
-              data = trimmed.slice(6).trim();
-              if (data === "[DONE]") continue;
-            }
-
-            try {
-              const chunk = JSON.parse(data);
-
-              if (needsNativeChat) {
-                const delta = chunk.message?.content;
-                if (delta) appendOutput(delta);
-
-                // Native endpoint embeds usage + timing in the final (done:true)
-                // chunk instead of a separate usage object.
-                if (chunk.done) {
-                  if (typeof chunk.prompt_eval_count === "number") {
-                    promptTokens = chunk.prompt_eval_count;
-                  }
-                  if (typeof chunk.eval_count === "number") {
-                    completionTokens = chunk.eval_count;
-                  }
-                  if (promptTokens !== null || completionTokens !== null) {
-                    totalTokens = (promptTokens ?? 0) + (completionTokens ?? 0);
-                  }
-                  if (typeof chunk.total_duration === "number") {
-                    inferenceMs = Math.round(chunk.total_duration / 1_000_000);
-                  }
-                  if (typeof chunk.load_duration === "number") {
-                    loadMs = Math.round(chunk.load_duration / 1_000_000);
-                  }
-                }
-              } else {
-                const delta = chunk.choices?.[0]?.delta?.content;
-                if (delta) appendOutput(delta);
-
-                // OpenAI-compat usage arrives on the final chunk.
-                if (chunk.usage) {
-                  promptTokens = chunk.usage.prompt_tokens ?? null;
-                  completionTokens = chunk.usage.completion_tokens ?? null;
-                  totalTokens = chunk.usage.total_tokens ?? null;
-                }
-              }
-            } catch {
-              // Skip malformed chunks
-            }
-          }
+          for (const line of lines) processLine(line);
         }
+
+        // Flush: the final record may arrive without a trailing newline, so
+        // anything left in the buffer (plus any bytes pending in the decoder)
+        // must still be parsed. On /api/chat this chunk carries the done:true
+        // payload with usage + timing metadata.
+        buffer += decoder.decode();
+        if (buffer) processLine(buffer);
       } finally {
         clearTimeout(streamTimer);
       }
