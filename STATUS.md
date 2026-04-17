@@ -1,9 +1,41 @@
 # Hugin — Status
 
-**Last session:** 2026-04-16
+**Last session:** 2026-04-17
 **Branch:** main
 
-## Completed This Session (2026-04-16)
+## Completed This Session (2026-04-17)
+
+### Fix: stable mcp-session-id forwarded to Agent SDK's Munin MCP client (#48, `7b794ba`, merged)
+
+Hugin's HTTP MCP client was generating a fresh session UUID per request, which broke munin-memory outcome-aware retrieval Phase 2 (session windows couldn't be correlated). Unblocks munin-memory#31.
+
+- Added `muninSessionId?: string` to `SdkTaskConfig`; when set, `executeSdkTask` includes `"mcp-session-id": task.muninSessionId` in the MCP server headers.
+- Call sites in `index.ts` now pass `munin.getSessionId()` (3 locations).
+- Tests: 2 new cases in `tests/sdk-executor.test.ts` verifying header forwarding when set/omitted.
+- Codex reviewed → no issues.
+
+### Feature: `think:false` support for Ollama reasoning models (#30, PR #49, open)
+
+Reasoning models (qwen3, qwen3.5, deepseek-r1, magistral) spent 90s on chain-of-thought for trivial prompts. Ollama's native `/api/chat` accepts `think:false` to skip this (90s → 2s on Pi); the OpenAI-compat endpoint does not.
+
+- Auto-routes reasoning models to `/api/chat` (NDJSON) and passes `think:false` by default; opt-in override via `**Reasoning: true**` task field.
+- Captures native timing/token fields (`prompt_eval_count`, `eval_count`, `total_duration`, `load_duration`).
+- Tests: 10 new cases in `tests/ollama-executor.test.ts`.
+- Codex review caught 4 medium + 1 low; all fixed in the same branch:
+  1. Native-path banner leaked into `resultText` (JSON corruption) → write banner via `logStream.write` only.
+  2. Final NDJSON chunk without trailing newline stranded `done:true` payload → extracted `processLine()` + post-loop flush.
+  3. `gpt-oss` uses level-based `think` (low/medium/high), not boolean → removed from auto-detect list; documented caveat.
+  4. `message.thinking` trace was discarded → stream to log file only (never `resultText`).
+  5. (low) AGENTS.md stale → synced with CLAUDE.md.
+- **Status: PR #49 open, not merged yet.** Awaiting merge.
+
+### Fix: reap expired leases mid-poll (#38, `293292f`, merged)
+
+`recoverStaleTasks()` only ran at startup. A runtime crash or OOM kill left tasks stuck with the `running` tag until the next dispatcher restart. Added `reapExpiredLeases()` running every 5 polls (~2.5 min at the default 30s interval) — transitions tasks with truly-expired leases to `failed` with reason `lease-expired`. Fail-fast (no auto-retry to `pending`) per the issue author's recommendation.
+
+- Pure decision helper `shouldReapExpiredLease` in `task-helpers.ts` (9 unit tests).
+- Safety properties: never reaps the currently-executing task on this worker; never reaps legacy tasks missing `lease_expires:` metadata; re-reads authoritative tags before writing (so a lease renewal landing between query and write is respected); swallows CAS failures.
+- Codex reviewed → no issues found (clean review, noted residual risk is the absence of an I/O-side integration test, which composes existing tested paths).
 
 ### RCA + fix: branch-per-task with PR delivery (#47, `afb50b3`, deployed)
 
@@ -28,9 +60,8 @@ A research spike task targeting `/home/magnus/repos/grimnir` failed with exit -1
 None.
 
 ## Next Steps
-- Watch first real task run under branch model to verify end-to-end PR creation works
-- **#30 `think:false` for ollama reasoning models** — small change, big Pi win (90s → 2s on qwen3.5:2b)
-- **#38 lease-reaper** — dispatcher can't reap tasks whose `lease_expires` is past
+- **Merge PR #49** (`feat/ollama-think-false`) — Codex-approved, Pi-side win waiting behind the merge
+- Watch next task run to confirm lease-reaper behaves (it's scoped to every 5 polls; first opportunity to observe is after a worker crash in the wild)
 - **Orphan branch cleanup** — prune `hugin/*` branches older than 7d with no open PR (follow-up to #47)
 - **Phase 7: Methodology templates** (#5) — next feature phase
 - **Security backlog:** #10-13 (prompt injection, task signing, provenance, exfiltration)
