@@ -70,6 +70,9 @@ function parseTask(content: string, workspace = "/home/magnus/workspace") {
   const ollamaHostRaw = content.match(
     /\*\*Ollama-host:\*\*\s*(.+)/i
   )?.[1]?.trim();
+  const reasoningRaw = content.match(
+    /\*\*Reasoning:\*\*\s*(true|false)/i
+  )?.[1]?.toLowerCase();
   const fallbackRaw = content.match(
     /\*\*Fallback:\*\*\s*(claude|none)/i
   )?.[1]?.toLowerCase() as "claude" | "none" | undefined;
@@ -116,6 +119,8 @@ function parseTask(content: string, workspace = "/home/magnus/workspace") {
     sequence: sequenceStr ? parseInt(sequenceStr) : undefined,
     model: modelRaw || undefined,
     ollamaHost: ollamaHostRaw || undefined,
+    reasoning:
+      reasoningRaw === "true" ? true : reasoningRaw === "false" ? false : undefined,
     fallback: fallbackRaw || undefined,
     contextRefs: contextRefsRaw
       ? contextRefsRaw.split(",").map((r: string) => r.trim()).filter(Boolean)
@@ -508,6 +513,34 @@ Do something`;
 
     const task = parseTask(content);
     expect(task!.ollamaHost).toBe("laptop");
+  });
+
+  it("should parse Reasoning: true/false and leave undefined when absent", () => {
+    const on = parseTask(`## Task
+- **Runtime:** ollama
+- **Model:** qwen3:4b
+- **Reasoning:** true
+
+### Prompt
+go`);
+    expect(on!.reasoning).toBe(true);
+
+    const off = parseTask(`## Task
+- **Runtime:** ollama
+- **Model:** qwen3:4b
+- **Reasoning:** false
+
+### Prompt
+go`);
+    expect(off!.reasoning).toBe(false);
+
+    const absent = parseTask(`## Task
+- **Runtime:** ollama
+- **Model:** qwen3:4b
+
+### Prompt
+go`);
+    expect(absent!.reasoning).toBeUndefined();
   });
 
   it("should parse Fallback field", () => {
