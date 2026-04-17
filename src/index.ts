@@ -15,7 +15,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease } from "./task-helpers.js";
 import { executeSdkTask } from "./sdk-executor.js";
 import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus, probeAllHosts, warmModel, getLoadedModels } from "./ollama-hosts.js";
@@ -1380,6 +1380,111 @@ async function recoverStaleTasks(): Promise<void> {
     }
   } catch (err) {
     console.error("Failed to recover stale tasks:", err);
+  }
+}
+
+// --- Lease reaping (runs mid-poll) ---
+// `recoverStaleTasks` only runs at startup. While the dispatcher is alive,
+// a crashed runtime or OOM kill can leave a task stuck with the `running` tag
+// past its lease. This reaper scans for such tasks on each poll and fails
+// them with a `lease-expired` reason. Fail-fast: no auto-retry to pending.
+
+async function reapExpiredLeases(): Promise<void> {
+  try {
+    const { results } = await munin.query({
+      query: "task",
+      tags: ["running"],
+      namespace: "tasks/",
+      entry_type: "state",
+      limit: 20,
+    });
+
+    const now = Date.now();
+
+    for (const result of results) {
+      if (!result.key || result.key !== "status") continue;
+
+      // Use query-result tags for the cheap filter to avoid a read per task.
+      const preDecision = shouldReapExpiredLease({
+        tags: result.tags,
+        namespace: result.namespace,
+        currentTask,
+        now,
+      });
+      if (!preDecision.reap) continue;
+
+      const entry = await munin.read(result.namespace, "status");
+      if (!entry) continue;
+
+      // Re-check with authoritative tags (lease may have just been renewed).
+      const decision = shouldReapExpiredLease({
+        tags: entry.tags,
+        namespace: result.namespace,
+        currentTask,
+        now: Date.now(),
+      });
+      if (!decision.reap) continue;
+
+      const expiredForS = Math.round(decision.expiredByMs / 1000);
+      const errorMessage = `Lease expired ${expiredForS}s ago (worker: ${decision.claimedBy || "unknown"})`;
+
+      console.log(`Reaping ${result.namespace} — ${errorMessage}`);
+
+      const task = parseTask(entry.content);
+      if (task && !task.sensitivityAssessment) {
+        task.sensitivityAssessment = getTaskSensitivityAssessment(task);
+        task.effectiveSensitivity = task.sensitivityAssessment.effective;
+      }
+      const classification = getTaskArtifactClassification(task || undefined, entry.content);
+      const runtime = getRuntimeFromTags(entry.tags);
+
+      try {
+        await munin.write(
+          result.namespace,
+          "status",
+          entry.content,
+          buildTerminalStatusTags("failed", entry.tags),
+          entry.updated_at,
+          classification,
+        );
+      } catch (err) {
+        // Compare-and-swap may fail if the task was just renewed/finished.
+        console.log(
+          `Reap of ${result.namespace} aborted (lost CAS race): ${(err as Error).message}`,
+        );
+        continue;
+      }
+
+      await munin.write(
+        result.namespace,
+        "result",
+        `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`,
+        undefined,
+        undefined,
+        classification,
+      );
+      if (runtime !== "pipeline") {
+        await writeStructuredTaskResult(
+          result.namespace,
+          createFailureStructuredResult(result.namespace, runtime, errorMessage, {
+            executor: "dispatcher",
+            resultSource: "lease-reaper",
+            replyTo: task?.replyTo,
+            replyFormat: task?.replyFormat,
+            group: task?.group,
+            sequence: task?.sequence,
+            pipeline: task?.pipeline,
+            sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
+          }),
+          classification,
+        );
+      }
+      await munin.log(result.namespace, `Lease reaped: ${errorMessage}`);
+      await promoteDependents(extractTaskId(result.namespace));
+      await refreshPipelineSummaryFromContent(entry.content);
+    }
+  } catch (err) {
+    console.error("Failed to reap expired leases:", err);
   }
 }
 
@@ -3064,6 +3169,13 @@ async function pollLoop(): Promise<void> {
     try {
       pollCount++;
       await reconcileTrackedPipelineSummaries();
+      // Reap tasks whose lease expired mid-run (e.g. worker crashed after
+      // claiming). Runs every 5 polls (~2.5 min at default 30s interval) —
+      // cheap but not free, and lease window is 2 minutes so faster cadence
+      // buys little.
+      if (pollCount % 5 === 0) {
+        await reapExpiredLeases();
+      }
       const processedCancellation = await processCancellationRequests();
       const processedResume = await processResumeRequests();
       const processedApproval = await processApprovalDecisions();

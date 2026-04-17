@@ -106,6 +106,98 @@ export function selectNextTask(
   return undefined;
 }
 
+// --- Lease reaping (#38) ---
+
+export interface ReapDecisionInput {
+  /** Tags on the running task entry. */
+  tags: string[];
+  /** Namespace of the task entry (e.g. "tasks/20260416-100000-a3f1"). */
+  namespace: string;
+  /** Namespace of the task this worker is currently executing, or null when idle. */
+  currentTask: string | null;
+  /** Epoch-millis "now" used to compare against the lease expiry. */
+  now: number;
+}
+
+export interface ReapDecision {
+  reap: boolean;
+  /** Value of the `claimed_by:` tag, or null if absent. */
+  claimedBy: string | null;
+  /** Parsed `lease_expires:` timestamp, or null if the tag is missing/malformed. */
+  leaseExpires: number | null;
+  /** Milliseconds past expiry (0 when reap=false). */
+  expiredByMs: number;
+  /** Why we declined to reap; empty string when reap=true. */
+  skipReason: "" | "currently-executing" | "lease-valid" | "no-lease-metadata";
+}
+
+function parseClaimedByTag(tags: string[]): string | null {
+  const tag = tags.find((t) => t.startsWith("claimed_by:"));
+  return tag ? tag.slice("claimed_by:".length) : null;
+}
+
+function parseLeaseExpiresTag(tags: string[]): number | null {
+  const tag = tags.find((t) => t.startsWith("lease_expires:"));
+  if (!tag) return null;
+  const raw = tag.slice("lease_expires:".length);
+  const ts = /^\d+$/.test(raw) ? Number(raw) : new Date(raw).getTime();
+  return Number.isNaN(ts) ? null : ts;
+}
+
+/**
+ * Decide whether a `running`-tagged task should be reaped because its lease
+ * has actually expired. Conservative on purpose:
+ *
+ * - The currently-executing task on this worker is never reaped (its next
+ *   lease renewal is about to land).
+ * - Tasks missing lease metadata entirely are left alone; startup recovery
+ *   (`recoverStaleTasks`) covers the legacy case, and mid-poll reaping should
+ *   only kill tasks we can prove are stuck.
+ * - Tasks whose lease expiry is still in the future are left alone.
+ */
+export function shouldReapExpiredLease(input: ReapDecisionInput): ReapDecision {
+  const claimedBy = parseClaimedByTag(input.tags);
+  const leaseExpires = parseLeaseExpiresTag(input.tags);
+
+  if (input.namespace === input.currentTask) {
+    return {
+      reap: false,
+      claimedBy,
+      leaseExpires,
+      expiredByMs: 0,
+      skipReason: "currently-executing",
+    };
+  }
+
+  if (leaseExpires === null) {
+    return {
+      reap: false,
+      claimedBy,
+      leaseExpires,
+      expiredByMs: 0,
+      skipReason: "no-lease-metadata",
+    };
+  }
+
+  if (input.now <= leaseExpires) {
+    return {
+      reap: false,
+      claimedBy,
+      leaseExpires,
+      expiredByMs: 0,
+      skipReason: "lease-valid",
+    };
+  }
+
+  return {
+    reap: true,
+    claimedBy,
+    leaseExpires,
+    expiredByMs: input.now - leaseExpires,
+    skipReason: "",
+  };
+}
+
 // --- Branch-per-task git flow (#47) ---
 
 export interface TaskBranchOptions {
