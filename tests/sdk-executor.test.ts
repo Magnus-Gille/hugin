@@ -205,6 +205,38 @@ describe("SDK executor", () => {
     });
   });
 
+  it("forwards muninSessionId as mcp-session-id header to the Munin MCP server", async () => {
+    const messages = [createMockResultSuccess("Done")];
+    mockedQuery.mockReturnValue(createMockQuery(messages) as ReturnType<typeof query>);
+
+    await executeSdkTask(
+      makeTaskConfig({ muninSessionId: "task-scoped-session-123" }),
+      "test-task-session",
+      tmpLogDir,
+    );
+
+    const call = mockedQuery.mock.calls[0]?.[0] as {
+      options?: { mcpServers?: Record<string, { headers?: Record<string, string> }> };
+    };
+    const muninServer = call?.options?.mcpServers?.["munin-memory"];
+    expect(muninServer?.headers?.["mcp-session-id"]).toBe("task-scoped-session-123");
+    expect(muninServer?.headers?.Authorization).toBe("Bearer test-key");
+  });
+
+  it("omits mcp-session-id header when muninSessionId is not provided", async () => {
+    const messages = [createMockResultSuccess("Done")];
+    mockedQuery.mockReturnValue(createMockQuery(messages) as ReturnType<typeof query>);
+
+    await executeSdkTask(makeTaskConfig(), "test-task-no-session", tmpLogDir);
+
+    const call = mockedQuery.mock.calls[0]?.[0] as {
+      options?: { mcpServers?: Record<string, { headers?: Record<string, string> }> };
+    };
+    const muninServer = call?.options?.mcpServers?.["munin-memory"];
+    expect(muninServer?.headers?.["mcp-session-id"]).toBeUndefined();
+    expect(muninServer?.headers?.Authorization).toBe("Bearer test-key");
+  });
+
   it("should create log file with header and footer", async () => {
     const messages = [createMockResultSuccess("Done")];
     mockedQuery.mockReturnValue(createMockQuery(messages) as ReturnType<typeof query>);
