@@ -12,6 +12,12 @@ export interface SdkTaskConfig {
   muninApiKey: string;
   maxOutputChars: number;
   model?: string;
+  /**
+   * Stable mcp-session-id forwarded to the Agent SDK's Munin MCP client so all
+   * MCP calls during this task share one session. Enables Munin's outcome-aware
+   * retrieval and session-flow telemetry to correlate queries with outcomes.
+   */
+  muninSessionId?: string;
 }
 
 export interface SdkExecutorResult {
@@ -130,10 +136,16 @@ export async function executeSdkTask(
     const mcpServers: Record<string, { type: "http"; url: string; headers?: Record<string, string> }> = {};
     if (task.muninUrl && task.muninApiKey) {
       const muninMcpUrl = task.muninUrl.replace(/\/$/, "") + "/mcp";
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${task.muninApiKey}`,
+      };
+      if (task.muninSessionId) {
+        headers["mcp-session-id"] = task.muninSessionId;
+      }
       mcpServers["munin-memory"] = {
         type: "http",
         url: muninMcpUrl,
-        headers: { Authorization: `Bearer ${task.muninApiKey}` },
+        headers,
       };
     }
 
