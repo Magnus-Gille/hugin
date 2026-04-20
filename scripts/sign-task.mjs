@@ -53,8 +53,12 @@ function canonicalizeContextRefs(refs) {
     .join("\n");
 }
 
+function canonicalizePrompt(raw) {
+  return raw.trim();
+}
+
 function buildCanonicalPayload(params) {
-  const promptSha = sha256Hex(params.prompt);
+  const promptSha = sha256Hex(canonicalizePrompt(params.prompt));
   const refs = params.contextRefs ?? [];
   const contextRefsSha = refs.length ? sha256Hex(canonicalizeContextRefs(refs)) : "";
   const fields = {

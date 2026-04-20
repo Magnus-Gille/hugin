@@ -625,30 +625,46 @@ function verifyTaskEntrySignature(
     };
   }
 
-  const params = parsedTask
-    ? {
-        taskId: extractTaskId(taskNs),
-        submitter: submittedBy,
-        submittedAt: parsedTask.submittedAt,
-        runtime: parsedTask.runtime,
-        prompt: parsedTask.prompt,
-        contextRefs: parsedTask.contextRefs,
-      }
-    : null;
+  // Internally-generated tasks (pipeline phase children, summary tasks,
+  // etc.) are submitted by Hugin itself. They never carry a signature
+  // because there is no external signer — the dispatcher trusts its own
+  // writes. Exempt them so `require` doesn't brick pipeline execution.
+  // When pipeline-aware signing ships (see docs/security/task-signing.md),
+  // this exemption becomes a proper internal signing path.
+  if (submittedBy === "hugin") {
+    return { result: { status: "valid" }, reject: false, message: "" };
+  }
 
-  // Pipeline tasks don't produce a TaskConfig here — we can still check
-  // signature presence but not verify HMAC. Treat that as an operational
-  // limitation and pass through for now; pipeline signing is a follow-up.
-  if (!params) {
-    if (policy === "require" && !signatureRaw) {
+  // Pipeline parent tasks don't produce a TaskConfig here — the HMAC
+  // scheme binds prompt/context-refs, which pipelines express differently
+  // (### Pipeline instead of ### Prompt). Until pipeline signing lands we
+  // cannot accept these under `require`; `warn` passes through.
+  if (!parsedTask) {
+    if (policy === "require") {
       return {
         result: { status: "missing" },
         reject: true,
-        message: "Task rejected by HUGIN_SIGNING_POLICY=require: missing Signature field",
+        message:
+          "Task rejected by HUGIN_SIGNING_POLICY=require: pipeline tasks cannot be verified by the v1 scheme",
       };
     }
     return { result: { status: "missing" }, reject: false, message: "" };
   }
+
+  // Use the runtime *as declared in the task body*, not the resolved
+  // execution runtime. Auto-routed tasks sign with `runtime=auto`; the
+  // dispatcher later overwrites parsedTask.runtime with the router's
+  // pick, so reading it here would break verification.
+  const declaredRuntime = parseDeclaredRuntime(content) ?? parsedTask.runtime;
+
+  const params = {
+    taskId: extractTaskId(taskNs),
+    submitter: submittedBy,
+    submittedAt: parsedTask.submittedAt,
+    runtime: declaredRuntime,
+    prompt: parsedTask.prompt,
+    contextRefs: parsedTask.contextRefs,
+  };
 
   const result = verifyTaskSignature(params, signatureRaw, config.submitterKeys);
 

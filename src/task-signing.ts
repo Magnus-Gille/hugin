@@ -45,6 +45,7 @@ export type VerificationStatus =
   | "invalid"
   | "missing"
   | "unknown-signer"
+  | "submitter-mismatch"
   | "malformed"
   | "unsupported-version";
 
@@ -68,7 +69,7 @@ export type KeyStore = Record<string, string>;
  *     is unambiguous when inspected as text).
  */
 export function buildCanonicalPayload(params: SigningParams): string {
-  const promptSha = sha256Hex(params.prompt);
+  const promptSha = sha256Hex(canonicalizePrompt(params.prompt));
   const contextRefsSha = params.contextRefs?.length
     ? sha256Hex(canonicalizeContextRefs(params.contextRefs))
     : "";
@@ -151,6 +152,20 @@ export function verifyTaskSignature(
     };
   }
 
+  // Bind keyId to the claimed submitter. A signer with any configured key
+  // must not be able to mint signatures impersonating a different
+  // submitter. The keyId must either equal the submitter name or be a
+  // rotation alias of the form `<submitter>-<rotation>` (e.g.
+  // `Codex-desktop-2026q2`). This is enforced *before* HMAC comparison
+  // so unknown rotation shapes surface clearly in logs.
+  if (!keyIdMatchesSubmitter(parsed.keyId, params.submitter)) {
+    return {
+      status: "submitter-mismatch",
+      keyId: parsed.keyId,
+      reason: `keyId "${parsed.keyId}" is not authorized to sign for submitter "${params.submitter}"`,
+    };
+  }
+
   const expectedHex = signTask(params, parsed.keyId, secretHex).split(":")[2];
   const actual = Buffer.from(parsed.hex, "hex");
   const expected = Buffer.from(expectedHex, "hex");
@@ -229,6 +244,22 @@ function sanitizeValue(v: string): string {
   return v.replace(/[\r\n]+/g, " ").trim();
 }
 
+function keyIdMatchesSubmitter(keyId: string, submitter: string): boolean {
+  if (!keyId || !submitter) return false;
+  if (keyId === submitter) return true;
+  return keyId.startsWith(`${submitter}-`);
+}
+
+/**
+ * Normalize a prompt the same way on both sides of the signature. The task
+ * body in Munin may carry trailing whitespace from editors or CRLF line
+ * endings; the submitter helper reads the prompt from a file. Collapsing to
+ * `.trim()` matches what parseTask() uses when extracting the prompt.
+ */
+export function canonicalizePrompt(raw: string): string {
+  return raw.trim();
+}
+
 /**
  * Accepts hex (64 chars) or base64 secrets. Falls back to UTF-8 bytes for
  * arbitrary strings — useful for tests and non-production config. HMAC
@@ -253,8 +284,17 @@ function decodeSecret(raw: string): Buffer {
 
 export type SigningPolicy = "off" | "warn" | "require";
 
+/**
+ * Parse HUGIN_SIGNING_POLICY. Unset or blank → "off". Any other value that
+ * isn't one of the three canonical modes throws — a security control must
+ * never silently degrade to off because of a typo.
+ */
 export function parseSigningPolicy(value: string | undefined | null): SigningPolicy {
-  const raw = value?.trim().toLowerCase();
+  if (value === undefined || value === null) return "off";
+  const raw = value.trim().toLowerCase();
+  if (raw === "") return "off";
   if (raw === "off" || raw === "warn" || raw === "require") return raw;
-  return "off";
+  throw new Error(
+    `invalid HUGIN_SIGNING_POLICY "${value}" — expected one of: off, warn, require`,
+  );
 }

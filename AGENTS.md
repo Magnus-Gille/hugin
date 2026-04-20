@@ -159,5 +159,5 @@ MUNIN_API_KEY=<same key Munin uses>
 | `OLLAMA_DEFAULT_MODEL` | `qwen2.5:3b` | Default model for ollama tasks without explicit Model field |
 | `HUGIN_INJECTION_POLICY` | `warn` | Prompt-injection policy for context-refs: `off` (no scan), `warn` (prepend warning banner), `block` (quarantine high-severity refs, task continues), `fail` (reject task). See `docs/security/prompt-injection-scanner.md`. |
 | `HUGIN_SIGNING_POLICY` | `off` | Task signature verification: `off` (skip), `warn` (log missing/invalid, never reject), `require` (reject unsigned/invalid). See `docs/security/task-signing.md`. |
-| `HUGIN_SUBMITTER_KEYS` | — | Inline JSON keystore for task signing: `{"<keyId>": "<hex-secret>"}`. |
+| `HUGIN_SUBMITTER_KEYS` | — | Inline JSON keystore for task signing: `{"<keyId>": "<hex-secret>"}` (64-char hex preferred; base64 accepted). |
 | `HUGIN_SUBMITTER_KEYS_FILE` | — | Path to a JSON keystore file. Takes precedence over `HUGIN_SUBMITTER_KEYS`. |

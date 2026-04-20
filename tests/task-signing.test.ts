@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   buildCanonicalPayload,
+  canonicalizePrompt,
   extractSignatureField,
   loadKeyStoreFromEnv,
   parseSignature,
@@ -98,14 +99,38 @@ describe("signTask + verifyTaskSignature round-trip", () => {
     expect(result.status).toBe("invalid");
   });
 
-  it("rejects a swapped submitter", () => {
+  it("rejects a swapped submitter via submitter-mismatch binding", () => {
     const sig = signTask(makeParams(), KEY_ID, SECRET_HEX);
     const result = verifyTaskSignature(
       makeParams({ submitter: "hugin" }),
       sig,
       KEYS,
     );
-    expect(result.status).toBe("invalid");
+    // keyId=Codex-desktop cannot sign for submitter=hugin regardless of
+    // whether the HMAC happens to match.
+    expect(result.status).toBe("submitter-mismatch");
+  });
+
+  it("blocks cross-submitter spoofing even with a valid HMAC", () => {
+    // A signer holding the ratatoskr key tries to pass itself off as
+    // Codex-desktop by claiming Submitted by: Codex-desktop but signing
+    // with Signature: v1:ratatoskr:...
+    const ratatoskrSecret = "b".repeat(64);
+    const keys = { ratatoskr: ratatoskrSecret, [KEY_ID]: SECRET_HEX };
+    const spoofed = makeParams({ submitter: KEY_ID }); // body claims Codex-desktop
+    const sig = signTask(spoofed, "ratatoskr", ratatoskrSecret); // signed by ratatoskr
+    const result = verifyTaskSignature(spoofed, sig, keys);
+    expect(result.status).toBe("submitter-mismatch");
+    expect(result.keyId).toBe("ratatoskr");
+  });
+
+  it("accepts rotation aliases of the form <submitter>-<rotation>", () => {
+    const rotationKeyId = "Codex-desktop-2026q2";
+    const keys = { [rotationKeyId]: SECRET_HEX };
+    const sig = signTask(makeParams(), rotationKeyId, SECRET_HEX);
+    const result = verifyTaskSignature(makeParams(), sig, keys);
+    expect(result.status).toBe("valid");
+    expect(result.keyId).toBe(rotationKeyId);
   });
 
   it("rejects a swapped runtime (cloud → ollama escalation)", () => {
@@ -180,14 +205,35 @@ describe("parseSignature", () => {
 });
 
 describe("parseSigningPolicy", () => {
-  it("accepts off|warn|require and defaults to off", () => {
+  it("accepts off|warn|require and defaults to off when unset", () => {
     expect(parseSigningPolicy("off")).toBe("off");
     expect(parseSigningPolicy("WARN")).toBe("warn");
     expect(parseSigningPolicy("require")).toBe("require");
     expect(parseSigningPolicy("   ")).toBe("off");
     expect(parseSigningPolicy("")).toBe("off");
-    expect(parseSigningPolicy("yolo")).toBe("off");
     expect(parseSigningPolicy(undefined)).toBe("off");
+    expect(parseSigningPolicy(null)).toBe("off");
+  });
+
+  it("throws on typos so the control never silently disables", () => {
+    // A typo like `requrie` must fail loud, not fall back to off.
+    expect(() => parseSigningPolicy("requrie")).toThrow(/invalid HUGIN_SIGNING_POLICY/);
+    expect(() => parseSigningPolicy("yolo")).toThrow(/invalid HUGIN_SIGNING_POLICY/);
+  });
+});
+
+describe("canonicalizePrompt", () => {
+  it("is applied on both sides of the signature", () => {
+    // Prompts that differ only in leading/trailing whitespace hash to the
+    // same canonical payload — the submitter helper trims, so the
+    // verifier must trim too.
+    const a = buildCanonicalPayload(makeParams({ prompt: "Do the thing." }));
+    const b = buildCanonicalPayload(makeParams({ prompt: "  Do the thing.\n\n" }));
+    expect(a).toEqual(b);
+  });
+
+  it("exposes the canonicalization rule so submitters can match it", () => {
+    expect(canonicalizePrompt("  hi\n")).toBe("hi");
   });
 });
 
@@ -221,6 +267,46 @@ describe("scripts/sign-task.mjs (cross-language drift guard)", () => {
         },
       ).trim();
       const expected = signTask(makeParams(), KEY_ID, SECRET_HEX);
+      expect(stdout).toBe(expected);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("agrees on prompts with trailing whitespace / EOF newlines", async () => {
+    // Real markdown prompt files routinely end with a newline. Both sides
+    // must canonicalize away that noise — otherwise --prompt-file signing
+    // silently breaks verification for every multi-line prompt.
+    const { execFileSync } = await import("node:child_process");
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "hugin-sign-"));
+    try {
+      const promptFile = path.join(tmp, "prompt.md");
+      fs.writeFileSync(promptFile, "  Do the thing.\n\n");
+      const stdout = execFileSync(
+        "node",
+        [
+          "scripts/sign-task.mjs",
+          "--task-id",
+          "20260420-120000-a1b2",
+          "--submitter",
+          KEY_ID,
+          "--submitted-at",
+          "2026-04-20T12:00:00Z",
+          "--runtime",
+          "claude",
+          "--prompt-file",
+          promptFile,
+          "--key-id",
+          KEY_ID,
+        ],
+        {
+          env: { ...process.env, HUGIN_SIGNING_SECRET: SECRET_HEX },
+          encoding: "utf8",
+        },
+      ).trim();
+      // Hugin's parseTask trims the prompt extracted from Munin; the
+      // expected signature must correspond to the trimmed form.
+      const expected = signTask(makeParams({ prompt: "Do the thing." }), KEY_ID, SECRET_HEX);
       expect(stdout).toBe(expected);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
