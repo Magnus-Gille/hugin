@@ -98,6 +98,7 @@ hugin/
 │   ├── context-loader.ts  # Context-refs resolver (fetch Munin entries for prompt injection)
 │   ├── prompt-injection-scanner.ts # Regex scanner for adversarial patterns in context-ref content
 │   ├── exfiltration-scanner.ts   # Regex scanner for data-leak patterns in task output
+│   ├── provenance.ts               # External-vs-trusted provenance detection for context-refs
 │   ├── task-signing.ts             # HMAC-SHA256 task submission signing/verification
 │   └── munin-client.ts    # HTTP client for Munin JSON-RPC API
 ├── tests/
@@ -160,6 +161,7 @@ MUNIN_API_KEY=<same key Munin uses>
 | `OLLAMA_DEFAULT_MODEL` | `qwen2.5:3b` | Default model for ollama tasks without explicit Model field |
 | `HUGIN_INJECTION_POLICY` | `warn` | Prompt-injection policy for context-refs: `off` (no scan), `warn` (prepend warning banner), `block` (quarantine high-severity refs, task continues), `fail` (reject task). See `docs/security/prompt-injection-scanner.md`. |
 | `HUGIN_EXFIL_POLICY` | `warn` | Exfiltration scanner policy for task results: `off` / `warn` / `flag` / `redact`. See `docs/security/exfiltration-scanner.md`. |
+| `HUGIN_EXTERNAL_POLICY` | `warn` | Provenance policy for externally sourced context-refs (entries tagged `source:external` or under `signals/`): `allow` / `warn` / `block` / `fail`. See `docs/security/provenance-enforcement.md`. |
 | `HUGIN_SIGNING_POLICY` | `off` | Task signature verification: `off` (skip), `warn` (log missing/invalid, never reject), `require` (reject unsigned/invalid). See `docs/security/task-signing.md`. |
 | `HUGIN_SUBMITTER_KEYS` | — | Inline JSON keystore for task signing: `{"<keyId>": "<hex-secret>"}` (64-char hex preferred; base64 accepted). |
 | `HUGIN_SUBMITTER_KEYS_FILE` | — | Path to a JSON keystore file. Takes precedence over `HUGIN_SUBMITTER_KEYS`. |

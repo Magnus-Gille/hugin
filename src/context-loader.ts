@@ -23,6 +23,14 @@ import {
   type InjectionScanResult,
   type InjectionSeverity,
 } from "./prompt-injection-scanner.js";
+import {
+  detectProvenance,
+  externalProvenanceBanner,
+  parseExternalPolicy,
+  provenanceReason,
+  type ExternalPolicy,
+  type Provenance,
+} from "./provenance.js";
 
 const DEFAULT_BUDGET_CHARS = 8_000;
 
@@ -37,6 +45,8 @@ export interface ContextRefMeta {
   injection?: InjectionScanResult;
   /** True when the ref was resolved but dropped from injected content due to policy=block. */
   quarantined?: boolean;
+  provenance: Provenance;
+  provenanceReason?: string;
 }
 
 export interface ContextResolution {
@@ -54,6 +64,11 @@ export interface ContextResolution {
   maxInjectionSeverity: InjectionSeverity;
   /** True when policy=fail and at least one ref met the policy threshold. */
   injectionBlocked: boolean;
+  externalPolicy: ExternalPolicy;
+  maxProvenance: Provenance;
+  refsExternal: string[];
+  /** True when externalPolicy=fail and at least one external ref was seen. */
+  externalBlocked: boolean;
 }
 
 function parseRef(ref: string): { namespace: string; key: string } | null {
@@ -78,6 +93,11 @@ function readPolicy(override?: InjectionPolicy): InjectionPolicy {
   return "warn";
 }
 
+function readExternalPolicy(override?: ExternalPolicy): ExternalPolicy {
+  if (override) return override;
+  return parseExternalPolicy(process.env.HUGIN_EXTERNAL_POLICY);
+}
+
 const POLICY_THRESHOLD: Record<InjectionPolicy, InjectionSeverity> = {
   off: "high",
   warn: "medium",
@@ -92,6 +112,7 @@ function meetsThreshold(severity: InjectionSeverity, policy: InjectionPolicy): b
 
 export interface ResolveContextOptions {
   injectionPolicy?: InjectionPolicy;
+  externalPolicy?: ExternalPolicy;
 }
 
 export async function resolveContextRefs(
@@ -102,15 +123,19 @@ export async function resolveContextRefs(
 ): Promise<ContextResolution> {
   const maxChars = budget ?? DEFAULT_BUDGET_CHARS;
   const policy = readPolicy(options.injectionPolicy);
+  const externalPolicy = readExternalPolicy(options.externalPolicy);
   const refsRequested = refList.map((r) => r.trim()).filter(Boolean);
   const refsResolved: string[] = [];
   const refsMissing: string[] = [];
   const refsQuarantined: string[] = [];
+  const refsExternal: string[] = [];
   const sections: string[] = [];
   const resolvedRefs: ContextRefMeta[] = [];
   let maxSens: Sensitivity | undefined;
   let maxInjectionSev: InjectionSeverity = "none";
+  let maxProvenance: Provenance = "trusted";
   let blocked = false;
+  let externalBlocked = false;
 
   const parsedRefs = refsRequested.map((refStr) => {
     const parsed = parseRef(refStr);
@@ -145,6 +170,12 @@ export async function resolveContextRefs(
     const sensitivity =
       muninClassificationToSensitivity(result.classification) ||
       namespaceFallbackSensitivity(parsed.namespace);
+    const provenance = detectProvenance(result.tags, parsed.namespace);
+    const provReason =
+      provenance === "external" ? provenanceReason(result.tags, parsed.namespace) : undefined;
+    // Scan for injection regardless of policy when the ref is external:
+    // external data deserves scanning even if the operator set injection
+    // policy to `off`. The scan result is always recorded on the meta.
     const injection = scanForInjection(result.content);
 
     const meta: ContextRefMeta = {
@@ -154,9 +185,18 @@ export async function resolveContextRefs(
       classification: result.classification,
       sensitivity,
       injection,
+      provenance,
+      provenanceReason: provReason,
     };
 
     refsResolved.push(refStr);
+    if (provenance === "external") {
+      refsExternal.push(refStr);
+      maxProvenance = "external";
+      console.warn(
+        `[provenance] ref=${refStr} provenance=external policy=${externalPolicy} reason=${provReason}`,
+      );
+    }
     maxInjectionSev =
       compareInjectionSeverity(maxInjectionSev, injection.severity) >= 0
         ? maxInjectionSev
@@ -167,6 +207,27 @@ export async function resolveContextRefs(
       console.warn(
         `[injection] ref=${refStr} severity=${injection.severity} policy=${policy} patterns=[${patterns}]`,
       );
+    }
+
+    // External policy enforcement happens before injection policy so a
+    // `fail`/`block` external ref is handled consistently regardless of
+    // whether it also triggered an injection pattern.
+    if (provenance === "external" && externalPolicy === "fail") {
+      externalBlocked = true;
+      meta.quarantined = true;
+      refsQuarantined.push(refStr);
+      resolvedRefs.push(meta);
+      break;
+    }
+
+    if (provenance === "external" && externalPolicy === "block") {
+      meta.quarantined = true;
+      refsQuarantined.push(refStr);
+      resolvedRefs.push(meta);
+      sections.push(
+        `### ${refStr}\n[quarantined: external-source entry blocked by HUGIN_EXTERNAL_POLICY=block (${provReason})]`,
+      );
+      continue;
     }
 
     if (policy === "fail" && meetsThreshold(injection.severity, policy)) {
@@ -195,6 +256,13 @@ export async function resolveContextRefs(
     maxSens = maxSensitivity(maxSens, sensitivity);
     resolvedRefs.push(meta);
     let body = result.content;
+    if (provenance === "external" && (externalPolicy === "warn" || externalPolicy === "allow")) {
+      // Prepend a provenance banner in both `warn` and `allow` modes so the
+      // model is always told the content is external. `allow` exists to
+      // disable the stricter block/fail enforcement, not to hide the
+      // provenance signal entirely.
+      body = `${externalProvenanceBanner(provReason || "source:external")}\n\n${body}`;
+    }
     if (policy === "warn" && injection.severity !== "none") {
       const warning =
         `[!] prompt-injection scanner flagged ${injection.severity}-severity patterns in this entry; ` +
@@ -222,5 +290,9 @@ export async function resolveContextRefs(
     injectionPolicy: policy,
     maxInjectionSeverity: maxInjectionSev,
     injectionBlocked: blocked,
+    externalPolicy,
+    maxProvenance,
+    refsExternal,
+    externalBlocked,
   };
 }

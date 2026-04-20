@@ -792,6 +792,20 @@ function getInjectionViolationForTask(task: TaskConfig): string | null {
   );
 }
 
+function getExternalProvenanceViolationForTask(task: TaskConfig): string | null {
+  const resolution = task.contextResolution;
+  if (!resolution || !resolution.externalBlocked) return null;
+  const flagged = resolution.refs.find(
+    (ref) => ref.provenance === "external" && ref.quarantined,
+  );
+  if (!flagged) return null;
+  const reason = flagged.provenanceReason || "source:external";
+  return (
+    `Task rejected by HUGIN_EXTERNAL_POLICY=fail: context-ref "${flagged.ref}" ` +
+    `is externally sourced (${reason})`
+  );
+}
+
 // --- Log directory ---
 
 function ensureLogDir(): void {
@@ -2652,7 +2666,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
     const securityViolation =
       getSecurityViolationForTask(parsedTask, sensitivityAssessment) ||
-      getInjectionViolationForTask(parsedTask);
+      getInjectionViolationForTask(parsedTask) ||
+      getExternalProvenanceViolationForTask(parsedTask);
     if (securityViolation) {
       const classification = getTaskArtifactClassification(parsedTask);
       await munin.write(
