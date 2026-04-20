@@ -21,6 +21,11 @@ import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus, probeAllHosts, warmModel, getLoadedModels } from "./ollama-hosts.js";
 import { resolveContextRefs } from "./context-loader.js";
 import {
+  scanForExfiltration,
+  redactExfiltration,
+  type ExfilScanResult,
+} from "./exfiltration-scanner.js";
+import {
   pipelineSideEffectIdSchema,
   type PipelineSideEffectId,
 } from "./pipeline-ir.js";
@@ -97,6 +102,88 @@ import {
   type VerificationResult,
 } from "./task-signing.js";
 
+export type ExfilPolicy = "off" | "warn" | "flag" | "redact";
+
+function parseExfilPolicy(raw: string | undefined): ExfilPolicy {
+  const v = raw?.trim().toLowerCase();
+  if (v === "off" || v === "warn" || v === "flag" || v === "redact") return v;
+  if (v && v.length > 0) {
+    throw new Error(
+      `Invalid HUGIN_EXFIL_POLICY=${raw}; expected off | warn | flag | redact`,
+    );
+  }
+  return "warn";
+}
+
+interface ExfilPolicyOutcome {
+  scan: ExfilScanResult;
+  redactedBody: string;
+  redactedStructured: string;
+  resultTags?: string[];
+  securitySection?: string;
+}
+
+function applyExfilPolicy(
+  taskNs: string,
+  resultBody: string,
+  structuredBody: string,
+  policy: ExfilPolicy,
+): ExfilPolicyOutcome {
+  if (policy === "off") {
+    return {
+      scan: { severity: "none", matches: [] },
+      redactedBody: resultBody,
+      redactedStructured: structuredBody,
+    };
+  }
+
+  const scan = scanForExfiltration(structuredBody);
+  if (scan.severity === "none") {
+    return {
+      scan,
+      redactedBody: resultBody,
+      redactedStructured: structuredBody,
+    };
+  }
+
+  const patterns = scan.matches.map((m) => m.pattern);
+  const uniquePatterns = [...new Set(patterns)];
+  console.warn(
+    `[exfil] task=${taskNs} severity=${scan.severity} policy=${policy} patterns=[${uniquePatterns.join(", ")}] count=${scan.matches.length}`,
+  );
+
+  let redactedBody = resultBody;
+  let redactedStructured = structuredBody;
+  if (policy === "redact") {
+    redactedStructured = redactExfiltration(structuredBody, scan);
+    const bodyScan = scanForExfiltration(resultBody);
+    redactedBody = redactExfiltration(resultBody, bodyScan);
+  }
+
+  const section = [
+    "",
+    "### Security Scan",
+    "",
+    `- **Exfiltration severity:** ${scan.severity}`,
+    `- **Patterns:** ${uniquePatterns.join(", ")}`,
+    `- **Matches:** ${scan.matches.length}`,
+    `- **Policy applied:** ${policy}`,
+  ].join("\n");
+
+  const resultTags =
+    policy === "flag" || policy === "redact"
+      ? ["security:exfil-suspected", `security:exfil-${scan.severity}`]
+      : undefined;
+
+  return {
+    scan,
+    redactedBody,
+    redactedStructured,
+    resultTags,
+    securitySection: section,
+  };
+}
+
 const HUGIN_HOME = path.join(process.env.HOME || "/home/magnus", ".hugin");
 const LOG_DIR = path.join(HUGIN_HOME, "logs");
 const HOOK_RESULT_DIR = path.join(HUGIN_HOME, "hook-results");
@@ -146,6 +233,7 @@ const config = {
     .filter(Boolean),
   signingPolicy: parseSigningPolicy(process.env.HUGIN_SIGNING_POLICY) as SigningPolicy,
   submitterKeys: loadKeyStoreFromEnv() as KeyStore,
+  exfilPolicy: parseExfilPolicy(process.env.HUGIN_EXFIL_POLICY),
 };
 
 if (config.signingPolicy !== "off") {
@@ -1850,6 +1938,21 @@ async function markTaskCancelled(
   const classification = getTaskArtifactClassification(task || undefined, entry.content);
   const completedAt = options.completedAt || new Date().toISOString();
   const runtime = getRuntimeFromTags(entry.tags);
+  // Apply exfil policy defensively: today's callers pass no body, but the
+  // helper's signature accepts one, so route body/bodyText through the
+  // scanner so a future caller cannot bypass redaction/tagging.
+  const cancelExfil = applyExfilPolicy(
+    taskNs,
+    options.body ?? "",
+    options.bodyText ?? "",
+    config.exfilPolicy,
+  );
+  const effectiveBody = options.body
+    ? cancelExfil.securitySection
+      ? `${cancelExfil.redactedBody}\n${cancelExfil.securitySection}`
+      : cancelExfil.redactedBody
+    : options.body;
+  const effectiveBodyText = options.bodyText ? cancelExfil.redactedStructured : options.bodyText;
   let approvalMetadata: TaskExecutionApprovalMetadata | undefined;
   if (task?.pipeline?.authority === "gated") {
     const [approvalRequestEntry, approvalDecisionEntry] = await Promise.all([
@@ -1889,9 +1992,9 @@ async function markTaskCancelled(
       replyFormat: task?.replyFormat,
       group: task?.group,
         sequence: task?.sequence,
-        body: options.body,
+        body: effectiveBody,
     }),
-    undefined,
+    cancelExfil.resultTags,
     undefined,
     classification
   );
@@ -1914,7 +2017,7 @@ async function markTaskCancelled(
         runtimeMetadata: options.runtimeMetadata,
         approval: approvalMetadata,
         bodyKind: options.bodyKind,
-        bodyText: options.bodyText,
+        bodyText: effectiveBodyText,
         sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
       }),
       classification,
@@ -3027,24 +3130,45 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // For spawn executor, check for hook result, then fall back to stdout
     let resultBody: string;
     let resultSource: string;
+    let rawBodyText: string;
+    let structuredBodyKind: TaskExecutionBodyKind;
 
     if ((isClaude || isOllama) && resultText) {
       resultSource = effectiveExecutor;
+      rawBodyText = resultText;
+      structuredBodyKind = "response";
       resultBody = `### Response\n\n${resultText}`;
     } else if (!isClaude && !isOllama) {
       const hookResult = readHookResult(taskId);
       if (hookResult) {
         resultSource = "hook";
+        rawBodyText = hookResult.last_assistant_message;
+        structuredBodyKind = "response";
         resultBody = `### Response\n\n${hookResult.last_assistant_message}`;
         console.log(`Using Stop hook result for task ${taskNs}`);
       } else {
         resultSource = "stdout";
-        resultBody = `### Output\n\`\`\`\n${output || "(no output)"}\n\`\`\``;
+        rawBodyText = output || "(no output)";
+        structuredBodyKind = "output";
+        resultBody = `### Output\n\`\`\`\n${rawBodyText}\n\`\`\``;
       }
     } else {
       resultSource = effectiveExecutor;
-      resultBody = `### Output\n\`\`\`\n${output || "(no output)"}\n\`\`\``;
+      rawBodyText = output || "(no output)";
+      structuredBodyKind = "output";
+      resultBody = `### Output\n\`\`\`\n${rawBodyText}\n\`\`\``;
     }
+
+    const exfilOutcome = applyExfilPolicy(
+      taskNs,
+      resultBody,
+      rawBodyText,
+      config.exfilPolicy,
+    );
+    const structuredBodyText = exfilOutcome.redactedStructured;
+    const finalResultBody = exfilOutcome.securitySection
+      ? `${exfilOutcome.redactedBody}\n${exfilOutcome.securitySection}`
+      : exfilOutcome.redactedBody;
 
     // Write result to Munin (skip if timeout already wrote partial result via SDK)
     if (!(isTimeout && isClaude)) {
@@ -3066,22 +3190,15 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           replyFormat: task.replyFormat,
           group: task.group,
           sequence: task.sequence,
-          body: resultBody,
+          body: finalResultBody,
           autoRouted: task.autoRouted,
           routingReason: task.routingDecision?.reason,
         }),
-        undefined,
+        exfilOutcome.resultTags,
         undefined,
         taskClassification,
       );
     }
-
-    const structuredBodyKind: TaskExecutionBodyKind =
-      resultSource === "stdout" ? "output" : "response";
-    const structuredBodyText =
-      resultSource === "stdout"
-        ? output || "(no output)"
-        : resultText || output || "(no output)";
     const baseRuntimeMetadata: TaskExecutionRuntimeMetadata | undefined =
       isOllama
         ? {
@@ -3137,9 +3254,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           replyFormat: task.replyFormat,
           group: task.group,
           sequence: task.sequence,
-          body: resultBody,
+          body: finalResultBody,
         }),
-        undefined,
+        exfilOutcome.resultTags,
         undefined,
         taskClassification,
       );
