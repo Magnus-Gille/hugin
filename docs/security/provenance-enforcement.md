@@ -62,9 +62,13 @@ is cheap to trust because it does not rely on regex coverage.
 - **Logs:** `[provenance] ref=<ref> provenance=external policy=<p>
   reason=<why>` is emitted by `resolveContextRefs` for each external
   ref.
-- **Resolution result:** `maxProvenance`, `refsExternal`, `externalPolicy`,
-  and `externalBlocked` are surfaced on `ContextResolution` for
-  downstream consumers (task journal, structured result).
+- **Ollama journal:** each ollama task's journal entry gains
+  `external_policy`, `max_provenance`, `context_refs_external`, and
+  `external_blocked`, alongside the existing injection/context fields.
+- **Resolution object:** `maxProvenance`, `refsExternal`,
+  `externalPolicy`, and `externalBlocked` are returned on the
+  in-process `ContextResolution` for callers that need them (pipeline
+  dispatch, future router heuristics).
 - **Task failure:** `policy=fail` tasks are rejected with reason
   `Task rejected by HUGIN_EXTERNAL_POLICY=fail: context-ref "…" is
   externally sourced (<reason>)`, visible in the human-readable `result`
