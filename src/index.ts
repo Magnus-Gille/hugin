@@ -579,6 +579,19 @@ function getSecurityViolationForTask(
   return null;
 }
 
+function getInjectionViolationForTask(task: TaskConfig): string | null {
+  const resolution = task.contextResolution;
+  if (!resolution || !resolution.injectionBlocked) return null;
+  const flagged = resolution.refs.find((ref) => ref.quarantined);
+  if (!flagged) return null;
+  const patterns = flagged.injection?.matches.map((m) => m.pattern).join(", ") || "unknown";
+  const severity = flagged.injection?.severity || "high";
+  return (
+    `Task rejected by HUGIN_INJECTION_POLICY=fail: context-ref "${flagged.ref}" ` +
+    `matched ${severity}-severity prompt-injection patterns [${patterns}]`
+  );
+}
+
 // --- Log directory ---
 
 function ensureLogDir(): void {
@@ -2398,10 +2411,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       }
     }
 
-    const securityViolation = getSecurityViolationForTask(
-      parsedTask,
-      sensitivityAssessment,
-    );
+    const securityViolation =
+      getSecurityViolationForTask(parsedTask, sensitivityAssessment) ||
+      getInjectionViolationForTask(parsedTask);
     if (securityViolation) {
       const classification = getTaskArtifactClassification(parsedTask);
       await munin.write(
@@ -2726,8 +2738,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         context_refs_requested: contextResolution?.refsRequested || [],
         context_refs_resolved: contextResolution?.refsResolved || [],
         context_refs_missing: contextResolution?.refsMissing || [],
+        context_refs_quarantined: contextResolution?.refsQuarantined || [],
         context_chars_total: contextResolution?.totalChars || 0,
         context_truncated: contextResolution?.truncated || false,
+        injection_policy: contextResolution?.injectionPolicy || "off",
+        injection_max_severity: contextResolution?.maxInjectionSeverity || "none",
       };
     }
 
@@ -2746,8 +2761,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         context_refs_requested: contextResolution?.refsRequested || [],
         context_refs_resolved: contextResolution?.refsResolved || [],
         context_refs_missing: contextResolution?.refsMissing || [],
+        context_refs_quarantined: contextResolution?.refsQuarantined || [],
         context_chars_total: contextResolution?.totalChars || 0,
         context_truncated: contextResolution?.truncated || false,
+        injection_policy: contextResolution?.injectionPolicy || "off",
+        injection_max_severity: contextResolution?.maxInjectionSeverity || "none",
       };
     }
     currentOllamaAbort = null;

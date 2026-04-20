@@ -106,6 +106,7 @@ hugin/
 │   ├── ollama-executor.ts        # Ollama executor (streaming, OpenAI-compatible API)
 │   ├── ollama-hosts.ts           # Lazy host resolution with negative caching
 │   ├── context-loader.ts         # Context-refs resolver with classification metadata
+│   ├── prompt-injection-scanner.ts # Regex scanner for adversarial patterns in context-ref content
 │   ├── munin-client.ts           # HTTP client for Munin JSON-RPC API
 │   ├── router.ts                 # Runtime auto-routing (pure function, filter/rank chain)
 │   ├── runtime-registry.ts       # Canonical runtime definitions (trust, cost, capabilities)
@@ -196,3 +197,4 @@ Security assessments, threat models, and audit reports live in `docs/security/`.
 | `OLLAMA_LAPTOP_URL` | — | Ollama endpoint on laptop (via Tailscale, empty = disabled) |
 | `OLLAMA_DEFAULT_MODEL` | `qwen2.5:3b` | Default model for ollama tasks without explicit Model field |
 | `HUGIN_ALLOWED_EGRESS_HOSTS` | — | Comma-separated extra hosts to allow for outbound fetch (added to built-in allowlist) |
+| `HUGIN_INJECTION_POLICY` | `warn` | Prompt-injection policy for context-refs: `off` (no scan), `warn` (prepend warning banner), `block` (quarantine high-severity refs, task continues), `fail` (reject task). See `docs/security/prompt-injection-scanner.md`. |
