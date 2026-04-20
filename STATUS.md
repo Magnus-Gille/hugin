@@ -33,20 +33,43 @@ Codex review on PR #52 caught 6 findings — all fixed before merge:
 
 New files: `src/task-signing.ts`, `scripts/sign-task.mjs`, `docs/security/task-signing.md`, `tests/task-signing.test.ts` (32 tests including cross-language drift guard). 346/346 tests passing.
 
+### Feature: exfiltration scanner for task results (#13, PR #53, `aca095c`, merged)
+
+Regex scanner runs on every task result body before it is written back to Munin. Patterns: PEM private-key headers, API keys (OpenAI sk-, sk-proj-, Anthropic sk-ant-api, GitHub classic + fine-grained PATs, AWS, Google, JWT Bearer), exfil commands (curl/wget/Invoke-WebRequest/fetch POST variants), URLs with sensitive query params, long base64 blobs. Policy modes: `off` / `warn` (default) / `flag` / `redact`. New env var: `HUGIN_EXFIL_POLICY`.
+
+Codex review on PR #53 caught 4 findings — all fixed before merge:
+
+1. (medium) exfil-command regex missed `curl URL -d @file`, URL-before-flag, `-F` uploads → rewrote with flag-before-URL and URL-before-flag alternatives, bounded non-greedy, expanded flag list.
+2. (medium) GitHub fine-grained PATs (`github_pat_…`) missing → added to api-key alternation.
+3. (low) exfil-url keyword list too broad (flagged `key=sort_order`, `session=…`) → narrowed to strictly sensitive names.
+4. (low) `markTaskCancelled()` bypass risk — cancel path wrote result body without scanning → threaded `applyExfilPolicy()` through the helper.
+
+### Feature: provenance enforcement for context-refs (#12, PR #54, `b465928`, merged)
+
+Detects externally sourced Munin entries (via `source:external` tag or `signals/` namespace prefix) and enforces `HUGIN_EXTERNAL_POLICY`: `allow` / `warn` (default, prepends banner) / `block` (quarantines external refs) / `fail` (rejects task). External-policy enforcement runs before injection-policy so `fail`/`block` external refs are handled consistently.
+
+Codex review on PR #54 caught 2 findings — both fixed before merge:
+
+1. (medium) `HUGIN_EXTERNAL_POLICY` parsed lazily inside `resolveContextRefs()`; a misspelled value would throw on every poll and wedge the queue → parsed once at startup into `config.externalPolicy` and threaded through.
+2. (low) Docs claimed provenance fields surfaced in journal/structured-result but implementation did not write them → added `external_policy`, `max_provenance`, `context_refs_external`, `external_blocked` to ollama journal extras; doc narrowed to reflect actual exposure.
+
+New files: `src/provenance.ts`, `docs/security/provenance-enforcement.md`, `tests/provenance.test.ts`. 400/400 tests passing.
+
 ## Blockers
 None.
 
 ## Next Steps
-- **Security backlog:** #12 (provenance tagging), #13 (exfiltration detection)
-- **Submitter rollout for signing** — per-submitter helpers for Codex CLI, Ratatoskr, /submit-task skill; documented in docs/security/task-signing.md as known follow-ups
-- **Flip signing policy to `warn` on Pi** once first submitter is wired
-- **Phase 7: Methodology templates** (#5) — next feature phase
-- **Orphan branch cleanup** — prune `hugin/*` branches older than 7d with no open PR (follow-up to #47)
+- **Security sprint — DONE** (#10 ✅ #11 ✅ #12 ✅ #13 ✅). Remaining: operational rollout.
+- **Submitter rollout for signing** — per-submitter helpers for Codex CLI, Ratatoskr, /submit-task skill; documented in docs/security/task-signing.md as known follow-ups.
+- **Flip signing policy to `warn` on Pi** once first submitter is wired.
+- **Roll `HUGIN_EXFIL_POLICY` and `HUGIN_EXTERNAL_POLICY` past `warn`** once banner volume on real traffic is understood.
+- **Phase 7: Methodology templates** (#5) — next feature phase.
+- **Orphan branch cleanup** — prune `hugin/*` branches older than 7d with no open PR (follow-up to #47).
 
 ## Plan Status
 - **Phases 1-6** — done and live-validated.
 - **Phase 7: Methodology templates** — not started.
-- **Security hardening sprint** — #10 ✅ #11 ✅ #12 #13 pending.
+- **Security hardening sprint** — #10 ✅ #11 ✅ #12 ✅ #13 ✅ — all shipped.
 
 ---
 
