@@ -96,6 +96,7 @@ hugin/
 │   ├── ollama-executor.ts # Ollama executor (streaming, OpenAI-compatible API)
 │   ├── ollama-hosts.ts    # Lazy host resolution with negative caching
 │   ├── context-loader.ts  # Context-refs resolver (fetch Munin entries for prompt injection)
+│   ├── prompt-injection-scanner.ts # Regex scanner for adversarial patterns in context-ref content
 │   └── munin-client.ts    # HTTP client for Munin JSON-RPC API
 ├── tests/
 │   ├── dispatcher.test.ts
@@ -155,3 +156,4 @@ MUNIN_API_KEY=<same key Munin uses>
 | `OLLAMA_PI_URL` | `http://127.0.0.1:11434` | Ollama endpoint on Pi (local) |
 | `OLLAMA_LAPTOP_URL` | — | Ollama endpoint on laptop (via Tailscale, empty = disabled) |
 | `OLLAMA_DEFAULT_MODEL` | `qwen2.5:3b` | Default model for ollama tasks without explicit Model field |
+| `HUGIN_INJECTION_POLICY` | `warn` | Prompt-injection policy for context-refs: `off` (no scan), `warn` (prepend warning banner), `block` (quarantine high-severity refs, task continues), `fail` (reject task). See `docs/security/prompt-injection-scanner.md`. |

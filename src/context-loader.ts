@@ -157,7 +157,6 @@ export async function resolveContextRefs(
     };
 
     refsResolved.push(refStr);
-    maxSens = maxSensitivity(maxSens, sensitivity);
     maxInjectionSev =
       compareInjectionSeverity(maxInjectionSev, injection.severity) >= 0
         ? maxInjectionSev
@@ -175,10 +174,9 @@ export async function resolveContextRefs(
       meta.quarantined = true;
       refsQuarantined.push(refStr);
       resolvedRefs.push(meta);
-      // Skip remaining refs — task will be rejected by the caller.
-      for (let j = i + 1; j < validRefs.length; j++) {
-        refsResolved.push(validRefs[j].refStr);
-      }
+      // Stop scanning — caller will reject the task. Remaining refs are
+      // neither resolved nor missing from our perspective; leave them out
+      // of refsResolved/refsMissing rather than misreport them.
       break;
     }
 
@@ -189,9 +187,12 @@ export async function resolveContextRefs(
       sections.push(
         `### ${refStr}\n[quarantined: prompt-injection scanner flagged ${injection.severity} severity patterns]`,
       );
+      // Quarantined content never reaches the prompt — do not let its
+      // classification influence sensitivity routing or gating.
       continue;
     }
 
+    maxSens = maxSensitivity(maxSens, sensitivity);
     resolvedRefs.push(meta);
     let body = result.content;
     if (policy === "warn" && injection.severity !== "none") {
