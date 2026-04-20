@@ -20,6 +20,7 @@ import { executeSdkTask } from "./sdk-executor.js";
 import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus, probeAllHosts, warmModel, getLoadedModels } from "./ollama-hosts.js";
 import { resolveContextRefs } from "./context-loader.js";
+import { parseExternalPolicy, type ExternalPolicy } from "./provenance.js";
 import {
   scanForExfiltration,
   redactExfiltration,
@@ -234,6 +235,7 @@ const config = {
   signingPolicy: parseSigningPolicy(process.env.HUGIN_SIGNING_POLICY) as SigningPolicy,
   submitterKeys: loadKeyStoreFromEnv() as KeyStore,
   exfilPolicy: parseExfilPolicy(process.env.HUGIN_EXFIL_POLICY),
+  externalPolicy: parseExternalPolicy(process.env.HUGIN_EXTERNAL_POLICY),
 };
 
 if (config.signingPolicy !== "off") {
@@ -651,6 +653,7 @@ async function assessTaskSecurity(task: TaskConfig): Promise<SensitivityAssessme
       task.contextRefs,
       task.contextBudget,
       munin,
+      { externalPolicy: config.externalPolicy },
     );
   }
 
@@ -789,6 +792,20 @@ function getInjectionViolationForTask(task: TaskConfig): string | null {
   return (
     `Task rejected by HUGIN_INJECTION_POLICY=fail: context-ref "${flagged.ref}" ` +
     `matched ${severity}-severity prompt-injection patterns [${patterns}]`
+  );
+}
+
+function getExternalProvenanceViolationForTask(task: TaskConfig): string | null {
+  const resolution = task.contextResolution;
+  if (!resolution || !resolution.externalBlocked) return null;
+  const flagged = resolution.refs.find(
+    (ref) => ref.provenance === "external" && ref.quarantined,
+  );
+  if (!flagged) return null;
+  const reason = flagged.provenanceReason || "source:external";
+  return (
+    `Task rejected by HUGIN_EXTERNAL_POLICY=fail: context-ref "${flagged.ref}" ` +
+    `is externally sourced (${reason})`
   );
 }
 
@@ -2652,7 +2669,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
     const securityViolation =
       getSecurityViolationForTask(parsedTask, sensitivityAssessment) ||
-      getInjectionViolationForTask(parsedTask);
+      getInjectionViolationForTask(parsedTask) ||
+      getExternalProvenanceViolationForTask(parsedTask);
     if (securityViolation) {
       const classification = getTaskArtifactClassification(parsedTask);
       await munin.write(
@@ -2982,6 +3000,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         context_truncated: contextResolution?.truncated || false,
         injection_policy: contextResolution?.injectionPolicy || "off",
         injection_max_severity: contextResolution?.maxInjectionSeverity || "none",
+        external_policy: contextResolution?.externalPolicy || "warn",
+        max_provenance: contextResolution?.maxProvenance || "trusted",
+        context_refs_external: contextResolution?.refsExternal || [],
+        external_blocked: contextResolution?.externalBlocked || false,
       };
     }
 
@@ -3005,6 +3027,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         context_truncated: contextResolution?.truncated || false,
         injection_policy: contextResolution?.injectionPolicy || "off",
         injection_max_severity: contextResolution?.maxInjectionSeverity || "none",
+        external_policy: contextResolution?.externalPolicy || "warn",
+        max_provenance: contextResolution?.maxProvenance || "trusted",
+        context_refs_external: contextResolution?.refsExternal || [],
+        external_blocked: contextResolution?.externalBlocked || false,
       };
     }
     currentOllamaAbort = null;

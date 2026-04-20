@@ -108,6 +108,7 @@ hugin/
 │   ├── context-loader.ts         # Context-refs resolver with classification metadata
 │   ├── prompt-injection-scanner.ts # Regex scanner for adversarial patterns in context-ref content
 │   ├── exfiltration-scanner.ts   # Regex scanner for data-leak patterns in task output
+│   ├── provenance.ts             # External-vs-trusted provenance detection for context-refs
 │   ├── task-signing.ts           # HMAC-SHA256 task submission signing/verification
 │   ├── munin-client.ts           # HTTP client for Munin JSON-RPC API
 │   ├── router.ts                 # Runtime auto-routing (pure function, filter/rank chain)
@@ -201,6 +202,7 @@ Security assessments, threat models, and audit reports live in `docs/security/`.
 | `HUGIN_ALLOWED_EGRESS_HOSTS` | — | Comma-separated extra hosts to allow for outbound fetch (added to built-in allowlist) |
 | `HUGIN_INJECTION_POLICY` | `warn` | Prompt-injection policy for context-refs: `off` (no scan), `warn` (prepend warning banner), `block` (quarantine high-severity refs, task continues), `fail` (reject task). See `docs/security/prompt-injection-scanner.md`. |
 | `HUGIN_EXFIL_POLICY` | `warn` | Exfiltration scanner policy for task results: `off` (no scan), `warn` (log + append security-scan section), `flag` (warn + tag result `security:exfil-suspected`), `redact` (flag + replace matches with `[redacted: <pattern>]`). See `docs/security/exfiltration-scanner.md`. |
+| `HUGIN_EXTERNAL_POLICY` | `warn` | Provenance policy for externally sourced context-refs (entries tagged `source:external` or in the `signals/` namespace): `allow` (inject with banner only), `warn` (banner + log, default), `block` (quarantine external refs, task continues), `fail` (reject task). See `docs/security/provenance-enforcement.md`. |
 | `HUGIN_SIGNING_POLICY` | `off` | Task signature verification policy: `off` (skip), `warn` (log missing/invalid, never reject), `require` (reject tasks without a valid signature). See `docs/security/task-signing.md`. |
 | `HUGIN_SUBMITTER_KEYS` | — | Inline JSON keystore: `{"<keyId>": "<hex-secret>"}` (64-char hex preferred; base64 accepted). |
 | `HUGIN_SUBMITTER_KEYS_FILE` | — | Path to a JSON keystore file. Takes precedence over `HUGIN_SUBMITTER_KEYS`. |

@@ -21,6 +21,7 @@ function makeEntry(
   key: string,
   content: string,
   classification: string,
+  tags: string[] = [],
 ): BatchEntry {
   return {
     found: true,
@@ -28,7 +29,7 @@ function makeEntry(
     namespace,
     key,
     content,
-    tags: [],
+    tags,
     classification,
     created_at: "2026-04-04T10:00:00Z",
     updated_at: "2026-04-04T10:00:00Z",
@@ -264,6 +265,218 @@ describe("context-loader", () => {
       );
       expect(resolution.content).not.toMatch(/prompt-injection scanner flagged/);
       expect(resolution.maxInjectionSeverity).toBe("none");
+    });
+  });
+
+  describe("provenance / external policy", () => {
+    it("marks entries with source:external tag as external", async () => {
+      const munin = {
+        async readBatch(refs: BatchRef[]): Promise<BatchEntry[]> {
+          return refs.map(({ namespace, key }) =>
+            makeEntry(namespace, key, "external report body", "internal", [
+              "source:external",
+            ]),
+          );
+        },
+      };
+      const resolution = await resolveContextRefs(
+        ["projects/hugin/status"],
+        8_000,
+        munin as never,
+        { externalPolicy: "warn" },
+      );
+      expect(resolution.maxProvenance).toBe("external");
+      expect(resolution.refsExternal).toEqual(["projects/hugin/status"]);
+      expect(resolution.refs[0].provenance).toBe("external");
+      expect(resolution.refs[0].provenanceReason).toMatch(/source:external/);
+    });
+
+    it("marks entries in signals/ namespace as external", async () => {
+      const munin = {
+        async readBatch(refs: BatchRef[]): Promise<BatchEntry[]> {
+          return refs.map(({ namespace, key }) =>
+            makeEntry(namespace, key, "inbound signal", "internal"),
+          );
+        },
+      };
+      const resolution = await resolveContextRefs(
+        ["signals/telegram/latest"],
+        8_000,
+        munin as never,
+        { externalPolicy: "warn" },
+      );
+      expect(resolution.maxProvenance).toBe("external");
+      expect(resolution.refsExternal).toEqual(["signals/telegram/latest"]);
+      expect(resolution.refs[0].provenance).toBe("external");
+      expect(resolution.refs[0].provenanceReason).toMatch(/namespace signals/);
+    });
+
+    it("treats non-tagged entries outside signals/ as trusted", async () => {
+      const munin = {
+        async readBatch(refs: BatchRef[]): Promise<BatchEntry[]> {
+          return refs.map(({ namespace, key }) =>
+            makeEntry(namespace, key, "internal note", "internal"),
+          );
+        },
+      };
+      const resolution = await resolveContextRefs(
+        ["projects/hugin/status"],
+        8_000,
+        munin as never,
+        { externalPolicy: "warn" },
+      );
+      expect(resolution.maxProvenance).toBe("trusted");
+      expect(resolution.refsExternal).toEqual([]);
+      expect(resolution.refs[0].provenance).toBe("trusted");
+    });
+
+    it("in warn mode prepends a provenance banner to external refs", async () => {
+      const munin = {
+        async readBatch(refs: BatchRef[]): Promise<BatchEntry[]> {
+          return refs.map(({ namespace, key }) =>
+            makeEntry(namespace, key, "external report body", "internal", [
+              "source:external",
+            ]),
+          );
+        },
+      };
+      const resolution = await resolveContextRefs(
+        ["projects/hugin/status"],
+        8_000,
+        munin as never,
+        { externalPolicy: "warn" },
+      );
+      expect(resolution.content).toMatch(/came from an external source/);
+      expect(resolution.content).toMatch(/external report body/);
+      expect(resolution.externalBlocked).toBe(false);
+    });
+
+    it("in allow mode still prepends the provenance banner", async () => {
+      const munin = {
+        async readBatch(refs: BatchRef[]): Promise<BatchEntry[]> {
+          return refs.map(({ namespace, key }) =>
+            makeEntry(namespace, key, "external report body", "internal", [
+              "source:external",
+            ]),
+          );
+        },
+      };
+      const resolution = await resolveContextRefs(
+        ["signals/rss/latest"],
+        8_000,
+        munin as never,
+        { externalPolicy: "allow" },
+      );
+      expect(resolution.content).toMatch(/came from an external source/);
+      expect(resolution.refsQuarantined).toEqual([]);
+    });
+
+    it("in block mode quarantines external refs with a quarantine notice", async () => {
+      const munin = {
+        async readBatch(refs: BatchRef[]): Promise<BatchEntry[]> {
+          return refs.map(({ namespace, key }) =>
+            makeEntry(namespace, key, "external report body", "internal", [
+              "source:external",
+            ]),
+          );
+        },
+      };
+      const resolution = await resolveContextRefs(
+        ["projects/hugin/status"],
+        8_000,
+        munin as never,
+        { externalPolicy: "block" },
+      );
+      expect(resolution.refsQuarantined).toEqual(["projects/hugin/status"]);
+      expect(resolution.refs[0].quarantined).toBe(true);
+      expect(resolution.content).toMatch(/\[quarantined: external-source/);
+      expect(resolution.content).not.toMatch(/external report body/);
+      expect(resolution.externalBlocked).toBe(false);
+    });
+
+    it("in fail mode sets externalBlocked=true and stops processing", async () => {
+      const munin = {
+        async readBatch(refs: BatchRef[]): Promise<BatchEntry[]> {
+          return refs.map(({ namespace, key }) => {
+            if (namespace === "signals") {
+              return makeEntry(namespace, key, "poisoned signal", "internal");
+            }
+            return makeEntry(namespace, key, "benign content", "internal");
+          });
+        },
+      };
+      const resolution = await resolveContextRefs(
+        ["signals/bad", "projects/good/status"],
+        8_000,
+        munin as never,
+        { externalPolicy: "fail" },
+      );
+      expect(resolution.externalBlocked).toBe(true);
+      expect(resolution.refsQuarantined).toEqual(["signals/bad"]);
+      expect(resolution.refsResolved).toEqual(["signals/bad"]);
+      expect(resolution.refsMissing).toEqual([]);
+    });
+
+    it("does not flag trusted refs even when external policy=fail", async () => {
+      const munin = {
+        async readBatch(refs: BatchRef[]): Promise<BatchEntry[]> {
+          return refs.map(({ namespace, key }) =>
+            makeEntry(namespace, key, "trusted content", "internal"),
+          );
+        },
+      };
+      const resolution = await resolveContextRefs(
+        ["projects/hugin/status"],
+        8_000,
+        munin as never,
+        { externalPolicy: "fail" },
+      );
+      expect(resolution.externalBlocked).toBe(false);
+      expect(resolution.refsQuarantined).toEqual([]);
+      expect(resolution.maxProvenance).toBe("trusted");
+    });
+
+    it("external block prevents sensitivity leakage from quarantined refs", async () => {
+      const munin = {
+        async readBatch(refs: BatchRef[]): Promise<BatchEntry[]> {
+          return refs.map(({ namespace, key }) => {
+            if (namespace === "signals") {
+              return makeEntry(
+                namespace,
+                key,
+                "externally sourced secret",
+                "client-confidential",
+              );
+            }
+            return makeEntry(namespace, key, "benign status", "internal");
+          });
+        },
+      };
+      const resolution = await resolveContextRefs(
+        ["signals/bad", "projects/hugin/status"],
+        8_000,
+        munin as never,
+        { externalPolicy: "block" },
+      );
+      expect(resolution.refsQuarantined).toEqual(["signals/bad"]);
+      expect(resolution.maxSensitivity).toBe("internal");
+    });
+
+    it("surfaces externalPolicy in the resolution result", async () => {
+      const munin = {
+        async readBatch(refs: BatchRef[]): Promise<BatchEntry[]> {
+          return refs.map(({ namespace, key }) =>
+            makeEntry(namespace, key, "content", "internal"),
+          );
+        },
+      };
+      const resolution = await resolveContextRefs(
+        ["projects/hugin/status"],
+        8_000,
+        munin as never,
+        { externalPolicy: "block" },
+      );
+      expect(resolution.externalPolicy).toBe("block");
     });
   });
 });
