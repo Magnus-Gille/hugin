@@ -25,9 +25,9 @@ fed; this one guards what the model emits.
 | ID | Severity | What it catches |
 |----|----------|-----------------|
 | `private-key` | high | PEM headers: `-----BEGIN (RSA|EC|DSA|OPENSSH|ENCRYPTED|PGP|ED25519|PRIVATE) [PRIVATE] KEY-----` |
-| `api-key` | high | Common API-key shapes: Anthropic `sk-ant-...`, OpenAI `sk-…`/`sk-proj-…`, GitHub `ghp_`/`ghs_`/`gho_`/`ghu_`/`ghr_`, Slack `xox[baprs]-…`, AWS `AKIA…`, Google `AIza…`, and generic `Bearer <jwt>` |
-| `exfil-command` | high | Outbound HTTP with payload: `curl -X POST` / `--data` / `--post-data` / `--upload-file`, `wget --post-data`, `Invoke-WebRequest … -Method POST`, `fetch('https://…', { method: 'POST' })` |
-| `exfil-url` | medium | URLs with query parameters carrying sensitive keys (`?data=…`, `?token=…`, `?secret=…`, `?password=…`, `?access_token=…`, `?exfil=…`, etc.) |
+| `api-key` | high | Common API-key shapes: Anthropic `sk-ant-...`, OpenAI `sk-…`/`sk-proj-…`, GitHub classic `ghp_`/`ghs_`/`gho_`/`ghu_`/`ghr_`, GitHub fine-grained `github_pat_…`, Slack `xox[baprs]-…`, AWS `AKIA…`, Google `AIza…`, and generic `Bearer <jwt>` |
+| `exfil-command` | high | Outbound HTTP with payload. Matches `curl`/`wget` with URL and payload/method flag in either order (`-X POST`, `--data`/`--data-binary`/`--data-urlencode`/`--data-raw`, `--post-data`, `--upload-file`, `-T`, `-d`, `-F`/`--form`). Also PowerShell `Invoke-WebRequest … -Method POST` and `fetch('https://…', { method: 'POST' })`. Spans are bounded to a single command via newline/`;`/`\|`/backtick terminators (ReDoS-safe). |
+| `exfil-url` | medium | URLs with query parameters carrying narrowly-sensitive keys: `data`, `payload`, `secret`, `token`, `leak`, `exfil`, `password`, `credentials`, `apikey`/`api_key`, `access_token`, `id_token`, `refresh_token`, `client_secret`, `private_key`. Generic names like `key`, `auth`, `session`, `cookie` are **excluded** — they appear too often in benign URLs (sort keys, session ids) and produced corrupting false positives under `redact`. |
 | `base64-blob` | low | Contiguous base64-ish runs of ≥256 characters with no whitespace |
 
 The scanner returns the worst severity observed plus every distinct

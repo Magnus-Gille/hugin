@@ -1938,6 +1938,21 @@ async function markTaskCancelled(
   const classification = getTaskArtifactClassification(task || undefined, entry.content);
   const completedAt = options.completedAt || new Date().toISOString();
   const runtime = getRuntimeFromTags(entry.tags);
+  // Apply exfil policy defensively: today's callers pass no body, but the
+  // helper's signature accepts one, so route body/bodyText through the
+  // scanner so a future caller cannot bypass redaction/tagging.
+  const cancelExfil = applyExfilPolicy(
+    taskNs,
+    options.body ?? "",
+    options.bodyText ?? "",
+    config.exfilPolicy,
+  );
+  const effectiveBody = options.body
+    ? cancelExfil.securitySection
+      ? `${cancelExfil.redactedBody}\n${cancelExfil.securitySection}`
+      : cancelExfil.redactedBody
+    : options.body;
+  const effectiveBodyText = options.bodyText ? cancelExfil.redactedStructured : options.bodyText;
   let approvalMetadata: TaskExecutionApprovalMetadata | undefined;
   if (task?.pipeline?.authority === "gated") {
     const [approvalRequestEntry, approvalDecisionEntry] = await Promise.all([
@@ -1977,9 +1992,9 @@ async function markTaskCancelled(
       replyFormat: task?.replyFormat,
       group: task?.group,
         sequence: task?.sequence,
-        body: options.body,
+        body: effectiveBody,
     }),
-    undefined,
+    cancelExfil.resultTags,
     undefined,
     classification
   );
@@ -2002,7 +2017,7 @@ async function markTaskCancelled(
         runtimeMetadata: options.runtimeMetadata,
         approval: approvalMetadata,
         bodyKind: options.bodyKind,
-        bodyText: options.bodyText,
+        bodyText: effectiveBodyText,
         sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
       }),
       classification,

@@ -66,8 +66,10 @@ const PATTERNS: PatternSpec[] = [
         // OpenAI project/user: sk-proj-<payload>, sk-<40+char>
         "\\bs\u006B-proj-[A-Za-z0-9_\\-]{24,}",
         "\\bs\u006B-[A-Za-z0-9]{40,}",
-        // GitHub PAT/server/oauth/user
+        // GitHub classic PAT/server/oauth/user/refresh
         "\\b\u0067h[pousr]_[A-Za-z0-9]{30,}",
+        // GitHub fine-grained PAT: github_pat_<22+_underscore/alnum>
+        "\\b\u0067ithub_pat_[A-Za-z0-9_]{22,}",
         // Slack
         "\\bxox[baprs]-[A-Za-z0-9\\-]{10,}",
         // AWS access key id
@@ -85,8 +87,11 @@ const PATTERNS: PatternSpec[] = [
     severity: "high",
     regex: new RegExp(
       [
-        // c\u0075rl/wget POST with explicit data flags
-        "\\b(?:c\u0075rl|wget)\\s+(?:-[A-Za-z]+\\s+)*(?:-X\\s+POST|--data|--data-binary|--data-urlencode|--post-data|--upload-file|-T\\s)",
+        // c\u0075rl/wget with URL and a payload/method flag in either order.
+        // Bounded non-greedy runs keep this ReDoS-safe. Command terminators
+        // (newline/`;`/`|`/backtick/`&&`) cap the span to a single command.
+        "\\b(?:c\u0075rl|wget)\\b[^\\n;&|`]{0,200}?(?:-X\\s+(?:POST|PUT)|--data(?:-binary|-urlencode|-raw|-ascii)?|--post-data|--upload-file|\\s-T\\s|\\s-d\\s|\\s-F\\s|--form)[^\\n;&|`]{0,200}?https?:\\/\\/",
+        "\\b(?:c\u0075rl|wget)\\b[^\\n;&|`]{0,200}?https?:\\/\\/[^\\n;&|`]{0,200}?(?:-X\\s+(?:POST|PUT)|--data(?:-binary|-urlencode|-raw|-ascii)?|--post-data|--upload-file|\\s-T\\s|\\s-d\\s|\\s-F\\s|--form)",
         // PowerShell Invoke-WebRequest/RestMethod with Method POST
         "\\bInvoke-(?:WebRequest|RestMethod)\\s+[^\\n]*-Method\\s+(?:POST|PUT)",
         // fetch('...', { method: 'POST' })
@@ -98,8 +103,13 @@ const PATTERNS: PatternSpec[] = [
   {
     id: "exfil-url",
     severity: "medium",
+    // Keyword list is intentionally narrow. Generic names like `key`,
+    // `auth`, `session`, and `cookie` appear in benign URLs too often
+    // (e.g. `?key=sort_order`) and produce corrupting false positives
+    // under `redact`. Keep only keys whose presence in a query string
+    // is a strong signal of credential/data leakage.
     regex:
-      /\bhttps?:\/\/[^\s"'<>\]]+?[?&](?:data|payload|secret|token|leak|exfil|key|password|credentials?|session|cookie|auth|apikey|access_token|id_token|refresh_token)=[^\s"'<>&\]]+/gi,
+      /\bhttps?:\/\/[^\s"'<>\]]+?[?&](?:data|payload|secret|token|leak|exfil|password|credentials?|apikey|api_key|access_token|id_token|refresh_token|client_secret|private_key)=[^\s"'<>&\]]+/gi,
   },
   {
     id: "base64-blob",
