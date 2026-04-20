@@ -18,6 +18,37 @@ export interface OllamaTaskConfig {
   timeoutMs: number;
   maxOutputChars: number;
   injectedContext?: string;
+  /**
+   * Control hybrid-reasoning behaviour for models that generate internal
+   * "thinking" tokens (qwen3, deepseek-r1, gpt-oss, …).
+   * - `false`: force think:false via native /api/chat (fast path, skips reasoning).
+   * - `true`: force think:true via native /api/chat (explicit opt-in to reasoning).
+   * - `undefined`: auto — default to think:false for known reasoning families
+   *   (otherwise use the OpenAI-compat endpoint unchanged).
+   */
+  reasoning?: boolean;
+}
+
+/**
+ * Model-family patterns that emit internal thinking tokens by default AND
+ * accept a boolean `think` parameter to disable it. GPT-OSS is intentionally
+ * omitted: it uses level-based reasoning (`"low"`/`"medium"`/`"high"`) and
+ * ignores boolean values — auto-routing it here would silently do nothing.
+ * If/when Hugin adds level-based reasoning support, extend the task schema
+ * first rather than this list.
+ */
+const REASONING_MODEL_PATTERNS: RegExp[] = [
+  /^qwen3(?:[.:]|$)/i,
+  /^deepseek-r1/i,
+  /^magistral/i,
+];
+
+/**
+ * Returns true when the model family is known to generate internal reasoning
+ * tokens and therefore benefits from explicit `think:false` by default.
+ */
+export function isReasoningModel(model: string): boolean {
+  return REASONING_MODEL_PATTERNS.some((re) => re.test(model));
 }
 
 export interface OllamaExecutorResult {
@@ -122,17 +153,33 @@ export async function executeOllamaTask(
       abortController.abort();
     }, task.timeoutMs);
 
-    const res = await fetch(`${task.ollamaBaseUrl}/v1/chat/completions`, {
+    // Decide whether we need the native /api/chat endpoint (it's the only one
+    // that honours the `think` parameter). Explicit reasoning setting always
+    // wins; otherwise auto-default to think:false for reasoning model families.
+    const needsNativeChat =
+      task.reasoning !== undefined || isReasoningModel(task.model);
+    const thinkValue = task.reasoning ?? false;
+
+    const endpoint = needsNativeChat ? "/api/chat" : "/v1/chat/completions";
+    const body: Record<string, unknown> = {
+      model: task.model,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: userMessage },
+      ],
+      stream: true,
+    };
+    if (needsNativeChat) {
+      body.think = thinkValue;
+      // Log-only metadata — must not go through appendOutput(), which would
+      // pollute output/resultText and corrupt tasks that expect clean JSON.
+      logStream.write(`[Ollama native /api/chat, think:${thinkValue}]\n`);
+    }
+
+    const res = await fetch(`${task.ollamaBaseUrl}${endpoint}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: task.model,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userMessage },
-        ],
-        stream: true,
-      }),
+      body: JSON.stringify(body),
       signal: abortController.signal,
     });
 
@@ -167,6 +214,69 @@ export async function executeOllamaTask(
         reader.cancel().catch(() => {});
       }, remainingMs);
 
+      const processLine = (line: string): void => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+
+        let data: string;
+        if (needsNativeChat) {
+          // Native /api/chat streams NDJSON — each non-empty line is JSON.
+          data = trimmed;
+        } else {
+          // OpenAI-compat streams SSE: `data: {json}` or `data: [DONE]`.
+          if (!trimmed.startsWith("data: ")) return;
+          data = trimmed.slice(6).trim();
+          if (data === "[DONE]") return;
+        }
+
+        try {
+          const chunk = JSON.parse(data);
+
+          if (needsNativeChat) {
+            const delta = chunk.message?.content;
+            if (delta) appendOutput(delta);
+
+            // Capture thinking trace to the log file only (never into
+            // resultText) so opt-in Reasoning: true stays debuggable without
+            // corrupting machine-readable output.
+            const thinking = chunk.message?.thinking;
+            if (thinking) logStream.write(`[thinking] ${thinking}`);
+
+            // Native endpoint embeds usage + timing in the final (done:true)
+            // chunk instead of a separate usage object.
+            if (chunk.done) {
+              if (typeof chunk.prompt_eval_count === "number") {
+                promptTokens = chunk.prompt_eval_count;
+              }
+              if (typeof chunk.eval_count === "number") {
+                completionTokens = chunk.eval_count;
+              }
+              if (promptTokens !== null || completionTokens !== null) {
+                totalTokens = (promptTokens ?? 0) + (completionTokens ?? 0);
+              }
+              if (typeof chunk.total_duration === "number") {
+                inferenceMs = Math.round(chunk.total_duration / 1_000_000);
+              }
+              if (typeof chunk.load_duration === "number") {
+                loadMs = Math.round(chunk.load_duration / 1_000_000);
+              }
+            }
+          } else {
+            const delta = chunk.choices?.[0]?.delta?.content;
+            if (delta) appendOutput(delta);
+
+            // OpenAI-compat usage arrives on the final chunk.
+            if (chunk.usage) {
+              promptTokens = chunk.usage.prompt_tokens ?? null;
+              completionTokens = chunk.usage.completion_tokens ?? null;
+              totalTokens = chunk.usage.total_tokens ?? null;
+            }
+          }
+        } catch {
+          // Skip malformed chunks
+        }
+      };
+
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -176,29 +286,15 @@ export async function executeOllamaTask(
           const lines = buffer.split("\n");
           buffer = lines.pop() || "";
 
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const data = line.slice(6).trim();
-            if (data === "[DONE]") continue;
-
-            try {
-              const chunk = JSON.parse(data);
-              const delta = chunk.choices?.[0]?.delta?.content;
-              if (delta) {
-                appendOutput(delta);
-              }
-
-              // Extract usage from final chunk (OpenAI-compatible format)
-              if (chunk.usage) {
-                promptTokens = chunk.usage.prompt_tokens ?? null;
-                completionTokens = chunk.usage.completion_tokens ?? null;
-                totalTokens = chunk.usage.total_tokens ?? null;
-              }
-            } catch {
-              // Skip malformed chunks
-            }
-          }
+          for (const line of lines) processLine(line);
         }
+
+        // Flush: the final record may arrive without a trailing newline, so
+        // anything left in the buffer (plus any bytes pending in the decoder)
+        // must still be parsed. On /api/chat this chunk carries the done:true
+        // payload with usage + timing metadata.
+        buffer += decoder.decode();
+        if (buffer) processLine(buffer);
       } finally {
         clearTimeout(streamTimer);
       }
@@ -212,13 +308,11 @@ export async function executeOllamaTask(
       }
     }
 
-    // Try to get timing info from ollama's native API response headers or
-    // use a separate call. The /v1/chat/completions endpoint doesn't reliably
-    // include timing, so we estimate from wall clock if needed.
-    // Ollama's native /api/generate returns total_duration and load_duration,
-    // but we're using the OpenAI-compatible endpoint for simplicity.
-    // Record wall-clock inference time as a fallback.
-    inferenceMs = Date.now() - startMs;
+    // Record wall-clock inference time only when the native endpoint didn't
+    // provide timing (OpenAI-compat path has no duration fields).
+    if (inferenceMs === null) {
+      inferenceMs = Date.now() - startMs;
+    }
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
       exitCode = "TIMEOUT";

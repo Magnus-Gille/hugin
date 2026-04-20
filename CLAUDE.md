@@ -50,6 +50,7 @@ Content format:
 - **Reply-format:** summary
 - **Model:** qwen2.5:7b
 - **Ollama-host:** pi | laptop
+- **Reasoning:** true | false
 - **Fallback:** claude | none
 - **Context-refs:** meta/conventions/status, projects/heimdall/status
 - **Context-budget:** 8000
@@ -74,6 +75,7 @@ Content format:
 
 **Ollama-specific fields:**
 - `Ollama-host:` — prefer a specific host (`pi` for local, `laptop` for remote via Tailscale). Default: auto-select.
+- `Reasoning:` — `true` to force `think:true` via native `/api/chat`, `false` to force `think:false`. Omit to auto: reasoning-model families (qwen3/3.5, deepseek-r1, magistral) default to `think:false` via `/api/chat`; other models use the OpenAI-compatible endpoint unchanged. `gpt-oss` uses level-based reasoning (`low`/`medium`/`high`) and is not auto-routed — set `Reasoning:` explicitly only once Hugin supports levels.
 - `Fallback:` — `claude` to fall back to Claude on infra failures (host unreachable, 5xx); `none` (default) to fail without fallback. Semantic failure (model responds but poorly) is never retried — that's experiment data.
 - `Context-refs:` — comma-separated Munin references (`namespace/key`) to fetch and inject into the prompt. Hugin enforces Munin classification against the task/runtime trust boundary before injecting them.
 - `Context-budget:` — max characters for injected context (default 8000). Truncated from end if exceeded.

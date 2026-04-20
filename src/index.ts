@@ -227,6 +227,7 @@ interface TaskConfig {
   sequence?: number;
   model?: string;
   ollamaHost?: string;
+  reasoning?: boolean;
   fallback?: "claude" | "none";
   contextRefs?: string[];
   contextBudget?: number;
@@ -351,6 +352,9 @@ function parseTask(content: string): TaskConfig | null {
   const ollamaHostRaw = content.match(
     /\*\*Ollama-host:\*\*\s*(.+)/i
   )?.[1]?.trim();
+  const reasoningRaw = content.match(
+    /\*\*Reasoning:\*\*\s*(true|false)/i
+  )?.[1]?.toLowerCase();
   const fallbackRaw = content.match(
     /\*\*Fallback:\*\*\s*(claude|none)/i
   )?.[1]?.toLowerCase() as "claude" | "none" | undefined;
@@ -427,6 +431,8 @@ function parseTask(content: string): TaskConfig | null {
     sequence: sequenceStr ? parseInt(sequenceStr) : undefined,
     model: modelRaw || undefined,
     ollamaHost: ollamaHostRaw || undefined,
+    reasoning:
+      reasoningRaw === "true" ? true : reasoningRaw === "false" ? false : undefined,
     fallback: fallbackRaw || undefined,
     contextRefs: contextRefsRaw
       ? contextRefsRaw.split(",").map((r) => r.trim()).filter(Boolean)
@@ -2649,6 +2655,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           timeoutMs: task.timeoutMs,
           maxOutputChars: config.maxOutputChars,
           injectedContext: contextResolution?.content || undefined,
+          reasoning: task.reasoning,
         },
         taskId,
         LOG_DIR,

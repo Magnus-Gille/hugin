@@ -20,7 +20,7 @@ Part of the Grimnir system: **Munin** (memory/brain), **Mímir** (file archive),
 3. Executes via the configured runtime:
    - `claude` (default): Agent SDK `query()` for structured results
    - `codex`: `codex exec --full-auto` spawn
-   - `ollama`: Calls ollama's OpenAI-compatible API with streaming. Supports context injection via `Context-refs` and infra-only fallback to claude.
+   - `ollama`: Streams responses from ollama. Non-reasoning models use the OpenAI-compatible `/v1/chat/completions` endpoint; reasoning-model families (qwen3/3.5, deepseek-r1, magistral) auto-route to the native `/api/chat` endpoint with `think:false` so the model skips internal reasoning tokens. Supports context injection via `Context-refs` and infra-only fallback to claude.
 4. Captures output (SDK message events or stdout/stderr) + streams to per-task log file
 5. Writes result back to Munin, updates tags to `completed` or `failed`
 6. Emits heartbeat to `tasks/_heartbeat` after each poll cycle
@@ -50,6 +50,7 @@ Content format:
 - **Reply-format:** summary
 - **Model:** qwen2.5:7b
 - **Ollama-host:** pi | laptop
+- **Reasoning:** true | false
 - **Fallback:** claude | none
 - **Context-refs:** meta/conventions/status, projects/heimdall/status
 - **Context-budget:** 8000
@@ -72,6 +73,7 @@ Content format:
 
 **Ollama-specific fields:**
 - `Ollama-host:` — prefer a specific host (`pi` for local, `laptop` for remote via Tailscale). Default: auto-select.
+- `Reasoning:` — `true` to force `think:true` via native `/api/chat`, `false` to force `think:false`. Omit to auto: reasoning-model families (qwen3/3.5, deepseek-r1, magistral) default to `think:false` via `/api/chat`; other models use the OpenAI-compatible endpoint unchanged. `gpt-oss` uses level-based reasoning and is not auto-routed.
 - `Fallback:` — `claude` to fall back to claude on infra failures (host unreachable, 5xx); `none` (default) to fail without fallback. Semantic failure (model responds but poorly) is never retried — that's experiment data.
 - `Context-refs:` — comma-separated Munin references (`namespace/key`) to fetch and inject into the prompt. Hugin enforces Munin classification against the task/runtime trust boundary before injecting them.
 - `Context-budget:` — max characters for injected context (default 8000). Truncated from end if exceeded.
