@@ -87,6 +87,15 @@ import {
   buildRuntimeCandidates,
   type RuntimeCapability,
 } from "./runtime-registry.js";
+import {
+  extractSignatureField,
+  loadKeyStoreFromEnv,
+  parseSigningPolicy,
+  verifyTaskSignature,
+  type KeyStore,
+  type SigningPolicy,
+  type VerificationResult,
+} from "./task-signing.js";
 
 const HUGIN_HOME = path.join(process.env.HOME || "/home/magnus", ".hugin");
 const LOG_DIR = path.join(HUGIN_HOME, "logs");
@@ -135,7 +144,21 @@ const config = {
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean),
+  signingPolicy: parseSigningPolicy(process.env.HUGIN_SIGNING_POLICY) as SigningPolicy,
+  submitterKeys: loadKeyStoreFromEnv() as KeyStore,
 };
+
+if (config.signingPolicy !== "off") {
+  const keyIds = Object.keys(config.submitterKeys);
+  console.log(
+    `[signing] policy=${config.signingPolicy} keys=${keyIds.length ? keyIds.join(",") : "(none configured)"}`,
+  );
+  if (config.signingPolicy === "require" && keyIds.length === 0) {
+    console.error(
+      "HUGIN_SIGNING_POLICY=require but no keys configured (set HUGIN_SUBMITTER_KEYS or HUGIN_SUBMITTER_KEYS_FILE). All tasks will be rejected.",
+    );
+  }
+}
 
 const legacyClaudeExecutor = process.env.HUGIN_CLAUDE_EXECUTOR?.trim().toLowerCase();
 if (legacyClaudeExecutor && legacyClaudeExecutor !== "sdk") {
@@ -577,6 +600,95 @@ function getSecurityViolationForTask(
     });
   }
   return null;
+}
+
+interface SigningVerdict {
+  result: VerificationResult;
+  reject: boolean;
+  message: string;
+}
+
+function verifyTaskEntrySignature(
+  taskNs: string,
+  content: string,
+  parsedTask: TaskConfig | null,
+  submittedBy: string,
+): SigningVerdict {
+  const policy = config.signingPolicy;
+  const signatureRaw = extractSignatureField(content);
+
+  if (policy === "off") {
+    return {
+      result: signatureRaw ? { status: "valid" } : { status: "missing" },
+      reject: false,
+      message: "",
+    };
+  }
+
+  // Internally-generated tasks (pipeline phase children, summary tasks,
+  // etc.) are submitted by Hugin itself. They never carry a signature
+  // because there is no external signer — the dispatcher trusts its own
+  // writes. Exempt them so `require` doesn't brick pipeline execution.
+  // When pipeline-aware signing ships (see docs/security/task-signing.md),
+  // this exemption becomes a proper internal signing path.
+  if (submittedBy === "hugin") {
+    return { result: { status: "valid" }, reject: false, message: "" };
+  }
+
+  // Pipeline parent tasks don't produce a TaskConfig here — the HMAC
+  // scheme binds prompt/context-refs, which pipelines express differently
+  // (### Pipeline instead of ### Prompt). Until pipeline signing lands we
+  // cannot accept these under `require`; `warn` passes through.
+  if (!parsedTask) {
+    if (policy === "require") {
+      return {
+        result: { status: "missing" },
+        reject: true,
+        message:
+          "Task rejected by HUGIN_SIGNING_POLICY=require: pipeline tasks cannot be verified by the v1 scheme",
+      };
+    }
+    return { result: { status: "missing" }, reject: false, message: "" };
+  }
+
+  // Use the runtime *as declared in the task body*, not the resolved
+  // execution runtime. Auto-routed tasks sign with `runtime=auto`; the
+  // dispatcher later overwrites parsedTask.runtime with the router's
+  // pick, so reading it here would break verification.
+  const declaredRuntime = parseDeclaredRuntime(content) ?? parsedTask.runtime;
+
+  const params = {
+    taskId: extractTaskId(taskNs),
+    submitter: submittedBy,
+    submittedAt: parsedTask.submittedAt,
+    runtime: declaredRuntime,
+    prompt: parsedTask.prompt,
+    contextRefs: parsedTask.contextRefs,
+  };
+
+  const result = verifyTaskSignature(params, signatureRaw, config.submitterKeys);
+
+  if (result.status === "valid") {
+    console.log(`[signing] task ${taskNs} signature valid (keyId=${result.keyId})`);
+    return { result, reject: false, message: "" };
+  }
+
+  const descriptor =
+    result.status === "missing"
+      ? "missing Signature field"
+      : `${result.status}${result.reason ? ` (${result.reason})` : ""}`;
+
+  if (policy === "warn") {
+    console.warn(`[signing] task ${taskNs} ${descriptor} — policy=warn, proceeding`);
+    return { result, reject: false, message: "" };
+  }
+
+  // policy === "require"
+  return {
+    result,
+    reject: true,
+    message: `Task rejected by HUGIN_SIGNING_POLICY=require: ${descriptor}`,
+  };
 }
 
 function getInjectionViolationForTask(task: TaskConfig): string | null {
@@ -2352,6 +2464,30 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       taskNs,
       `Task rejected: submitter "${submittedBy}" not authorized`
     );
+    await promoteDependents(extractTaskId(taskNs));
+    await refreshPipelineSummaryFromContent(entry.content);
+    return { hadTask: true, queueDepth };
+  }
+
+  // Verify task signature per HUGIN_SIGNING_POLICY
+  const signingVerdict = verifyTaskEntrySignature(
+    taskNs,
+    entry.content,
+    parsedTask,
+    submittedBy,
+  );
+  if (signingVerdict.reject) {
+    console.warn(
+      `Rejecting task ${taskNs}: signature ${signingVerdict.result.status}` +
+        (signingVerdict.result.reason ? ` (${signingVerdict.result.reason})` : ""),
+    );
+    await failTaskWithMessage(
+      taskNs,
+      entry,
+      signingVerdict.message,
+      declaredRuntime === "pipeline" ? "runtime:pipeline" : undefined,
+    );
+    await munin.log(taskNs, `Task rejected by signing policy: ${signingVerdict.message}`);
     await promoteDependents(extractTaskId(taskNs));
     await refreshPipelineSummaryFromContent(entry.content);
     return { hadTask: true, queueDepth };

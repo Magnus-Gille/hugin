@@ -107,6 +107,7 @@ hugin/
 │   ├── ollama-hosts.ts           # Lazy host resolution with negative caching
 │   ├── context-loader.ts         # Context-refs resolver with classification metadata
 │   ├── prompt-injection-scanner.ts # Regex scanner for adversarial patterns in context-ref content
+│   ├── task-signing.ts           # HMAC-SHA256 task submission signing/verification
 │   ├── munin-client.ts           # HTTP client for Munin JSON-RPC API
 │   ├── router.ts                 # Runtime auto-routing (pure function, filter/rank chain)
 │   ├── runtime-registry.ts       # Canonical runtime definitions (trust, cost, capabilities)
@@ -198,3 +199,6 @@ Security assessments, threat models, and audit reports live in `docs/security/`.
 | `OLLAMA_DEFAULT_MODEL` | `qwen2.5:3b` | Default model for ollama tasks without explicit Model field |
 | `HUGIN_ALLOWED_EGRESS_HOSTS` | — | Comma-separated extra hosts to allow for outbound fetch (added to built-in allowlist) |
 | `HUGIN_INJECTION_POLICY` | `warn` | Prompt-injection policy for context-refs: `off` (no scan), `warn` (prepend warning banner), `block` (quarantine high-severity refs, task continues), `fail` (reject task). See `docs/security/prompt-injection-scanner.md`. |
+| `HUGIN_SIGNING_POLICY` | `off` | Task signature verification policy: `off` (skip), `warn` (log missing/invalid, never reject), `require` (reject tasks without a valid signature). See `docs/security/task-signing.md`. |
+| `HUGIN_SUBMITTER_KEYS` | — | Inline JSON keystore: `{"<keyId>": "<hex-secret>"}` (64-char hex preferred; base64 accepted). |
+| `HUGIN_SUBMITTER_KEYS_FILE` | — | Path to a JSON keystore file. Takes precedence over `HUGIN_SUBMITTER_KEYS`. |
