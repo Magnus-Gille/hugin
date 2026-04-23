@@ -173,10 +173,17 @@ Do the thing.
   submitter allowlist; both layers must pass. An invalid submitter
   with a valid signature still fails.
 
+## Submitter rollout status
+
+| Submitter | Status | Notes |
+|-----------|--------|-------|
+| Ratatoskr | ✅ wired | `src/task-signing.ts` + `RATATOSKR_SIGNING_SECRET`. Cross-drift test spawns `sign-task.mjs`. |
+| `/submit-task` skill (claude-code) | ✅ wired | Step 7b invokes `scripts/sign-task.mjs` when `HUGIN_SIGNING_SECRET` is set. |
+| claude-desktop / claude-web / claude-mobile | ⬜ deferred | No shell access to run the helper. Needs a Munin-side signer or a chat-host delegate before `require` is safe. |
+| Codex CLI (codex-desktop / codex-web / codex-mobile) | ⬜ deferred | Codex submits via `memory_write` MCP — needs either a CLI wrapper or an MCP signing tool. |
+
 ## Known follow-ups
 
-- Per-submitter rollout (Codex CLI, Ratatoskr, /submit-task skill,
-  claude-code sessions) — tracked separately.
 - Pipeline task signing — the `Runtime: pipeline` branch skips HMAC
   verification because its parsed fields differ; add a pipeline-aware
   canonical payload when pipeline submitters adopt signing.

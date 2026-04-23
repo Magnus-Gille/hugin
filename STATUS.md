@@ -1,9 +1,20 @@
 # Hugin — Status
 
-**Last session:** 2026-04-20
+**Last session:** 2026-04-23
 **Branch:** main
 
-## Completed This Session (2026-04-20)
+## Completed This Session (2026-04-23)
+
+### Submitter rollout for HMAC task signing (#11 follow-up)
+
+First two submitters now speak the v1 signing scheme shipped in #11 (PR #52):
+
+- **Ratatoskr** (`repos/ratatoskr`): added `src/task-signing.ts` mirroring hugin's canonicalization; `src/task-writer.ts` embeds `**Signature:** v1:<keyId>:<hex>` when `RATATOSKR_SIGNING_SECRET` is set, omits otherwise (backwards-compat during rollout). Config adds `RATATOSKR_SIGNING_SECRET`/`RATATOSKR_SIGNING_KEY_ID`. Tests include a cross-language drift guard that spawns `hugin/scripts/sign-task.mjs` and asserts byte-equal output. 93/93 tests passing, build green.
+- **`/submit-task` skill** (`~/.claude/skills/submit-task/SKILL.md`): new Step 7b invokes `scripts/sign-task.mjs` from claude-code when `HUGIN_SIGNING_SECRET` is in env; documents the limitation that desktop/web/mobile environments can't sign (no shell access) and submit unsigned during rollout.
+
+No changes on Hugin side — verification already shipped and defaults to `HUGIN_SIGNING_POLICY=off`. Next: distribute secrets to Pi, flip to `warn`, watch log for any straggler submitters.
+
+## Completed 2026-04-20
 
 ### Merged PR #49 (`feat/ollama-think-false`, `c404ad1`)
 Merged at session start. Reasoning models (qwen3/3.5, deepseek-r1, magistral) now auto-route to `/api/chat` with `think:false`, cutting inference latency 90s → 2s on Pi.
@@ -60,8 +71,9 @@ None.
 
 ## Next Steps
 - **Security sprint — DONE** (#10 ✅ #11 ✅ #12 ✅ #13 ✅). Remaining: operational rollout.
-- **Submitter rollout for signing** — per-submitter helpers for Codex CLI, Ratatoskr, /submit-task skill; documented in docs/security/task-signing.md as known follow-ups.
-- **Flip signing policy to `warn` on Pi** once first submitter is wired.
+- **Submitter rollout for signing** — Ratatoskr ✅ / `/submit-task` skill (claude-code) ✅ / Codex CLI (codex-desktop, codex-web, codex-mobile) ⬜ / pipeline-parent signing (v1 doesn't bind `### Pipeline` bodies) ⬜.
+- **Deploy signing secrets to Pi**: generate one 64-char hex per signer; put matching entries into `HUGIN_SUBMITTER_KEYS` on Hugin; deliver the corresponding secret to each submitter host (`RATATOSKR_SIGNING_SECRET` on Ratatoskr; `HUGIN_SIGNING_SECRET` on laptop claude-code).
+- **Flip `HUGIN_SIGNING_POLICY=warn` on Pi** once the first submitter is signing in the field, watch `[signing]` log lines for stragglers, promote to `require` after ≥72h clean.
 - **Roll `HUGIN_EXFIL_POLICY` and `HUGIN_EXTERNAL_POLICY` past `warn`** once banner volume on real traffic is understood.
 - **Phase 7: Methodology templates** (#5) — next feature phase.
 - **Orphan branch cleanup** — prune `hugin/*` branches older than 7d with no open PR (follow-up to #47).
