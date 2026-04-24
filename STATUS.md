@@ -1,7 +1,34 @@
 # Hugin — Status
 
-**Last session:** 2026-04-23
+**Last session:** 2026-04-24
 **Branch:** main
+
+## Completed This Session (2026-04-24)
+
+### Fix: independent lease reaper timer (#38 #58, PR #61, `c4d3932` + `9d3d1c3`, merged + deployed)
+
+Root cause of two tasks appearing `running` simultaneously: `reapExpiredLeases()` ran inside `pollOnce`, which blocks for the duration of a task. A task running for minutes meant the reaper was frozen too, leaving orphan `running` tags uncollected.
+
+Fix:
+- Moved reaper to a dedicated `setInterval` at 60s (`LEASE_REAPER_INTERVAL_MS`)
+- Added `startLeaseReaper()` / `stopLeaseReaper()` with in-flight guard and shutdown hook
+- Added dedicated `reaperMunin` client so reaper traffic never queues behind task-completion writes or inherits task-scoped session IDs
+- Updated stale comments in `src/index.ts` and `src/task-helpers.ts`
+
+Codex review (`gpt-5.4 xhigh`) flagged shared `MuninClient` contention (medium) and stale comments (low) — both fixed in `9d3d1c3` before push.
+
+Deployed to Pi (`huginmunin.local`, PID `hugin-huginmunin-2690885`). Post-deploy state verified: `polling: true`, `current_task: null`. The two research sweeps dispatched earlier resolved: codex orchestrator → `failed` (reaped, expired lease), drone → `completed`.
+
+### Cleanup: stale legacy test entry deleted from Munin
+
+`tasks/20260406-192449-mis-1-public-but-private-ref` — April 6 test entry manually written to `running` state with no lease metadata. Would never be auto-reaped (by design). Deleted entire namespace (3 state entries + 10 logs).
+
+### Issues filed (added to Grimnir Roadmap #1)
+
+- **#57** — non-atomic task completion: `completed` write can fail after result write, leaving permanent `running` tag
+- **#58** — reaper blocked inside poll loop (fixed this session ✅)
+- **#59** — no CLI auto-update routine for major bumps (codex/claude)
+- **#60** — `update-cli.sh` uses `npm update -g` (misses major version bumps)
 
 ## Completed This Session (2026-04-23)
 
