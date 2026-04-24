@@ -93,6 +93,11 @@ Codex review on PR #54 caught 2 findings — both fixed before merge:
 
 New files: `src/provenance.ts`, `docs/security/provenance-enforcement.md`, `tests/provenance.test.ts`. 400/400 tests passing.
 
+## In Progress
+
+### Research: OSS orchestrator sweep (`20260424-061340-orchestrator-sweep`, runtime:codex)
+Decision-grade sweep of ~20 orchestration candidates (Nomad, Temporal, BullMQ, Inngest, Ray, etc.) against Grimnir's fleet constraints (ARM64 Pi + Apple Silicon, no cloud, raw process execution, sensitivity placement). Deliverable: `docs/research/orchestrator-sweep.md` committed to repo + popular summary to `~/mimir/reading/`. Task was dispatched but reaped (expired lease on first attempt) — check task status and resubmit if needed.
+
 ## Blockers
 None.
 
@@ -104,6 +109,8 @@ None.
 - **Roll `HUGIN_EXFIL_POLICY` and `HUGIN_EXTERNAL_POLICY` past `warn`** once banner volume on real traffic is understood.
 - **Phase 7: Methodology templates** (#5) — next feature phase.
 - **Orphan branch cleanup** — prune `hugin/*` branches older than 7d with no open PR (follow-up to #47).
+- **Multi-host dispatch planning** — architecture discussion concluded: coordinator-for-decisions + peers-for-execution shape preferred. Waiting on orchestrator sweep results before committing to DIY vs adopt (Nomad likely candidate for placement layer).
+- **openai/privacy-filter evaluation** (#56) — evaluate for local PII redaction on Pi/MacBook/Mac Studio; integration points: exfil scanner, sensitivity inference, context-ref sanitization.
 
 ## Plan Status
 - **Phases 1-6** — done and live-validated.
