@@ -267,6 +267,7 @@ if (!config.muninApiKey) {
 
 const LEASE_DURATION_MS = 120_000; // 2 minutes — renewed during execution
 const LEASE_RENEWAL_INTERVAL_MS = 60_000; // renew every 60s
+const LEASE_REAPER_INTERVAL_MS = 60_000; // scan for expired foreign leases every 60s
 
 const workerId = `hugin-${os.hostname()}-${process.pid}`;
 
@@ -285,6 +286,8 @@ let currentOllamaAbort: AbortController | null = null;
 let server: Server;
 let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
 let cancelWatchTimer: ReturnType<typeof setInterval> | null = null;
+let leaseReaperTimer: ReturnType<typeof setInterval> | null = null;
+let leaseReaperInFlight = false;
 let lastQueueDepth = 0;
 let lastBlockedTaskCount = 0;
 const startedAt = Date.now();
@@ -1721,6 +1724,28 @@ async function reapExpiredLeases(): Promise<void> {
     }
   } catch (err) {
     console.error("Failed to reap expired leases:", err);
+  }
+}
+
+// Independent reaper timer so expired foreign leases get cleaned up even when
+// `pollOnce` is blocked on a long-running current task. The reaper only acts on
+// tasks it doesn't own (or whose lease has expired), so running concurrently
+// with the dispatcher's current task is safe.
+function startLeaseReaper(): void {
+  stopLeaseReaper();
+  leaseReaperTimer = setInterval(() => {
+    if (leaseReaperInFlight || shuttingDown) return;
+    leaseReaperInFlight = true;
+    void reapExpiredLeases().finally(() => {
+      leaseReaperInFlight = false;
+    });
+  }, LEASE_REAPER_INTERVAL_MS);
+}
+
+function stopLeaseReaper(): void {
+  if (leaseReaperTimer) {
+    clearInterval(leaseReaperTimer);
+    leaseReaperTimer = null;
   }
 }
 
@@ -3467,19 +3492,17 @@ async function pollLoop(): Promise<void> {
   // Pre-warm ollama default model to avoid cold-start latency on first task (fire-and-forget)
   warmModel(config.ollamaDefaultModel).catch(() => {});
 
+  // Start the independent reaper so expired foreign leases get cleaned up even
+  // while pollOnce is blocked on a long-running current task. The poll loop no
+  // longer invokes the reaper — this timer is the single source of truth.
+  startLeaseReaper();
+
   let pollCount = 0;
   while (!shuttingDown) {
     let queueDepth = 0;
     try {
       pollCount++;
       await reconcileTrackedPipelineSummaries();
-      // Reap tasks whose lease expired mid-run (e.g. worker crashed after
-      // claiming). Runs every 5 polls (~2.5 min at default 30s interval) —
-      // cheap but not free, and lease window is 2 minutes so faster cadence
-      // buys little.
-      if (pollCount % 5 === 0) {
-        await reapExpiredLeases();
-      }
       const processedCancellation = await processCancellationRequests();
       const processedResume = await processResumeRequests();
       const processedApproval = await processApprovalDecisions();
@@ -3554,6 +3577,7 @@ async function shutdown(signal: string): Promise<void> {
 
   stopLeaseRenewal();
   stopCancellationWatch();
+  stopLeaseReaper();
 
   // Mark the current task as failed before killing the process
   if (currentTask) {
