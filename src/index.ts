@@ -267,6 +267,7 @@ if (!config.muninApiKey) {
 
 const LEASE_DURATION_MS = 120_000; // 2 minutes — renewed during execution
 const LEASE_RENEWAL_INTERVAL_MS = 60_000; // renew every 60s
+const LEASE_REAPER_INTERVAL_MS = 60_000; // scan for expired foreign leases every 60s
 
 const workerId = `hugin-${os.hostname()}-${process.pid}`;
 
@@ -285,6 +286,8 @@ let currentOllamaAbort: AbortController | null = null;
 let server: Server;
 let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
 let cancelWatchTimer: ReturnType<typeof setInterval> | null = null;
+let leaseReaperTimer: ReturnType<typeof setInterval> | null = null;
+let leaseReaperInFlight = false;
 let lastQueueDepth = 0;
 let lastBlockedTaskCount = 0;
 const startedAt = Date.now();
@@ -319,10 +322,13 @@ const egressPolicy = installFetchEgressPolicy(
 );
 
 const munin = createMuninClient();
-// Keep lease renewal and active-task cancellation polling off the main request
-// slot so a long Retry-After on background work cannot delay them past expiry.
+// Keep lease renewal, active-task cancellation polling, and the independent
+// lease reaper off the main request slot so a long Retry-After on background
+// work cannot delay them past expiry — and so reaper traffic does not queue up
+// behind task-completion writes or contaminate the task-scoped session window.
 const leaseMunin = createMuninClient();
 const cancelWatchMunin = createMuninClient();
+const reaperMunin = createMuninClient();
 
 // --- Task parsing ---
 
@@ -1619,15 +1625,18 @@ async function recoverStaleTasks(): Promise<void> {
   }
 }
 
-// --- Lease reaping (runs mid-poll) ---
+// --- Lease reaping ---
 // `recoverStaleTasks` only runs at startup. While the dispatcher is alive,
 // a crashed runtime or OOM kill can leave a task stuck with the `running` tag
-// past its lease. This reaper scans for such tasks on each poll and fails
-// them with a `lease-expired` reason. Fail-fast: no auto-retry to pending.
+// past its lease. This reaper runs on its own 60s timer (see `startLeaseReaper`)
+// so it is not gated on `pollOnce` finishing the current task, and routes its
+// query + CAS writes through a dedicated `reaperMunin` client so they do not
+// queue behind task-completion writes on the main client. Fail-fast: no
+// auto-retry to pending.
 
 async function reapExpiredLeases(): Promise<void> {
   try {
-    const { results } = await munin.query({
+    const { results } = await reaperMunin.query({
       query: "task",
       tags: ["running"],
       namespace: "tasks/",
@@ -1649,7 +1658,7 @@ async function reapExpiredLeases(): Promise<void> {
       });
       if (!preDecision.reap) continue;
 
-      const entry = await munin.read(result.namespace, "status");
+      const entry = await reaperMunin.read(result.namespace, "status");
       if (!entry) continue;
 
       // Re-check with authoritative tags (lease may have just been renewed).
@@ -1675,7 +1684,7 @@ async function reapExpiredLeases(): Promise<void> {
       const runtime = getRuntimeFromTags(entry.tags);
 
       try {
-        await munin.write(
+        await reaperMunin.write(
           result.namespace,
           "status",
           entry.content,
@@ -1691,7 +1700,7 @@ async function reapExpiredLeases(): Promise<void> {
         continue;
       }
 
-      await munin.write(
+      await reaperMunin.write(
         result.namespace,
         "result",
         `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`,
@@ -1699,6 +1708,10 @@ async function reapExpiredLeases(): Promise<void> {
         undefined,
         classification,
       );
+      // The structured-result write and pipeline/dependent bookkeeping intentionally
+      // stay on the main client — they run after the user-visible `status` flip
+      // has already landed via `reaperMunin`, so queueing them behind in-flight
+      // task-completion traffic no longer keeps finished tasks tagged `running`.
       if (runtime !== "pipeline") {
         await writeStructuredTaskResult(
           result.namespace,
@@ -1715,12 +1728,34 @@ async function reapExpiredLeases(): Promise<void> {
           classification,
         );
       }
-      await munin.log(result.namespace, `Lease reaped: ${errorMessage}`);
+      await reaperMunin.log(result.namespace, `Lease reaped: ${errorMessage}`);
       await promoteDependents(extractTaskId(result.namespace));
       await refreshPipelineSummaryFromContent(entry.content);
     }
   } catch (err) {
     console.error("Failed to reap expired leases:", err);
+  }
+}
+
+// Independent reaper timer so expired foreign leases get cleaned up even when
+// `pollOnce` is blocked on a long-running current task. The reaper only acts on
+// tasks it doesn't own (or whose lease has expired), so running concurrently
+// with the dispatcher's current task is safe.
+function startLeaseReaper(): void {
+  stopLeaseReaper();
+  leaseReaperTimer = setInterval(() => {
+    if (leaseReaperInFlight || shuttingDown) return;
+    leaseReaperInFlight = true;
+    void reapExpiredLeases().finally(() => {
+      leaseReaperInFlight = false;
+    });
+  }, LEASE_REAPER_INTERVAL_MS);
+}
+
+function stopLeaseReaper(): void {
+  if (leaseReaperTimer) {
+    clearInterval(leaseReaperTimer);
+    leaseReaperTimer = null;
   }
 }
 
@@ -3467,19 +3502,17 @@ async function pollLoop(): Promise<void> {
   // Pre-warm ollama default model to avoid cold-start latency on first task (fire-and-forget)
   warmModel(config.ollamaDefaultModel).catch(() => {});
 
+  // Start the independent reaper so expired foreign leases get cleaned up even
+  // while pollOnce is blocked on a long-running current task. The poll loop no
+  // longer invokes the reaper — this timer is the single source of truth.
+  startLeaseReaper();
+
   let pollCount = 0;
   while (!shuttingDown) {
     let queueDepth = 0;
     try {
       pollCount++;
       await reconcileTrackedPipelineSummaries();
-      // Reap tasks whose lease expired mid-run (e.g. worker crashed after
-      // claiming). Runs every 5 polls (~2.5 min at default 30s interval) —
-      // cheap but not free, and lease window is 2 minutes so faster cadence
-      // buys little.
-      if (pollCount % 5 === 0) {
-        await reapExpiredLeases();
-      }
       const processedCancellation = await processCancellationRequests();
       const processedResume = await processResumeRequests();
       const processedApproval = await processApprovalDecisions();
@@ -3554,6 +3587,7 @@ async function shutdown(signal: string): Promise<void> {
 
   stopLeaseRenewal();
   stopCancellationWatch();
+  stopLeaseReaper();
 
   // Mark the current task as failed before killing the process
   if (currentTask) {

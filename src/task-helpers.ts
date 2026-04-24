@@ -151,8 +151,8 @@ function parseLeaseExpiresTag(tags: string[]): number | null {
  * - The currently-executing task on this worker is never reaped (its next
  *   lease renewal is about to land).
  * - Tasks missing lease metadata entirely are left alone; startup recovery
- *   (`recoverStaleTasks`) covers the legacy case, and mid-poll reaping should
- *   only kill tasks we can prove are stuck.
+ *   (`recoverStaleTasks`) covers the legacy case, and the timer-driven reaper
+ *   should only kill tasks we can prove are stuck.
  * - Tasks whose lease expiry is still in the future are left alone.
  */
 export function shouldReapExpiredLease(input: ReapDecisionInput): ReapDecision {
