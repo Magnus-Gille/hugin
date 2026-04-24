@@ -3286,28 +3286,36 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         undefined,
         taskClassification,
       );
-      await writeStructuredTaskResult(
-        taskNs,
-        createCancelledStructuredResult(taskNs, task.runtime, cancellation.reason, {
-          executor: effectiveExecutor,
-          resultSource,
-          startedAt,
-          completedAt,
-          durationSeconds: Math.round(durationMs / 1000),
-          logFile: `~/.hugin/logs/${taskId}.log`,
-          replyTo: task.replyTo,
-          replyFormat: task.replyFormat,
-          group: task.group,
-          sequence: task.sequence,
-          pipeline: task.pipeline,
-          runtimeMetadata,
-          approval: approvalMetadata,
-          bodyKind: structuredBodyKind,
-          bodyText: structuredBodyText,
-          sensitivity: taskSensitivitySnapshot,
-        }),
-        taskClassification,
-      );
+      let postProcessingError: string | null = null;
+      try {
+        await writeStructuredTaskResult(
+          taskNs,
+          createCancelledStructuredResult(taskNs, task.runtime, cancellation.reason, {
+            executor: effectiveExecutor,
+            resultSource,
+            startedAt,
+            completedAt,
+            durationSeconds: Math.round(durationMs / 1000),
+            logFile: `~/.hugin/logs/${taskId}.log`,
+            replyTo: task.replyTo,
+            replyFormat: task.replyFormat,
+            group: task.group,
+            sequence: task.sequence,
+            pipeline: task.pipeline,
+            runtimeMetadata,
+            approval: approvalMetadata,
+            bodyKind: structuredBodyKind,
+            bodyText: structuredBodyText,
+            sensitivity: taskSensitivitySnapshot,
+          }),
+          taskClassification,
+        );
+      } catch (err) {
+        postProcessingError = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `Failed to write structured result for ${taskNs}: ${postProcessingError}. Proceeding to terminal status write so the task does not stay 'running'.`
+        );
+      }
       await munin.write(
         taskNs,
         "status",
@@ -3316,43 +3324,61 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         undefined,
         taskClassification,
       );
+      if (postProcessingError) {
+        try {
+          await munin.log(
+            taskNs,
+            `Post-processing error: structured result write failed (${postProcessingError}). Terminal status still recorded.`
+          );
+        } catch {
+          // Don't let a diagnostic log failure surface as a new error.
+        }
+      }
       await munin.log(
         taskNs,
         `Task cancelled in ${Math.round(durationMs / 1000)}s (reason: ${cancellation.reason}, executor: ${executorLabel})`
       );
     } else {
-      await writeStructuredTaskResult(
-        taskNs,
-        buildStructuredTaskResult({
-          schemaVersion: 1,
-          taskId,
-          taskNamespace: taskNs,
-          lifecycle: ok ? "completed" : "failed",
-          outcome: ok ? "completed" : isTimeout ? "timed_out" : "failed",
-          runtime: task.runtime,
-          executor: effectiveExecutor,
-          resultSource,
-          exitCode,
-          startedAt,
-          completedAt,
-          durationSeconds: Math.round(durationMs / 1000),
-          logFile: `~/.hugin/logs/${taskId}.log`,
-          replyTo: task.replyTo,
-          replyFormat: task.replyFormat,
-          group: task.group,
-          sequence: task.sequence,
-          costUsd: costUsd ?? undefined,
-          prUrl,
-          bodyKind: structuredBodyKind,
-          bodyText: structuredBodyText,
-          errorMessage: ok ? undefined : structuredBodyText,
-          runtimeMetadata,
-          pipeline: task.pipeline,
-          approval: approvalMetadata,
-          sensitivity: taskSensitivitySnapshot,
-        }),
-        taskClassification,
-      );
+      let postProcessingError: string | null = null;
+      try {
+        await writeStructuredTaskResult(
+          taskNs,
+          buildStructuredTaskResult({
+            schemaVersion: 1,
+            taskId,
+            taskNamespace: taskNs,
+            lifecycle: ok ? "completed" : "failed",
+            outcome: ok ? "completed" : isTimeout ? "timed_out" : "failed",
+            runtime: task.runtime,
+            executor: effectiveExecutor,
+            resultSource,
+            exitCode,
+            startedAt,
+            completedAt,
+            durationSeconds: Math.round(durationMs / 1000),
+            logFile: `~/.hugin/logs/${taskId}.log`,
+            replyTo: task.replyTo,
+            replyFormat: task.replyFormat,
+            group: task.group,
+            sequence: task.sequence,
+            costUsd: costUsd ?? undefined,
+            prUrl,
+            bodyKind: structuredBodyKind,
+            bodyText: structuredBodyText,
+            errorMessage: ok ? undefined : structuredBodyText,
+            runtimeMetadata,
+            pipeline: task.pipeline,
+            approval: approvalMetadata,
+            sensitivity: taskSensitivitySnapshot,
+          }),
+          taskClassification,
+        );
+      } catch (err) {
+        postProcessingError = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `Failed to write structured result for ${taskNs}: ${postProcessingError}. Proceeding to terminal status write so the task does not stay 'running'.`
+        );
+      }
 
       await munin.write(
         taskNs,
@@ -3363,6 +3389,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         undefined,
         taskClassification
       );
+      if (postProcessingError) {
+        try {
+          await munin.log(
+            taskNs,
+            `Post-processing error: structured result write failed (${postProcessingError}). Terminal status still recorded.`
+          );
+        } catch {
+          // Don't let a diagnostic log failure surface as a new error.
+        }
+      }
 
       await munin.log(
         taskNs,
