@@ -322,10 +322,13 @@ const egressPolicy = installFetchEgressPolicy(
 );
 
 const munin = createMuninClient();
-// Keep lease renewal and active-task cancellation polling off the main request
-// slot so a long Retry-After on background work cannot delay them past expiry.
+// Keep lease renewal, active-task cancellation polling, and the independent
+// lease reaper off the main request slot so a long Retry-After on background
+// work cannot delay them past expiry — and so reaper traffic does not queue up
+// behind task-completion writes or contaminate the task-scoped session window.
 const leaseMunin = createMuninClient();
 const cancelWatchMunin = createMuninClient();
+const reaperMunin = createMuninClient();
 
 // --- Task parsing ---
 
@@ -1622,15 +1625,18 @@ async function recoverStaleTasks(): Promise<void> {
   }
 }
 
-// --- Lease reaping (runs mid-poll) ---
+// --- Lease reaping ---
 // `recoverStaleTasks` only runs at startup. While the dispatcher is alive,
 // a crashed runtime or OOM kill can leave a task stuck with the `running` tag
-// past its lease. This reaper scans for such tasks on each poll and fails
-// them with a `lease-expired` reason. Fail-fast: no auto-retry to pending.
+// past its lease. This reaper runs on its own 60s timer (see `startLeaseReaper`)
+// so it is not gated on `pollOnce` finishing the current task, and routes its
+// query + CAS writes through a dedicated `reaperMunin` client so they do not
+// queue behind task-completion writes on the main client. Fail-fast: no
+// auto-retry to pending.
 
 async function reapExpiredLeases(): Promise<void> {
   try {
-    const { results } = await munin.query({
+    const { results } = await reaperMunin.query({
       query: "task",
       tags: ["running"],
       namespace: "tasks/",
@@ -1652,7 +1658,7 @@ async function reapExpiredLeases(): Promise<void> {
       });
       if (!preDecision.reap) continue;
 
-      const entry = await munin.read(result.namespace, "status");
+      const entry = await reaperMunin.read(result.namespace, "status");
       if (!entry) continue;
 
       // Re-check with authoritative tags (lease may have just been renewed).
@@ -1678,7 +1684,7 @@ async function reapExpiredLeases(): Promise<void> {
       const runtime = getRuntimeFromTags(entry.tags);
 
       try {
-        await munin.write(
+        await reaperMunin.write(
           result.namespace,
           "status",
           entry.content,
@@ -1694,7 +1700,7 @@ async function reapExpiredLeases(): Promise<void> {
         continue;
       }
 
-      await munin.write(
+      await reaperMunin.write(
         result.namespace,
         "result",
         `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`,
@@ -1702,6 +1708,10 @@ async function reapExpiredLeases(): Promise<void> {
         undefined,
         classification,
       );
+      // The structured-result write and pipeline/dependent bookkeeping intentionally
+      // stay on the main client — they run after the user-visible `status` flip
+      // has already landed via `reaperMunin`, so queueing them behind in-flight
+      // task-completion traffic no longer keeps finished tasks tagged `running`.
       if (runtime !== "pipeline") {
         await writeStructuredTaskResult(
           result.namespace,
@@ -1718,7 +1728,7 @@ async function reapExpiredLeases(): Promise<void> {
           classification,
         );
       }
-      await munin.log(result.namespace, `Lease reaped: ${errorMessage}`);
+      await reaperMunin.log(result.namespace, `Lease reaped: ${errorMessage}`);
       await promoteDependents(extractTaskId(result.namespace));
       await refreshPipelineSummaryFromContent(entry.content);
     }
