@@ -825,8 +825,9 @@ async function writeStructuredTaskResult(
   taskNs: string,
   result: StructuredTaskResult,
   classification?: string,
+  client: MuninClient = munin,
 ): Promise<void> {
-  await munin.write(
+  await client.write(
     taskNs,
     "result-structured",
     JSON.stringify(buildStructuredTaskResult(result), null, 2),
@@ -836,12 +837,18 @@ async function writeStructuredTaskResult(
   );
 }
 
-async function refreshPipelineSummary(pipelineId: string): Promise<void> {
-  await pipelineSummaryManager.refresh(munin, pipelineId, console);
+async function refreshPipelineSummary(
+  pipelineId: string,
+  client: MuninClient = munin,
+): Promise<void> {
+  await pipelineSummaryManager.refresh(client, pipelineId, console);
 }
 
-async function refreshPipelineSummaryFromContent(content: string): Promise<void> {
-  await pipelineSummaryManager.refreshFromContent(munin, content, console);
+async function refreshPipelineSummaryFromContent(
+  content: string,
+  client: MuninClient = munin,
+): Promise<void> {
+  await pipelineSummaryManager.refreshFromContent(client, content, console);
 }
 
 async function primeTrackedPipelineSummaries(): Promise<void> {
@@ -1708,10 +1715,12 @@ async function reapExpiredLeases(): Promise<void> {
         undefined,
         classification,
       );
-      // The structured-result write and pipeline/dependent bookkeeping intentionally
-      // stay on the main client — they run after the user-visible `status` flip
-      // has already landed via `reaperMunin`, so queueing them behind in-flight
-      // task-completion traffic no longer keeps finished tasks tagged `running`.
+      // Route all reaper follow-up work (structured result, dependent promotion,
+      // pipeline summary refresh) through `reaperMunin` as well so every write
+      // the reaper emits carries the reaper's own mcp-session-id. Using the
+      // shared `munin` client here would attribute these writes to the active
+      // task's task-scoped session (rotated at claim time in `executeTask`),
+      // polluting the outcome-aware session telemetry from #48.
       if (runtime !== "pipeline") {
         await writeStructuredTaskResult(
           result.namespace,
@@ -1726,11 +1735,12 @@ async function reapExpiredLeases(): Promise<void> {
             sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
           }),
           classification,
+          reaperMunin,
         );
       }
       await reaperMunin.log(result.namespace, `Lease reaped: ${errorMessage}`);
-      await promoteDependents(extractTaskId(result.namespace));
-      await refreshPipelineSummaryFromContent(entry.content);
+      await promoteDependents(extractTaskId(result.namespace), reaperMunin);
+      await refreshPipelineSummaryFromContent(entry.content, reaperMunin);
     }
   } catch (err) {
     console.error("Failed to reap expired leases:", err);
@@ -1769,8 +1779,11 @@ function dependencyStateFromEntry(entry: MuninReadResult | null | undefined): De
   return "pending";
 }
 
-async function readDependencyStates(dependencyIds: string[]): Promise<Record<string, DependencyState>> {
-  const entries = await munin.readBatch(
+async function readDependencyStates(
+  dependencyIds: string[],
+  client: MuninClient = munin,
+): Promise<Record<string, DependencyState>> {
+  const entries = await client.readBatch(
     dependencyIds.map((dependencyId) => ({
       namespace: `tasks/${dependencyId}`,
       key: "status",
@@ -1787,7 +1800,8 @@ async function readDependencyStates(dependencyIds: string[]): Promise<Record<str
 async function failBlockedTask(
   taskNs: string,
   entry: MuninEntry & { found: true },
-  errorMessage: string
+  errorMessage: string,
+  client: MuninClient = munin,
 ): Promise<void> {
   const task = parseTask(entry.content);
   if (task && !task.sensitivityAssessment) {
@@ -1795,7 +1809,7 @@ async function failBlockedTask(
     task.effectiveSensitivity = task.sensitivityAssessment.effective;
   }
   const classification = getTaskArtifactClassification(task || undefined, entry.content);
-  await munin.write(
+  await client.write(
     taskNs,
     "status",
     entry.content,
@@ -1803,7 +1817,7 @@ async function failBlockedTask(
     entry.updated_at,
     classification
   );
-  await munin.write(
+  await client.write(
     taskNs,
     "result",
     `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`,
@@ -1827,44 +1841,51 @@ async function failBlockedTask(
       sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
     }),
     classification,
+    client,
   );
-  await munin.log(taskNs, `Failed due to dependency state: ${errorMessage}`);
-  await refreshPipelineSummaryFromContent(entry.content);
+  await client.log(taskNs, `Failed due to dependency state: ${errorMessage}`);
+  await refreshPipelineSummaryFromContent(entry.content, client);
 }
 
-async function evaluateBlockedTaskState(taskNs: string): Promise<"promoted" | "failed" | "waiting"> {
-  const entry = await munin.read(taskNs, "status");
+async function evaluateBlockedTaskState(
+  taskNs: string,
+  client: MuninClient = munin,
+): Promise<"promoted" | "failed" | "waiting"> {
+  const entry = await client.read(taskNs, "status");
   if (!entry || !entry.tags.includes("blocked")) return "waiting";
 
   const dependencyIds = getDependencyIds(entry.tags);
-  const dependencyStates = await readDependencyStates(dependencyIds);
+  const dependencyStates = await readDependencyStates(dependencyIds, client);
   const evaluation = evaluateBlockedTask(entry.tags, dependencyStates);
 
   if (evaluation.shouldFail) {
     const errorMessage = evaluation.failureReason || "Dependency failure";
-    await failBlockedTask(taskNs, entry, errorMessage);
+    await failBlockedTask(taskNs, entry, errorMessage, client);
     console.log(`Blocked task ${taskNs} failed (${errorMessage})`);
     return "failed";
   }
 
   if (evaluation.shouldPromote) {
     const promotedTags = buildPromotedTags(entry.tags);
-    await munin.write(taskNs, "status", entry.content, promotedTags, entry.updated_at);
+    await client.write(taskNs, "status", entry.content, promotedTags, entry.updated_at);
     const statusReason = evaluation.failedIds.length > 0
       ? `Promoted from blocked -> pending (all ${evaluation.dependencyIds.length} dependencies reached terminal state; continuing after failures)`
       : `Promoted from blocked -> pending (all ${evaluation.dependencyIds.length} dependencies met)`;
-    await munin.log(taskNs, statusReason);
+    await client.log(taskNs, statusReason);
     console.log(`Promoted ${taskNs} -> pending (deps checked: ${evaluation.dependencyIds.length})`);
-    await refreshPipelineSummaryFromContent(entry.content);
+    await refreshPipelineSummaryFromContent(entry.content, client);
     return "promoted";
   }
 
   return "waiting";
 }
 
-async function promoteDependents(completedTaskId: string): Promise<void> {
+async function promoteDependents(
+  completedTaskId: string,
+  client: MuninClient = munin,
+): Promise<void> {
   try {
-    const { results, total } = await munin.query({
+    const { results, total } = await client.query({
       query: "task",
       tags: ["blocked", `depends-on:${completedTaskId}`],
       namespace: "tasks/",
@@ -1877,7 +1898,7 @@ async function promoteDependents(completedTaskId: string): Promise<void> {
     for (const result of results) {
       if (result.key !== "status") continue;
       try {
-        const outcome = await evaluateBlockedTaskState(result.namespace);
+        const outcome = await evaluateBlockedTaskState(result.namespace, client);
         if (outcome === "promoted") promoted++;
         if (outcome === "failed") failed++;
       } catch (err) {
@@ -2029,6 +2050,26 @@ async function markTaskCancelled(
           : undefined),
     };
   }
+  // CAS the terminal `status` first so a concurrent reaper or other terminal
+  // transition cannot land between our `result`/`result-structured` writes and
+  // our own CAS — which would leave `status=failed` with a cancelled result
+  // payload. If the CAS loses, abort without writing the cancelled artifacts.
+  try {
+    await munin.write(
+      taskNs,
+      "status",
+      entry.content,
+      buildTerminalStatusTags("cancelled", entry.tags),
+      entry.updated_at,
+      classification
+    );
+  } catch (err) {
+    console.log(
+      `Cancel of ${taskNs} aborted (lost CAS race): ${(err as Error).message}`,
+    );
+    return;
+  }
+
   await munin.write(
     taskNs,
     "result",
@@ -2043,8 +2084,8 @@ async function markTaskCancelled(
       replyTo: task?.replyTo,
       replyFormat: task?.replyFormat,
       group: task?.group,
-        sequence: task?.sequence,
-        body: effectiveBody,
+      sequence: task?.sequence,
+      body: effectiveBody,
     }),
     cancelExfil.resultTags,
     undefined,
@@ -2076,14 +2117,6 @@ async function markTaskCancelled(
     );
   }
 
-  await munin.write(
-    taskNs,
-    "status",
-    entry.content,
-    buildTerminalStatusTags("cancelled", entry.tags),
-    entry.updated_at,
-    classification
-  );
   await munin.log(taskNs, `Task cancelled: ${reason}`);
   if (task?.pipeline?.pipelineId) {
     await refreshPipelineSummary(task.pipeline.pipelineId);
