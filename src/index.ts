@@ -3286,6 +3286,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         undefined,
         taskClassification,
       );
+      let postProcessingError: string | null = null;
       try {
         await writeStructuredTaskResult(
           taskNs,
@@ -3310,18 +3311,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           taskClassification,
         );
       } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
+        postProcessingError = err instanceof Error ? err.message : String(err);
         console.warn(
-          `Failed to write structured result for ${taskNs}: ${errMsg}. Proceeding to terminal status write so the task does not stay 'running'.`
+          `Failed to write structured result for ${taskNs}: ${postProcessingError}. Proceeding to terminal status write so the task does not stay 'running'.`
         );
-        try {
-          await munin.log(
-            taskNs,
-            `Post-processing error: structured result write failed (${errMsg}). Terminal status still recorded.`
-          );
-        } catch {
-          // Don't let a log failure block the status write.
-        }
       }
       await munin.write(
         taskNs,
@@ -3331,11 +3324,22 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         undefined,
         taskClassification,
       );
+      if (postProcessingError) {
+        try {
+          await munin.log(
+            taskNs,
+            `Post-processing error: structured result write failed (${postProcessingError}). Terminal status still recorded.`
+          );
+        } catch {
+          // Don't let a diagnostic log failure surface as a new error.
+        }
+      }
       await munin.log(
         taskNs,
         `Task cancelled in ${Math.round(durationMs / 1000)}s (reason: ${cancellation.reason}, executor: ${executorLabel})`
       );
     } else {
+      let postProcessingError: string | null = null;
       try {
         await writeStructuredTaskResult(
           taskNs,
@@ -3370,18 +3374,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           taskClassification,
         );
       } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
+        postProcessingError = err instanceof Error ? err.message : String(err);
         console.warn(
-          `Failed to write structured result for ${taskNs}: ${errMsg}. Proceeding to terminal status write so the task does not stay 'running'.`
+          `Failed to write structured result for ${taskNs}: ${postProcessingError}. Proceeding to terminal status write so the task does not stay 'running'.`
         );
-        try {
-          await munin.log(
-            taskNs,
-            `Post-processing error: structured result write failed (${errMsg}). Terminal status still recorded.`
-          );
-        } catch {
-          // Don't let a log failure block the status write.
-        }
       }
 
       await munin.write(
@@ -3393,6 +3389,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         undefined,
         taskClassification
       );
+      if (postProcessingError) {
+        try {
+          await munin.log(
+            taskNs,
+            `Post-processing error: structured result write failed (${postProcessingError}). Terminal status still recorded.`
+          );
+        } catch {
+          // Don't let a diagnostic log failure surface as a new error.
+        }
+      }
 
       await munin.log(
         taskNs,
