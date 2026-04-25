@@ -1,7 +1,21 @@
 # Hugin — Status
 
-**Last session:** 2026-04-24
+**Last session:** 2026-04-25
 **Branch:** main
+
+## Completed This Session (2026-04-25)
+
+### Research: orchestrator sweep for multi-host placement layer (`4374037`, committed by Hugin task `20260424-210931-orchestrator-sweep`)
+
+Decision-grade sweep of 25 OSS orchestration candidates. **Recommendation: stay DIY** — build ~410 LOC on top of Munin. The policy layer (sensitivity, trust, cost-ranked routing, capability filters) is already in `router.ts`/`sensitivity.ts`. Missing primitives are straightforward.
+
+Top-3: (1) DIY on Munin — ~410 LOC, 2–3 days; (2) Nomad — adopt only if fleet grows past 4 hosts or containers needed (BSL risk); (3) NATS JetStream — adopt only if Munin polling hits scale limits.
+
+Eliminated: K3s / Docker Swarm / Trigger.dev (container-required), Ray (broken on Pi ARM64), Temporal / Cadence (13+ GB RAM), all task queues (BullMQ, Celery, Asynq, River, Faktory — wrong problem).
+
+Artefacts: `docs/research/orchestrator-sweep.md` (committed), `~/mimir/research/hugin/2026-04-24-orchestrator-sweep.md` (detailed), `~/mimir/reading/2026-04-24-orchestrator-sweep.md` (popular, Heimdall `/read`).
+
+Orchestrator-sweep gate from path-forward plan is resolved. Multi-host sprint can proceed DIY.
 
 ## Completed This Session (2026-04-24)
 
@@ -95,22 +109,33 @@ New files: `src/provenance.ts`, `docs/security/provenance-enforcement.md`, `test
 
 ## In Progress
 
-### Research: OSS orchestrator sweep (`20260424-061340-orchestrator-sweep`, runtime:codex)
-Decision-grade sweep of ~20 orchestration candidates (Nomad, Temporal, BullMQ, Inngest, Ray, etc.) against Grimnir's fleet constraints (ARM64 Pi + Apple Silicon, no cloud, raw process execution, sensitivity placement). Deliverable: `docs/research/orchestrator-sweep.md` committed to repo + popular summary to `~/mimir/reading/`. Task was dispatched but reaped (expired lease on first attempt) — check task status and resubmit if needed.
+None.
 
 ## Blockers
 None.
 
 ## Next Steps
-- **Security sprint — DONE** (#10 ✅ #11 ✅ #12 ✅ #13 ✅). Remaining: operational rollout.
-- **Submitter rollout for signing** — Ratatoskr ✅ / `/submit-task` skill (claude-code) ✅ / Codex CLI (codex-desktop, codex-web, codex-mobile) ⬜ / pipeline-parent signing (v1 doesn't bind `### Pipeline` bodies) ⬜.
+
+### Hygiene (do before multi-host sprint)
+- **Fix #57** — non-atomic task completion: add retry or idempotent status flip.
 - **Deploy signing secrets to Pi**: generate one 64-char hex per signer; put matching entries into `HUGIN_SUBMITTER_KEYS` on Hugin; deliver the corresponding secret to each submitter host (`RATATOSKR_SIGNING_SECRET` on Ratatoskr; `HUGIN_SIGNING_SECRET` on laptop claude-code).
 - **Flip `HUGIN_SIGNING_POLICY=warn` on Pi** once the first submitter is signing in the field, watch `[signing]` log lines for stragglers, promote to `require` after ≥72h clean.
+- **Submitter rollout for signing** — Codex CLI (codex-desktop, codex-web, codex-mobile) ⬜ / pipeline-parent signing ⬜.
 - **Roll `HUGIN_EXFIL_POLICY` and `HUGIN_EXTERNAL_POLICY` past `warn`** once banner volume on real traffic is understood.
-- **Phase 7: Methodology templates** (#5) — next feature phase.
 - **Orphan branch cleanup** — prune `hugin/*` branches older than 7d with no open PR (follow-up to #47).
-- **Multi-host dispatch planning** — architecture discussion concluded: coordinator-for-decisions + peers-for-execution shape preferred. Waiting on orchestrator sweep results before committing to DIY vs adopt (Nomad likely candidate for placement layer).
-- **openai/privacy-filter evaluation** (#56) — evaluate for local PII redaction on Pi/MacBook/Mac Studio; integration points: exfil scanner, sensitivity inference, context-ref sanitization.
+
+### Multi-host sprint (orchestrator-sweep gate ✅ resolved — stay DIY)
+1. **`Host:` field + peer-claim** — extend task schema; coordinator Pi assigns `Host:`; peer Hugins filter poll by matching `Host:`. ~410 LOC total per sweep.
+2. **Prove on MBA first** — validate peer-claim loop on MBA before buying Mac Studio.
+3. **Agent-harness runtimes** — `opencode-spawn` / `aider-spawn` executors modelled on `codex-executor.ts`, pointing at configurable OpenAI-compatible base URL.
+4. **Sub-agent offload research spike** — how Claude Code sub-agents can be dispatched as Hugin tasks (rather than consuming Opus tokens in-process).
+
+### Mac Studio purchase gate
+Do not spend until steps 1–3 above run on MBA peer with real offload numbers. See `projects/home-server-eval` for quality/offload thresholds.
+
+### Later
+- **Phase 7: Methodology templates** (#5).
+- **openai/privacy-filter evaluation** (#56) — local PII redaction benchmarks.
 
 ## Plan Status
 - **Phases 1-6** — done and live-validated.
