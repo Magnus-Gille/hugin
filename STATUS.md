@@ -5,6 +5,26 @@
 
 ## Completed This Session (2026-04-25)
 
+### Fix: status-first ordering in task completion (#57, `3501c7a`, merged + deployed)
+
+`writeStructuredTaskResult()` (Zod parse) could throw between the markdown `result` write and the `status` flip, leaving tasks permanently stuck with the `running` tag. Confirmed by `tasks/20260424-061340-orchestrator-sweep`: `result` written at 06:30:05, `status` updated_at 06:29:53 still tagged `running`.
+
+Fix:
+- Extracted `finalizeTaskCompletion()` helper in `src/task-helpers.ts` with a duck-typed `TaskCompletionClient` interface.
+- Helper writes `status` to terminal state FIRST (guaranteed flip), then `writeStructuredResult` in a try/catch (non-fatal — logs error but does not propagate), then the log entry.
+- Used in both normal and cancelled completion paths in `src/index.ts` (lines 3357–3438 collapsed into two helper calls).
+- New `tests/task-completion.test.ts`: 4 tests covering write ordering, status-on-throw, status-write-failure propagation, log-after-throw. 404/404 tests passing.
+
+Deployed to Pi (`huginmunin.local`, PID `hugin-huginmunin-2766044`). Post-deploy state: `polling: true`, `current_task: null`, both Ollama hosts available.
+
+### Debate: orchestrator stack plan stress-tested with Codex (`debate/orch-stack-*`)
+
+Plan: telemetry schema v2 → OpenRouter executor → `hugin-mcp` package → orchestrator skill (~2,090 LOC). Codex (gpt-5.4 xhigh) raised 11 critique points across 2 rounds. **Final verdict: priority has not been earned** — run a falsifiable go/no-go evaluation with existing journal telemetry plus a fixed task benchmark before writing any new code.
+
+Key concessions: latency premise stale (`think:false` cut Pi Ollama from 90s → 2s), OpenRouter routing semantics undefined (would systematically lose to free+trusted Ollama), `infer_direct` was a security regression (now requires structural controls: 500-char cap, local-only, forced public, audit log), Hugin is serial (delegation = token/model/async offload, not parallel speedup), no success gate.
+
+Revised build order: **#57 fix ✅ → journal analysis → 10–20 task benchmark → decision gate → (if green) design `cloud-third-party` trust tier → OpenRouter → MCP → skill**.
+
 ### Research: orchestrator sweep for multi-host placement layer (`4374037`, committed by Hugin task `20260424-210931-orchestrator-sweep`)
 
 Decision-grade sweep of 25 OSS orchestration candidates. **Recommendation: stay DIY** — build ~410 LOC on top of Munin. The policy layer (sensitivity, trust, cost-ranked routing, capability filters) is already in `router.ts`/`sensitivity.ts`. Missing primitives are straightforward.
@@ -117,12 +137,17 @@ None.
 ## Next Steps
 
 ### Hygiene (do before multi-host sprint)
-- **Fix #57** — non-atomic task completion: add retry or idempotent status flip.
 - **Deploy signing secrets to Pi**: generate one 64-char hex per signer; put matching entries into `HUGIN_SUBMITTER_KEYS` on Hugin; deliver the corresponding secret to each submitter host (`RATATOSKR_SIGNING_SECRET` on Ratatoskr; `HUGIN_SIGNING_SECRET` on laptop claude-code).
 - **Flip `HUGIN_SIGNING_POLICY=warn` on Pi** once the first submitter is signing in the field, watch `[signing]` log lines for stragglers, promote to `require` after ≥72h clean.
 - **Submitter rollout for signing** — Codex CLI (codex-desktop, codex-web, codex-mobile) ⬜ / pipeline-parent signing ⬜.
 - **Roll `HUGIN_EXFIL_POLICY` and `HUGIN_EXTERNAL_POLICY` past `warn`** once banner volume on real traffic is understood.
 - **Orphan branch cleanup** — prune `hugin/*` branches older than 7d with no open PR (follow-up to #47).
+
+### Orchestrator stack — go/no-go evaluation (per Codex debate verdict)
+Before writing any new code, run a falsifiable evaluation:
+1. **Journal analysis** — extract token/cost/latency/escalation signal from existing Hugin invocation journal.
+2. **Manual delegation benchmark** — 10–20 representative tasks, hand-delegate locally (Ollama only, no MCP, no OpenRouter, no schema changes).
+3. **Decision gate** — if benchmark shows ≥20% Anthropic token reduction with ≤30% escalation rate and ≤2× p95 latency, proceed to design phase. Otherwise: deprioritize and continue multi-host sprint.
 
 ### Multi-host sprint (orchestrator-sweep gate ✅ resolved — stay DIY)
 1. **`Host:` field + peer-claim** — extend task schema; coordinator Pi assigns `Host:`; peer Hugins filter poll by matching `Host:`. ~410 LOC total per sweep.
