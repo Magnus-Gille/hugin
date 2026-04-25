@@ -548,6 +548,65 @@ async function createPullRequest(
   });
 }
 
+// --- Atomic task completion (#57) ---
+
+// Minimal interface needed — avoids importing MuninClient which would create circular deps
+interface TaskCompletionClient {
+  write(namespace: string, key: string, content: string, tags: string[], expectedUpdatedAt?: string | undefined, classification?: string | undefined): Promise<unknown>;
+  log(namespace: string, message: string): Promise<unknown>;
+}
+
+export interface TaskCompletionResult {
+  structuredResultOk: boolean;
+  structuredResultError?: unknown;
+}
+
+/**
+ * Atomically finalize a task by writing the terminal status FIRST (guaranteed),
+ * then the structured result in a try/catch (non-fatal), then the log entry.
+ *
+ * This ordering ensures a task can never get stuck with the `running` tag if
+ * the structured-result write (which calls Zod .parse() internally) throws.
+ */
+export async function finalizeTaskCompletion(
+  client: TaskCompletionClient,
+  taskNs: string,
+  options: {
+    statusContent: string;
+    terminalTags: string[];
+    classification?: string;
+    writeStructuredResult: () => Promise<void>;
+    logMessage: string;
+  },
+): Promise<TaskCompletionResult> {
+  // Status FIRST — guaranteed terminal flip even if structured-result write fails
+  await client.write(
+    taskNs,
+    "status",
+    options.statusContent,
+    options.terminalTags,
+    undefined,
+    options.classification,
+  );
+
+  let structuredResultOk = true;
+  let structuredResultError: unknown;
+  try {
+    await options.writeStructuredResult();
+  } catch (err) {
+    structuredResultOk = false;
+    structuredResultError = err;
+    console.error(
+      `[${taskNs}] Failed to write result-structured (task already in terminal state):`,
+      err,
+    );
+  }
+
+  await client.log(taskNs, options.logMessage);
+
+  return { structuredResultOk, structuredResultError };
+}
+
 function isRemoteHostAllowed(remoteUrl: string, allowedHosts: string[]): boolean {
   const trimmed = remoteUrl.trim();
   let host: string | null = null;

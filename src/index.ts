@@ -15,7 +15,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, finalizeTaskCompletion } from "./task-helpers.js";
 import { executeSdkTask } from "./sdk-executor.js";
 import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus, probeAllHosts, warmModel, getLoadedModels } from "./ollama-hosts.js";
@@ -3354,88 +3354,73 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         undefined,
         taskClassification,
       );
-      await writeStructuredTaskResult(
-        taskNs,
-        createCancelledStructuredResult(taskNs, task.runtime, cancellation.reason, {
-          executor: effectiveExecutor,
-          resultSource,
-          startedAt,
-          completedAt,
-          durationSeconds: Math.round(durationMs / 1000),
-          logFile: `~/.hugin/logs/${taskId}.log`,
-          replyTo: task.replyTo,
-          replyFormat: task.replyFormat,
-          group: task.group,
-          sequence: task.sequence,
-          pipeline: task.pipeline,
-          runtimeMetadata,
-          approval: approvalMetadata,
-          bodyKind: structuredBodyKind,
-          bodyText: structuredBodyText,
-          sensitivity: taskSensitivitySnapshot,
-        }),
-        taskClassification,
-      );
-      await munin.write(
-        taskNs,
-        "status",
-        entry.content,
-        buildTerminalStatusTags("cancelled", entry.tags, `runtime:${task.runtime}`),
-        undefined,
-        taskClassification,
-      );
-      await munin.log(
-        taskNs,
-        `Task cancelled in ${Math.round(durationMs / 1000)}s (reason: ${cancellation.reason}, executor: ${executorLabel})`
-      );
+      await finalizeTaskCompletion(munin, taskNs, {
+        statusContent: entry.content,
+        terminalTags: buildTerminalStatusTags("cancelled", entry.tags, `runtime:${task.runtime}`),
+        classification: taskClassification,
+        writeStructuredResult: () => writeStructuredTaskResult(
+          taskNs,
+          createCancelledStructuredResult(taskNs, task.runtime, cancellation.reason, {
+            executor: effectiveExecutor,
+            resultSource,
+            startedAt,
+            completedAt,
+            durationSeconds: Math.round(durationMs / 1000),
+            logFile: `~/.hugin/logs/${taskId}.log`,
+            replyTo: task.replyTo,
+            replyFormat: task.replyFormat,
+            group: task.group,
+            sequence: task.sequence,
+            pipeline: task.pipeline,
+            runtimeMetadata,
+            approval: approvalMetadata,
+            bodyKind: structuredBodyKind,
+            bodyText: structuredBodyText,
+            sensitivity: taskSensitivitySnapshot,
+          }),
+          taskClassification,
+        ),
+        logMessage: `Task cancelled in ${Math.round(durationMs / 1000)}s (reason: ${cancellation.reason}, executor: ${executorLabel})`,
+      });
     } else {
-      await writeStructuredTaskResult(
-        taskNs,
-        buildStructuredTaskResult({
-          schemaVersion: 1,
-          taskId,
-          taskNamespace: taskNs,
-          lifecycle: ok ? "completed" : "failed",
-          outcome: ok ? "completed" : isTimeout ? "timed_out" : "failed",
-          runtime: task.runtime,
-          executor: effectiveExecutor,
-          resultSource,
-          exitCode,
-          startedAt,
-          completedAt,
-          durationSeconds: Math.round(durationMs / 1000),
-          logFile: `~/.hugin/logs/${taskId}.log`,
-          replyTo: task.replyTo,
-          replyFormat: task.replyFormat,
-          group: task.group,
-          sequence: task.sequence,
-          costUsd: costUsd ?? undefined,
-          prUrl,
-          bodyKind: structuredBodyKind,
-          bodyText: structuredBodyText,
-          errorMessage: ok ? undefined : structuredBodyText,
-          runtimeMetadata,
-          pipeline: task.pipeline,
-          approval: approvalMetadata,
-          sensitivity: taskSensitivitySnapshot,
-        }),
-        taskClassification,
-      );
-
-      await munin.write(
-        taskNs,
-        "status",
-        entry.content,
-        buildTerminalStatusTags(ok ? "completed" : "failed", entry.tags, `runtime:${task.runtime}`)
-        ,
-        undefined,
-        taskClassification
-      );
-
-      await munin.log(
-        taskNs,
-        `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`
-      );
+      await finalizeTaskCompletion(munin, taskNs, {
+        statusContent: entry.content,
+        terminalTags: buildTerminalStatusTags(ok ? "completed" : "failed", entry.tags, `runtime:${task.runtime}`),
+        classification: taskClassification,
+        writeStructuredResult: () => writeStructuredTaskResult(
+          taskNs,
+          buildStructuredTaskResult({
+            schemaVersion: 1,
+            taskId,
+            taskNamespace: taskNs,
+            lifecycle: ok ? "completed" : "failed",
+            outcome: ok ? "completed" : isTimeout ? "timed_out" : "failed",
+            runtime: task.runtime,
+            executor: effectiveExecutor,
+            resultSource,
+            exitCode,
+            startedAt,
+            completedAt,
+            durationSeconds: Math.round(durationMs / 1000),
+            logFile: `~/.hugin/logs/${taskId}.log`,
+            replyTo: task.replyTo,
+            replyFormat: task.replyFormat,
+            group: task.group,
+            sequence: task.sequence,
+            costUsd: costUsd ?? undefined,
+            prUrl,
+            bodyKind: structuredBodyKind,
+            bodyText: structuredBodyText,
+            errorMessage: ok ? undefined : structuredBodyText,
+            runtimeMetadata,
+            pipeline: task.pipeline,
+            approval: approvalMetadata,
+            sensitivity: taskSensitivitySnapshot,
+          }),
+          taskClassification,
+        ),
+        logMessage: `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`,
+      });
     }
 
     const shouldPromoteDependents =
