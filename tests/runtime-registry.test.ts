@@ -1,9 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
+  ALIAS_MAP_V1,
   RUNTIME_REGISTRY,
   buildRuntimeCandidates,
+  getAliasMap,
   getRegistryEntryById,
   getRuntimeMaxSensitivity,
+  resolveAlias,
 } from "../src/runtime-registry.js";
 import type { OllamaHost } from "../src/ollama-hosts.js";
 
@@ -14,6 +17,8 @@ describe("RUNTIME_REGISTRY", () => {
     expect(ids).toContain("codex-spawn");
     expect(ids).toContain("ollama-pi");
     expect(ids).toContain("ollama-laptop");
+    expect(ids).toContain("openrouter");
+    expect(ids).toContain("pi-harness");
   });
 
   it("every entry has required fields", () => {
@@ -141,5 +146,99 @@ describe("buildRuntimeCandidates", () => {
   it("returns all registry entries", () => {
     const candidates = buildRuntimeCandidates([piOnline, laptopOffline]);
     expect(candidates.length).toBe(RUNTIME_REGISTRY.length);
+  });
+});
+
+describe("orchestrator v1 policy fields", () => {
+  it("openrouter is third-party, ZDR-required, explicit-only", () => {
+    const entry = getRegistryEntryById("openrouter");
+    expect(entry).toBeDefined();
+    expect(entry!.provider).toBe("openrouter");
+    expect(entry!.egress).toBe("third-party");
+    expect(entry!.zdrRequired).toBe(true);
+    expect(entry!.autoEligible).toBe(false);
+    expect(entry!.family).toBe("one-shot");
+    expect(entry!.reasoningLevel).toBe("medium");
+  });
+
+  it("pi-harness is third-party, ZDR-required, explicit-only, harness family", () => {
+    const entry = getRegistryEntryById("pi-harness");
+    expect(entry).toBeDefined();
+    expect(entry!.provider).toBe("pi-harness");
+    expect(entry!.family).toBe("harness");
+    expect(entry!.harnessCmd).toBe("pi");
+    expect(entry!.harnessFlags).toEqual(["--no-session", "--provider", "openrouter"]);
+    expect(entry!.zdrRequired).toBe(true);
+    expect(entry!.autoEligible).toBe(false);
+  });
+
+  it("existing one-shot runtimes are auto-eligible by default", () => {
+    for (const id of ["claude-sdk", "codex-spawn", "ollama-pi", "ollama-laptop"]) {
+      const entry = getRegistryEntryById(id);
+      expect(entry?.autoEligible).toBe(true);
+      expect(entry?.family).toBe("one-shot");
+    }
+  });
+
+  it("ollama entries are local-egress and not ZDR-flagged", () => {
+    const ollamaEntries = RUNTIME_REGISTRY.filter(
+      (r) => r.dispatcherRuntime === "ollama",
+    );
+    for (const entry of ollamaEntries) {
+      expect(entry.egress).toBe("local");
+      expect(entry.zdrRequired).toBe(false);
+    }
+  });
+});
+
+describe("alias map (v1)", () => {
+  it("getAliasMap returns ALIAS_MAP_V1", () => {
+    expect(getAliasMap()).toBe(ALIAS_MAP_V1);
+    expect(ALIAS_MAP_V1.version).toBe(1);
+  });
+
+  it("contains the four v1 aliases", () => {
+    const aliases = Object.keys(ALIAS_MAP_V1.aliases).sort();
+    expect(aliases).toEqual(["large-reasoning", "medium", "pi-large-coder", "tiny"]);
+  });
+
+  it("tiny resolves to ollama-pi/qwen2.5:3b", () => {
+    const r = resolveAlias("tiny");
+    expect(r.runtimeId).toBe("ollama-pi");
+    expect(r.model).toBe("qwen2.5:3b");
+    expect(r.family).toBe("one-shot");
+  });
+
+  it("medium resolves to ollama-laptop/qwen3:14b (eval-validated)", () => {
+    const r = resolveAlias("medium");
+    expect(r.runtimeId).toBe("ollama-laptop");
+    expect(r.model).toBe("qwen3:14b");
+    expect(r.family).toBe("one-shot");
+  });
+
+  it("large-reasoning resolves to openrouter/gpt-oss-120b @ medium", () => {
+    const r = resolveAlias("large-reasoning");
+    expect(r.runtimeId).toBe("openrouter");
+    expect(r.model).toBe("openai/gpt-oss-120b");
+    expect(r.reasoningLevel).toBe("medium");
+    expect(r.family).toBe("one-shot");
+  });
+
+  it("pi-large-coder resolves to pi-harness/qwen3-coder-next", () => {
+    const r = resolveAlias("pi-large-coder");
+    expect(r.runtimeId).toBe("pi-harness");
+    expect(r.model).toBe("qwen/qwen3-coder-next");
+    expect(r.family).toBe("harness");
+    expect(r.harness).toBe("pi");
+  });
+
+  it("every alias references a known runtime", () => {
+    for (const resolution of Object.values(ALIAS_MAP_V1.aliases)) {
+      expect(getRegistryEntryById(resolution.runtimeId)).toBeDefined();
+    }
+  });
+
+  it("resolveAlias throws on unknown alias", () => {
+    expect(() => resolveAlias("nonexistent" as never)).toThrow(/Unknown alias/);
   });
 });

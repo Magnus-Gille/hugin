@@ -1,0 +1,110 @@
+[
+  {
+    "id": "orch-C01",
+    "source": "codex-round-1",
+    "text": "DAG-first doesn't enable multi-agent behavior without parallel execution — just a fancier sequential queue",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-C02",
+    "source": "codex-round-1",
+    "text": "Worker identity/leases must come before DAG — stale recovery assumes single-instance",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "orch-C03",
+    "source": "codex-round-1",
+    "text": "Security model is routing labels, not enforcement — self-declared submitter, env inheritance, exfiltration via sub-task prompts",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-C04",
+    "source": "codex-round-1",
+    "text": "Missing dependency failure policy — what happens when a DAG node fails?",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "orch-C05",
+    "source": "codex-round-1",
+    "text": "Munin coordination uses tag scans and whole-entry rereads — not efficient for dense graphs",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-C06",
+    "source": "codex-round-1",
+    "text": "General DAG invites cycles/debugging problems — parent/child joins are simpler and sufficient",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-C07",
+    "source": "codex-round-1",
+    "text": "One scheduler, many workers should be an explicit design invariant",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-C08",
+    "source": "codex-round-2",
+    "text": "Event-driven promotion needs a reconciliation loop — crash between completion and promotion leaves children blocked",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-C09",
+    "source": "codex-round-2",
+    "text": "HMAC submitter auth is weak if signing secret is in task's env — doesn't create real privilege boundary",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-C10",
+    "source": "codex-round-2",
+    "text": "failure_policy at task level is too coarse — should be per-dependency-edge for mixed critical/optional inputs",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-C11",
+    "source": "codex-round-2",
+    "text": "max_children is only meaningful if enforced by scheduler, not just declared in task metadata",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-C12",
+    "source": "codex-round-2",
+    "text": "Worker boundary underspecified — is a worker a host daemon, execution slot, or endpoint label?",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  }
+]

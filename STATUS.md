@@ -1,9 +1,50 @@
 # Hugin — Status
 
-**Last session:** 2026-04-25
+**Last session:** 2026-04-26
 **Branch:** main
 
-## Completed This Session (2026-04-25)
+## Completed This Session (2026-04-26)
+
+### Step 2 done — runtime registry extended (uncommitted)
+
+`src/runtime-registry.ts` gains orthogonal policy fields (`provider`, `egress`, `zdrRequired`, `autoEligible`, `family`, `reasoningLevel`, `harnessCmd`, `harnessFlags`) per spec §6. Two new runtime rows: `openrouter` (one-shot, third-party, ZDR, explicit-only) and `pi-harness` (harness, third-party, ZDR, explicit-only, `pi --no-session --provider openrouter`). All four legacy rows backfilled with sensible defaults.
+
+Stable alias map (`ALIAS_MAP_V1`) added with `tiny` / `medium` / `large-reasoning` / `pi-large-coder`. `resolveAlias()` and `getAliasMap()` helpers exposed.
+
+`src/router.ts` gains an `autoEligible: false` filter so the auto-router never picks orchestrator runtimes (they remain selectable explicitly via the alias map).
+
+Type plumbing: `DispatcherRuntime` widened to include `openrouter | pi-harness` in both `runtime-registry.ts` and `task-result-schema.ts`. Two narrow casts at `src/index.ts:2698` and `src/pipeline-compiler.ts:527` keep the dispatcher-side types honest (auto-router and pipeline runtime IDs are restricted to legacy three).
+
+Tests: `tests/runtime-registry.test.ts` extended with 9 new tests (alias map + policy fields). `tests/router.test.ts` extended with 4 new autoEligible tests. 431/431 passing.
+
+### Step 3 done — `finalizeDelegatedOutput()` shared helper (uncommitted)
+
+New `src/finalize-delegated-output.ts`. Single helper used by every output-return surface (broker, executors, MCP) per spec §4/§5/§7. Wraps the existing exfiltration scanner, returns a typed `DelegationResult` with `result_kind: "text" | "diff"`, structured diff metadata, and `provenance: { source: "delegated", scanner_pass, policy_version, harness_version? }`. Scanner policy `warn` (default) keeps content but flags; `redact` substitutes matched spans. `tests/finalize-delegated-output.test.ts`: 13 tests covering text path, diff path, clean/warn/redact transitions, metadata propagation.
+
+### Step 1 done — orchestrator v1 data-model spec (`docs/orchestrator-v1-data-model.md`, uncommitted)
+
+Locks request envelope, harness `WorktreeSpec`, 5-state await machine with `result_kind: text | diff`, append-only journal events + projection, runtime registry extension, end-to-end provenance chain. §11 records the Option B decision and the eval data backing it.
+
+### Decision: orchestrator v1 builds; pi-harness on Pi enters v1 (Option B)
+
+Magnus overrode the prior debate's "priority not earned" verdict and chose to build the orchestrator stack and learn from real usage. Adversarial debate (`debate/orch-v1-build-*`) re-framed as HOW not IF, ran 2 rounds with Codex (gpt-5.4 xhigh), surfaced 17 critique points (6/17 caught by self-review = 35%). All 17 valid; 5 critical. Net: ~2,000 LOC / ~5 days revised estimate (up from original ~1,000 LOC / 2 days).
+
+Key contract changes from the debate:
+- Drop `hugin_run` (sync) from v1 — submit+await over 30s poll cannot deliver real sync.
+- Hugin is sole journal writer (laptop MCP cannot own a Pi-side journal).
+- Add orthogonal `provider`/`egress`/`zdrRequired`/`autoEligible` fields instead of stretching the trust tier.
+- Hugin owns ZDR enforcement (pinned allowlist + cached catalog metadata).
+- Append-only event log + read-time projection (no JSONL mutation) for journal.
+- Pi-side broker (Tailscale-only, bearer auth) replaces laptop-side signing keys.
+- Stable aliases (`tiny`, `medium`, `large-reasoning`, `pi-large-coder`) over literal model names.
+
+Then a parallel-session result flipped the harness scope: `pi` (the pi-coding-agent) scored 5/6 strict, 6/6 lenient on the aider-eval task set against `openrouter/qwen/qwen3-coder-next`, headless one-shot via `pi --no-session -p`, fresh `git worktree add` per task. **Decision: Option B** — `pi` enters v1 as a harness runtime running on the Pi, calling cloud models via OR; working trees are per-task git worktrees on the Pi; Hugin never auto-pushes; diffs return to Claude for review.
+
+Spec finalized: `docs/orchestrator-v1-data-model.md` (Step 1 deliverable). Covers request envelope, harness `WorktreeSpec`, 5-state await machine with `result_kind: text | diff`, append-only journal events, runtime registry extension (incl. new `pi-harness` provider row), provenance chain end-to-end. Step 2 (runtime registry extension) is unblocked.
+
+Debate artifacts (committed): `debate/INDEX.md`, `debate/orch-v1-build-summary.md`, `debate/orch-v1-build-critique-log.json`. Drafts/critiques/rebuttals stay local per skill defaults.
+
+
 
 ### Fix: status-first ordering in task completion (#57, `3501c7a`, merged + deployed)
 
@@ -24,6 +65,37 @@ Plan: telemetry schema v2 → OpenRouter executor → `hugin-mcp` package → or
 Key concessions: latency premise stale (`think:false` cut Pi Ollama from 90s → 2s), OpenRouter routing semantics undefined (would systematically lose to free+trusted Ollama), `infer_direct` was a security regression (now requires structural controls: 500-char cap, local-only, forced public, audit log), Hugin is serial (delegation = token/model/async offload, not parallel speedup), no success gate.
 
 Revised build order: **#57 fix ✅ → journal analysis → 10–20 task benchmark → decision gate → (if green) design `cloud-third-party` trust tier → OpenRouter → MCP → skill**.
+
+### Review: v1 build-plan critique written (`debate/orch-v1-build-codex-critique.md`)
+
+Second-pass HOW critique against the new "build it now" framing. Main findings:
+
+- `hugin_run` is not a credible sync surface on top of the current 30s poll + single-task dispatcher; either async-only v1 or a real direct path is needed.
+- The proposed orchestrator journal cannot be laptop-MCP-owned if the authoritative `~/.hugin` files live on the Pi; Hugin should stay the sole journal writer.
+- OpenRouter needs provider-aware metadata and server-side model-policy enforcement; overloading `semi-trusted` is too blunt.
+- MCP-originated submission needs an explicit auth/signing/secret story before `HUGIN_SIGNING_POLICY=require`.
+
+Munin context load was attempted first per instructions but unavailable from this session: `memory_orient` safety-blocked, subsequent `memory_read`/`memory_query` calls returned `user cancelled MCP tool call`. The critique is therefore grounded in local repo state + code, not live Munin status.
+
+### Debate: Round 2 rebuttal to Claude response written (`debate/orch-v1-build-codex-rebuttal-1.md`)
+
+Reviewed Claude's revised plan against the live code seams it now depends on. Judgement:
+
+- **Resolved adequately:** F1 (`hugin_run` removed), F2 (Hugin-only journal ownership), F3 (provider/egress/zdr/explicit-only policy shape), F4 (Hugin-side allowlist enforcement), F5 (shared result finalization path).
+- **Still incomplete:** F6 (broker endpoint auth/scope/idempotency/provenance still underspecified), F7 (`await` resumability does not solve Pi reboot + lease-orphan ambiguity), F8 (alias versioning / corpus regime shifts), F9 (append-only journal cannot support post-hoc `rate` updates without an event/projection design).
+- **New issues introduced by the revision:** broker requires turning Hugin from localhost-only health server into a remote authenticated control surface; overlaying full prompt/output into the main invocation journal changes retention/blast radius; `orchestrator_session_id` must stay distinct from Munin's task-scoped `mcp-session-id`.
+
+Most important pre-code requirement: define the Pi-side delegation contract first — request envelope, append-only journal event model, await/result state machine, and provenance chain. If that authority boundary is wrong, the broker, aliases, and telemetry all become migration pain.
+
+### Review: Round 2 rebuttal to Step 1-3 implementation review written (`debate/orch-v1-impl-review-codex-rebuttal-1.md`)
+
+Reviewed Claude's Step 1-3 response against the live spec and source. Munin partially improved this round: `memory_orient` succeeded, but the requested `memory_read("projects/hugin","synthesis")`, fallback `status`, `memory_query(...)`, and `memory_narrative(...)` calls still cancelled / safety-blocked, so the rebuttal remains grounded in local state plus live code.
+
+Judgement:
+
+- **Adequate concessions:** Finding 2 is genuinely conceded (redacted diff cannot stay on the success branch), Finding 4's default flip to `copy_node_modules: false` is directionally right, and Finding 5's `envelope_version` / `result_schema_version` additions are valid as far as the request/result wire goes.
+- **Still incomplete:** `runtime_row_id?: string` fixes observability after the fact but not control-plane identity, union widening, or row-scoped policy lookup; the proposed §12 write-ordering invariants still do not choose a single source of truth for submit/complete/await and over-apply the #57 status-first lesson; journal/event versioning remains missing even after the result/request version concession.
+- **Most important pre-Step-4 requirement:** write the delegated-task durability contract as a source-of-truth spec, not just an ordering list — what makes a submission durable, what makes a completion durable, what `await` reads after crash/restart, and where stable runtime-row identity lives end to end.
 
 ### Research: orchestrator sweep for multi-host placement layer (`4374037`, committed by Hugin task `20260424-210931-orchestrator-sweep`)
 

@@ -1,0 +1,110 @@
+[
+  {
+    "id": "orch-v1-impl-review-C01",
+    "source": "codex-round-1",
+    "text": "Step 2 widens the shared DispatcherRuntime contract to include orchestrator-only runtimes (openrouter, pi-harness) before the dispatcher can parse or execute them, and discards row-level identity. Sensitivity policy keys off coarse DispatcherRuntime instead of registry row.",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "orch-v1-impl-review-C02",
+    "source": "codex-round-1",
+    "text": "Scanner semantics are internally inconsistent: spec defines DelegationError.kind 'scanner_blocked' as 'redact mode triggered', but finalizeDelegatedOutput returns a successful DelegationResult with scanner_pass: 'redact'. Tests lock in redacted-diff-as-success, but a redacted unified diff is no longer a valid patch.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-impl-review-C03",
+    "source": "codex-round-1",
+    "text": "Partial-failure ordering is unspecified across the six writes (journal submit, Munin task, finalize, structured result, journal complete, await visibility). The state machine does not model 'accepted but not indexed' or 'task complete but journal append failed'. Hugin shipped a real bug in this exact class last sprint (#57).",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-impl-review-C04",
+    "source": "codex-round-1",
+    "text": "Worktree contract bakes in Pi disk model and Node-repo assumption with no baseline. copy_node_modules defaults to true; 7-day retention is unjustified by disk budget or task-volume estimate.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "orch-v1-impl-review-C05",
+    "source": "codex-round-1",
+    "text": "Protocol versioning and retry semantics are too thin. No envelope_version on DelegationRequest, no result_schema_version on DelegationResult. Retry/idempotency-key reuse rules are unspecified.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "orch-v1-impl-review-C06",
+    "source": "codex-round-2",
+    "text": "Finding 1 remedy (runtime_row_id?: string in DelegationResult) is a posterior-attribution fix, not a control-plane fix. The shared task-result schema still blesses orchestrator runtimes the dispatcher cannot run; sensitivity policy still keys by coarse DispatcherRuntime; BrokerAnnotations.alias_resolved records coarse runtime/host rather than stable runtime-row identity. The deeper rework: split LegacyDispatcherRuntime, carry stable runtime-row identity at submit/complete, move policy lookups to registry-row scope.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-impl-review-C07",
+    "source": "codex-round-2",
+    "text": "Finding 3 remedy imports the #57 lesson too literally. In existing Hugin, structured result write is secondary (non-fatal) so status-first ordering works. In orchestrator await, the structured DelegationResult IS the payload, so 'status first, result later' creates a 'completed task with no durable result' failure mode. The right fix is a source-of-truth contract: what makes a submission durable, what makes a completion durable, what await reads, and what can be backfilled.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-impl-review-C08",
+    "source": "codex-round-2",
+    "text": "Versioning concession only half-closes the issue. Journal event schemas (DelegationSubmittedEvent, DelegationCompletedEvent, DelegationRatedEvent) and the 'envelope encoded' Munin task representation remain unversioned even though both are part of the public recovery/projection contract.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-impl-review-C09",
+    "source": "codex-round-2",
+    "text": "submitted_not_indexed proposed in the response leaks an internal indexing gap into the client contract. Munin task entries should be the durable submit record OR the broker index should be canonical, but both being canonical is contradictory.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-impl-review-C10",
+    "source": "codex-round-2",
+    "text": "20GB worktree cap idea is concrete but lacks admission-control semantics. What happens when worktree creation would exceed budget, or disk fills mid-claim? Reject at submit, eager reap, or fail mid-run?",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-impl-review-C11",
+    "source": "codex-round-2",
+    "text": "runtime_row_id should be required, not optional. Broker already knows it at submit time (alias resolution); making it optional weakens the corpus boundary on day one.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-impl-review-C12",
+    "source": "codex-round-2",
+    "text": "Munin CAS is per-key. 'structured result + status flip in Munin (atomic CAS)' as proposed in the response is not a real operation — status and result are separate keys, so the proposed ordering invariant relies on a primitive the substrate does not have.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  }
+]

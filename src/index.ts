@@ -91,6 +91,7 @@ import {
 import { routeTask, type RouterDecision } from "./router.js";
 import {
   buildRuntimeCandidates,
+  isLegacyDispatcherRuntime,
   type RuntimeCapability,
 } from "./runtime-registry.js";
 import {
@@ -2577,8 +2578,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     limit: 50,
   });
 
+  // Orchestrator v1 tasks (broker-submitted, tagged "orch-v1") are dispatched
+  // by the Pi-side broker, not by the legacy in-process poller. Filter them
+  // out so the dispatcher does not greedily claim a runtime:openrouter or
+  // runtime:pi-harness task and fail it as "missing prompt or runtime".
+  // See docs/orchestrator-v1-data-model.md §3 for the broker submit path.
+  const dispatchableResults = results.filter(
+    (r) => !r.tags.includes("orch-v1"),
+  );
+
   // Select the next eligible task respecting Group/Sequence ordering (FIFO within eligible set)
-  const taskResult = selectNextTask(results, runningResults);
+  const taskResult = selectNextTask(dispatchableResults, runningResults);
   if (!taskResult) return { hadTask: false, queueDepth: 0 };
 
   const taskNs = taskResult.namespace;
@@ -2695,7 +2705,18 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           preferredModel: parsedTask.model,
           availableRuntimes: candidates,
         });
-        parsedTask.runtime = decision.selectedRuntime.dispatcherRuntime;
+        // Auto-router is contractually required to exclude autoEligible:false
+        // runtimes (openrouter, pi-harness). Verify rather than cast — if this
+        // ever fires, the contract was violated upstream and the dispatcher
+        // cannot execute the selection.
+        const selectedRuntime = decision.selectedRuntime.dispatcherRuntime;
+        if (!isLegacyDispatcherRuntime(selectedRuntime)) {
+          throw new Error(
+            `Auto-router selected non-legacy runtime "${selectedRuntime}" — ` +
+              `autoEligible filter contract violated. selected_id=${decision.selectedRuntime.id}`,
+          );
+        }
+        parsedTask.runtime = selectedRuntime;
         parsedTask.routingDecision = decision;
         if (decision.selectedRuntime.ollamaHost) {
           parsedTask.ollamaHost = decision.selectedRuntime.ollamaHost;

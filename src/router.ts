@@ -60,6 +60,17 @@ export function routeTask(input: RouterInput): RouterDecision {
     return true;
   });
 
+  // Step 2b: Filter out runtimes that are explicit-only (autoEligible: false).
+  // These can still be selected by alias via the orchestrator broker, but the
+  // generic auto-router never picks them.
+  candidates = candidates.filter((c) => {
+    if (c.autoEligible === false) {
+      eliminated.push({ id: c.id, reason: "explicit-only (autoEligible: false)" });
+      return false;
+    }
+    return true;
+  });
+
   // Step 3: Filter by capabilities (if specified)
   if (capabilities && capabilities.length > 0) {
     candidates = candidates.filter((c) => {

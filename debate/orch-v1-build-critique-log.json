@@ -1,0 +1,155 @@
+[
+  {
+    "id": "orch-v1-build-F01",
+    "source": "codex-round-1",
+    "text": "hugin_run has no credible v1 sync path: submit+await over 30s poll + single-task dispatcher cannot deliver real synchronous behavior",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "orch-v1-build-F02",
+    "source": "codex-round-1",
+    "text": "Journal ownership and current-session semantics not designed: laptop MCP cannot own a Pi journal; parent_session_id and task_type have no carrier in current task schema",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-build-F03",
+    "source": "codex-round-1",
+    "text": "OpenRouter being squeezed into wrong policy primitive: reusing semi-trusted collapses Anthropic subscription and third-party relay into one bucket; need provider/egress/zdrRequired/autoEligible fields",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "orch-v1-build-F04",
+    "source": "codex-round-1",
+    "text": "ZDR enforcement on wrong host and wrong phase: MCP startup catalog fetch leaks if other submitters; live fetch is a boot dependency; Hugin should pin allowlist with cached metadata + fail closed",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-build-F05",
+    "source": "codex-round-1",
+    "text": "Output return paths can bypass exfil scanner: existing scan runs in dispatcher completion; MCP returning raw provider bytes regresses this",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "orch-v1-build-F06",
+    "source": "codex-round-1",
+    "text": "MCP-originated submission missing real auth/secret-management story: laptop needs MUNIN_API_KEY + signing key + allowlisted submitter identity; not designed",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "orch-v1-build-F07",
+    "source": "codex-round-1",
+    "text": "Partial-failure and reconnect semantics underspecified: 'await blocks until done/timeout' conflates queue wait, provider delay, host sleep, laptop sleep, task failure",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-build-F08",
+    "source": "codex-round-1",
+    "text": "Model/skill contract already stale: scope locks qwen3:14b but registry defaults laptop to qwen3.5:35b-a3b; gpt-oss reasoning levels not handled",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "orch-v1-build-F09",
+    "source": "codex-round-1",
+    "text": "Telemetry plan duplicates existing data but misses defensible fields: skill_version, provider_policy_version, retry/escalation chain, verification outcome, submitter identity, parent_session_id source",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-build-F10",
+    "source": "codex-round-2",
+    "text": "Append-only JSONL journal cannot support post-hoc rating updates by task_id without an event-log + projection model or a different store",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-build-F11",
+    "source": "codex-round-2",
+    "text": "Broker endpoint requires new remote exposure model: Hugin is 127.0.0.1 and /health-only today; broker means network surface + auth hardening + request handling, not 'one more helper'",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-build-F12",
+    "source": "codex-round-2",
+    "text": "Lease reaper interaction with 'running' state: post-reboot tasks remain 'running' for up to ~3 minutes (60s reaper sweep + 120s lease); await needs explicit stale/orphan_suspected state",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-build-F13",
+    "source": "codex-round-2",
+    "text": "Alias governance underspecified: silent alias retargeting causes corpus regime change; need alias_map_version, model_alias_requested + model_effective fields, manual promotion only",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "orch-v1-build-F14",
+    "source": "codex-round-2",
+    "text": "Session ID confusion risk: orchestrator_session_id must not conflate with Hugin's existing task-scoped Munin session IDs used for outcome-aware telemetry",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-build-F15",
+    "source": "codex-round-2",
+    "text": "Folding full prompt/output into main invocation journal changes blast radius: retention, growth, and existing consumer surface area all change vs separate file",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "orch-v1-build-F16",
+    "source": "codex-round-2",
+    "text": "verification_outcome useful as taxonomy but not a cure for self-rating bias; pair with weekly external spot-audit + objective behavioral traces (retries, discards, escalations)",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "orch-v1-build-F17",
+    "source": "codex-round-2",
+    "text": "Build order should start with delegation data model (envelope + state machine + journal event model + alias resolution) BEFORE broker skeleton, not after",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  }
+]

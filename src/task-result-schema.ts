@@ -21,7 +21,16 @@ export const taskExecutionBodyKindSchema = z.enum([
 ]);
 export type TaskExecutionBodyKind = z.infer<typeof taskExecutionBodyKindSchema>;
 
-export const dispatcherRuntimeSchema = z.enum(["claude", "codex", "ollama", "auto"]);
+// The structured task result schema is the dispatcher's local view. It only
+// sees the legacy executor runtimes (claude/codex/ollama). Orchestrator-only
+// runtimes (openrouter, pi-harness) flow through a separate broker path and
+// produce DelegationResult, never StructuredTaskResult.
+export const dispatcherRuntimeSchema = z.enum([
+  "claude",
+  "codex",
+  "ollama",
+  "auto",
+]);
 export type DispatcherRuntime = z.infer<typeof dispatcherRuntimeSchema>;
 
 export const taskExecutionPipelineContextSchema = z.object({
