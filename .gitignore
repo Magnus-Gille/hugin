@@ -2,5 +2,8 @@ node_modules/
 dist/
 .env
 .DS_Store
-debate/
+debate/*
+!debate/INDEX.md
+!debate/*-summary.md
+!debate/*-critique-log.json
 .claude/

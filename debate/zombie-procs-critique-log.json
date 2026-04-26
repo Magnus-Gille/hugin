@@ -1,0 +1,83 @@
+[
+  {
+    "id": "zombie-procs-C01",
+    "source": "codex-round-1",
+    "text": "Which service wins port race is not proven — could be system-level winning, making user-level the zombie producer",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "zombie-procs-C02",
+    "source": "codex-round-1",
+    "text": "User-level service ReadWritePaths=/home/magnus/repos/hugin prevents log writes to /home/magnus/.hugin/logs/ — a real bug that would cause task failures",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "zombie-procs-C03",
+    "source": "codex-round-1",
+    "text": "Fix 3 calls process.exit(0) immediately after currentChild.kill(SIGTERM), orphaning the child before it can exit",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "zombie-procs-C04",
+    "source": "codex-round-1",
+    "text": "munin-memory.service After= dependency is silently ignored in user-level context if munin-memory is system-level",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "zombie-procs-C05",
+    "source": "codex-round-1",
+    "text": "Migration plan doesn't remove legacy system-level service atomically — deploy-pi.sh needs idempotent removal block",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "zombie-procs-C06",
+    "source": "codex-round-1",
+    "text": "Linger not verified or enforced — user-level service won't start on boot if Linger=no",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "zombie-procs-C07",
+    "source": "codex-round-1",
+    "text": "StartLimitBurst claim about crash loop persistence needs verification",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "zombie-procs-C08",
+    "source": "codex-round-2",
+    "text": "ReadWritePaths fix is underspecified — Option A (broad) vs Option B (surgical) not decided; needs write-path audit",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "zombie-procs-C09",
+    "source": "codex-round-2",
+    "text": "Repo hugin.service has User=magnus and WantedBy=multi-user.target — wrong for a user-level service template",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  }
+]

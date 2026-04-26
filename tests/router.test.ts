@@ -302,4 +302,73 @@ describe("routeTask", () => {
       }
     });
   });
+
+  describe("autoEligible filter (orchestrator v1)", () => {
+    const openrouter = makeCandidate({
+      id: "openrouter",
+      dispatcherRuntime: "openrouter",
+      trustTier: "semi-trusted",
+      costModel: "per-token",
+      modelSize: "large",
+      capabilities: ["code"],
+      autoEligible: false,
+    });
+
+    const piHarness = makeCandidate({
+      id: "pi-harness",
+      dispatcherRuntime: "pi-harness",
+      trustTier: "semi-trusted",
+      costModel: "per-token",
+      modelSize: "large",
+      capabilities: ["code", "tools"],
+      autoEligible: false,
+    });
+
+    it("excludes autoEligible:false runtimes from auto-routing", () => {
+      const input: RouterInput = {
+        effectiveSensitivity: "internal",
+        availableRuntimes: [...allRuntimes, openrouter, piHarness],
+      };
+      const decision = routeTask(input);
+      expect(decision.selectedRuntime.id).not.toBe("openrouter");
+      expect(decision.selectedRuntime.id).not.toBe("pi-harness");
+      const eliminatedIds = decision.eliminated.map((e) => e.id);
+      expect(eliminatedIds).toContain("openrouter");
+      expect(eliminatedIds).toContain("pi-harness");
+    });
+
+    it("records explicit-only reason for eliminated explicit-only runtimes", () => {
+      const input: RouterInput = {
+        effectiveSensitivity: "internal",
+        availableRuntimes: [...allRuntimes, openrouter],
+      };
+      const decision = routeTask(input);
+      const elim = decision.eliminated.find((e) => e.id === "openrouter");
+      expect(elim?.reason).toMatch(/explicit-only/);
+    });
+
+    it("falls through to autoEligible:true runtimes correctly", () => {
+      // Even when openrouter would otherwise win on size, ollama-pi (free, trusted)
+      // should still be picked for internal-sensitivity tasks.
+      const input: RouterInput = {
+        effectiveSensitivity: "internal",
+        availableRuntimes: [openrouter, ollamaPi],
+      };
+      const decision = routeTask(input);
+      expect(decision.selectedRuntime.id).toBe("ollama-pi");
+    });
+
+    it("undefined autoEligible is treated as eligible (backwards-compatible)", () => {
+      const legacy = makeCandidate({
+        id: "legacy-runtime",
+        // autoEligible omitted
+      });
+      const input: RouterInput = {
+        effectiveSensitivity: "internal",
+        availableRuntimes: [legacy],
+      };
+      const decision = routeTask(input);
+      expect(decision.selectedRuntime.id).toBe("legacy-runtime");
+    });
+  });
 });

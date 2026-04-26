@@ -91,6 +91,7 @@ import {
 import { routeTask, type RouterDecision } from "./router.js";
 import {
   buildRuntimeCandidates,
+  isLegacyDispatcherRuntime,
   type RuntimeCapability,
 } from "./runtime-registry.js";
 import {
@@ -2695,7 +2696,18 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           preferredModel: parsedTask.model,
           availableRuntimes: candidates,
         });
-        parsedTask.runtime = decision.selectedRuntime.dispatcherRuntime;
+        // Auto-router is contractually required to exclude autoEligible:false
+        // runtimes (openrouter, pi-harness). Verify rather than cast — if this
+        // ever fires, the contract was violated upstream and the dispatcher
+        // cannot execute the selection.
+        const selectedRuntime = decision.selectedRuntime.dispatcherRuntime;
+        if (!isLegacyDispatcherRuntime(selectedRuntime)) {
+          throw new Error(
+            `Auto-router selected non-legacy runtime "${selectedRuntime}" — ` +
+              `autoEligible filter contract violated. selected_id=${decision.selectedRuntime.id}`,
+          );
+        }
+        parsedTask.runtime = selectedRuntime;
         parsedTask.routingDecision = decision;
         if (decision.selectedRuntime.ollamaHost) {
           parsedTask.ollamaHost = decision.selectedRuntime.ollamaHost;

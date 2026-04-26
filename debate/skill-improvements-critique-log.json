@@ -1,0 +1,128 @@
+[
+  {
+    "id": "skill-improvements-C01",
+    "source": "codex-round-1",
+    "text": "Tier system adds complexity to solve a problem (heaviness) that lacks evidence — only 2 debates on record, both completed quickly",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "skill-improvements-C02",
+    "source": "codex-round-1",
+    "text": "Quick tier removes self-review and critique log, breaking Step 10 index tracking and Step 11 completeness verification",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-improvements-C03",
+    "source": "codex-round-1",
+    "text": "Quick tier fragments the dataset, making future historical learning (Idea #8) harder rather than easier",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-improvements-C04",
+    "source": "codex-round-1",
+    "text": "Rejecting role inversion is conjecture, not evidence — self-review catch rates don't speak to role inversion quality",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "skill-improvements-C05",
+    "source": "codex-round-1",
+    "text": "Phasing order is backwards — front-loads the biggest, least-validated change instead of starting with narrow, evidence-producing fixes",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-improvements-C06",
+    "source": "codex-round-1",
+    "text": "Type-specific prompting risks anchoring Codex away from cross-cutting issues",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-improvements-C07",
+    "source": "codex-round-1",
+    "text": "Dynamic round scoring is gameable — atomizing issues or restating in different language to justify continuation",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-improvements-C08",
+    "source": "codex-round-1",
+    "text": "Deep tier creates expectation gradient making Standard feel second-rate",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "skill-improvements-C09",
+    "source": "codex-round-1",
+    "text": "SKILL.md size concern should focus on branching factor and conditional complexity, not raw line count",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-improvements-C10",
+    "source": "codex-round-1",
+    "text": "Deep tier context dilution — later rounds become context-management exercises rather than better critique",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-improvements-C11",
+    "source": "codex-round-2",
+    "text": "Step 6 symmetry problem — if Round 1 becomes type-aware but Round 2 stays generic, domain-specific probing drops off",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-improvements-C12",
+    "source": "codex-round-2",
+    "text": "Severity calibration still lacks a semantic target — does severity measure the flaw, the consequence of ignoring it, or the reversibility?",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-improvements-C13",
+    "source": "codex-round-2",
+    "text": "Mixed-type debates need a composition rule for combined prompts, not just 'additive' handwaving",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-improvements-C14",
+    "source": "codex-round-2",
+    "text": "Prompt/checklist drift is now an immediate implementation problem since type-specific prompts are adopt-first",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  }
+]
