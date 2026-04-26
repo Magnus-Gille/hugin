@@ -166,6 +166,8 @@ npm run build
 npm test
 ```
 
+For substantive code changes, default to red/green TDD: write the failing test first, confirm it fails, then implement until it passes. Skip for refactors with no behavior change, config tweaks, and trivial fixes.
+
 ## How to run locally
 
 ```bash
