@@ -212,6 +212,62 @@ describe("executeOpenRouterDelegation", () => {
     expect(out.error.message).toContain("one-shot");
   });
 
+  it("rejects empty/whitespace-only completions as executor_failed (retryable)", async () => {
+    const client = stubClient(async () => ({
+      output: "   \n\t  ",
+      finishReason: "length",
+      modelEffective: "openai/gpt-oss-120b",
+      usage: { prompt_tokens: 8, completion_tokens: 0, total_tokens: 8 },
+      raw: {},
+    }));
+    const out = await executeOpenRouterDelegation(envelope(), { client });
+    expect(out.ok).toBe(false);
+    if (out.ok) throw new Error("expected error");
+    expect(out.error.kind).toBe("executor_failed");
+    expect(out.error.retryable).toBe(true);
+    expect(out.error.message).toContain("empty completion");
+    expect(out.error.message).toContain("finish_reason=length");
+  });
+
+  it("computes cost_usd from token usage against the pricing snapshot", async () => {
+    const client = stubClient(async () => ({
+      output: "ok",
+      finishReason: "stop",
+      modelEffective: "openai/gpt-oss-120b",
+      usage: { prompt_tokens: 1_000_000, completion_tokens: 1_000_000, total_tokens: 2_000_000 },
+      raw: {},
+    }));
+    const out = await executeOpenRouterDelegation(envelope(), { client });
+    expect(out.ok).toBe(true);
+    if (!out.ok) throw new Error("expected ok");
+    // 1M prompt @ $0.05/M + 1M completion @ $0.30/M = $0.35
+    expect(out.result.cost_usd).toBeCloseTo(0.35, 6);
+  });
+
+  it("falls back to cost_usd=0 with a warning when the model is not in the pricing snapshot", async () => {
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (msg: unknown) => {
+      warns.push(String(msg));
+    };
+    try {
+      const client = stubClient(async () => ({
+        output: "ok",
+        finishReason: "stop",
+        modelEffective: "some/unlisted-model",
+        usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+        raw: {},
+      }));
+      const out = await executeOpenRouterDelegation(envelope(), { client });
+      expect(out.ok).toBe(true);
+      if (!out.ok) throw new Error("expected ok");
+      expect(out.result.cost_usd).toBe(0);
+      expect(warns.some((w) => w.includes("some/unlisted-model"))).toBe(true);
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+
   it("respects scanner_policy: redact replaces matches in output", async () => {
     const client = stubClient(async () => ({
       output: "Here is a key: sk-ant-api03-secrettokensecrettokensecrettokensecrettokensecrettokensecrettokensecret-tokenAA",

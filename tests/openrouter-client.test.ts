@@ -164,6 +164,42 @@ describe("OpenRouterClient", () => {
     }
   });
 
+  it("maps stalled response body to code 'timeout' (timer covers body parse)", async () => {
+    // Headers arrive promptly; body never resolves until the abort fires.
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      const sig = (init?.signal as AbortSignal | undefined) ?? null;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          if (sig?.aborted) {
+            controller.error(Object.assign(new Error("aborted"), { name: "AbortError" }));
+            return;
+          }
+          sig?.addEventListener("abort", () => {
+            controller.error(Object.assign(new Error("aborted"), { name: "AbortError" }));
+          });
+          // Never enqueues — body hangs until abort.
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    const client = new OpenRouterClient({ apiKey: "k", fetchImpl });
+    try {
+      await client.chat({
+        model: "openai/gpt-oss-120b",
+        prompt: "hi",
+        timeoutMs: 20,
+      });
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(OpenRouterError);
+      expect((err as OpenRouterError).code).toBe("timeout");
+      expect((err as OpenRouterError).message).toMatch(/stalled|timed out/);
+    }
+  });
+
   it("maps malformed JSON body to code 'parse'", async () => {
     const fetchImpl: typeof fetch = async () =>
       new Response("not json", {

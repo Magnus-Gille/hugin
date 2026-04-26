@@ -30,7 +30,15 @@ import {
   type OpenRouterChatResponse,
   type OpenRouterClient,
 } from "../openrouter-client.js";
+import { computeOpenRouterCostUsd } from "../openrouter-pricing.js";
 import type { DelegationEnvelope } from "./types.js";
+
+/**
+ * Spec-defined default timeout for one-shot delegations
+ * (docs/orchestrator-v1-data-model.md §3, line 96). Used when the
+ * envelope omits `timeout_ms`.
+ */
+export const ONE_SHOT_DEFAULT_TIMEOUT_MS = 300_000;
 
 export interface OpenRouterExecutorDeps {
   client: OpenRouterClient;
@@ -77,6 +85,7 @@ export async function executeOpenRouterDelegation(
   }
 
   const start = (deps.now ?? Date.now)();
+  const timeoutMs = envelope.timeout_ms ?? ONE_SHOT_DEFAULT_TIMEOUT_MS;
 
   let chatResponse: OpenRouterChatResponse;
   try {
@@ -85,20 +94,41 @@ export async function executeOpenRouterDelegation(
       prompt: envelope.prompt,
       reasoningLevel: envelope.alias_resolved.reasoning_level,
       maxOutputTokens: envelope.max_output_tokens,
-      timeoutMs: envelope.timeout_ms,
+      timeoutMs,
     });
   } catch (err) {
     return { ok: false, error: mapClientError(envelope, err) };
   }
 
+  if (chatResponse.output.trim().length === 0) {
+    return {
+      ok: false,
+      error: {
+        task_id: envelope.task_id,
+        kind: "executor_failed",
+        message:
+          `OpenRouter returned an empty completion (finish_reason=${chatResponse.finishReason ?? "null"})`,
+        retryable: true,
+      },
+    };
+  }
+
   const durationS = ((deps.now ?? Date.now)() - start) / 1000;
+  const modelEffective =
+    chatResponse.modelEffective || envelope.alias_resolved.model_requested;
+  const cost = computeOpenRouterCostUsd(modelEffective, chatResponse.usage);
+  if (cost === null) {
+    console.warn(
+      `[orch-v1/openrouter] cost_usd unknown for model '${modelEffective}' — pricing snapshot does not cover it; reporting 0`,
+    );
+  }
 
   return finalizeDelegatedOutput({
     result_kind: "text",
     raw_output: chatResponse.output,
     task_id: envelope.task_id,
     alias_requested: envelope.alias_resolved.alias,
-    model_effective: chatResponse.modelEffective || envelope.alias_resolved.model_requested,
+    model_effective: modelEffective,
     runtime_effective: "openrouter",
     runtime_row_id_effective: envelope.alias_resolved.runtime_row_id,
     host_effective: "openrouter",
@@ -108,7 +138,7 @@ export async function executeOpenRouterDelegation(
     completion_tokens: chatResponse.usage.completion_tokens,
     total_tokens: chatResponse.usage.total_tokens,
     duration_s: durationS,
-    cost_usd: 0,
+    cost_usd: cost ?? 0,
   });
 }
 

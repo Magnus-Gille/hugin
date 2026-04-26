@@ -98,7 +98,14 @@ export interface OpenRouterChatResponse {
   raw: unknown;
 }
 
-const DEFAULT_TIMEOUT_MS = 120_000;
+/**
+ * Last-resort safety net only. The executor is expected to resolve a
+ * runtime-default timeout (300_000 ms for one-shot, 900_000 ms for
+ * harness, per docs/orchestrator-v1-data-model.md §3) and pass it
+ * explicitly. This fallback exists so the client cannot hang forever
+ * if a future caller forgets, but it is *not* the documented default.
+ */
+const DEFAULT_TIMEOUT_MS = 600_000;
 
 export class OpenRouterClient {
   private readonly apiKey: string;
@@ -148,46 +155,61 @@ export class OpenRouterClient {
       else request.abortSignal.addEventListener("abort", () => controller.abort(), { once: true });
     }
 
-    let response: Response;
+    // The same AbortController must remain armed through both the fetch
+    // (headers) and the body read. fetch() resolves once headers arrive;
+    // a stalled body would otherwise hang indefinitely with the timer
+    // already cleared.
     try {
-      response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: this.buildHeaders(),
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      clearTimeout(timer);
-      if ((err as Error & { name?: string }).name === "AbortError") {
-        throw new OpenRouterError("timeout", `OpenRouter request timed out after ${timeoutMs}ms`);
+      let response: Response;
+      try {
+        response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: this.buildHeaders(),
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } catch (err) {
+        if (isAbortError(err)) {
+          throw new OpenRouterError(
+            "timeout",
+            `OpenRouter request timed out after ${timeoutMs}ms`,
+          );
+        }
+        throw new OpenRouterError(
+          "network",
+          `OpenRouter network error: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
-      throw new OpenRouterError(
-        "network",
-        `OpenRouter network error: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    clearTimeout(timer);
 
-    if (!response.ok) {
-      const text = await safeReadText(response);
-      throw new OpenRouterError(
-        "provider",
-        `OpenRouter returned HTTP ${response.status}`,
-        { httpStatus: response.status, providerMessage: text },
-      );
-    }
+      if (!response.ok) {
+        const text = await safeReadText(response, controller.signal);
+        throw new OpenRouterError(
+          "provider",
+          `OpenRouter returned HTTP ${response.status}`,
+          { httpStatus: response.status, providerMessage: text },
+        );
+      }
 
-    let parsed: unknown;
-    try {
-      parsed = await response.json();
-    } catch (err) {
-      throw new OpenRouterError(
-        "parse",
-        `OpenRouter response was not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+      let parsed: unknown;
+      try {
+        parsed = await response.json();
+      } catch (err) {
+        if (isAbortError(err)) {
+          throw new OpenRouterError(
+            "timeout",
+            `OpenRouter response body stalled and timed out after ${timeoutMs}ms`,
+          );
+        }
+        throw new OpenRouterError(
+          "parse",
+          `OpenRouter response was not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
 
-    return mapChatResponse(parsed);
+      return mapChatResponse(parsed);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private buildHeaders(): Record<string, string> {
@@ -202,12 +224,19 @@ export class OpenRouterClient {
   }
 }
 
-async function safeReadText(response: Response): Promise<string | undefined> {
+async function safeReadText(
+  response: Response,
+  _signal?: AbortSignal,
+): Promise<string | undefined> {
   try {
     return await response.text();
   } catch {
     return undefined;
   }
+}
+
+function isAbortError(err: unknown): boolean {
+  return (err as Error & { name?: string })?.name === "AbortError";
 }
 
 interface OpenRouterChoice {
