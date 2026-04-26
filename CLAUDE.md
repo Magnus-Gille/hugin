@@ -126,7 +126,17 @@ hugin/
 │   ├── task-result-schema.ts     # Structured task result with classification
 │   ├── task-status-tags.ts       # Tag manipulation helpers for task lifecycle
 │   ├── task-graph.ts             # Task dependency graph for pipelines
-│   └── result-format.ts          # Result formatting utilities
+│   ├── result-format.ts          # Result formatting utilities
+│   └── broker/                   # Orchestrator-v1 broker (Tailscale-only HTTP, /v1/delegate/*)
+│       ├── server.ts             # Express app + opt-in startup (HUGIN_BROKER_KEYS)
+│       ├── handlers.ts           # submit/await/rate/list/models endpoint handlers
+│       ├── auth.ts               # Bearer-token middleware, constant-time compare
+│       ├── idempotency.ts        # In-memory idempotency-key dedupe (§3.1)
+│       ├── journal.ts            # Append-only delegation-events.jsonl + projection
+│       ├── task-store.ts         # Munin operations: submit / read / two-phase complete
+│       ├── alias-resolution.ts   # Alias → AliasResolved annotation + policy_version
+│       ├── reconciliation.ts     # Periodic sweep: backfill journal events for orch-v1 tasks
+│       └── types.ts              # Zod schemas for the wire contract
 ├── tests/                        # 19 test files mirroring src/
 ├── docs/                         # Engineering plans, evaluations, security docs
 │   └── security/                 # Threat models and security assessments
@@ -206,3 +216,8 @@ Security assessments, threat models, and audit reports live in `docs/security/`.
 | `HUGIN_SIGNING_POLICY` | `off` | Task signature verification policy: `off` (skip), `warn` (log missing/invalid, never reject), `require` (reject tasks without a valid signature). See `docs/security/task-signing.md`. |
 | `HUGIN_SUBMITTER_KEYS` | — | Inline JSON keystore: `{"<keyId>": "<hex-secret>"}` (64-char hex preferred; base64 accepted). |
 | `HUGIN_SUBMITTER_KEYS_FILE` | — | Path to a JSON keystore file. Takes precedence over `HUGIN_SUBMITTER_KEYS`. |
+| `HUGIN_BROKER_HOST` | `127.0.0.1` | Bind address for the orchestrator-v1 broker (`/v1/delegate/*`). Set to the Tailscale interface IP in production. |
+| `HUGIN_BROKER_PORT` | `3033` | Port for the broker endpoint. |
+| `HUGIN_BROKER_KEYS` | — | Inline JSON keystore: `{"<principal>": "<token>"}`. Setting either this or `HUGIN_BROKER_KEYS_FILE` enables the broker. |
+| `HUGIN_BROKER_KEYS_FILE` | — | Path to a JSON keystore file for the broker. Takes precedence over `HUGIN_BROKER_KEYS`. |
+| `HUGIN_BROKER_RECONCILIATION_INTERVAL_MS` | `60000` | Interval between reconciliation sweeps (backfills journal events for orch-v1 tasks visible in Munin). |

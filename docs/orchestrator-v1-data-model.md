@@ -67,7 +67,7 @@ Alias governance rules:
 
 ## 3. Request envelope
 
-What the MCP submits via the broker. JSON over HTTP `POST /orchestrator/submit`.
+What the MCP submits via the broker. JSON over HTTP `POST /v1/delegate/submit`.
 
 ```typescript
 interface DelegationRequest {
@@ -86,7 +86,7 @@ interface DelegationRequest {
 
   // How to do it
   alias_requested: Alias;               // Required. See §2.
-  alias_map_version: number;            // Read by MCP from /orchestrator/models at session start.
+  alias_map_version: number;            // Read by MCP from /v1/delegate/models at session start.
 
   // Harness-only fields (required iff alias_requested resolves to a harness family)
   worktree?: WorktreeSpec;              // Required for harness aliases. Rejected for one-shot aliases.
@@ -574,7 +574,7 @@ This section locks the durability model.
 
 ### 12.2 Submit ordering
 
-The broker's `POST /orchestrator/submit` performs writes in this order:
+The broker's `POST /v1/delegate/submit` performs writes in this order:
 
 1. **Acquire dedupe lock** on the `idempotency_key` (in-memory; non-durable). If another submission with the same key is in-flight, queue this one or reject.
 2. **Munin write:** create `tasks/<task_id>` with the full envelope (request + `BrokerAnnotations`) and tags `["pending", "runtime:<runtime>", "orch-v1"]`. This write must succeed before the broker returns `200 OK` to the MCP. *This is the durability boundary — once Munin acks, the submission is durable.*
@@ -619,7 +619,7 @@ The earlier proposal of a `submitted_not_indexed` await branch is dropped: Munin
 
 ### 12.5 Reconciliation sweep
 
-A periodic reconciliation pass (default every 60s, configurable via `HUGIN_RECONCILIATION_INTERVAL_MS`) does:
+A periodic reconciliation pass (default every 60s, configurable via `HUGIN_BROKER_RECONCILIATION_INTERVAL_MS`) does:
 
 1. Scan Munin for `tasks/*` entries with the `orch-v1` tag and a status that disagrees with the broker's in-memory cache.
 2. For each Munin task without a matching `delegation_submitted` event in the journal: append the event from the stored envelope (idempotent — the journal append checks if the event already exists before writing).
