@@ -108,6 +108,8 @@ import { BrokerTaskStore } from "./broker/task-store.js";
 import { DelegationJournal } from "./broker/journal.js";
 import { IdempotencyIndex } from "./broker/idempotency.js";
 import { BrokerReconciler } from "./broker/reconciliation.js";
+import { OrchWorker } from "./broker/orch-worker.js";
+import { OpenRouterClient } from "./openrouter-client.js";
 
 export type ExfilPolicy = "off" | "warn" | "flag" | "redact";
 
@@ -297,6 +299,7 @@ let currentOllamaAbort: AbortController | null = null;
 let server: Server;
 let runningBroker: RunningBroker | null = null;
 let brokerReconciler: BrokerReconciler | null = null;
+let orchWorker: OrchWorker | null = null;
 let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
 let cancelWatchTimer: ReturnType<typeof setInterval> | null = null;
 let leaseReaperTimer: ReturnType<typeof setInterval> | null = null;
@@ -3636,6 +3639,7 @@ async function shutdown(signal: string): Promise<void> {
   // Release the port immediately so a replacement instance can start.
   server?.close();
   brokerReconciler?.stop();
+  orchWorker?.stop();
   if (runningBroker) {
     runningBroker.close().catch((err) => {
       console.error(
@@ -3801,6 +3805,31 @@ if (brokerEnv.enabled) {
       console.log(
         `Broker reconciler: every ${config.brokerReconciliationIntervalMs}ms (journal: ${brokerHome})`,
       );
+
+      const orKey = process.env.OPENROUTER_API_KEY?.trim();
+      if (orKey) {
+        const orClient = new OpenRouterClient({
+          apiKey: orKey,
+          referer: process.env.OPENROUTER_REFERER || "https://hugin.local",
+          appTitle: process.env.OPENROUTER_APP_TITLE || "hugin-orch-v1",
+        });
+        orchWorker = new OrchWorker({
+          munin,
+          taskStore,
+          journal,
+          openrouterClient: orClient,
+          workerId: `orch-${workerId}`,
+          pollIntervalMs: config.pollIntervalMs,
+        });
+        orchWorker.start();
+        console.log(
+          `Orch worker (openrouter): polling every ${config.pollIntervalMs}ms`,
+        );
+      } else {
+        console.log(
+          "Orch worker (openrouter): disabled (set OPENROUTER_API_KEY to enable)",
+        );
+      }
     })
     .catch((err) => {
       console.error(

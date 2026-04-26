@@ -136,6 +136,7 @@ hugin/
 │       ├── task-store.ts         # Munin operations: submit / read / two-phase complete
 │       ├── alias-resolution.ts   # Alias → AliasResolved annotation + policy_version
 │       ├── reconciliation.ts     # Periodic sweep: backfill journal events for orch-v1 tasks
+│       ├── orch-worker.ts        # Poll loop: claims orch-v1 pending tasks → OpenRouter executor → two-phase complete
 │       └── types.ts              # Zod schemas for the wire contract
 ├── tests/                        # 19 test files mirroring src/
 ├── docs/                         # Engineering plans, evaluations, security docs
@@ -221,3 +222,6 @@ Security assessments, threat models, and audit reports live in `docs/security/`.
 | `HUGIN_BROKER_KEYS` | — | Inline JSON keystore: `{"<principal>": "<token>"}`. Setting either this or `HUGIN_BROKER_KEYS_FILE` enables the broker. |
 | `HUGIN_BROKER_KEYS_FILE` | — | Path to a JSON keystore file for the broker. Takes precedence over `HUGIN_BROKER_KEYS`. |
 | `HUGIN_BROKER_RECONCILIATION_INTERVAL_MS` | `60000` | Interval between reconciliation sweeps (backfills journal events for orch-v1 tasks visible in Munin). |
+| `OPENROUTER_API_KEY` | — | Enables the orch-v1 OpenRouter worker (Step 5b). Required to actually execute one-shot delegations; without it the broker still accepts submissions but tasks stay `pending`. |
+| `OPENROUTER_REFERER` | `https://hugin.local` | `HTTP-Referer` header value sent to OpenRouter (used for ranking/attribution). |
+| `OPENROUTER_APP_TITLE` | `hugin-orch-v1` | `X-Title` header value sent to OpenRouter. |
