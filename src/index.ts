@@ -2578,8 +2578,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     limit: 50,
   });
 
+  // Orchestrator v1 tasks (broker-submitted, tagged "orch-v1") are dispatched
+  // by the Pi-side broker, not by the legacy in-process poller. Filter them
+  // out so the dispatcher does not greedily claim a runtime:openrouter or
+  // runtime:pi-harness task and fail it as "missing prompt or runtime".
+  // See docs/orchestrator-v1-data-model.md §3 for the broker submit path.
+  const dispatchableResults = results.filter(
+    (r) => !r.tags.includes("orch-v1"),
+  );
+
   // Select the next eligible task respecting Group/Sequence ordering (FIFO within eligible set)
-  const taskResult = selectNextTask(results, runningResults);
+  const taskResult = selectNextTask(dispatchableResults, runningResults);
   if (!taskResult) return { hadTask: false, queueDepth: 0 };
 
   const taskNs = taskResult.namespace;

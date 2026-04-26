@@ -1,6 +1,17 @@
 # Orchestrator Stack v1 — Scope
 
-**Status:** Approved scope, ready to build
+> **⚠ Superseded by [`docs/orchestrator-v1-data-model.md`](../orchestrator-v1-data-model.md).**
+>
+> This scope doc is kept for historical context. The contract spec is the single source of truth. Notable contract changes since this doc was written:
+>
+> - **`hugin_run` (sync) is dropped.** A 30s poll + serial dispatcher cannot deliver real sync. v1 is async-only: `hugin_submit` + `hugin_await`.
+> - **Single `~/.hugin/orchestrator-journal.jsonl` is replaced** by an append-only `delegation-events.jsonl` event log + read-time projection. Hugin is the sole journal writer; the laptop MCP never writes to a Pi-side journal.
+> - **Pi-harness (Option B)** entered v1 scope after a parallel-session aider eval (`pi --no-session --provider openrouter` against `qwen/qwen3-coder-next` scored 5/6 strict, 6/6 lenient). Worktrees live on the Pi; Hugin never auto-pushes; diffs return to Claude for review.
+> - **Stable aliases** (`tiny`, `medium`, `large-reasoning`, `pi-large-coder`) replace literal model names at the MCP boundary.
+> - **Pi-side broker** with Tailscale-only bearer auth replaces laptop-side signing keys for orchestrator submissions.
+> - **Orthogonal policy fields** (`provider`, `egress`, `zdrRequired`, `autoEligible`) replace stretching the trust tier.
+
+**Status:** Superseded — see banner above.
 **Date:** 2026-04-25
 **Decision:** Build it. Run it. Learn from real usage. Defer the formal go/no-go evaluation until we have a corpus of real ratings.
 

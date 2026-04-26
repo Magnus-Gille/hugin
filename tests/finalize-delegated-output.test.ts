@@ -10,6 +10,7 @@ const baseTextInput: FinalizeTextInput = {
   alias_requested: "medium",
   model_effective: "qwen3:14b",
   runtime_effective: "ollama",
+  runtime_row_id_effective: "ollama-laptop",
   host_effective: "mba",
   result_kind: "text",
   raw_output: "Hello, world.",
@@ -23,6 +24,7 @@ const baseDiffInput: FinalizeDiffInput = {
   alias_requested: "pi-large-coder",
   model_effective: "qwen/qwen3-coder-next",
   runtime_effective: "pi-harness",
+  runtime_row_id_effective: "pi-harness",
   host_effective: "pi",
   result_kind: "diff",
   raw_diff: {
@@ -119,6 +121,50 @@ describe("finalizeDelegatedOutput — text path", () => {
     if (!outcome.ok) return;
     expect(() => new Date(outcome.result.finalized_at).toISOString()).not.toThrow();
   });
+
+  it("stamps result_schema_version=1 and runtime_row_id_effective", () => {
+    const outcome = finalizeDelegatedOutput(baseTextInput);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.result.result_schema_version).toBe(1);
+    expect(outcome.result.runtime_row_id_effective).toBe("ollama-laptop");
+  });
+
+  it("policy=off skips the scanner and preserves payload exactly", () => {
+    const outcome = finalizeDelegatedOutput({
+      ...baseTextInput,
+      raw_output:
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBA...\n-----END RSA PRIVATE KEY-----",
+      scanner_policy: "off",
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.result.provenance.scanner_pass).toBe("skipped");
+    expect(outcome.result.output).toContain("BEGIN RSA PRIVATE KEY");
+  });
+
+  it("policy=flag preserves payload and reports scanner_pass=flag on match", () => {
+    const outcome = finalizeDelegatedOutput({
+      ...baseTextInput,
+      raw_output:
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBA...\n-----END RSA PRIVATE KEY-----",
+      scanner_policy: "flag",
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.result.provenance.scanner_pass).toBe("flag");
+    expect(outcome.result.output).toContain("BEGIN RSA PRIVATE KEY");
+  });
+
+  it("policy=flag reports scanner_pass=clean when payload has no matches", () => {
+    const outcome = finalizeDelegatedOutput({
+      ...baseTextInput,
+      scanner_policy: "flag",
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.result.provenance.scanner_pass).toBe("clean");
+  });
 });
 
 describe("finalizeDelegatedOutput — diff path", () => {
@@ -209,5 +255,45 @@ describe("finalizeDelegatedOutput — diff path", () => {
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     expect(outcome.result.provenance.harness_version).toBe("pi@2.0.0-rc1");
+  });
+
+  it("diff under policy=off preserves payload and never escalates", () => {
+    const outcome = finalizeDelegatedOutput({
+      ...baseDiffInput,
+      scanner_policy: "off",
+      raw_diff: {
+        ...baseDiffInput.raw_diff,
+        unified_diff:
+          "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBA...\n-----END RSA PRIVATE KEY-----",
+      },
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.result.provenance.scanner_pass).toBe("skipped");
+    expect(outcome.result.diff!.unified_diff).toContain("BEGIN RSA PRIVATE KEY");
+  });
+
+  it("diff under policy=flag preserves payload and never escalates", () => {
+    const outcome = finalizeDelegatedOutput({
+      ...baseDiffInput,
+      scanner_policy: "flag",
+      raw_diff: {
+        ...baseDiffInput.raw_diff,
+        unified_diff:
+          "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBA...\n-----END RSA PRIVATE KEY-----",
+      },
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.result.provenance.scanner_pass).toBe("flag");
+    expect(outcome.result.diff!.unified_diff).toContain("BEGIN RSA PRIVATE KEY");
+  });
+
+  it("stamps result_schema_version=1 and runtime_row_id_effective on diff path", () => {
+    const outcome = finalizeDelegatedOutput(baseDiffInput);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.result.result_schema_version).toBe(1);
+    expect(outcome.result.runtime_row_id_effective).toBe("pi-harness");
   });
 });

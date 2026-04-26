@@ -16,6 +16,10 @@
  *   a corrupted diff. The default `warn` policy still returns success with the
  *   raw diff intact, regardless of result_kind.
  *
+ * Policy surface mirrors the project-wide `ExfilPolicy` from src/index.ts so
+ * the broker/MCP path can reuse the same env-driven control without ad-hoc
+ * branching: `off | warn | flag | redact`.
+ *
  * See docs/orchestrator-v1-data-model.md §4 (result schema), §5 (scanner pass),
  * §7 (provenance chain). See docs/security/exfiltration-scanner.md for the
  * scanner policy semantics.
@@ -31,7 +35,7 @@ import type { Alias } from "./runtime-registry.js";
 export type DelegationRuntimeEffective = "ollama" | "openrouter" | "pi-harness";
 export type DelegationHostEffective = "pi" | "mba" | "openrouter";
 export type DelegationResultKind = "text" | "diff";
-export type ScannerPass = "clean" | "warn" | "redact";
+export type ScannerPass = "skipped" | "clean" | "warn" | "flag" | "redact";
 
 export interface DelegationDiff {
   base_sha: string;
@@ -50,10 +54,12 @@ export interface DelegationProvenance {
 }
 
 export interface DelegationResult {
+  result_schema_version: 1;
   task_id: string;
   alias_requested: Alias;
   model_effective: string;
   runtime_effective: DelegationRuntimeEffective;
+  runtime_row_id_effective: string;
   host_effective: DelegationHostEffective;
   result_kind: DelegationResultKind;
 
@@ -90,13 +96,14 @@ export type FinalizeOutcome =
   | { ok: true; result: DelegationResult }
   | { ok: false; error: DelegationError };
 
-export type ScannerPolicy = "warn" | "redact";
+export type ScannerPolicy = "off" | "warn" | "flag" | "redact";
 
 interface BaseInput {
   task_id: string;
   alias_requested: Alias;
   model_effective: string;
   runtime_effective: DelegationRuntimeEffective;
+  runtime_row_id_effective: string;
   host_effective: DelegationHostEffective;
   policy_version: string;
   harness_version?: string;
@@ -125,16 +132,29 @@ export type FinalizeInput = FinalizeTextInput | FinalizeDiffInput;
 /**
  * Single shared finalizer. Returns a `FinalizeOutcome` discriminated union.
  *
- * - Clean payloads → `{ ok: true, result }` with `scanner_pass: "clean"`.
- * - Matched payloads under `warn` policy → `{ ok: true, result }` with
- *   `scanner_pass: "warn"`; payload is unmodified.
- * - Text matched under `redact` policy → `{ ok: true, result }` with
- *   `scanner_pass: "redact"`; matched spans replaced.
- * - Diff matched under `redact` policy → `{ ok: false, error }` with
- *   `kind: "scanner_blocked"`. Redacted diffs are not valid patches.
+ * Policy semantics (mirrors ExfilPolicy in src/index.ts):
+ * - `off`: skip scanner entirely; payload returned untouched with
+ *   `scanner_pass: "skipped"`.
+ * - `warn` (default): scan; matched payloads return success with
+ *   `scanner_pass: "warn"`; payload unmodified.
+ * - `flag`: scan; matched payloads return success with `scanner_pass: "flag"`;
+ *   payload unmodified. Caller is expected to tag downstream records (e.g.
+ *   `security:exfil-suspected`) using the metadata.
+ * - `redact`:
+ *    - text matched → success with `scanner_pass: "redact"`; matched spans
+ *      replaced.
+ *    - diff matched → `scanner_blocked` error. Redacted diffs are not valid
+ *      patches.
  */
 export function finalizeDelegatedOutput(input: FinalizeInput): FinalizeOutcome {
   const policy: ScannerPolicy = input.scanner_policy ?? "warn";
+
+  if (policy === "off") {
+    return {
+      ok: true,
+      result: buildResult(input, "skipped", payloadOf(input)),
+    };
+  }
 
   const scannedPayload = scanPayload(input);
 
@@ -163,6 +183,14 @@ export function finalizeDelegatedOutput(input: FinalizeInput): FinalizeOutcome {
     policy,
   );
 
+  return { ok: true, result: buildResult(input, scannerPass, finalizedPayload) };
+}
+
+function buildResult(
+  input: FinalizeInput,
+  scannerPass: ScannerPass,
+  finalizedPayload: string,
+): DelegationResult {
   const provenance: DelegationProvenance = {
     source: "delegated",
     scanner_pass: scannerPass,
@@ -173,10 +201,12 @@ export function finalizeDelegatedOutput(input: FinalizeInput): FinalizeOutcome {
   }
 
   const base = {
+    result_schema_version: 1 as const,
     task_id: input.task_id,
     alias_requested: input.alias_requested,
     model_effective: input.model_effective,
     runtime_effective: input.runtime_effective,
+    runtime_row_id_effective: input.runtime_row_id_effective,
     host_effective: input.host_effective,
     result_kind: input.result_kind,
     prompt_tokens: input.prompt_tokens,
@@ -190,14 +220,11 @@ export function finalizeDelegatedOutput(input: FinalizeInput): FinalizeOutcome {
   } satisfies Omit<DelegationResult, "output" | "diff">;
 
   if (input.result_kind === "text") {
-    return { ok: true, result: { ...base, output: finalizedPayload } };
+    return { ...base, output: finalizedPayload };
   }
   return {
-    ok: true,
-    result: {
-      ...base,
-      diff: { ...input.raw_diff, unified_diff: finalizedPayload },
-    },
+    ...base,
+    diff: { ...input.raw_diff, unified_diff: finalizedPayload },
   };
 }
 
@@ -206,9 +233,14 @@ interface ScannedPayload {
   scan: ExfilScanResult;
 }
 
+function payloadOf(input: FinalizeInput): string {
+  return input.result_kind === "text"
+    ? input.raw_output
+    : input.raw_diff.unified_diff;
+}
+
 function scanPayload(input: FinalizeInput): ScannedPayload {
-  const text =
-    input.result_kind === "text" ? input.raw_output : input.raw_diff.unified_diff;
+  const text = payloadOf(input);
   const scan = scanForExfiltration(text);
   return { text, scan };
 }
@@ -216,7 +248,7 @@ function scanPayload(input: FinalizeInput): ScannedPayload {
 function applyScannerPolicy(
   text: string,
   scan: ExfilScanResult,
-  policy: ScannerPolicy,
+  policy: Exclude<ScannerPolicy, "off">,
 ): { scannerPass: ScannerPass; finalizedPayload: string } {
   if (scan.severity === "none") {
     return { scannerPass: "clean", finalizedPayload: text };
@@ -226,6 +258,9 @@ function applyScannerPolicy(
       scannerPass: "redact",
       finalizedPayload: redactExfiltration(text, scan),
     };
+  }
+  if (policy === "flag") {
+    return { scannerPass: "flag", finalizedPayload: text };
   }
   return { scannerPass: "warn", finalizedPayload: text };
 }
