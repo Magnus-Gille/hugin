@@ -103,6 +103,11 @@ import {
   type SigningPolicy,
   type VerificationResult,
 } from "./task-signing.js";
+import { readBrokerEnv, startBroker, type RunningBroker } from "./broker/server.js";
+import { BrokerTaskStore } from "./broker/task-store.js";
+import { DelegationJournal } from "./broker/journal.js";
+import { IdempotencyIndex } from "./broker/idempotency.js";
+import { BrokerReconciler } from "./broker/reconciliation.js";
 
 export type ExfilPolicy = "off" | "warn" | "flag" | "redact";
 
@@ -237,7 +242,12 @@ const config = {
   submitterKeys: loadKeyStoreFromEnv() as KeyStore,
   exfilPolicy: parseExfilPolicy(process.env.HUGIN_EXFIL_POLICY),
   externalPolicy: parseExternalPolicy(process.env.HUGIN_EXTERNAL_POLICY),
+  brokerReconciliationIntervalMs: parseInt(
+    process.env.HUGIN_BROKER_RECONCILIATION_INTERVAL_MS || "60000",
+  ),
 };
+
+const brokerEnv = readBrokerEnv(process.env);
 
 if (config.signingPolicy !== "off") {
   const keyIds = Object.keys(config.submitterKeys);
@@ -285,6 +295,8 @@ let currentChild: ChildProcess | null = null;
 let currentSdkAbort: AbortController | null = null;
 let currentOllamaAbort: AbortController | null = null;
 let server: Server;
+let runningBroker: RunningBroker | null = null;
+let brokerReconciler: BrokerReconciler | null = null;
 let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
 let cancelWatchTimer: ReturnType<typeof setInterval> | null = null;
 let leaseReaperTimer: ReturnType<typeof setInterval> | null = null;
@@ -3623,6 +3635,14 @@ async function shutdown(signal: string): Promise<void> {
 
   // Release the port immediately so a replacement instance can start.
   server?.close();
+  brokerReconciler?.stop();
+  if (runningBroker) {
+    runningBroker.close().catch((err) => {
+      console.error(
+        `Broker close error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
 
   stopLeaseRenewal();
   stopCancellationWatch();
@@ -3754,6 +3774,42 @@ server.on("error", (err: NodeJS.ErrnoException) => {
   }
   process.exit(1);
 });
+
+// Optional orchestrator-v1 broker (separate port; opt-in via HUGIN_BROKER_KEYS).
+if (brokerEnv.enabled) {
+  const brokerHome = path.join(HUGIN_HOME, "delegation-events.jsonl");
+  const journal = new DelegationJournal({ path: brokerHome });
+  const taskStore = new BrokerTaskStore(munin);
+  const idempotency = new IdempotencyIndex();
+  brokerReconciler = new BrokerReconciler({
+    taskStore,
+    journal,
+    intervalMs: config.brokerReconciliationIntervalMs,
+  });
+  startBroker({
+    host: brokerEnv.host,
+    port: brokerEnv.port,
+    keys: brokerEnv.keys,
+    deps: { taskStore, journal, idempotency },
+  })
+    .then((rb) => {
+      runningBroker = rb;
+      console.log(
+        `Broker endpoint: http://${brokerEnv.host}:${brokerEnv.port}/v1/delegate/* (principals: ${Object.keys(brokerEnv.keys).join(", ")})`,
+      );
+      brokerReconciler?.start();
+      console.log(
+        `Broker reconciler: every ${config.brokerReconciliationIntervalMs}ms (journal: ${brokerHome})`,
+      );
+    })
+    .catch((err) => {
+      console.error(
+        `Failed to start broker: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+} else {
+  console.log("Broker: disabled (set HUGIN_BROKER_KEYS to enable)");
+}
 
 // Check Munin is reachable before starting poll loop
 munin.health().then((ok) => {
