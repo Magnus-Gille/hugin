@@ -27,6 +27,7 @@ export interface IdempotencyEntry {
 
 export type IdempotencyOutcome =
   | { kind: "fresh" }
+  | { kind: "in_flight" }
   | { kind: "retry"; task_id: string }
   | { kind: "collision"; existing_task_id: string };
 
@@ -36,12 +37,29 @@ export interface IdempotencyOptions {
 }
 
 /**
- * Canonicalize the request envelope for hashing. Excludes broker-added
- * fields (none are present at request time, but documents the intent) and
- * normalises object key order so semantically-equal envelopes hash equally.
+ * Recursively sort object keys so semantically equal payloads serialise
+ * identically, regardless of property insertion order. Arrays preserve order.
+ */
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value !== null && typeof value === "object") {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      sorted[key] = canonicalize((value as Record<string, unknown>)[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+/**
+ * Canonicalize the request envelope for hashing. Recursively sorts keys
+ * so nested fields (e.g. `worktree.target_files`) participate in the hash —
+ * a flat top-level sort would silently drop them via JSON.stringify's
+ * array-replacer rules.
  */
 export function canonicalizeRequest(request: DelegationRequest): string {
-  return JSON.stringify(request, Object.keys(request).sort());
+  return JSON.stringify(canonicalize(request));
 }
 
 export function hashPayload(request: DelegationRequest): string {
@@ -50,6 +68,10 @@ export function hashPayload(request: DelegationRequest): string {
 
 export class IdempotencyIndex {
   private readonly entries = new Map<string, IdempotencyEntry>();
+  private readonly reservations = new Map<
+    string,
+    { payload_hash: string; recorded_at: number }
+  >();
   private readonly windowMs: number;
   private readonly now: () => number;
 
@@ -59,21 +81,34 @@ export class IdempotencyIndex {
   }
 
   /**
-   * Check whether a submission is a fresh task, a retry of an existing one,
-   * or a collision (same key, different payload). Caller commits the entry
-   * via `record()` once the Munin write succeeds.
+   * Atomically check-and-reserve an idempotency_key. If `fresh`, the caller
+   * MUST follow up with `record(...)` after the Munin write succeeds, or
+   * `release(...)` if the write fails. Concurrent callers observing an
+   * outstanding reservation get `in_flight` so they can back off and retry.
    */
-  inspect(idempotencyKey: string, request: DelegationRequest): IdempotencyOutcome {
-    const existing = this.entries.get(idempotencyKey);
+  reserve(idempotencyKey: string, request: DelegationRequest): IdempotencyOutcome {
     const now = this.now();
-    if (!existing || now - existing.recorded_at > this.windowMs) {
-      return { kind: "fresh" };
+    const cutoff = now - this.windowMs;
+
+    const existing = this.entries.get(idempotencyKey);
+    if (existing && existing.recorded_at > cutoff) {
+      const payloadHash = hashPayload(request);
+      if (existing.payload_hash === payloadHash) {
+        return { kind: "retry", task_id: existing.task_id };
+      }
+      return { kind: "collision", existing_task_id: existing.task_id };
     }
-    const payloadHash = hashPayload(request);
-    if (existing.payload_hash === payloadHash) {
-      return { kind: "retry", task_id: existing.task_id };
+
+    const reserved = this.reservations.get(idempotencyKey);
+    if (reserved && reserved.recorded_at > cutoff) {
+      return { kind: "in_flight" };
     }
-    return { kind: "collision", existing_task_id: existing.task_id };
+
+    this.reservations.set(idempotencyKey, {
+      payload_hash: hashPayload(request),
+      recorded_at: now,
+    });
+    return { kind: "fresh" };
   }
 
   record(
@@ -86,12 +121,16 @@ export class IdempotencyIndex {
       payload_hash: hashPayload(request),
       recorded_at: this.now(),
     });
+    this.reservations.delete(idempotencyKey);
+  }
+
+  release(idempotencyKey: string): void {
+    this.reservations.delete(idempotencyKey);
   }
 
   /**
-   * Drop entries older than the window. Called periodically by the broker;
-   * also invoked lazily on inspect() so a long-quiet broker doesn't grow
-   * unbounded.
+   * Drop entries and stale reservations older than the window. Called
+   * periodically by the broker; also keeps quiet brokers bounded.
    */
   prune(): number {
     const cutoff = this.now() - this.windowMs;
@@ -102,10 +141,16 @@ export class IdempotencyIndex {
         dropped++;
       }
     }
+    for (const [key, entry] of this.reservations) {
+      if (entry.recorded_at <= cutoff) {
+        this.reservations.delete(key);
+        dropped++;
+      }
+    }
     return dropped;
   }
 
   size(): number {
-    return this.entries.size;
+    return this.entries.size + this.reservations.size;
   }
 }

@@ -140,7 +140,6 @@ export type RateRequest = z.infer<typeof rateRequestSchema>;
 
 export const awaitRequestSchema = z.object({
   task_id: z.string().min(1),
-  max_wait_s: z.number().int().nonnegative().optional(),
 });
 export type AwaitRequest = z.infer<typeof awaitRequestSchema>;
 

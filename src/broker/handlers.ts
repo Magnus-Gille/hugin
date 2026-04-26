@@ -102,7 +102,15 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
       return;
     }
 
-    const idemOutcome = deps.idempotency.inspect(request.idempotency_key, request);
+    if (request.orchestrator_submitter !== principal) {
+      res.status(400).json({
+        error: "policy_rejected",
+        message: `orchestrator_submitter '${request.orchestrator_submitter}' does not match authenticated principal '${principal}'`,
+      });
+      return;
+    }
+
+    const idemOutcome = deps.idempotency.reserve(request.idempotency_key, request);
     if (idemOutcome.kind === "retry") {
       res.status(200).json({
         task_id: idemOutcome.task_id,
@@ -116,6 +124,13 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
         error: "policy_rejected",
         message: "idempotency_key reused with a different payload",
         existing_task_id: idemOutcome.existing_task_id,
+      });
+      return;
+    }
+    if (idemOutcome.kind === "in_flight") {
+      res.status(503).json({
+        error: "in_flight",
+        message: "another submission with this idempotency_key is in flight; retry after backoff",
       });
       return;
     }
@@ -134,6 +149,7 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
     try {
       await deps.taskStore.submit({ envelope });
     } catch (err) {
+      deps.idempotency.release(request.idempotency_key);
       res.status(500).json({
         error: "internal",
         message: `munin submit failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -229,6 +245,11 @@ export function createAwaitHandler(deps: BrokerHandlerDependencies) {
     });
   };
 }
+
+// Lease metadata stays empty until the orch-v1 executor lands (Step 5).
+// Once an executor claims a task it will populate `claimed_by`, lease
+// expiry, and heartbeat — at that point this handler will compute
+// `running` vs `stale` from the expiry timestamp.
 
 export function createRateHandler(deps: BrokerHandlerDependencies) {
   return async (req: AuthenticatedRequest, res: Response): Promise<void> => {
