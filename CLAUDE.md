@@ -127,6 +127,10 @@ hugin/
 │   ├── task-status-tags.ts       # Tag manipulation helpers for task lifecycle
 │   ├── task-graph.ts             # Task dependency graph for pipelines
 │   ├── result-format.ts          # Result formatting utilities
+│   ├── mcp-server.ts             # hugin-mcp stdio entrypoint (orchestrator-side, on the laptop)
+│   ├── mcp/                      # hugin-mcp internals (broker client + tool definitions)
+│   │   ├── broker-client.ts      # HTTP client for /v1/delegate/* (bearer auth, AbortController timeout)
+│   │   └── tools.ts              # 5 MCP tools (hugin_submit/await/rate/list/models) with envelope autofill
 │   └── broker/                   # Orchestrator-v1 broker (Tailscale-only HTTP, /v1/delegate/*)
 │       ├── server.ts             # Express app + opt-in startup (HUGIN_BROKER_KEYS)
 │       ├── handlers.ts           # submit/await/rate/list/models endpoint handlers
@@ -195,6 +199,37 @@ Security assessments, threat models, and audit reports live in `docs/security/`.
 - Filename: `<topic>.md` (e.g., `lethal-trifecta-assessment.md`)
 - Open findings should be filed as GitHub Issues, not left as prose in the doc
 - Hugin tasks that produce security reports should commit and push them, not leave them as untracked files
+
+## hugin-mcp (laptop side)
+
+`hugin-mcp` is a stdio MCP server that exposes the Pi-side broker's `/v1/delegate/*` endpoints to a local Claude Code or Claude Desktop session. It runs on the *orchestrator* laptop, not on the Pi.
+
+```
+Claude Code  ⟷  hugin-mcp (stdio)  ⟶  HTTP /v1/delegate/* (Tailscale)  ⟶  Pi broker
+```
+
+**Tools exposed:**
+- `hugin_submit` — submit a delegation task
+- `hugin_await` — read current task state
+- `hugin_rate` — append a rating event for a completed task
+- `hugin_list` — list recent delegated tasks
+- `hugin_models` — read the active alias map and runtime registry
+
+The MCP layer fills in protocol envelope fields (`envelope_version`, `alias_map_version`, `idempotency_key`, `orchestrator_session_id`, `orchestrator_submitter`) so callers only think about the task itself.
+
+**Required env (orchestrator side):**
+- `HUGIN_BROKER_URL` — e.g. `http://huginmunin.<tailnet>.ts.net:3033`
+- `HUGIN_BROKER_TOKEN` — bearer token registered in the Pi's `HUGIN_BROKER_KEYS`
+
+**Optional env:**
+- `HUGIN_MCP_SUBMITTER` — `orchestrator_submitter` principal (default: `claude-code`)
+- `HUGIN_MCP_REQUEST_TIMEOUT_MS` — per-request HTTP timeout (default: `60000`)
+
+**Wire it into Claude Code:**
+```bash
+npm run build  # produces dist/mcp-server.js
+claude mcp add-json hugin '{"command":"node","args":["/Users/magnus/repos/hugin/dist/mcp-server.js"],"env":{"HUGIN_BROKER_URL":"http://huginmunin:3033","HUGIN_BROKER_TOKEN":"..."}}' -s user
+```
 
 ## Environment variables
 
