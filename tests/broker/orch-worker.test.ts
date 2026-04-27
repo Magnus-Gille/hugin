@@ -304,7 +304,7 @@ describe("OrchWorker.runOnce", () => {
     expect(completed.error_kind).toBe("executor_failed");
   });
 
-  it("skips tasks whose resolved runtime is not openrouter", async () => {
+  it("returns idle (not skipped) when the only pending task is for another worker", async () => {
     const munin = new FakeMunin();
     const env = makeEnvelope("20260426-120000-orch-cccc3333", {
       alias_resolved: {
@@ -336,10 +336,130 @@ describe("OrchWorker.runOnce", () => {
     });
 
     const tick = await worker.runOnce();
-    expect(tick.outcome).toBe("skipped");
+    expect(tick.outcome).toBe("idle");
     expect(chatCalled).toBe(false);
-    // No writes — task stays pending for a future executor.
+    // No writes — task stays pending for the harness worker.
     expect(munin.writes.length).toBe(0);
+  });
+
+  it("scans past unhandleable rows to pick a handleable openrouter task behind them (F1)", async () => {
+    // Older harness task at the front of the queue must not block a
+    // newer openrouter task — otherwise the openrouter worker stalls
+    // until a harness worker drains the harness one.
+    const munin = new FakeMunin();
+    const harness = makeEnvelope("20260426-120000-orch-har00001", {
+      alias_resolved: {
+        alias: "pi-large-coder",
+        family: "harness",
+        harness: "pi",
+        model_requested: "qwen/qwen3-coder-next",
+        runtime: "openrouter",
+        runtime_row_id: "openrouter",
+        host: "openrouter",
+      },
+    });
+    const oneShot = makeEnvelope("20260426-120100-orch-or000002");
+    munin.queryResults = [
+      seedPendingTask(munin, harness, "2026-04-26T12:00:00Z"),
+      seedPendingTask(munin, oneShot, "2026-04-26T12:01:00Z"),
+    ];
+
+    const taskStore = new BrokerTaskStore(munin as unknown as MuninClient);
+    const journal = new DelegationJournal({ path: journalPath });
+    const client = stubClient(async (req) => ({
+      output: "ok",
+      finishReason: "stop",
+      modelEffective: req.model,
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      raw: {},
+    }));
+
+    const worker = new OrchWorker({
+      munin: munin as unknown as MuninClient,
+      taskStore,
+      journal,
+      openrouterClient: client,
+      workerId: "w1",
+    });
+
+    const tick = await worker.runOnce();
+    expect(tick.outcome).toBe("completed");
+    expect(tick.task_id).toBe(oneShot.task_id);
+    // Harness task untouched.
+    const harnessWrites = munin.writes.filter(
+      (w) => w.namespace === `tasks/${harness.task_id}`,
+    );
+    expect(harnessWrites.length).toBe(0);
+  });
+
+  it("derives the lease window from envelope.timeout_ms when set (F3)", async () => {
+    const munin = new FakeMunin();
+    // Pick a timeout larger than the executor's default (300s) to prove
+    // the worker is using the envelope value, not the default.
+    const env = makeEnvelope("20260426-120000-orch-tmo00001", {
+      timeout_ms: 900_000,
+    });
+    munin.queryResults = [seedPendingTask(munin, env, "2026-04-26T12:00:00Z")];
+
+    const taskStore = new BrokerTaskStore(munin as unknown as MuninClient);
+    const journal = new DelegationJournal({ path: journalPath });
+    const client = stubClient(async (req) => ({
+      output: "ok",
+      finishReason: "stop",
+      modelEffective: req.model,
+      usage: {},
+      raw: {},
+    }));
+
+    const fixedNow = new Date("2026-04-26T12:00:01Z");
+    const worker = new OrchWorker({
+      munin: munin as unknown as MuninClient,
+      taskStore,
+      journal,
+      openrouterClient: client,
+      workerId: "w1",
+      now: () => fixedNow,
+    });
+
+    await worker.runOnce();
+    const claim = munin.writes.find(
+      (w) => w.namespace === `tasks/${env.task_id}` && w.tags?.includes("running"),
+    );
+    expect(claim).toBeDefined();
+    const expiry = claim!.tags!.find((t) => t.startsWith("lease_expires:"));
+    expect(expiry).toBeDefined();
+    const expiryMs = Number(expiry!.slice("lease_expires:".length));
+    // 900s timeout + 60s buffer = 960s after fixedNow.
+    expect(expiryMs).toBe(fixedNow.getTime() + 900_000 + 60_000);
+  });
+
+  it("returns error (not claimed_lost) when the claim write fails for non-CAS reasons (F5)", async () => {
+    const munin = new FakeMunin();
+    const env = makeEnvelope("20260426-120000-orch-net00001");
+    munin.queryResults = [seedPendingTask(munin, env, "2026-04-26T12:00:00Z")];
+    munin.rejectNextWrite = {
+      remaining: 1,
+      error: new Error("Munin write rejected for tasks/.../status: network — connect ECONNREFUSED"),
+    };
+
+    const taskStore = new BrokerTaskStore(munin as unknown as MuninClient);
+    const journal = new DelegationJournal({ path: journalPath });
+    const client = stubClient(async () => {
+      throw new Error("should not be called");
+    });
+
+    const worker = new OrchWorker({
+      munin: munin as unknown as MuninClient,
+      taskStore,
+      journal,
+      openrouterClient: client,
+      workerId: "w1",
+    });
+
+    const tick = await worker.runOnce();
+    expect(tick.outcome).toBe("error");
+    expect(tick.message).toContain("non-CAS");
+    expect(tick.message).toContain("ECONNREFUSED");
   });
 
   it("returns claimed_lost when the CAS write fails", async () => {

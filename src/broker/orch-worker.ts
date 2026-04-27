@@ -32,7 +32,10 @@ import type {
   ScannerPolicy,
 } from "../finalize-delegated-output.js";
 import type { OpenRouterClient } from "../openrouter-client.js";
-import { executeOpenRouterDelegation } from "./openrouter-executor.js";
+import {
+  ONE_SHOT_DEFAULT_TIMEOUT_MS,
+  executeOpenRouterDelegation,
+} from "./openrouter-executor.js";
 import type { DelegationJournal } from "./journal.js";
 import {
   BrokerTaskStore,
@@ -48,7 +51,13 @@ import {
 } from "./types.js";
 
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
-export const DEFAULT_LEASE_DURATION_MS = 600_000; // 10 min — covers the 5-min one-shot timeout + buffer.
+/**
+ * Buffer added to the envelope's `timeout_ms` when computing the lease
+ * window. A lease must outlive the executor call by enough margin to
+ * cover the two-phase complete writes; otherwise the reaper could
+ * recover a task that is still running.
+ */
+export const LEASE_BUFFER_MS = 60_000;
 
 export interface OrchWorkerConfig {
   munin: MuninClient;
@@ -58,6 +67,10 @@ export interface OrchWorkerConfig {
   scannerPolicy?: ScannerPolicy;
   workerId: string;
   pollIntervalMs?: number;
+  /**
+   * Override the lease window. When omitted, the worker derives the
+   * lease from the envelope's `timeout_ms` plus `LEASE_BUFFER_MS`.
+   */
   leaseDurationMs?: number;
   now?: () => Date;
 }
@@ -76,16 +89,22 @@ interface PendingCandidate {
   status: MuninEntry;
 }
 
+interface PickResult {
+  candidate: PendingCandidate;
+  envelope?: DelegationEnvelope;
+  parseError?: unknown;
+}
+
 export class OrchWorker {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private readonly pollIntervalMs: number;
-  private readonly leaseDurationMs: number;
+  private readonly leaseDurationOverrideMs: number | undefined;
   private readonly now: () => Date;
 
   constructor(private readonly config: OrchWorkerConfig) {
     this.pollIntervalMs = config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-    this.leaseDurationMs = config.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
+    this.leaseDurationOverrideMs = config.leaseDurationMs;
     this.now = config.now ?? (() => new Date());
   }
 
@@ -121,32 +140,35 @@ export class OrchWorker {
     this.running = true;
     const startedAt = this.now();
     try {
-      const candidate = await this.pickPending();
-      if (!candidate) {
+      const picked = await this.pickPending();
+      if (!picked) {
         return mkTick(startedAt, this.now(), { outcome: "idle" });
       }
 
-      let envelope: DelegationEnvelope;
-      try {
-        envelope = delegationEnvelopeSchema.parse(JSON.parse(candidate.status.content));
-      } catch (err) {
-        return await this.failUnparseable(candidate, err, startedAt);
+      if (picked.parseError) {
+        return await this.failUnparseable(picked.candidate, picked.parseError, startedAt);
       }
 
-      if (!this.canHandle(envelope)) {
-        return mkTick(startedAt, this.now(), {
-          task_id: candidate.task_id,
-          outcome: "skipped",
-          message: `runtime=${envelope.alias_resolved.runtime} family=${envelope.alias_resolved.family} not handled by this worker`,
-        });
-      }
+      // pickPending only returns rows where canHandle(envelope) is true
+      // (or rows that failed to parse, handled above). Anything that is
+      // for a different runtime/family is left in `pending` for whichever
+      // worker handles it.
+      const envelope = picked.envelope!;
+      const candidate = picked.candidate;
 
-      const claimed = await this.claim(candidate);
-      if (!claimed) {
+      const claim = await this.claim(candidate, envelope);
+      if (claim.kind === "lost") {
         return mkTick(startedAt, this.now(), {
           task_id: candidate.task_id,
           outcome: "claimed_lost",
           message: "another worker beat us to the CAS",
+        });
+      }
+      if (claim.kind === "error") {
+        return mkTick(startedAt, this.now(), {
+          task_id: candidate.task_id,
+          outcome: "error",
+          message: `claim write failed (non-CAS): ${claim.message}`,
         });
       }
 
@@ -196,7 +218,15 @@ export class OrchWorker {
     }
   }
 
-  private async pickPending(): Promise<PendingCandidate | undefined> {
+  /**
+   * Walk the FIFO-ordered pending queue, parsing each envelope and
+   * returning the first one this worker can handle. Rows for runtimes
+   * or families this worker does not handle are skipped — leaving them
+   * in `pending` for whichever worker (e.g. pi-harness) does. Rows that
+   * fail to parse are returned immediately so the worker can flip them
+   * to `failed` rather than letting them block the queue.
+   */
+  private async pickPending(): Promise<PickResult | undefined> {
     const { results } = await this.config.munin.query({
       query: "task",
       tags: ["pending", ORCH_V1_TAG],
@@ -214,7 +244,19 @@ export class OrchWorker {
       // The query is eventually-consistent; another worker may already
       // have flipped this past `pending`.
       if (pickLifecycleTag(status.tags) !== "pending") continue;
-      return { task_id: taskId, namespace: row.namespace, status };
+      const candidate: PendingCandidate = {
+        task_id: taskId,
+        namespace: row.namespace,
+        status,
+      };
+      let envelope: DelegationEnvelope;
+      try {
+        envelope = delegationEnvelopeSchema.parse(JSON.parse(status.content));
+      } catch (parseError) {
+        return { candidate, parseError };
+      }
+      if (!this.canHandle(envelope)) continue;
+      return { candidate, envelope };
     }
     return undefined;
   }
@@ -226,11 +268,26 @@ export class OrchWorker {
     );
   }
 
-  private async claim(candidate: PendingCandidate): Promise<boolean> {
+  private leaseDurationFor(envelope: DelegationEnvelope): number {
+    if (this.leaseDurationOverrideMs !== undefined) {
+      return this.leaseDurationOverrideMs;
+    }
+    const timeout = envelope.timeout_ms ?? ONE_SHOT_DEFAULT_TIMEOUT_MS;
+    return timeout + LEASE_BUFFER_MS;
+  }
+
+  private async claim(
+    candidate: PendingCandidate,
+    envelope: DelegationEnvelope,
+  ): Promise<
+    | { kind: "ok" }
+    | { kind: "lost"; message: string }
+    | { kind: "error"; message: string }
+  > {
     const claimTags = buildClaimTags(
       candidate.status.tags,
       this.config.workerId,
-      this.now().getTime() + this.leaseDurationMs,
+      this.now().getTime() + this.leaseDurationFor(envelope),
     );
     try {
       await this.config.munin.write(
@@ -241,16 +298,20 @@ export class OrchWorker {
         candidate.status.updated_at,
         "internal",
       );
-      return true;
+      return { kind: "ok" };
     } catch (err) {
-      // Munin reports CAS conflicts as generic write rejections — we
-      // can't distinguish "lost race" from other failures here. Treat
-      // any failure as "skip and retry on next tick"; the lease reaper
-      // catches genuinely stuck tasks.
-      console.info(
-        `[orch-worker] claim failed for ${candidate.task_id}: ${err instanceof Error ? err.message : String(err)}`,
+      const message = err instanceof Error ? err.message : String(err);
+      if (isCasConflict(message)) {
+        console.info(`[orch-worker] CAS conflict on ${candidate.task_id}: ${message}`);
+        return { kind: "lost", message };
+      }
+      // Non-CAS failure (auth, network, 5xx) — surface as `error` so
+      // operators see infrastructure problems rather than misreading
+      // them as benign "lost the race" outcomes.
+      console.warn(
+        `[orch-worker] claim write failed for ${candidate.task_id} (non-CAS): ${message}`,
       );
-      return false;
+      return { kind: "error", message };
     }
   }
 
@@ -349,6 +410,16 @@ function pickLifecycleTag(tags: string[]): string | undefined {
     if (tags.includes(tag)) return tag;
   }
   return undefined;
+}
+
+/**
+ * Distinguish a Munin CAS conflict (another writer beat us) from any
+ * other write failure (auth, network, 5xx). Munin surfaces CAS
+ * conflicts via the `cas_conflict` error code in the rejection
+ * message — see `MuninClient.write` in src/munin-client.ts.
+ */
+function isCasConflict(message: string): boolean {
+  return /cas_conflict/i.test(message);
 }
 
 /**

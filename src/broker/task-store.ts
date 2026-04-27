@@ -150,8 +150,24 @@ export class BrokerTaskStore {
    * Used by the reconciliation sweep.
    */
   async listInFlight(): Promise<{ namespace: string; tags: string[] }[]> {
+    return this.listByLifecycle(["pending", "running"]);
+  }
+
+  /**
+   * Find every orch-v1 task in a terminal lifecycle (`completed` or
+   * `failed`). The reconciliation sweep uses this to backfill
+   * `delegation_completed` events when the worker crashed between the
+   * Munin write and the journal append.
+   */
+  async listTerminal(): Promise<{ namespace: string; tags: string[] }[]> {
+    return this.listByLifecycle(["completed", "failed"]);
+  }
+
+  private async listByLifecycle(
+    lifecycleTags: string[],
+  ): Promise<{ namespace: string; tags: string[] }[]> {
     const collected: { namespace: string; tags: string[] }[] = [];
-    for (const tag of ["pending", "running"]) {
+    for (const tag of lifecycleTags) {
       const { results } = await this.munin.query({
         query: "task",
         tags: [tag, ORCH_V1_TAG],
