@@ -60,7 +60,103 @@ describe("buildTools — hugin_submit", () => {
       timeout_ms: undefined,
       max_output_tokens: undefined,
     });
-    expect(parseResult(result)).toEqual({ task_id: "t1", state: "pending" });
+    expect(parseResult(result)).toEqual({
+      task_id: "t1",
+      state: "pending",
+      idempotency_key: "11111111-1111-4111-8111-111111111111",
+    });
+  });
+
+  it("uses ToolDeps.aliasMapVersion when provided (F1 — broker-discovered version)", async () => {
+    const submit = vi.fn(async () => ({ task_id: "t1" }));
+    const broker = fakeBroker({ submit });
+    const tools = buildTools({
+      broker,
+      sessionId: "sess",
+      submitter: "claude-code",
+      newId: () => "11111111-1111-4111-8111-111111111111",
+      aliasMapVersion: 7,
+    });
+
+    await tools.submit.handler({
+      task_type: "summarize",
+      prompt: "p",
+      alias_requested: "tiny",
+    });
+
+    expect(submit.mock.calls[0]![0]).toMatchObject({ alias_map_version: 7 });
+  });
+
+  it("falls back to ALIAS_MAP_VERSION when ToolDeps.aliasMapVersion is omitted (F1)", async () => {
+    const submit = vi.fn(async () => ({ task_id: "t1" }));
+    const broker = fakeBroker({ submit });
+    const tools = buildTools({
+      broker,
+      sessionId: "sess",
+      submitter: "claude-code",
+      newId: () => "11111111-1111-4111-8111-111111111111",
+    });
+
+    await tools.submit.handler({
+      task_type: "summarize",
+      prompt: "p",
+      alias_requested: "tiny",
+    });
+
+    expect(submit.mock.calls[0]![0]).toMatchObject({
+      alias_map_version: ALIAS_MAP_VERSION,
+    });
+  });
+
+  it("echoes the auto-generated idempotency_key in error responses (F2)", async () => {
+    const submit = vi.fn(async () => {
+      throw new BrokerNetworkError("connection refused");
+    });
+    const broker = fakeBroker({ submit });
+    const tools = buildTools({
+      broker,
+      sessionId: "sess",
+      submitter: "claude-code",
+      newId: () => "99999999-9999-4999-8999-999999999999",
+    });
+
+    const result = await tools.submit.handler({
+      task_type: "summarize",
+      prompt: "p",
+      alias_requested: "tiny",
+    });
+
+    expect(result.isError).toBe(true);
+    const payload = parseResult(result) as {
+      idempotency_key: string;
+      error: { kind: string };
+    };
+    expect(payload.idempotency_key).toBe("99999999-9999-4999-8999-999999999999");
+    expect(payload.error.kind).toBe("broker_network_error");
+  });
+
+  it("does not overwrite an idempotency_key the broker echoed back (F2)", async () => {
+    const submit = vi.fn(async () => ({
+      task_id: "t1",
+      idempotency_key: "broker-echoed-key",
+    }));
+    const broker = fakeBroker({ submit });
+    const tools = buildTools({
+      broker,
+      sessionId: "sess",
+      submitter: "claude-code",
+      newId: () => "should-not-replace",
+    });
+
+    const result = await tools.submit.handler({
+      task_type: "summarize",
+      prompt: "p",
+      alias_requested: "tiny",
+    });
+
+    expect(parseResult(result)).toMatchObject({
+      idempotency_key: "broker-echoed-key",
+    });
   });
 
   it("uses the caller-supplied idempotency_key when provided", async () => {

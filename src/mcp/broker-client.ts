@@ -44,13 +44,37 @@ export class BrokerNetworkError extends Error {
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 
 export class BrokerClient {
-  private readonly baseUrl: string;
+  private readonly baseUrl: URL;
   private readonly bearerToken: string;
   private readonly requestTimeoutMs: number;
   private readonly fetchImpl: typeof fetch;
 
   constructor(config: BrokerClientConfig) {
-    this.baseUrl = config.baseUrl.replace(/\/$/, "");
+    let parsed: URL;
+    try {
+      parsed = new URL(config.baseUrl);
+    } catch {
+      throw new Error(`hugin-mcp: HUGIN_BROKER_URL is not a valid URL: ${config.baseUrl}`);
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error(
+        `hugin-mcp: HUGIN_BROKER_URL must be http(s); got ${parsed.protocol}`,
+      );
+    }
+    if (parsed.username || parsed.password) {
+      throw new Error(
+        "hugin-mcp: HUGIN_BROKER_URL must not contain userinfo; pass credentials via HUGIN_BROKER_TOKEN",
+      );
+    }
+    if (parsed.search || parsed.hash) {
+      throw new Error("hugin-mcp: HUGIN_BROKER_URL must not contain a query string or fragment");
+    }
+    if (parsed.pathname !== "/" && parsed.pathname !== "") {
+      throw new Error(
+        `hugin-mcp: HUGIN_BROKER_URL must not contain a path prefix; got ${parsed.pathname}`,
+      );
+    }
+    this.baseUrl = parsed;
     this.bearerToken = config.bearerToken;
     this.requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.fetchImpl = config.fetchImpl ?? fetch;
@@ -87,9 +111,10 @@ export class BrokerClient {
   private async request(path: string, method: string, body?: unknown): Promise<unknown> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const url = new URL(path, this.baseUrl).toString();
     let response: Response;
     try {
-      response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      response = await this.fetchImpl(url, {
         method,
         headers: {
           authorization: `Bearer ${this.bearerToken}`,

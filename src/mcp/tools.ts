@@ -36,6 +36,14 @@ export interface ToolDeps {
    * Stable per-MCP-process session id. Persisted in journal events so
    * later analysis can group tasks submitted by the same Claude
    * session. Generated on server startup.
+   *
+   * Note: this value participates in the broker's idempotency hash
+   * (see `src/broker/idempotency.ts`). Retries that span MCP restarts
+   * will see a different session id and therefore a different hash —
+   * the broker will treat them as a collision rather than a replay.
+   * Within a single MCP process, retries with the same
+   * `idempotency_key` (returned in the submit response) replay
+   * cleanly.
    */
   sessionId: string;
   /**
@@ -43,6 +51,13 @@ export interface ToolDeps {
    * broker recognises (e.g. `claude-code`, `claude-desktop`).
    */
   submitter: string;
+  /**
+   * Alias-map version stamped on every submit envelope. Discovered
+   * from `/v1/delegate/models` at server startup; if unavailable,
+   * falls back to {@link ALIAS_MAP_VERSION}. The broker uses this to
+   * detect orchestrator skew when it bumps the alias map.
+   */
+  aliasMapVersion?: number;
   /** UUID generator (overridable for tests). */
   newId?: () => string;
 }
@@ -89,13 +104,6 @@ const submitInputSchema = z.object(submitInputShape);
 
 export const awaitInputShape = {
   task_id: z.string().min(1).describe("Task id returned by `hugin_submit`."),
-  max_wait_s: z
-    .number()
-    .int()
-    .min(0)
-    .max(900)
-    .optional()
-    .describe("Reserved; broker currently returns immediately."),
 };
 const awaitInputSchema = z.object(awaitInputShape);
 
@@ -133,6 +141,23 @@ function asResult(value: unknown, isError = false): {
 } {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   return isError ? { content: [{ type: "text", text }], isError: true } : { content: [{ type: "text", text }] };
+}
+
+/**
+ * Surface the idempotency_key used on a submit so the caller can
+ * replay the same logical request after a transient error. We add the
+ * key alongside whatever shape the broker returned, without
+ * overwriting any existing `idempotency_key` field.
+ */
+function withIdempotencyKey(response: unknown, idempotencyKey: string): unknown {
+  if (response && typeof response === "object" && !Array.isArray(response)) {
+    const obj = response as Record<string, unknown>;
+    if (obj.idempotency_key === undefined) {
+      return { ...obj, idempotency_key: idempotencyKey };
+    }
+    return obj;
+  }
+  return { response, idempotency_key: idempotencyKey };
 }
 
 function errorPayload(err: unknown): { error: { kind: string; message: string; http_status?: number; body?: unknown } } {
@@ -179,30 +204,34 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_submit",
     title: "Submit a delegation task to Hugin",
     description:
-      "Hand a task off to the Pi-side broker for execution on a cheaper or differently-capable runtime. Returns the assigned task_id.",
+      "Hand a task off to the Pi-side broker for execution on a cheaper or differently-capable runtime. Returns the assigned task_id and the `idempotency_key` used (auto-generated if not supplied) — pass that key back as `idempotency_key` to safely retry the same logical request.",
     inputShape: submitInputShape,
     handler: async (rawInput) => {
+      let idempotencyKey: string | undefined;
       try {
         const input = submitInputSchema.parse(rawInput);
+        idempotencyKey = input.idempotency_key ?? newId();
         const payload = {
           envelope_version: ENVELOPE_VERSION,
-          idempotency_key: input.idempotency_key ?? newId(),
+          idempotency_key: idempotencyKey,
           orchestrator_session_id: deps.sessionId,
           orchestrator_submitter: deps.submitter,
           parent_task_id: input.parent_task_id,
           task_type: input.task_type,
           prompt: input.prompt,
           alias_requested: input.alias_requested,
-          alias_map_version: ALIAS_MAP_VERSION,
+          alias_map_version: deps.aliasMapVersion ?? ALIAS_MAP_VERSION,
           worktree: input.worktree,
           sensitivity: input.sensitivity,
           timeout_ms: input.timeout_ms,
           max_output_tokens: input.max_output_tokens,
         };
         const response = await deps.broker.submit(payload);
-        return asResult(response);
+        return asResult(withIdempotencyKey(response, idempotencyKey));
       } catch (err) {
-        return asResult(errorPayload(err), true);
+        const payload = errorPayload(err) as Record<string, unknown>;
+        if (idempotencyKey) payload.idempotency_key = idempotencyKey;
+        return asResult(payload, true);
       }
     },
   };
@@ -211,7 +240,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_await",
     title: "Read the current state of a delegated task",
     description:
-      "Idempotent read of a task's status: `running` / `completed` / `failed` / `stale` / `unknown`. Safe to poll.",
+      "Idempotent read of a task's status: `running` / `completed` / `failed`. Returns immediately. While `running`, the response also carries lease info and an `orphan_suspected` flag (true once the lease has expired without completion). Safe to poll.",
     inputShape: awaitInputShape,
     handler: async (rawInput) => {
       try {

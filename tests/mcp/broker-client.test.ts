@@ -155,4 +155,54 @@ describe("BrokerClient", () => {
     const [url] = fetchImpl.mock.calls[0]!;
     expect(url).toBe("http://broker.test:3033/v1/delegate/models");
   });
+
+  it("rejects baseUrl with userinfo so the bearer token cannot be misrouted (F5)", () => {
+    expect(
+      () =>
+        new BrokerClient({
+          baseUrl: "http://attacker:pass@broker.test:3033",
+          bearerToken: "tk",
+        }),
+    ).toThrowError(/userinfo/);
+  });
+
+  it("rejects baseUrl with a query string (F5)", () => {
+    expect(
+      () =>
+        new BrokerClient({
+          baseUrl: "http://broker.test:3033/?evil=1",
+          bearerToken: "tk",
+        }),
+    ).toThrowError(/query string|fragment/);
+  });
+
+  it("rejects baseUrl with a path prefix (F5)", () => {
+    expect(
+      () =>
+        new BrokerClient({
+          baseUrl: "http://broker.test:3033/some/prefix",
+          bearerToken: "tk",
+        }),
+    ).toThrowError(/path prefix/);
+  });
+
+  it("rejects non-http(s) schemes (F5)", () => {
+    expect(
+      () =>
+        new BrokerClient({
+          baseUrl: "ftp://broker.test:3033",
+          bearerToken: "tk",
+        }),
+    ).toThrowError(/http\(s\)/);
+  });
+
+  it("rejects malformed URLs (F5)", () => {
+    expect(
+      () =>
+        new BrokerClient({
+          baseUrl: "not a url",
+          bearerToken: "tk",
+        }),
+    ).toThrowError(/not a valid URL/);
+  });
 });

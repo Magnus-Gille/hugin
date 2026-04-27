@@ -25,7 +25,7 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { BrokerClient } from "./mcp/broker-client.js";
-import { buildTools, type HuginTool } from "./mcp/tools.js";
+import { ALIAS_MAP_VERSION, buildTools, type HuginTool } from "./mcp/tools.js";
 
 const SERVER_NAME = "hugin-mcp";
 const SERVER_VERSION = "0.1.0";
@@ -37,6 +37,41 @@ function readRequiredEnv(name: string): string {
     process.exit(1);
   }
   return value;
+}
+
+/**
+ * Discover the broker's current `alias_map_version` so submit envelopes
+ * carry the live value instead of a hard-coded constant. The broker
+ * uses this to detect orchestrator skew when it bumps the alias map.
+ *
+ * If `/v1/delegate/models` is unreachable or returns an unexpected
+ * shape, fall back to the compiled-in {@link ALIAS_MAP_VERSION}: this
+ * keeps startup non-blocking on transient network errors, at the cost
+ * of submitting a possibly-stale version (which the broker will
+ * surface as a normal version-skew error on the first submit).
+ */
+async function discoverAliasMapVersion(broker: BrokerClient): Promise<number> {
+  try {
+    const response = await broker.models();
+    if (
+      response &&
+      typeof response === "object" &&
+      "alias_map_version" in response
+    ) {
+      const candidate = (response as { alias_map_version: unknown }).alias_map_version;
+      if (typeof candidate === "number" && Number.isInteger(candidate) && candidate > 0) {
+        return candidate;
+      }
+    }
+    process.stderr.write(
+      `hugin-mcp: /v1/delegate/models did not advertise alias_map_version; using ${ALIAS_MAP_VERSION}\n`,
+    );
+  } catch (err) {
+    process.stderr.write(
+      `hugin-mcp: failed to fetch alias_map_version (${err instanceof Error ? err.message : String(err)}); using ${ALIAS_MAP_VERSION}\n`,
+    );
+  }
+  return ALIAS_MAP_VERSION;
 }
 
 function readOptionalNumber(name: string, fallback: number): number {
@@ -57,10 +92,12 @@ export async function main(): Promise<void> {
   const requestTimeoutMs = readOptionalNumber("HUGIN_MCP_REQUEST_TIMEOUT_MS", 60_000);
 
   const broker = new BrokerClient({ baseUrl, bearerToken, requestTimeoutMs });
+  const aliasMapVersion = await discoverAliasMapVersion(broker);
   const tools = buildTools({
     broker,
     sessionId: randomUUID(),
     submitter,
+    aliasMapVersion,
   });
 
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
@@ -88,12 +125,9 @@ export async function main(): Promise<void> {
   await server.connect(transport);
 }
 
-const isMain = import.meta.url === `file://${process.argv[1]}`;
-if (isMain) {
-  main().catch((err: unknown) => {
-    process.stderr.write(
-      `hugin-mcp fatal: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
-    );
-    process.exit(1);
-  });
-}
+main().catch((err: unknown) => {
+  process.stderr.write(
+    `hugin-mcp fatal: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
+  );
+  process.exit(1);
+});
