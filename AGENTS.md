@@ -101,6 +101,10 @@ hugin/
 │   ├── provenance.ts               # External-vs-trusted provenance detection for context-refs
 │   ├── task-signing.ts             # HMAC-SHA256 task submission signing/verification
 │   ├── munin-client.ts    # HTTP client for Munin JSON-RPC API
+│   ├── mcp-server.ts             # hugin-mcp stdio entrypoint (orchestrator-side, on the laptop)
+│   ├── mcp/                      # hugin-mcp internals (broker client + tool definitions)
+│   │   ├── broker-client.ts      # HTTP client for /v1/delegate/* (bearer auth, AbortController timeout)
+│   │   └── tools.ts              # 5 MCP tools (hugin_submit/await/rate/list/models) with envelope autofill
 │   └── broker/                   # Orchestrator-v1 broker (Tailscale-only HTTP, /v1/delegate/*)
 │       ├── server.ts             # Express app + opt-in startup (HUGIN_BROKER_KEYS)
 │       ├── handlers.ts           # submit/await/rate/list/models endpoint handlers
@@ -180,3 +184,7 @@ MUNIN_API_KEY=<same key Munin uses>
 | `OPENROUTER_API_KEY` | — | OpenRouter API key. When set on a Pi-side broker, the orch-worker is enabled and dispatches `runtime: openrouter, family: one-shot` tasks. |
 | `OPENROUTER_REFERER` | `https://hugin.local` | `HTTP-Referer` header sent on OpenRouter requests (provider attribution). |
 | `OPENROUTER_APP_TITLE` | `hugin-orch-v1` | `X-Title` header sent on OpenRouter requests. |
+| `HUGIN_BROKER_URL` | — | hugin-mcp only (laptop side): URL of the Pi broker, e.g. `http://huginmunin.<tailnet>.ts.net:3033`. |
+| `HUGIN_BROKER_TOKEN` | — | hugin-mcp only: bearer token registered in the Pi's `HUGIN_BROKER_KEYS`. |
+| `HUGIN_MCP_SUBMITTER` | `claude-code` | hugin-mcp only: `orchestrator_submitter` principal stamped on each delegation envelope. |
+| `HUGIN_MCP_REQUEST_TIMEOUT_MS` | `60000` | hugin-mcp only: per-request HTTP timeout against the broker. |
