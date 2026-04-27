@@ -238,18 +238,18 @@ export function createAwaitHandler(deps: BrokerHandlerDependencies) {
       return;
     }
 
+    const lease = readLeaseInfo(status.tags, status.updated_at);
+    const nowMs = nowFn(deps)().getTime();
+    const orphanSuspected =
+      lease.lease_expires_at !== null &&
+      Date.parse(lease.lease_expires_at) < nowMs;
     res.status(200).json({
       status: "running",
-      lease: emptyLeaseInfo(),
-      orphan_suspected: false,
+      lease,
+      orphan_suspected: orphanSuspected,
     });
   };
 }
-
-// Lease metadata stays empty until the orch-v1 executor lands (Step 5).
-// Once an executor claims a task it will populate `claimed_by`, lease
-// expiry, and heartbeat — at that point this handler will compute
-// `running` vs `stale` from the expiry timestamp.
 
 export function createRateHandler(deps: BrokerHandlerDependencies) {
   return async (req: AuthenticatedRequest, res: Response): Promise<void> => {
@@ -373,11 +373,43 @@ function pickLifecycleTag(tags: string[]): string | undefined {
   return undefined;
 }
 
-function emptyLeaseInfo() {
+interface LeaseInfo {
+  claimed_by: string | null;
+  claimed_at: string | null;
+  lease_expires_at: string | null;
+  last_heartbeat_at: string | null;
+  queue_depth_when_submitted: number;
+}
+
+/**
+ * Reconstruct lease metadata from the status entry's tags. The orch-v1
+ * worker writes `claimed_by:<id>` and `lease_expires:<epoch-ms>` on
+ * every CAS claim (see src/broker/orch-worker.ts:buildClaimTags). The
+ * status entry's `updated_at` is the most reliable proxy for
+ * `claimed_at` since the claim is the most recent write that touched it.
+ *
+ * Tasks still in `pending` (no lease yet) return all-null fields.
+ * Heartbeat is not yet tracked for one-shot openrouter calls; that
+ * field stays null until a long-running runtime needs it.
+ */
+function readLeaseInfo(tags: string[], updatedAt: string): LeaseInfo {
+  const claimedByTag = tags.find((t) => t.startsWith("claimed_by:"));
+  const leaseExpiresTag = tags.find((t) => t.startsWith("lease_expires:"));
+  const claimedBy = claimedByTag
+    ? claimedByTag.slice("claimed_by:".length)
+    : null;
+  let leaseExpiresAt: string | null = null;
+  if (leaseExpiresTag) {
+    const raw = leaseExpiresTag.slice("lease_expires:".length);
+    const ms = /^\d+$/.test(raw) ? Number(raw) : Date.parse(raw);
+    if (!Number.isNaN(ms)) {
+      leaseExpiresAt = new Date(ms).toISOString();
+    }
+  }
   return {
-    claimed_by: null,
-    claimed_at: null,
-    lease_expires_at: null,
+    claimed_by: claimedBy,
+    claimed_at: claimedBy ? updatedAt : null,
+    lease_expires_at: leaseExpiresAt,
     last_heartbeat_at: null,
     queue_depth_when_submitted: 0,
   };

@@ -100,7 +100,14 @@ hugin/
 │   ├── exfiltration-scanner.ts   # Regex scanner for data-leak patterns in task output
 │   ├── provenance.ts               # External-vs-trusted provenance detection for context-refs
 │   ├── task-signing.ts             # HMAC-SHA256 task submission signing/verification
-│   └── munin-client.ts    # HTTP client for Munin JSON-RPC API
+│   ├── munin-client.ts    # HTTP client for Munin JSON-RPC API
+│   └── broker/                   # Orchestrator-v1 broker (Tailscale-only HTTP, /v1/delegate/*)
+│       ├── server.ts             # Express app + opt-in startup (HUGIN_BROKER_KEYS)
+│       ├── handlers.ts           # submit/await/rate/list/models endpoint handlers
+│       ├── orch-worker.ts        # Polls Munin for orch-v1 tasks, claims via CAS, dispatches to OpenRouter
+│       ├── openrouter-executor.ts # OpenRouter one-shot delegation runner
+│       ├── reconciliation.ts     # Periodic sweep: backfill journal events for orch-v1 tasks
+│       └── task-store.ts         # Munin operations: submit / read / two-phase complete
 ├── tests/
 │   ├── dispatcher.test.ts
 │   └── sdk-executor.test.ts
@@ -165,3 +172,11 @@ MUNIN_API_KEY=<same key Munin uses>
 | `HUGIN_SIGNING_POLICY` | `off` | Task signature verification: `off` (skip), `warn` (log missing/invalid, never reject), `require` (reject unsigned/invalid). See `docs/security/task-signing.md`. |
 | `HUGIN_SUBMITTER_KEYS` | — | Inline JSON keystore for task signing: `{"<keyId>": "<hex-secret>"}` (64-char hex preferred; base64 accepted). |
 | `HUGIN_SUBMITTER_KEYS_FILE` | — | Path to a JSON keystore file. Takes precedence over `HUGIN_SUBMITTER_KEYS`. |
+| `HUGIN_BROKER_HOST` | `127.0.0.1` | Bind address for the orchestrator-v1 broker (`/v1/delegate/*`). Set to the Tailscale interface IP in production. |
+| `HUGIN_BROKER_PORT` | `3033` | Port for the broker endpoint. |
+| `HUGIN_BROKER_KEYS` | — | Inline JSON keystore: `{"<principal>": "<token>"}`. Setting either this or `HUGIN_BROKER_KEYS_FILE` enables the broker. |
+| `HUGIN_BROKER_KEYS_FILE` | — | Path to a JSON keystore file for the broker. Takes precedence over `HUGIN_BROKER_KEYS`. |
+| `HUGIN_BROKER_RECONCILIATION_INTERVAL_MS` | `60000` | Interval between reconciliation sweeps (backfills journal events for orch-v1 tasks visible in Munin). |
+| `OPENROUTER_API_KEY` | — | OpenRouter API key. When set on a Pi-side broker, the orch-worker is enabled and dispatches `runtime: openrouter, family: one-shot` tasks. |
+| `OPENROUTER_REFERER` | `https://hugin.local` | `HTTP-Referer` header sent on OpenRouter requests (provider attribution). |
+| `OPENROUTER_APP_TITLE` | `hugin-orch-v1` | `X-Title` header sent on OpenRouter requests. |

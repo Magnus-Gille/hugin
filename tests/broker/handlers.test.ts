@@ -213,7 +213,7 @@ describe("POST /v1/delegate/await", () => {
     expect(body.status).toBe("unknown");
   });
 
-  it("returns running for a pending task", async () => {
+  it("returns running for a pending task with empty lease info", async () => {
     harness.munin.reads["tasks/t1/status"] = {
       id: "1",
       namespace: "tasks/t1",
@@ -230,6 +230,65 @@ describe("POST /v1/delegate/await", () => {
     });
     const body = await res.json();
     expect(body.status).toBe("running");
+    expect(body.lease.claimed_by).toBeNull();
+    expect(body.lease.lease_expires_at).toBeNull();
+    expect(body.orphan_suspected).toBe(false);
+  });
+
+  it("populates lease info from claimed_by/lease_expires tags on a running task (F4)", async () => {
+    const future = Date.now() + 600_000;
+    harness.munin.reads["tasks/t1/status"] = {
+      id: "1",
+      namespace: "tasks/t1",
+      key: "status",
+      content: "envelope",
+      tags: [
+        "running",
+        ORCH_V1_TAG,
+        "claimed_by:orch-worker-A",
+        `lease_expires:${future}`,
+      ],
+      created_at: "2026-04-26T12:00:00Z",
+      updated_at: "2026-04-26T12:00:01Z",
+    };
+    const res = await fetch(`${harness.url}/v1/delegate/await`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({ task_id: "t1" }),
+    });
+    const body = await res.json();
+    expect(body.status).toBe("running");
+    expect(body.lease.claimed_by).toBe("orch-worker-A");
+    expect(body.lease.claimed_at).toBe("2026-04-26T12:00:01Z");
+    expect(body.lease.lease_expires_at).toBe(new Date(future).toISOString());
+    expect(body.orphan_suspected).toBe(false);
+  });
+
+  it("flags orphan_suspected when the lease has already expired (F4)", async () => {
+    const past = Date.now() - 600_000;
+    harness.munin.reads["tasks/t1/status"] = {
+      id: "1",
+      namespace: "tasks/t1",
+      key: "status",
+      content: "envelope",
+      tags: [
+        "running",
+        ORCH_V1_TAG,
+        "claimed_by:orch-worker-stale",
+        `lease_expires:${past}`,
+      ],
+      created_at: "2026-04-26T12:00:00Z",
+      updated_at: "2026-04-26T12:00:01Z",
+    };
+    const res = await fetch(`${harness.url}/v1/delegate/await`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({ task_id: "t1" }),
+    });
+    const body = await res.json();
+    expect(body.status).toBe("running");
+    expect(body.lease.claimed_by).toBe("orch-worker-stale");
+    expect(body.orphan_suspected).toBe(true);
   });
 
   it("returns completed with structured result", async () => {

@@ -125,6 +125,124 @@ describe("BrokerReconciler.runOnce", () => {
     expect(stats.submittedBackfilled).toBe(0);
   });
 
+  it("backfills delegation_completed for completed tasks missing the event (F2)", async () => {
+    const munin = new FakeMunin();
+    munin.inflight = [
+      { namespace: "tasks/done1", tags: ["completed", ORCH_V1_TAG] },
+    ];
+    munin.reads["tasks/done1/status"] = {
+      content: JSON.stringify(envelope("done1")),
+      tags: ["completed", ORCH_V1_TAG],
+      created_at: "2026-04-26T12:00:00Z",
+      updated_at: "2026-04-26T12:00:05Z",
+    };
+    munin.reads["tasks/done1/result-structured"] = {
+      content: JSON.stringify({
+        task_id: "done1",
+        result_schema_version: 1,
+        output: "the answer",
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        total_tokens: 15,
+        duration_s: 1.2,
+        cost_usd: 0.0005,
+        model_effective: "qwen2.5:3b",
+        runtime_effective: "ollama",
+        runtime_row_id_effective: "ollama-pi",
+        host_effective: "pi",
+        provenance: { scanner_pass: "clean" },
+      }),
+      tags: [ORCH_V1_TAG, "result-structured"],
+      created_at: "2026-04-26T12:00:04Z",
+      updated_at: "2026-04-26T12:00:04Z",
+    };
+    const journal = new DelegationJournal({ path: path.join(tmpDir, "events.jsonl") });
+    const taskStore = new BrokerTaskStore(munin as unknown as MuninClient);
+    const reconciler = new BrokerReconciler({ taskStore, journal });
+
+    const stats = await reconciler.runOnce();
+    expect(stats.completedBackfilled).toBe(1);
+    expect(stats.submittedBackfilled).toBe(1);
+    const events = await journal.readAll();
+    const completed = events.find((e) => e.event_type === "delegation_completed");
+    expect(completed).toBeDefined();
+    if (completed?.event_type !== "delegation_completed") throw new Error("type narrow");
+    expect(completed.task_id).toBe("done1");
+    expect(completed.outcome).toBe("completed");
+    expect(completed.total_tokens).toBe(15);
+    expect(completed.cost_usd).toBe(0.0005);
+    expect(completed.scanner_pass).toBe("clean");
+    expect(completed.event_ts).toBe("2026-04-26T12:00:05Z");
+  });
+
+  it("backfills delegation_completed for failed tasks with error metadata (F2)", async () => {
+    const munin = new FakeMunin();
+    munin.inflight = [
+      { namespace: "tasks/bad1", tags: ["failed", ORCH_V1_TAG] },
+    ];
+    munin.reads["tasks/bad1/status"] = {
+      content: JSON.stringify(envelope("bad1")),
+      tags: ["failed", ORCH_V1_TAG],
+      created_at: "2026-04-26T12:00:00Z",
+      updated_at: "2026-04-26T12:00:05Z",
+    };
+    munin.reads["tasks/bad1/result-error"] = {
+      content: JSON.stringify({
+        task_id: "bad1",
+        kind: "executor_failed",
+        message: "OpenRouter returned HTTP 503",
+        retryable: true,
+      }),
+      tags: [ORCH_V1_TAG, "result-error"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    const journal = new DelegationJournal({ path: path.join(tmpDir, "events.jsonl") });
+    const taskStore = new BrokerTaskStore(munin as unknown as MuninClient);
+    const reconciler = new BrokerReconciler({ taskStore, journal });
+
+    const stats = await reconciler.runOnce();
+    expect(stats.completedBackfilled).toBe(1);
+    const events = await journal.readAll();
+    const completed = events.find((e) => e.event_type === "delegation_completed");
+    expect(completed).toBeDefined();
+    if (completed?.event_type !== "delegation_completed") throw new Error("type narrow");
+    expect(completed.outcome).toBe("failed");
+    expect(completed.error_kind).toBe("executor_failed");
+    expect(completed.error_message).toContain("503");
+  });
+
+  it("does not re-backfill delegation_completed when the journal already has it (F2)", async () => {
+    const munin = new FakeMunin();
+    munin.inflight = [
+      { namespace: "tasks/done1", tags: ["completed", ORCH_V1_TAG] },
+    ];
+    munin.reads["tasks/done1/status"] = {
+      content: JSON.stringify(envelope("done1")),
+      tags: ["completed", ORCH_V1_TAG],
+      created_at: "2026-04-26T12:00:00Z",
+      updated_at: "2026-04-26T12:00:05Z",
+    };
+    munin.reads["tasks/done1/result-structured"] = {
+      content: JSON.stringify({
+        task_id: "done1",
+        result_schema_version: 1,
+        output: "ok",
+      }),
+    };
+    const journal = new DelegationJournal({ path: path.join(tmpDir, "events.jsonl") });
+    const taskStore = new BrokerTaskStore(munin as unknown as MuninClient);
+    const reconciler = new BrokerReconciler({ taskStore, journal });
+
+    await reconciler.runOnce();
+    const stats2 = await reconciler.runOnce();
+    expect(stats2.completedBackfilled).toBe(0);
+    expect(stats2.submittedBackfilled).toBe(0);
+    const events = await journal.readAll();
+    const completed = events.filter((e) => e.event_type === "delegation_completed");
+    expect(completed.length).toBe(1);
+  });
+
   it("counts errors and continues on bad envelopes", async () => {
     const munin = new FakeMunin();
     munin.inflight = [{ namespace: "tasks/bad", tags: ["pending", ORCH_V1_TAG] }];
