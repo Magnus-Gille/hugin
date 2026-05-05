@@ -5,6 +5,12 @@
 
 ## Completed This Session (2026-05-05)
 
+### /delegate skill (orch-v1 Step 7)
+
+- `~/.claude/skills/delegate/SKILL.md` — wraps `hugin_submit` → `hugin_await` polling → `hugin_rate`. Aliases (tiny/medium/large-reasoning), task_type taxonomy, sensitivity guard (no `private` via v1 broker), idempotency-key replay, structured error handling.
+- Differentiates from `/submit-task`: one-shot bounded transforms (summarize/extract/draft/rewrite) vs autonomous Pi agent.
+- Pending dogfood: enable broker on Pi + register hugin-mcp on laptop to actually exercise it.
+
 ### friction-mcp built, tested, smoke-tested end-to-end
 
 - `src/friction/schema.ts` — Zod taxonomy (11 friction types, severity, resource_assessment, alias_suggested), `FRICTION_CATEGORY` map, `FRICTION_SCHEMA_VERSION=1`.
