@@ -128,6 +128,11 @@ hugin/
 │   ├── task-graph.ts             # Task dependency graph for pipelines
 │   ├── result-format.ts          # Result formatting utilities
 │   ├── mcp-server.ts             # hugin-mcp stdio entrypoint (orchestrator-side, on the laptop)
+│   ├── friction-mcp.ts           # friction-mcp stdio entrypoint (report_friction tool for AI self-reporting)
+│   ├── friction/                 # friction-mcp internals
+│   │   ├── schema.ts             # Zod taxonomy: 11 friction types, severity, resource_assessment
+│   │   ├── munin-key.ts          # Pure builders: namespace/key/tags/content for signals/friction
+│   │   └── tool.ts               # buildFrictionTool — 2s hard timeout, lossy fire-and-forget write
 │   ├── mcp/                      # hugin-mcp internals (broker client + tool definitions)
 │   │   ├── broker-client.ts      # HTTP client for /v1/delegate/* (bearer auth, AbortController timeout)
 │   │   └── tools.ts              # 5 MCP tools (hugin_submit/await/rate/list/models) with envelope autofill
@@ -262,3 +267,7 @@ claude mcp add-json hugin '{"command":"node","args":["/Users/magnus/repos/hugin/
 | `OPENROUTER_API_KEY` | — | Enables the orch-v1 OpenRouter worker (Step 5b). Required to actually execute one-shot delegations; without it the broker still accepts submissions but tasks stay `pending`. |
 | `OPENROUTER_REFERER` | `https://hugin.local` | `HTTP-Referer` header value sent to OpenRouter (used for ranking/attribution). |
 | `OPENROUTER_APP_TITLE` | `hugin-orch-v1` | `X-Title` header value sent to OpenRouter. |
+| `HUGIN_FRICTION_INJECTION` | `off` | Set to `on` to inject `friction-mcp` into Claude SDK tasks. Each task gets `report_friction` available as an MCP tool. Default off — opt-in until signal quality is established. |
+| `HUGIN_FRICTION_TASK_ID` | — | Auto-tag friction events with the current task ID (injected by sdk-executor). |
+| `HUGIN_FRICTION_MODEL_ID` | `unknown` | Model identifier for friction tags (injected by sdk-executor). |
+| `HUGIN_FRICTION_WRITE_TIMEOUT_MS` | `2000` | Munin write timeout for friction-mcp. Lossy by design — keep short. |
