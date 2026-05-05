@@ -1,0 +1,146 @@
+[
+  {
+    "id": "friction-mcp-C01",
+    "source": "codex-round-1",
+    "text": "Priority is not earned — broker not yet enabled, hugin_rate not dogfooded; next move is orch-v1 enablement, not a new telemetry MCP",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "friction-mcp-C02",
+    "source": "codex-round-1",
+    "text": "Plan duplicates the unfinished hugin_rate feedback loop without proving a gap that hugin_rate cannot fill",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "friction-mcp-C03",
+    "source": "codex-round-1",
+    "text": "resource_assessment claim ('direct routing signal with no inference needed') is not defensible — calibration by model family, task type, and prompt wording is still required",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "friction-mcp-C04",
+    "source": "codex-round-1",
+    "text": "SDK executor injection only covers Claude tasks, not Ollama, OpenRouter, Codex spawn, or pi-harness — mismatches the stated multi-runtime comparison goal",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "friction-mcp-C05",
+    "source": "codex-round-1",
+    "text": "Model-authored events written with Classification:internal without provenance tags violates the trust model established elsewhere in the codebase",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "friction-mcp-C06",
+    "source": "codex-round-1",
+    "text": "'No new infrastructure' claim overstated — new MCP entrypoint, bin, schema, report script, and SDK executor changes are real build and operational cost",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "friction-mcp-C07",
+    "source": "codex-round-1",
+    "text": "Degradation under partial failure is a placeholder, not a policy — Munin write failures can add latency, trigger model retries, or create survivorship bias",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "friction-mcp-C08",
+    "source": "codex-round-1",
+    "text": "Aggregation lacks denominators — friction rate cannot be computed from signals/friction/* alone; requires join against all tasks including zero-friction tasks",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "friction-mcp-C09",
+    "source": "codex-round-1",
+    "text": "would_benefit_from uses cheap/mid/frontier/local-large — not the router's vocabulary (tiny/medium/large-reasoning/pi-large-coder); cannot drive actual routing decisions",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "friction-mcp-C10",
+    "source": "codex-round-1",
+    "text": "Success criteria too weak — 'tool writes to Munin' is an implementation milestone, not a product outcome; needs correlation gates against hugin_rate",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "friction-mcp-C11",
+    "source": "codex-round-1",
+    "text": "Self-review findings (calibration bias, schema versioning, retention, failure semantics, tool description) not absorbed into the plan snapshot",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "friction-mcp-C12",
+    "source": "codex-round-2",
+    "text": "Response still anchors on friction-mcp as the likely destination before evidence exists — needs explicit kill criteria, not just promotion criteria",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "friction-mcp-C13",
+    "source": "codex-round-2",
+    "text": "SDK injection defense confused about active path — orch-v1 broker worker routes through OpenRouter, not Claude Agent SDK; injection would miss the very corpus needed for baseline",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "friction-mcp-C14",
+    "source": "codex-round-2",
+    "text": "Observer identity ambiguity — evaluator annotation (orchestrating Claude reviewing output) and delegate self-report (executing model mid-task) are different data with opposite potential biases; plan collapses them",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "friction-mcp-C15",
+    "source": "codex-round-2",
+    "text": "20-30 task sample is too small to prove routing value across task types, aliases, runtime rows, and model families — anecdotes will masquerade as evidence",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "friction-mcp-C16",
+    "source": "codex-round-2",
+    "text": "Lossy telemetry correction solves Munin coupling but not behavior coupling — giving the executing model an extra tool changes task behavior regardless of write success",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]

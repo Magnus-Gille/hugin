@@ -237,6 +237,83 @@ describe("SDK executor", () => {
     expect(muninServer?.headers?.Authorization).toBe("Bearer test-key");
   });
 
+  it("does not inject friction-mcp when HUGIN_FRICTION_INJECTION is unset", async () => {
+    const previous = process.env.HUGIN_FRICTION_INJECTION;
+    delete process.env.HUGIN_FRICTION_INJECTION;
+    try {
+      const messages = [createMockResultSuccess("Done")];
+      mockedQuery.mockReturnValue(createMockQuery(messages) as ReturnType<typeof query>);
+
+      await executeSdkTask(makeTaskConfig(), "test-friction-off", tmpLogDir);
+
+      const call = mockedQuery.mock.calls[0]?.[0] as {
+        options?: { mcpServers?: Record<string, unknown> };
+      };
+      expect(call?.options?.mcpServers?.["friction"]).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.HUGIN_FRICTION_INJECTION;
+      else process.env.HUGIN_FRICTION_INJECTION = previous;
+    }
+  });
+
+  it("injects friction-mcp as a stdio server when HUGIN_FRICTION_INJECTION=on", async () => {
+    const previous = process.env.HUGIN_FRICTION_INJECTION;
+    process.env.HUGIN_FRICTION_INJECTION = "on";
+    try {
+      const messages = [createMockResultSuccess("Done")];
+      mockedQuery.mockReturnValue(createMockQuery(messages) as ReturnType<typeof query>);
+
+      await executeSdkTask(
+        makeTaskConfig({ model: "claude-sonnet-4-6" }),
+        "test-friction-on",
+        tmpLogDir,
+      );
+
+      const call = mockedQuery.mock.calls[0]?.[0] as {
+        options?: {
+          mcpServers?: Record<
+            string,
+            { type?: string; command?: string; args?: string[]; env?: Record<string, string> }
+          >;
+        };
+      };
+      const friction = call?.options?.mcpServers?.["friction"];
+      expect(friction).toBeDefined();
+      expect(friction?.type).toBe("stdio");
+      expect(friction?.args?.[0]).toMatch(/friction-mcp\.js$/);
+      expect(friction?.env?.MUNIN_URL).toBe("http://localhost:3030");
+      expect(friction?.env?.MUNIN_API_KEY).toBe("test-key");
+      expect(friction?.env?.HUGIN_FRICTION_TASK_ID).toBe("test-friction-on");
+      expect(friction?.env?.HUGIN_FRICTION_MODEL_ID).toBe("claude-sonnet-4-6");
+    } finally {
+      if (previous === undefined) delete process.env.HUGIN_FRICTION_INJECTION;
+      else process.env.HUGIN_FRICTION_INJECTION = previous;
+    }
+  });
+
+  it("defaults HUGIN_FRICTION_MODEL_ID to 'unknown' when task.model is unset", async () => {
+    const previous = process.env.HUGIN_FRICTION_INJECTION;
+    process.env.HUGIN_FRICTION_INJECTION = "on";
+    try {
+      const messages = [createMockResultSuccess("Done")];
+      mockedQuery.mockReturnValue(createMockQuery(messages) as ReturnType<typeof query>);
+
+      await executeSdkTask(makeTaskConfig(), "test-friction-unknown-model", tmpLogDir);
+
+      const call = mockedQuery.mock.calls[0]?.[0] as {
+        options?: {
+          mcpServers?: Record<string, { env?: Record<string, string> }>;
+        };
+      };
+      expect(call?.options?.mcpServers?.["friction"]?.env?.HUGIN_FRICTION_MODEL_ID).toBe(
+        "unknown",
+      );
+    } finally {
+      if (previous === undefined) delete process.env.HUGIN_FRICTION_INJECTION;
+      else process.env.HUGIN_FRICTION_INJECTION = previous;
+    }
+  });
+
   it("should create log file with header and footer", async () => {
     const messages = [createMockResultSuccess("Done")];
     mockedQuery.mockReturnValue(createMockQuery(messages) as ReturnType<typeof query>);

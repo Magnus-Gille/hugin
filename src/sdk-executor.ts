@@ -1,6 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { query, type Query } from "@anthropic-ai/claude-agent-sdk";
+
+type HttpMcpServer = { type: "http"; url: string; headers?: Record<string, string> };
+type StdioMcpServer = { type: "stdio"; command: string; args: string[]; env: Record<string, string> };
+type McpServerEntry = HttpMcpServer | StdioMcpServer;
+
+const FRICTION_MCP_DIST_PATH = fileURLToPath(new URL("./friction-mcp.js", import.meta.url));
 
 // --- Types ---
 
@@ -133,7 +140,7 @@ export async function executeSdkTask(
 
   try {
     // Build MCP servers config so task-spawned agents get Munin access
-    const mcpServers: Record<string, { type: "http"; url: string; headers?: Record<string, string> }> = {};
+    const mcpServers: Record<string, McpServerEntry> = {};
     if (task.muninUrl && task.muninApiKey) {
       const muninMcpUrl = task.muninUrl.replace(/\/$/, "") + "/mcp";
       const headers: Record<string, string> = {
@@ -146,6 +153,26 @@ export async function executeSdkTask(
         type: "http",
         url: muninMcpUrl,
         headers,
+      };
+    }
+
+    // Optional friction-mcp injection — opt-in via HUGIN_FRICTION_INJECTION=on
+    // until we have signal that self-report adds value.
+    if (
+      process.env.HUGIN_FRICTION_INJECTION === "on" &&
+      task.muninUrl &&
+      task.muninApiKey
+    ) {
+      mcpServers["friction"] = {
+        type: "stdio",
+        command: process.execPath,
+        args: [FRICTION_MCP_DIST_PATH],
+        env: {
+          MUNIN_URL: task.muninUrl,
+          MUNIN_API_KEY: task.muninApiKey,
+          HUGIN_FRICTION_TASK_ID: taskId,
+          HUGIN_FRICTION_MODEL_ID: task.model ?? "unknown",
+        },
       };
     }
 

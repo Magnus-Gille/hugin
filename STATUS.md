@@ -1,9 +1,37 @@
 # Hugin — Status
 
-**Last session:** 2026-04-27
+**Last session:** 2026-05-05
 **Branch:** main
 
-## Completed This Session (2026-04-27)
+## Completed This Session (2026-05-05)
+
+### friction-mcp built, tested, smoke-tested end-to-end
+
+- `src/friction/schema.ts` — Zod taxonomy (11 friction types, severity, resource_assessment, alias_suggested), `FRICTION_CATEGORY` map, `FRICTION_SCHEMA_VERSION=1`.
+- `src/friction/munin-key.ts` — pure builders: namespace, key (task-id + ISO stamp with `:` and `.` → `-`), tags, JSON content.
+- `src/friction/tool.ts` — `buildFrictionTool(deps)`, 2s hard timeout, lossy fire-and-forget (write errors → `dropped:true`, not `isError`).
+- `src/friction-mcp.ts` — stdio entrypoint; required: `MUNIN_URL`, `MUNIN_API_KEY`; optional: `HUGIN_FRICTION_TASK_ID`, `HUGIN_FRICTION_MODEL_ID`, `HUGIN_FRICTION_WRITE_TIMEOUT_MS`.
+- `scripts/friction-report.mjs` — v1 aggregation: `memory_list signals/friction`, group/count by model/type/severity.
+- `tests/friction/{schema,munin-key,tool}.test.ts` — 28 tests, all green.
+- `tests/sdk-executor.test.ts` — 3 new injection tests (off/on/default-model), all green.
+- `src/sdk-executor.ts` — widened mcpServers type to `HttpMcpServer | StdioMcpServer`; friction injection gated on `HUGIN_FRICTION_INJECTION=on` (default off).
+- Registered as user-scope MCP in Claude Code (`friction-mcp`), pointing at `http://huginmunin:3030`.
+- Two smoke entries verified in `signals/friction/` — one from initial registration, one logging this session's copy-paste friction.
+
+### Pi infrastructure changes (manual, not deployed)
+- Munin now binds `0.0.0.0:3030` via systemd drop-in `/etc/systemd/system/munin-memory.service.d/bind.conf`.
+- `MUNIN_ALLOWED_HOSTS` in `/home/magnus/munin-memory/.env` extended with `huginmunin:3030` (preserved `munin-memory.gille.ai`).
+- UFW enabled: deny incoming, allow lo + tailscale0 + ssh.
+
+### friction-mcp debate (prior session, same date)
+- Debate concluded: build it (user override), adopt smaller technical fixes from critique.
+- Summary + critique-log committed to `debate/friction-mcp-{summary,critique-log}.md`.
+
+## In Progress
+
+None.
+
+## Last Major Delivery (2026-04-27)
 
 ### Steps 5 + 6 done — orch-v1 OpenRouter executor + hugin-mcp server (merged + deployed)
 

@@ -4,13 +4,16 @@
   "description": "Task dispatcher for the Grimnir AI system — polls Munin for tasks, spawns AI runtimes, reports results",
   "type": "module",
   "bin": {
-    "hugin-mcp": "dist/mcp-server.js"
+    "hugin-mcp": "dist/mcp-server.js",
+    "friction-mcp": "dist/friction-mcp.js"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "start:mcp": "node dist/mcp-server.js",
+    "start:friction-mcp": "node dist/friction-mcp.js",
+    "friction-report": "node scripts/friction-report.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },
