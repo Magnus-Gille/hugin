@@ -152,6 +152,7 @@ hugin/
 │   └── security/                 # Threat models and security assessments
 └── scripts/
     ├── deploy-pi.sh
+    ├── enable-broker.sh          # One-shot: generate broker token on Pi, write to .env, restart, register hugin-mcp locally
     ├── submit-daily-analysis.sh  # Submit daily journal analysis as ollama task
     ├── submit-stale-status-review.sh
     ├── sync-claude-config.sh     # Sync ~/.claude/ config to Pi
