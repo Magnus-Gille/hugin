@@ -272,3 +272,6 @@ claude mcp add-json hugin '{"command":"node","args":["/Users/magnus/repos/hugin/
 | `HUGIN_FRICTION_TASK_ID` | — | Auto-tag friction events with the current task ID (injected by sdk-executor). |
 | `HUGIN_FRICTION_MODEL_ID` | `unknown` | Model identifier for friction tags (injected by sdk-executor). |
 | `HUGIN_FRICTION_WRITE_TIMEOUT_MS` | `2000` | Munin write timeout for friction-mcp. Lossy by design — keep short. |
+| `HUGIN_ARXIV_MCP` | `off` | Set to `on` to inject `arxiv-mcp-server` into Claude SDK tasks via `uvx`. Provides `mcp__arxiv__search_papers`, `read_paper`, `download_paper`, etc. Requires `uvx` (astral.sh/uv) on PATH. Useful for research spikes involving academic papers. |
+| `HUGIN_UVX_PATH` | `uvx` | Full path to the `uvx` binary when it is not on the default PATH (e.g. `/home/magnus/.local/bin/uvx`). |
+| `ARXIV_STORAGE_PATH` | — | Directory where arxiv-mcp-server caches downloaded papers. Forwarded into the arxiv MCP subprocess environment. |

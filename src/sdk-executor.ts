@@ -176,6 +176,25 @@ export async function executeSdkTask(
       };
     }
 
+    // Optional arxiv MCP injection — opt-in via HUGIN_ARXIV_MCP=on
+    // Provides mcp__arxiv__search_papers, read_paper, download_paper, etc.
+    // Requires uvx (astral.sh/uv) to be available on PATH.
+    if (process.env.HUGIN_ARXIV_MCP === "on") {
+      const uvxPath = process.env.HUGIN_UVX_PATH ?? "uvx";
+      mcpServers["arxiv"] = {
+        type: "stdio",
+        command: uvxPath,
+        args: ["arxiv-mcp-server"],
+        env: {
+          HOME: process.env.HOME ?? "/home/magnus",
+          PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+          ...(process.env.ARXIV_STORAGE_PATH
+            ? { ARXIV_STORAGE_PATH: process.env.ARXIV_STORAGE_PATH }
+            : {}),
+        },
+      };
+    }
+
     queryInstance = query({
       prompt: task.prompt,
       options: {
