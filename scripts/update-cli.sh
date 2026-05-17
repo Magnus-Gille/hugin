@@ -121,22 +121,28 @@ write_munin_status() {
 JSON_EOF
 )
 
-  # --fail-with-body: non-2xx HTTP exits non-zero (but still prints the body).
+  # Capture the HTTP status via -w '%{http_code}' rather than --fail-with-body
+  # (the latter needs curl >= 7.76; older Raspberry Pi OS images ship 7.74).
   # The bearer token is fed via --config on stdin so it never appears in argv
-  # (process args are world-readable via /proc on Linux).
-  local response status=0
-  response=$(curl --config - -sS --fail-with-body --max-time 10 \
+  # (process args are world-readable via /proc on Linux). Body -> temp file,
+  # status code -> stdout; a connection failure yields http_code "000".
+  local body_file http_code response
+  body_file=$(mktemp)
+  http_code=$(curl --config - -sS --max-time 10 \
+    -o "$body_file" -w '%{http_code}' \
     -X POST "${MUNIN_URL}/mcp" \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
     -d "$body" <<CURLCFG
 header = "Authorization: Bearer ${MUNIN_API_KEY}"
 CURLCFG
-  ) || status=$?
+  ) || http_code="000"
+  response=$(cat "$body_file" 2>/dev/null || true)
+  rm -f "$body_file"
 
-  if [ "$status" -ne 0 ]; then
-    echo "Munin status write failed (non-fatal, curl exit ${status}): ${response}"
-    logger -t hugin-update "FAILED: Munin status write (curl exit ${status})"
+  if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+    echo "Munin status write failed (non-fatal, HTTP ${http_code}): ${response}"
+    logger -t hugin-update "FAILED: Munin status write (HTTP ${http_code})"
     return
   fi
 
