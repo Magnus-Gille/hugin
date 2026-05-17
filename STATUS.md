@@ -1,7 +1,48 @@
 # Hugin — Status
 
-**Last session:** 2026-05-05
+**Last session:** 2026-05-17
 **Branch:** main
+
+## Completed This Session (2026-05-17)
+
+### Friction-mcp — wired up end-to-end
+
+- `HUGIN_FRICTION_INJECTION=on` set in Pi `.env` (`/home/magnus/repos/hugin/.env`) and verified in running process.
+- Friction reporting directive added to `~/.claude/CLAUDE.md` on laptop (by user) — instructs Claude Code to proactively call `report_friction` at medium+ severity.
+- Root cause of zero organic signals: tool existed and was Connected but nothing prompted the model to call it. Both gaps now closed.
+
+### hugin-deploy.service — two bugs fixed (`12a5f6b`)
+
+The Pi path-unit that rebuilds/restarts Hugin on commit had been silently failing for 4 days:
+
+1. **`tsc: not found`** — `node_modules` was installed production-only (`npm ci --omit=dev`), so TypeScript devDeps were missing. Fixed: `ExecStart` now runs `npm install --include=dev && npm run build` (inline shell).
+2. **Wrong manager context** — `ExecStartPost` ran `sudo systemctl restart hugin.service` against the *system* manager, but `hugin.service` is a *user* unit. Fixed: `systemctl --user restart hugin.service` with `User=magnus` + `XDG_RUNTIME_DIR=/run/user/1000`, no sudo.
+
+Committed to `main`, pushed. Pi rebuilt, restarted, verified healthy. Unit is now `enabled` (was `disabled` — wouldn't have survived a Pi reboot before).
+
+### deploy.sh user-scope fix (grimnir PR #20, `44696c8`)
+
+Root cause of a deploy-induced outage: `deploy.sh` assumed all services are system units. For user-unit services (hugin, verdandi) it stopped+disabled the user instance, then tried `sudo systemctl restart` against a nonexistent system unit — taking the service offline.
+
+- `services.json`: `systemd_units[].scope` field (`"system"` default, `"user"` for hugin and verdandi).
+- `scripts/lib/registry.js`: emits `unit_scope` as 7th field in deploy query.
+- `deploy.sh`: branches on scope — user units get `systemctl --user restart`, no stop/disable sabotage.
+
+On `grimnir:fix/deploy-user-units` (PR #20). Tested: hugin redeploy now restarts cleanly with zero downtime.
+
+### Security scan analysis
+
+`grimnir-security-scan` (weekly, Sun 03:00) is healthy and already caught the hugin npm vulns this morning (03:06, `overall_status: critical`). The data went unread — identical failure mode to friction-mcp. Root issue: working collector, no sink.
+
+### GitHub Issues filed + on Grimnir Roadmap board
+
+- grimnir#21 — Security scan never surfaces: add delta-aware notification
+- grimnir#22 — Secret-scan test-file exclusion broken (12 false positives/week; forces `overall_status: critical` permanently)
+- grimnir#23 — Meta: build delta-surfacing component once for all collectors (friction, security, validate)
+- grimnir#24 — `sync-repos.service` has no journal entries — auto git-pull may not be running
+- hugin#69 — Dependency vulns: 5 high / 8 moderate (`npm audit fix` pending)
+
+All added to Grimnir Roadmap project board.
 
 ## Completed This Session (2026-05-05)
 
@@ -32,6 +73,15 @@
 ### friction-mcp debate (prior session, same date)
 - Debate concluded: build it (user override), adopt smaller technical fixes from critique.
 - Summary + critique-log committed to `debate/friction-mcp-{summary,critique-log}.md`.
+
+## Next Steps (from 2026-05-17)
+
+1. **`npm audit fix`** (hugin#69) — `npm audit fix` → build → test → deploy. Fast, no breaking changes.
+2. **Merge grimnir PR #20** (`fix/deploy-user-units`) — deploy.sh user-scope fix. Has no conflicts.
+3. **grimnir#22** — fix secret-scan test-file exclusion (note: `fix(security-scan): skip test files in secret scan` commit `776664a` already exists on `feat/tallriksvis-sandbox` — may just need cherry-picking to main).
+4. **grimnir#21** after #22 — wire security-scan notification (depends on noise being cleared first).
+5. **grimnir#24** — investigate `sync-repos.service` (no journal → possibly never ran; check `loginctl` linger, systemd user session persistence).
+6. **Broker still disabled** on Pi — see broker enablement steps below.
 
 ## In Progress
 
@@ -69,21 +119,19 @@ None.
 
 None.
 
-## Next Steps
-
-### Orchestrator v1 — enable + wire up
-1. Generate `HUGIN_BROKER_KEYS` token (see above) and redeploy
-2. Register `hugin-mcp` in Claude Code on laptop
-3. Step 7: Write `/delegate` skill — wraps hugin_submit + poll loop + rate on completion
-4. Step 8: Dogfood with 5–10 real delegations; spot-audit the journal
+### Broker enable (carry-forward from 2026-05-05)
+1. Generate token: `openssl rand -hex 32`
+2. Add to Pi `.env`: `HUGIN_BROKER_KEYS={"claude-code":"<token>"}`
+3. Redeploy: `./scripts/deploy-pi.sh` (now safe post grimnir#20)
+4. Register MCP on laptop: `claude mcp add-json hugin '{"command":"node","args":["/Users/magnus/repos/hugin/dist/mcp-server.js"],"env":{"HUGIN_BROKER_URL":"http://huginmunin:3033","HUGIN_BROKER_TOKEN":"<token>"}}' -s user`
 
 ### Hygiene (carry-forward)
-- **Deploy signing secrets to Pi**: generate one 64-char hex per signer; put matching entries into `HUGIN_SUBMITTER_KEYS` on Hugin; deliver the corresponding secret to each submitter host (`RATATOSKR_SIGNING_SECRET` on Ratatoskr; `HUGIN_SIGNING_SECRET` on laptop claude-code).
-- **Flip `HUGIN_SIGNING_POLICY=warn` on Pi** once the first submitter is signing in the field, watch `[signing]` log lines for stragglers, promote to `require` after ≥72h clean.
-- **Roll `HUGIN_EXFIL_POLICY` and `HUGIN_EXTERNAL_POLICY` past `warn`** once banner volume on real traffic is understood.
+- **Deploy signing secrets to Pi**: `HUGIN_SUBMITTER_KEYS` on Hugin; `RATATOSKR_SIGNING_SECRET` on Ratatoskr.
+- **Flip `HUGIN_SIGNING_POLICY=warn`** once first submitter is signing; promote to `require` after ≥72h clean.
+- **Roll `HUGIN_EXFIL_POLICY` / `HUGIN_EXTERNAL_POLICY`** past `warn` once banner volume understood.
 
 ### Multi-host sprint (after dogfood)
-1. `Host:` field + peer-claim — extend task schema; coordinator Pi assigns `Host:`; peer Hugins filter poll by matching `Host:`.
+1. `Host:` field + peer-claim — coordinator Pi assigns `Host:`; peers filter poll by matching `Host:`.
 2. Agent-harness runtimes — `opencode-spawn` / `aider-spawn` executors.
 
 ---
