@@ -1668,6 +1668,12 @@ async function reconcileDeliveryPending(
     try {
       delivery = await deliverArtifacts({
         manifest: task.artifactManifest,
+        // Symmetric with the active path (Codex review A): without
+        // stagingPrefixes the realpath-containment guard is disabled, so a
+        // recovered delivery could escape the staging root undetected.
+        stagingPrefixes: config.deliveryTargets.map(
+          (t) => t.localStagingPrefix,
+        ),
         appendLog: (line) => {
           try {
             fs.appendFileSync(logPath, `${line}\n`);
@@ -1681,8 +1687,12 @@ async function reconcileDeliveryPending(
       currentDeliveryAbort = null;
     }
     if (!delivery.ok) {
+      // missing-local / unsafe-local (no trustworthy deliverable) are ALWAYS
+      // terminal regardless of policy; infra is terminal under `require`.
+      // Symmetric with the active path (Codex review B).
       const terminal =
         delivery.failureKind === "missing-local" ||
+        delivery.failureKind === "unsafe-local" ||
         config.deliveryPolicy === "require";
       if (terminal) ok = false;
     }
@@ -3726,8 +3736,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     }
     currentCancellation = null;
 
-    // Agent run + delivery both finished — now it is safe to stop lease
-    // renewal and the cancellation watch.
+    // Agent run + delivery both finished. Lease renewal was already stopped
+    // before the delivery checkpoint (see ~L3487, Codex review #2) — the call
+    // below is an idempotent guard, not the primary stop. The cancellation
+    // watch, however, was kept ACTIVE through delivery so an operator could
+    // abort a hung rsync; THIS is where it is finally stopped.
     stopLeaseRenewal();
     stopCancellationWatch();
 
@@ -3800,6 +3813,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           }
         : baseRuntimeMetadata;
 
+    // Carry the terminal delivery marker (issue #68) into the persistent tag
+    // set so downstream consumers + startup reconciliation see a consistent
+    // terminal delivery state. Shared by the cancelled and normal branches —
+    // a cancel mid-delivery still set terminalDeliveryTag = "delivery:failed".
+    const finalizeBaseTags = terminalDeliveryTag
+      ? [
+          ...entry.tags.filter((t) => !t.startsWith("delivery:")),
+          terminalDeliveryTag,
+        ]
+      : entry.tags;
+
     if (isCancelled && cancellation) {
       await munin.write(
         taskNs,
@@ -3822,10 +3846,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         undefined,
         taskClassification,
       );
-      await finalizeTaskCompletion(munin, taskNs, {
+      const cancelledFinalize = await finalizeTaskCompletion(munin, taskNs, {
         statusContent: entry.content,
-        terminalTags: buildTerminalStatusTags("cancelled", entry.tags, `runtime:${task.runtime}`),
+        terminalTags: buildTerminalStatusTags("cancelled", finalizeBaseTags, `runtime:${task.runtime}`),
         classification: taskClassification,
+        // Single-owner CAS for runtime-owned delivery (#68, Codex review C):
+        // if a startup reconciler reclaimed the delivery checkpoint while we
+        // were delivering, this CAS is rejected and we must NOT finalize. When
+        // the task never entered delivery this is undefined → no CAS, same as
+        // the prior behaviour.
+        expectedUpdatedAt: deliveryCheckpointUpdatedAt,
         writeStructuredResult: () => writeStructuredTaskResult(
           taskNs,
           createCancelledStructuredResult(taskNs, task.runtime, cancellation.reason, {
@@ -3850,16 +3880,18 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         ),
         logMessage: `Task cancelled in ${Math.round(durationMs / 1000)}s (reason: ${cancellation.reason}, executor: ${executorLabel})`,
       });
+      if (cancelledFinalize.statusCasLost) {
+        // The startup reconciler re-owns this task (single-owner model). It
+        // will write the terminal state, promote dependents, and refresh the
+        // pipeline — doing it here too would double-fire those side effects.
+        console.warn(
+          `Task ${taskNs} cancelled-finalize CAS lost — delivery reconciliation owns terminalization`,
+        );
+        currentTask = null;
+        currentTaskConfig = null;
+        return { hadTask: true, queueDepth };
+      }
     } else {
-      // Carry the terminal delivery marker (issue #68) into the persistent
-      // tag set so downstream consumers + startup reconciliation see a
-      // consistent terminal delivery state.
-      const finalizeBaseTags = terminalDeliveryTag
-        ? [
-            ...entry.tags.filter((t) => !t.startsWith("delivery:")),
-            terminalDeliveryTag,
-          ]
-        : entry.tags;
       const finalizeOutcome = await finalizeTaskCompletion(munin, taskNs, {
         statusContent: entry.content,
         terminalTags: buildTerminalStatusTags(ok ? "completed" : "failed", finalizeBaseTags, `runtime:${task.runtime}`),

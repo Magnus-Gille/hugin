@@ -425,6 +425,52 @@ describe("deliverArtifacts", () => {
     expect(spawnCalls).toHaveLength(0);
   });
 
+  // Codex review D: a non-ENOENT realpath failure must NOT silently bypass
+  // the containment guard — we cannot prove containment, so refuse.
+  it("rejects when realpath throws a non-ENOENT error → unsafe-local", async () => {
+    const res = await deliverArtifacts({
+      manifest: manifestOf,
+      appendLog: () => {},
+      spawnFn: mockSpawn,
+      lstatFn: () => ({ isSymbolicLink: () => false }),
+      realpathFn: () => {
+        const err = new Error("permission denied") as NodeJS.ErrnoException;
+        err.code = "EACCES";
+        throw err;
+      },
+      stagingPrefixes: ["/home/magnus/scratch/"],
+      statFn: () => ({ size: 42 }),
+      hashFn: () => "h",
+    });
+    expect(res.ok).toBe(false);
+    expect(res.failureKind).toBe("unsafe-local");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  // ENOENT still falls through to the stat-based missing-local handling so the
+  // failure kind stays consistent with a plain absent file.
+  it("treats a realpath ENOENT as fall-through (→ missing-local)", async () => {
+    const res = await deliverArtifacts({
+      manifest: manifestOf,
+      appendLog: () => {},
+      spawnFn: mockSpawn,
+      lstatFn: () => ({ isSymbolicLink: () => false }),
+      realpathFn: () => {
+        const err = new Error("no such file") as NodeJS.ErrnoException;
+        err.code = "ENOENT";
+        throw err;
+      },
+      stagingPrefixes: ["/home/magnus/scratch/"],
+      statFn: () => {
+        throw new Error("ENOENT");
+      },
+      hashFn: () => "h",
+    });
+    expect(res.ok).toBe(false);
+    expect(res.failureKind).toBe("missing-local");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
   it("allows a local path whose realpath stays under the staging root", async () => {
     spawnBehaviors = [
       { code: 0 },

@@ -557,7 +557,17 @@ export async function deliverArtifacts(
       let real: string;
       try {
         real = realpathFn(a.local);
-      } catch {
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        if (code && code !== "ENOENT") {
+          // realpath failed for a non-absence reason (EACCES, ELOOP, …). We
+          // cannot prove containment, so refuse rather than silently skip the
+          // guard (Codex review D). ENOENT falls through to the stat-based
+          // missing-local handling below for a consistent failure kind.
+          return unsafeLocal(
+            `realpath failed (${code}); cannot verify containment under the allowed staging root: ${a.local}`,
+          );
+        }
         real = "";
       }
       if (real) {
