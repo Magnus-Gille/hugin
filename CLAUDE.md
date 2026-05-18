@@ -88,6 +88,12 @@ Content format:
 
 **Pipeline tasks:** Use `Runtime: pipeline` with a `### Pipeline` section instead of `### Prompt`. Pipeline phases use runtime IDs (`claude-sdk`, `codex-spawn`, `ollama-pi`, `ollama-laptop`, or `auto`) which differ from standalone runtime names. Per-phase `Capabilities:` is supported.
 
+**Artefact delivery (`### Artifacts` manifest, issue #68):** A task may declare an `### Artifacts` section so that **Hugin (not the agent)** owns and verifies delivery of the deliverables. The agent only writes content to the declared local staging paths and must make no delivery claims.
+
+- **Grammar (load-bearing):** `### Artifacts` MUST appear *before* `### Prompt`. Prompt extraction reads from `### Prompt` to EOF, so a manifest placed after it would leak into the agent prompt — Hugin rejects that ordering at submit time.
+- **Shape:** a single fenced ```json array; each entry `{ "id", "local", "remote": "user@host:/abs/path", "required": true|false }`. `local` must be an absolute path under an allowed staging prefix; `remote` must match an allowed target tuple. Un-substituted `<placeholder>`s, `..`, NUL, newlines, shell metacharacters, and disallowed targets are rejected **before** the (paid) run — no spend on a malformed manifest.
+- **Lifecycle:** after the agent finishes, Hugin writes a durable nonterminal `running + delivery:pending` checkpoint (agent content preserved in `result`), then `statSync` → `rsync` to `<remote>.partial` → remote `sha256sum` match → atomic `ssh mv`. The final `result` is written before the terminal status flip. A terminal delivery failure renders **`- **Exit code:** 2`** + `- **Failure kind:** DELIVERY_FAILED` (positive integer — Ratatoskr treats a non-numeric/negative code as success). Status carries `delivery:verified` / `delivery:failed`; the structured result carries an optional `artifactDelivery` object. A crash mid-delivery is reconciled on restart without a paid rerun.
+
 **Results:** Written to the same namespace under two keys:
 - `result` — human-readable markdown with exit code, timestamps, duration, and response body
 - `result-structured` — machine-readable JSON (Zod-validated) with schema version, lifecycle metadata, runtime metadata (requested vs effective model/host), sensitivity audit, and structured body. Prefer this for programmatic consumption.
@@ -127,6 +133,7 @@ hugin/
 │   ├── task-status-tags.ts       # Tag manipulation helpers for task lifecycle
 │   ├── task-graph.ts             # Task dependency graph for pipelines
 │   ├── result-format.ts          # Result formatting utilities
+│   ├── artifact-delivery.ts      # Runtime-owned artefact delivery (#68): manifest parse/validate, target allowlist, rsync→sha256→mv deliver+verify
 │   ├── mcp-server.ts             # hugin-mcp stdio entrypoint (orchestrator-side, on the laptop)
 │   ├── friction-mcp.ts           # friction-mcp stdio entrypoint (report_friction tool for AI self-reporting)
 │   ├── friction/                 # friction-mcp internals
@@ -274,4 +281,6 @@ claude mcp add-json hugin '{"command":"node","args":["/Users/magnus/repos/hugin/
 | `HUGIN_FRICTION_WRITE_TIMEOUT_MS` | `2000` | Munin write timeout for friction-mcp. Lossy by design — keep short. |
 | `HUGIN_ARXIV_MCP` | `off` | Set to `on` to inject `arxiv-mcp-server` into Claude SDK tasks via `uvx`. Provides `mcp__arxiv__search_papers`, `read_paper`, `download_paper`, etc. Requires `uvx` (astral.sh/uv) on PATH. Useful for research spikes involving academic papers. |
 | `HUGIN_UVX_PATH` | `uvx` | Full path to the `uvx` binary when it is not on the default PATH (e.g. `/home/magnus/.local/bin/uvx`). |
+| `HUGIN_DELIVERY_POLICY` | `require` | Runtime-owned artefact delivery (issue #68): `off` (ignore `### Artifacts` manifests — rollback / old-skill compat), `warn` (validate + report diagnostics, never fail a content-success task), `require` (missing local content or an unrecoverable delivery failure → terminal `failed`, content preserved in the checkpoint so re-submission is free). |
+| `HUGIN_DELIVERY_TARGETS` | (single NAS) | JSON array of allowed delivery target tuples `[{ "user", "host", "remotePathPrefix", "localStagingPrefix" }]`. Separate from the fetch egress allowlist. A manifest `remote`/`local` must match a tuple (user + host + remote-prefix; local under the staging prefix) or the task is rejected at submit time. |
 | `ARXIV_STORAGE_PATH` | — | Directory where arxiv-mcp-server caches downloaded papers. Forwarded into the arxiv MCP subprocess environment. |

@@ -1,7 +1,16 @@
 # Hugin — Status
 
-**Last session:** 2026-05-17
+**Last session:** 2026-05-18
 **Branch:** main
+
+## Completed This Session (2026-05-18)
+
+### Artifact delivery #68 — Round 2 adversarial review
+
+- Wrote `debate/artifact-delivery-68-codex-rebuttal-1.md` (local debate artifact; `debate/*` is gitignored).
+- Verdict: runtime-owned artifact delivery remains the right architecture, but the revised design is not safe to implement until the `delivery:pending` lifecycle protocol is pinned down.
+- Key findings: first checkpoint must stay nonterminal (`running + delivery:pending` with active lease), Ratatoskr treats non-numeric exit codes as success, artifact delivery reconciliation is net-new, host allowlisting alone is insufficient without user/path-prefix constraints, and current tag builders drop `delivery:*`.
+- Munin intentionally skipped for this review per user instruction.
 
 ## Completed This Session (2026-05-17)
 

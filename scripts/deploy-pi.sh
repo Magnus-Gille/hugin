@@ -63,6 +63,31 @@ else
   echo "  Generate a key or reuse the existing Munin API key"
 fi
 
+echo "==> Artefact-delivery preflight (issue #68)..."
+# The deliverer runs ON the Pi and ships to the NAS over SSH+rsync from the
+# systemd-user environment. Probe SSH (BatchMode, no prompts), rsync, and a
+# write/read/delete round-trip BEFORE enabling HUGIN_DELIVERY_POLICY=require.
+# Non-fatal: the runtime checkpoint + failure handling are the real safety net
+# (a probe can pass while the long-running unit later loses env/keys/NAS), so a
+# probe failure is a loud WARNING, not a hard deploy stop.
+DELIVERY_NAS_USER="${HUGIN_DELIVERY_NAS_USER:-magnus}"
+DELIVERY_NAS_HOST="${HUGIN_DELIVERY_NAS_HOST:-100.99.119.52}"
+DELIVERY_NAS_DIR="${HUGIN_DELIVERY_NAS_DIR:-/home/magnus/mimir-inbox}"
+if ssh "$REMOTE" "
+  set -e
+  export HOME=/home/$DEPLOY_USER
+  command -v rsync >/dev/null || { echo 'rsync missing on Pi'; exit 1; }
+  ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 \
+    $DELIVERY_NAS_USER@$DELIVERY_NAS_HOST -- \
+    \"mkdir -p $DELIVERY_NAS_DIR && touch $DELIVERY_NAS_DIR/.hugin-preflight && rm -f $DELIVERY_NAS_DIR/.hugin-preflight\"
+"; then
+  echo "  OK: Pi → NAS SSH/rsync write/read/delete probe passed"
+else
+  echo "  WARNING: artefact-delivery preflight FAILED."
+  echo "  Do NOT set HUGIN_DELIVERY_POLICY=require until SSH keys / BatchMode /"
+  echo "  NAS reachability are fixed (else delivery-capable tasks will fail)."
+fi
+
 echo "==> Syncing global Claude config..."
 "$(dirname "$0")/sync-claude-config.sh" "$PI_HOST"
 
