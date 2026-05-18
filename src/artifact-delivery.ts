@@ -151,6 +151,12 @@ export interface ManifestParseResult {
   present: boolean;
   manifest: ArtifactManifest | null;
   error: string | null;
+  // True only for the "### Artifacts after ### Prompt" grammar violation. This
+  // is a structural prompt-leak hazard independent of the delivery feature, so
+  // the dispatcher must reject it even when HUGIN_DELIVERY_POLICY=off (Codex
+  // review #5 — otherwise the manifest leaks into the agent prompt in rollback
+  // mode).
+  grammarViolation?: boolean;
 }
 
 /**
@@ -184,6 +190,7 @@ export function parseArtifactManifest(
     return {
       present: true,
       manifest: null,
+      grammarViolation: true,
       error:
         "### Artifacts section must appear before ### Prompt (otherwise the manifest leaks into the agent prompt)",
     };
@@ -304,6 +311,7 @@ export function parseArtifactManifest(
 export type ArtifactStatus =
   | "verified"
   | "missing-local"
+  | "unsafe-local"
   | "delivery-failed"
   | "verify-failed";
 
@@ -320,6 +328,10 @@ export type DeliveryFailureKind =
   // Local staging file missing/empty = the agent didn't produce the
   // deliverable = the #68 bug. ALWAYS terminal.
   | "missing-local"
+  // Local staging path is a symlink or resolves outside the allowed staging
+  // root = symlink-escape exfiltration attempt (Codex review #3). ALWAYS
+  // terminal — never deliver, never retry.
+  | "unsafe-local"
   // SSH unreachable / rsync timeout / verify timeout / remote command failure
   // = infrastructure. Terminal only under `require`.
   | "infra";
@@ -345,10 +357,24 @@ export interface DeliverOptions {
   maxBytes?: number;
   /** Abort signal (operator cancel / shutdown). */
   signal?: AbortSignal;
+  /**
+   * Allowed local staging prefixes (slash-normalized, from the delivery target
+   * tuples). The resolved REAL path of every local artefact must stay under
+   * one of these. The manifest's string allowlist alone follows symlinks, so a
+   * task could stage a symlink under the allowed prefix pointing at any
+   * readable file (e.g. ~/.ssh keys) and exfiltrate it (Codex review #3).
+   * Empty/undefined disables the realpath containment check (the lstat
+   * symlink-reject still applies).
+   */
+  stagingPrefixes?: string[];
   /** Test seam. */
   spawnFn?: typeof spawn;
   /** Test seam: stat. */
   statFn?: (p: string) => { size: number };
+  /** Test seam: lstat (no symlink follow). */
+  lstatFn?: (p: string) => { isSymbolicLink: () => boolean };
+  /** Test seam: realpath. */
+  realpathFn?: (p: string) => string;
   /** Test seam: local hash. */
   hashFn?: (p: string) => string;
 }
@@ -453,6 +479,10 @@ export async function deliverArtifacts(
 ): Promise<DeliveryResult> {
   const spawnFn = opts.spawnFn ?? spawn;
   const statFn = opts.statFn ?? ((p: string) => fs.statSync(p));
+  const lstatFn =
+    opts.lstatFn ?? ((p: string) => fs.lstatSync(p) as { isSymbolicLink: () => boolean });
+  const realpathFn = opts.realpathFn ?? ((p: string) => fs.realpathSync(p));
+  const stagingPrefixes = opts.stagingPrefixes ?? [];
   const hashFn = opts.hashFn ?? sha256File;
   const commandTimeoutMs = opts.commandTimeoutMs ?? 45_000;
   const overallTimeoutMs = opts.timeoutMs ?? 120_000;
@@ -490,6 +520,56 @@ export async function deliverArtifacts(
         failureKind: "infra",
         error: `artefact ${a.id}: unparseable remote`,
       };
+    }
+
+    // 0. Symlink-escape guard (Codex review #3). The manifest validated
+    //    `a.local` as a *string* under an allowed staging prefix, but
+    //    statSync/readFileSync/rsync all follow symlinks. Reject if the final
+    //    component is a symlink, and require the resolved real path to remain
+    //    under an allowed staging prefix (catches symlinked parent dirs too).
+    //    ALWAYS terminal — this is an exfiltration attempt, never retry.
+    const unsafeLocal = (error: string): DeliveryResult => {
+      records.push({
+        id: a.id,
+        status: "unsafe-local",
+        remote: a.remote,
+        error,
+      });
+      opts.appendLog(`[delivery] ${a.id}: UNSAFE local path — ${error}`);
+      return {
+        ok: false,
+        records,
+        failureKind: "unsafe-local",
+        error: `artefact "${a.id}" local path rejected: ${error}`,
+      };
+    };
+    try {
+      if (lstatFn(a.local).isSymbolicLink()) {
+        return unsafeLocal(
+          `local staging path is a symlink (symlink-escape blocked): ${a.local}`,
+        );
+      }
+    } catch {
+      // lstat failure here = path absent; fall through to the stat-based
+      // missing-local handling below for a consistent failure kind.
+    }
+    if (stagingPrefixes.length > 0) {
+      let real: string;
+      try {
+        real = realpathFn(a.local);
+      } catch {
+        real = "";
+      }
+      if (real) {
+        const contained = stagingPrefixes.some(
+          (prefix) => real === prefix.replace(/\/$/, "") || real.startsWith(prefix),
+        );
+        if (!contained) {
+          return unsafeLocal(
+            `resolves outside the allowed staging root (${real} not under ${stagingPrefixes.join(", ")})`,
+          );
+        }
+      }
     }
 
     // 1. Local staging file must exist and be non-empty.

@@ -80,6 +80,12 @@ Content format:
 
 **Type tags:** Tags matching `type:*` (e.g., `type:research`, `type:email`) are carried forward through the task lifecycle (pending → running → completed/failed).
 
+**Artefact delivery (`### Artifacts` manifest, issue #68):** A task may declare an `### Artifacts` section so **Hugin (not the agent)** owns and verifies delivery of the deliverables; the agent only writes to the declared local staging paths and makes no delivery claims.
+
+- **Grammar (load-bearing):** `### Artifacts` MUST appear *before* `### Prompt` (prompt extraction reads `### Prompt` → EOF, so a manifest after it leaks into the agent prompt). This ordering violation is rejected at submit time **regardless of `HUGIN_DELIVERY_POLICY`**.
+- **Shape:** a single fenced ```json array; each entry `{ "id", "local", "remote": "user@host:/abs/path", "required": true|false }`. `local` must be absolute, under an allowed staging prefix, and not a symlink (a staged symlink / a path that realpath-resolves outside the staging root is rejected as `unsafe-local`). `remote` must match an allowed target tuple. Un-substituted `<placeholder>`s, `..`, NUL, newlines, shell metacharacters, and disallowed targets are rejected before the (paid) run.
+- **Lifecycle:** after the agent finishes, Hugin writes a durable nonterminal `running + delivery:pending` checkpoint (agent content preserved in `result`), then `statSync` → `rsync` to `<remote>.partial` → remote `sha256sum` match → atomic `ssh mv`. The final `result` is written before the terminal status flip, which CAS-guards a single owner. A terminal delivery failure renders **`- **Exit code:** 2`** + `- **Failure kind:** DELIVERY_FAILED` (positive integer — Ratatoskr treats a non-numeric/negative code as success). Status carries `delivery:verified` / `delivery:failed`; the structured result carries an optional `artifactDelivery` object. A crash mid-delivery is reconciled on restart without a paid rerun.
+
 Results are written to the same namespace under key `result`.
 
 ## Project structure
@@ -101,6 +107,7 @@ hugin/
 │   ├── provenance.ts               # External-vs-trusted provenance detection for context-refs
 │   ├── task-signing.ts             # HMAC-SHA256 task submission signing/verification
 │   ├── munin-client.ts    # HTTP client for Munin JSON-RPC API
+│   ├── artifact-delivery.ts      # Runtime-owned artefact delivery (#68): manifest parse/validate, target allowlist, symlink guard, rsync→sha256→mv deliver+verify
 │   ├── mcp-server.ts             # hugin-mcp stdio entrypoint (orchestrator-side, on the laptop)
 │   ├── mcp/                      # hugin-mcp internals (broker client + tool definitions)
 │   │   ├── broker-client.ts      # HTTP client for /v1/delegate/* (bearer auth, AbortController timeout)
@@ -176,6 +183,8 @@ MUNIN_API_KEY=<same key Munin uses>
 | `HUGIN_SIGNING_POLICY` | `off` | Task signature verification: `off` (skip), `warn` (log missing/invalid, never reject), `require` (reject unsigned/invalid). See `docs/security/task-signing.md`. |
 | `HUGIN_SUBMITTER_KEYS` | — | Inline JSON keystore for task signing: `{"<keyId>": "<hex-secret>"}` (64-char hex preferred; base64 accepted). |
 | `HUGIN_SUBMITTER_KEYS_FILE` | — | Path to a JSON keystore file. Takes precedence over `HUGIN_SUBMITTER_KEYS`. |
+| `HUGIN_DELIVERY_POLICY` | `require` | Runtime-owned artefact delivery (issue #68): `off` (ignore `### Artifacts` manifests — rollback / old-skill compat; the `### Artifacts`-after-`### Prompt` grammar error is still rejected), `warn` (validate + report diagnostics, never fail a content-success task), `require` (missing/unsafe local content or an unrecoverable delivery failure → terminal `failed`, content preserved in the checkpoint so re-submission is free). |
+| `HUGIN_DELIVERY_TARGETS` | (single NAS) | JSON array of allowed delivery target tuples `[{ "user", "host", "remotePathPrefix", "localStagingPrefix" }]`. Separate from the fetch egress allowlist. A manifest `remote`/`local` must match a tuple, and the local path's realpath must stay under the staging prefix, or the task is rejected at submit time. |
 | `HUGIN_BROKER_HOST` | `127.0.0.1` | Bind address for the orchestrator-v1 broker (`/v1/delegate/*`). Set to the Tailscale interface IP in production. |
 | `HUGIN_BROKER_PORT` | `3033` | Port for the broker endpoint. |
 | `HUGIN_BROKER_KEYS` | — | Inline JSON keystore: `{"<principal>": "<token>"}`. Setting either this or `HUGIN_BROKER_KEYS_FILE` enables the broker. |

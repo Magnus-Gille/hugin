@@ -76,6 +76,47 @@ describe("finalizeTaskCompletion", () => {
     ).rejects.toThrow("Munin network error");
   });
 
+  it("a rejected CAS with expectedUpdatedAt bails without finalizing (single-owner, #68)", async () => {
+    const { client, writes, logs } = makeClient();
+    client.write.mockRejectedValueOnce(new Error("expected_updated_at mismatch"));
+    const structured = vi.fn(async () => {});
+
+    const result = await finalizeTaskCompletion(client, "tasks/test-005", {
+      statusContent: "## Task",
+      terminalTags: ["completed", "delivery:verified"],
+      expectedUpdatedAt: "2026-05-18T00:00:00Z",
+      writeStructuredResult: structured,
+      logMessage: "should not be logged",
+    });
+
+    expect(result.statusCasLost).toBe(true);
+    expect(result.structuredResultOk).toBe(false);
+    // No structured write, no log, no successful status write — the new owner
+    // (startup delivery reconciliation) stands.
+    expect(structured).not.toHaveBeenCalled();
+    expect(writes).toHaveLength(0);
+    expect(logs).toHaveLength(0);
+  });
+
+  it("passes expectedUpdatedAt through to the status CAS write", async () => {
+    const { client } = makeClient();
+    await finalizeTaskCompletion(client, "tasks/test-006", {
+      statusContent: "## Task",
+      terminalTags: ["completed"],
+      expectedUpdatedAt: "2026-05-18T12:00:00Z",
+      writeStructuredResult: async () => {},
+      logMessage: "ok",
+    });
+    expect(client.write).toHaveBeenCalledWith(
+      "tasks/test-006",
+      "status",
+      "## Task",
+      ["completed"],
+      "2026-05-18T12:00:00Z",
+      undefined,
+    );
+  });
+
   it("log is written after status even when structured result fails", async () => {
     const { client, logs } = makeClient();
 

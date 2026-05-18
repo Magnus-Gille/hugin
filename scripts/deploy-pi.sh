@@ -70,9 +70,22 @@ echo "==> Artefact-delivery preflight (issue #68)..."
 # Non-fatal: the runtime checkpoint + failure handling are the real safety net
 # (a probe can pass while the long-running unit later loses env/keys/NAS), so a
 # probe failure is a loud WARNING, not a hard deploy stop.
-DELIVERY_NAS_USER="${HUGIN_DELIVERY_NAS_USER:-magnus}"
-DELIVERY_NAS_HOST="${HUGIN_DELIVERY_NAS_HOST:-100.99.119.52}"
-DELIVERY_NAS_DIR="${HUGIN_DELIVERY_NAS_DIR:-/home/magnus/mimir-inbox}"
+# Single source of truth: derive the probe target from the first
+# HUGIN_DELIVERY_TARGETS tuple (same allowlist the runtime enforces), so the
+# preflight cannot drift from the actual delivery target (Codex review #6).
+# Falls back to the built-in default NAS when the env var is unset.
+read -r DELIVERY_NAS_USER DELIVERY_NAS_HOST DELIVERY_NAS_DIR <<EOF
+$(HUGIN_DELIVERY_TARGETS="${HUGIN_DELIVERY_TARGETS:-}" node -e '
+  const raw = process.env.HUGIN_DELIVERY_TARGETS;
+  let t = { user: "magnus", host: "100.99.119.52", remotePathPrefix: "/home/magnus/mimir-inbox/" };
+  if (raw && raw.trim()) {
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr) && arr[0]) t = arr[0];
+  }
+  const dir = String(t.remotePathPrefix).replace(/\/$/, "");
+  process.stdout.write(`${t.user} ${t.host} ${dir}`);
+' 2>/dev/null || echo "magnus 100.99.119.52 /home/magnus/mimir-inbox")
+EOF
 if ssh "$REMOTE" "
   set -e
   export HOME=/home/$DEPLOY_USER

@@ -152,6 +152,16 @@ describe("parseArtifactManifest", () => {
     );
     expect(r.manifest).toBeNull();
     expect(r.error).toMatch(/must appear before ### Prompt/);
+    // Codex review #5: flagged so the dispatcher rejects it even when
+    // HUGIN_DELIVERY_POLICY=off (the manifest would otherwise leak into the
+    // agent prompt in rollback mode).
+    expect(r.grammarViolation).toBe(true);
+  });
+
+  it("does NOT flag non-grammar errors as grammarViolation", () => {
+    const r = parseArtifactManifest(manifestBlock("[not json"), TARGETS);
+    expect(r.error).toBeTruthy();
+    expect(r.grammarViolation).toBeFalsy();
   });
 
   it("the SDK prompt extraction excludes the manifest when ordered correctly", () => {
@@ -380,6 +390,59 @@ describe("deliverArtifacts", () => {
     expect(res.ok).toBe(false);
     expect(res.failureKind).toBe("infra");
     expect(spawnCalls).toHaveLength(0);
+  });
+
+  // Codex review #3: the string allowlist follows symlinks; a staged symlink
+  // under the allowed prefix could exfiltrate any readable file.
+  it("rejects a symlinked local staging path → terminal unsafe-local", async () => {
+    const res = await deliverArtifacts({
+      manifest: manifestOf,
+      appendLog: () => {},
+      spawnFn: mockSpawn,
+      lstatFn: () => ({ isSymbolicLink: () => true }),
+      statFn: () => ({ size: 42 }),
+      hashFn: () => "h",
+    });
+    expect(res.ok).toBe(false);
+    expect(res.failureKind).toBe("unsafe-local");
+    expect(res.records[0].status).toBe("unsafe-local");
+    expect(spawnCalls).toHaveLength(0); // never touched the network
+  });
+
+  it("rejects a local path that realpath-resolves outside the staging root", async () => {
+    const res = await deliverArtifacts({
+      manifest: manifestOf,
+      appendLog: () => {},
+      spawnFn: mockSpawn,
+      lstatFn: () => ({ isSymbolicLink: () => false }),
+      realpathFn: () => "/home/magnus/.ssh/id_ed25519",
+      stagingPrefixes: ["/home/magnus/scratch/"],
+      statFn: () => ({ size: 42 }),
+      hashFn: () => "h",
+    });
+    expect(res.ok).toBe(false);
+    expect(res.failureKind).toBe("unsafe-local");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("allows a local path whose realpath stays under the staging root", async () => {
+    spawnBehaviors = [
+      { code: 0 },
+      { code: 0 },
+      { code: 0, stdout: "abc123  file" },
+      { code: 0 },
+    ];
+    const res = await deliverArtifacts({
+      manifest: manifestOf,
+      appendLog: () => {},
+      spawnFn: mockSpawn,
+      lstatFn: () => ({ isSymbolicLink: () => false }),
+      realpathFn: (p) => p,
+      stagingPrefixes: ["/home/magnus/scratch/"],
+      statFn: () => ({ size: 42 }),
+      hashFn: () => "abc123",
+    });
+    expect(res.ok).toBe(true);
   });
 
   it("is idempotent: a prior verified record is skipped", async () => {

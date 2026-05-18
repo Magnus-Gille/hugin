@@ -559,6 +559,11 @@ interface TaskCompletionClient {
 export interface TaskCompletionResult {
   structuredResultOk: boolean;
   structuredResultError?: unknown;
+  // True only when `expectedUpdatedAt` was supplied and the terminal status
+  // CAS write was rejected (another owner advanced the entry). The caller must
+  // NOT treat the task as finalized — it has been re-owned (e.g. by startup
+  // delivery reconciliation, Codex review #1).
+  statusCasLost?: boolean;
 }
 
 /**
@@ -577,17 +582,33 @@ export async function finalizeTaskCompletion(
     classification?: string;
     writeStructuredResult: () => Promise<void>;
     logMessage: string;
+    // When set, the terminal status write is a compare-and-swap against this
+    // updated_at. A rejected CAS means ownership moved (single-owner model for
+    // runtime-owned delivery, #68) — we bail WITHOUT writing structured/log so
+    // the new owner's terminal state stands.
+    expectedUpdatedAt?: string;
   },
 ): Promise<TaskCompletionResult> {
   // Status FIRST — guaranteed terminal flip even if structured-result write fails
-  await client.write(
-    taskNs,
-    "status",
-    options.statusContent,
-    options.terminalTags,
-    undefined,
-    options.classification,
-  );
+  try {
+    await client.write(
+      taskNs,
+      "status",
+      options.statusContent,
+      options.terminalTags,
+      options.expectedUpdatedAt,
+      options.classification,
+    );
+  } catch (err) {
+    if (options.expectedUpdatedAt) {
+      console.warn(
+        `[${taskNs}] Terminal status CAS lost (ownership moved) — skipping finalize:`,
+        err,
+      );
+      return { structuredResultOk: false, statusCasLost: true };
+    }
+    throw err;
+  }
 
   let structuredResultOk = true;
   let structuredResultError: unknown;

@@ -106,6 +106,7 @@ export const artifactDeliveryRecordSchema = z.object({
   status: z.enum([
     "verified",
     "missing-local",
+    "unsafe-local",
     "delivery-failed",
     "verify-failed",
   ]),
@@ -117,7 +118,7 @@ export const artifactDeliveryRecordSchema = z.object({
 
 export const artifactDeliverySchema = z.object({
   ok: z.boolean(),
-  failureKind: z.enum(["missing-local", "infra"]).optional(),
+  failureKind: z.enum(["missing-local", "unsafe-local", "infra"]).optional(),
   artifacts: z.array(artifactDeliveryRecordSchema).default([]),
 });
 export type ArtifactDeliveryStructured = z.infer<typeof artifactDeliverySchema>;
