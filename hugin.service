@@ -13,8 +13,14 @@ EnvironmentFile=/home/magnus/repos/hugin/.env
 Environment=PATH=/home/magnus/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 
 # Sandboxing
-ProtectSystem=strict
-ReadWritePaths=/home/magnus /tmp
+# ProtectSystem is deliberately NOT set: under any value (true/full/strict) it
+# read-only-bind-mounts /usr, which makes OpenSSH 10's strict config-ownership
+# check misjudge the symlinked /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf
+# (target under /usr/lib/systemd) as "Bad owner or permissions", breaking the
+# runtime-owned artefact delivery rsync/ssh to the NAS (issue #68 / #75).
+# Empirically bisected: ProtectSystem is the sole trigger; the directives below
+# retain meaningful hardening (no privilege escalation, restricted socket
+# families). ReadWritePaths is dropped with it (a no-op without ProtectSystem).
 NoNewPrivileges=true
 PrivateTmp=false
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
