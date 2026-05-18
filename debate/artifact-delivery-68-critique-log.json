@@ -1,0 +1,191 @@
+[
+  {
+    "id": "artifact-delivery-68-C01",
+    "source": "codex-round-1",
+    "text": "Blocking ssh/rsync/verify inserted into the single-task in-band post-exec path — NAS latency/hangs block the only dispatcher slot; no throughput or failure budget",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "artifact-delivery-68-C02",
+    "source": "codex-round-1",
+    "text": "Terminal `failed` is the wrong default for transient NAS infra failures — converts content-good/NAS-bad into noisy false-failures; distinguish local-content failure from remote-infra failure",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "artifact-delivery-68-C03",
+    "source": "codex-round-1",
+    "text": "Exit-code inconsistency (CRITICAL): `ok=exitCode===0` but Ratatoskr decides success by parsing `**Exit code:** (\\d+)` from human markdown, not the status tag — a delivery-failed task could render `Exit code: 0` and report success on Telegram",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "artifact-delivery-68-C04",
+    "source": "codex-round-1",
+    "text": "Log-capture claim is false — `executeSdkTask` closes the log stream before returning; post-exec delivery cannot rely on SDK log plumbing, needs explicit appendLog dependency",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "artifact-delivery-68-C05",
+    "source": "codex-round-1",
+    "text": "Restart/timeout/cancel semantics unsafe — lease/cancel watch stop before the exfil site; no durable handoff between agent-content and delivery; startup recovery writes generic failed result",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "artifact-delivery-68-C06",
+    "source": "codex-round-1",
+    "text": "`wc -c` is a weak integrity check (same-size stale file passes); no idempotency key; partial-delivery cleanup undesigned — use sha256 + temp path + atomic rename + per-artefact state",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "artifact-delivery-68-C07",
+    "source": "codex-round-1",
+    "text": "SSH/rsync dependency operationally under-specified — service file does not set HOME; no known_hosts/BatchMode/NAS-reachability probe; needs deploy-time preflight",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "artifact-delivery-68-C08",
+    "source": "codex-round-1",
+    "text": "Plan couples core dispatcher to one NAS identity/path layout; arbitrary manifests become arbitrary ssh targets — needs a DeliveryTarget abstraction or at least a delivery allowlist",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "artifact-delivery-68-C09",
+    "source": "codex-round-1",
+    "text": "Reversibility missing — should follow the existing HUGIN_*_POLICY env pattern with off/warn/defer/require staged enforcement",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "artifact-delivery-68-C10",
+    "source": "codex-round-1",
+    "text": "Submit-time manifest validation is not optional — placeholder/malformed manifest must reject at parse/claim time before the paid spike, not be caught post-spike by verify",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "artifact-delivery-68-C11",
+    "source": "codex-round-1",
+    "text": "`### Prompt` extraction is prompt-to-EOF; `### Artifacts` after it leaks the manifest to the agent — grammar must force `### Artifacts` before `### Prompt`, with a test",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "artifact-delivery-68-C12",
+    "source": "codex-round-1",
+    "text": "Schema-version 'no bump' decision holds under consumer grep (Ratatoskr/broker/mcp don't pin schemaVersion or exhaustively switch outcome), but the plan overstated the evidence and old Zod readers strip the optional field — delivery state must also live in tags+markdown",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "artifact-delivery-68-C13",
+    "source": "codex-round-2",
+    "text": "First-revision fix `exitCode: \"DELIVERY_FAILED\"` is WRONG — Ratatoskr's `(\\d+)` regex no-matches non-numeric and defaults to success; must use a positive integer (e.g. 2) + `Failure kind:` line",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "artifact-delivery-68-C14",
+    "source": "codex-round-2",
+    "text": "Checkpoint must be nonterminal AND keep the task claimed with an active lease — `delivery:pending` paired with terminal status lets Ratatoskr stop and read the checkpoint as final; paired with `pending` lets the dispatcher re-execute",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "artifact-delivery-68-C15",
+    "source": "codex-round-2",
+    "text": "`delivery:*` tags are not persistent today — buildClaimTags lease renewal and buildTerminalStatusTags both drop them unless explicitly added to the persistent set",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "artifact-delivery-68-C16",
+    "source": "codex-round-2",
+    "text": "Reconciliation reentrancy — active path, startup recovery, lease reaper, and shutdown can race into duplicate delivery; needs a single shared CAS ownership model",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "artifact-delivery-68-C17",
+    "source": "codex-round-2",
+    "text": "structured `result-structured` cannot represent `delivery:pending` without lying (lifecycle is terminal-only) — use a separate checkpoint key / write structured result once at terminal finalize",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "artifact-delivery-68-C18",
+    "source": "codex-round-2",
+    "text": "Host allowlist alone is inadequate — needs a target tuple allowlist (user/host/remote-path-prefix/local-staging-prefix), argv with no shell interpolation, and must not reuse the fetch egress allowlist",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "artifact-delivery-68-C19",
+    "source": "codex-round-2",
+    "text": "Adjacent existing bug — recovery/shutdown write `- **Exit code:** -1`; Ratatoskr's `(\\d+)` does not match the minus sign, so those mis-render as success. New path must use positive codes; file the adjacent bug separately",
+    "classification": "valid",
+    "impact": "deferred",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "artifact-delivery-68-C20",
+    "source": "codex-round-2",
+    "text": "Default `defer` has no downstream owner without a reconciler + retry budget + budget-exhaustion terminalization; would look stuck",
+    "classification": "valid",
+    "impact": "deferred",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "artifact-delivery-68-C21",
+    "source": "codex-round-2",
+    "text": "Deploy preflight is necessary but not sufficient — an interactive deploy-time probe can pass while the long-running systemd user unit later lacks env/keys/known_hosts/NAS; runtime failure handling + checkpoint are the real safety net",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": true
+  }
+]

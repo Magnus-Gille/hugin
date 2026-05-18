@@ -52,6 +52,15 @@ import {
   buildTaskResultDocument,
 } from "./result-format.js";
 import {
+  parseArtifactManifest,
+  deliverArtifacts,
+  parseDeliveryPolicy,
+  loadDeliveryTargets,
+  renderArtifactDeliverySection,
+  type ArtifactManifest,
+  type DeliveryResult,
+} from "./artifact-delivery.js";
+import {
   buildPromotedTags,
   evaluateBlockedTask,
   getDependencyIds,
@@ -247,6 +256,11 @@ const config = {
   brokerReconciliationIntervalMs: parseInt(
     process.env.HUGIN_BROKER_RECONCILIATION_INTERVAL_MS || "60000",
   ),
+  // Runtime-owned artefact delivery (issue #68). `parseDeliveryPolicy` and
+  // `loadDeliveryTargets` throw on malformed input — fail fast at startup
+  // rather than silently mis-deliver.
+  deliveryPolicy: parseDeliveryPolicy(process.env.HUGIN_DELIVERY_POLICY),
+  deliveryTargets: loadDeliveryTargets(process.env.HUGIN_DELIVERY_TARGETS),
 };
 
 const brokerEnv = readBrokerEnv(process.env);
@@ -296,6 +310,9 @@ let currentTaskConfig: TaskConfig | null = null;
 let currentChild: ChildProcess | null = null;
 let currentSdkAbort: AbortController | null = null;
 let currentOllamaAbort: AbortController | null = null;
+// Runtime-owned artefact delivery (issue #68). Aborted by operator cancel /
+// shutdown so a hung `ssh`/`rsync` cannot wedge the single dispatcher slot.
+let currentDeliveryAbort: AbortController | null = null;
 let server: Server;
 let runningBroker: RunningBroker | null = null;
 let brokerReconciler: BrokerReconciler | null = null;
@@ -374,6 +391,14 @@ interface TaskConfig {
   capabilities?: RuntimeCapability[];
   autoRouted?: boolean;
   routingDecision?: RouterDecision;
+  // Runtime-owned artefact delivery (issue #68). Runtime-only — deliberately
+  // NOT in SdkTaskConfig: the manifest must never reach the agent prompt.
+  artifactManifest?: ArtifactManifest;
+  artifactManifestError?: string;
+  // "### Artifacts after ### Prompt" grammar violation — rejected even when
+  // HUGIN_DELIVERY_POLICY=off (the manifest would otherwise leak into the
+  // agent prompt; Codex review #5).
+  artifactManifestGrammarViolation?: boolean;
 }
 
 type DeclaredRuntime = TaskConfig["runtime"] | "pipeline" | "auto";
@@ -543,6 +568,14 @@ function parseTask(content: string): TaskConfig | null {
     ? resolveContext(contextRaw)
     : workingDir || config.workspace;
 
+  // Runtime-owned artefact delivery manifest (issue #68). Parsed unconditionally
+  // so submit-time validation can reject a malformed/placeholder-leaking
+  // manifest BEFORE the paid spike; acted on only when policy != off.
+  const artifactManifestResult = parseArtifactManifest(
+    content,
+    config.deliveryTargets,
+  );
+
   const validCapabilities: RuntimeCapability[] = [];
   if (capabilitiesRaw) {
     for (const cap of capabilitiesRaw.split(",").map((c) => c.trim()).filter(Boolean)) {
@@ -578,6 +611,10 @@ function parseTask(content: string): TaskConfig | null {
       : undefined,
     capabilities: validCapabilities.length > 0 ? validCapabilities : undefined,
     autoRouted: isAutoRoute || undefined,
+    artifactManifest: artifactManifestResult.manifest ?? undefined,
+    artifactManifestError: artifactManifestResult.error ?? undefined,
+    artifactManifestGrammarViolation:
+      artifactManifestResult.grammarViolation || undefined,
     pipeline:
       pipelineId && pipelinePhase
         ? {
@@ -1404,6 +1441,10 @@ function buildClaimTags(
   const authorityTags = baseTags.filter((t) => t.startsWith("authority:"));
   const sensitivityTags = baseTags.filter((t) => t.startsWith("sensitivity:"));
   const routingTags = baseTags.filter((t) => t.startsWith("routing:"));
+  // `delivery:*` must survive lease renewal so the nonterminal
+  // `running + delivery:pending` checkpoint is not silently dropped when the
+  // lease renews mid-delivery (issue #68, debate R2 §A).
+  const deliveryTags = baseTags.filter((t) => t.startsWith("delivery:"));
   return [
     lifecycle,
     ...(runtimeTag ? [runtimeTag] : []),
@@ -1411,6 +1452,7 @@ function buildClaimTags(
     ...authorityTags,
     ...sensitivityTags,
     ...routingTags,
+    ...deliveryTags,
     `claimed_by:${workerId}`,
     `lease_expires:${leaseExpiry()}`,
   ];
@@ -1460,6 +1502,9 @@ function requestCancellationForCurrentTask(request: CancellationRequest): void {
   }
   if (currentOllamaAbort && !currentOllamaAbort.signal.aborted) {
     currentOllamaAbort.abort(request.reason);
+  }
+  if (currentDeliveryAbort && !currentDeliveryAbort.signal.aborted) {
+    currentDeliveryAbort.abort(request.reason);
   }
   if (currentChild && !currentChild.killed) {
     currentChild.kill("SIGTERM");
@@ -1556,6 +1601,177 @@ async function killOrphanDispatchers(): Promise<void> {
 // recovered (we just restarted, so they're orphaned). Tasks claimed by other
 // workers are only recovered if their lease has expired.
 
+// Runtime-owned artefact delivery (issue #68): a `running + delivery:pending`
+// checkpoint means the agent content is durably preserved in `result` but
+// delivery did not finalize (crash/restart mid-delivery). Re-deliver ONCE under
+// a single CAS reclaim and finalize terminally — no paid rerun. Shared by
+// startup recovery; the reaper deliberately skips delivery:pending and leaves
+// it for this path.
+async function reconcileDeliveryPending(
+  taskNs: string,
+  entry: MuninEntry,
+): Promise<void> {
+  const task = parseTask(entry.content);
+  const classification = getTaskArtifactClassification(
+    task || undefined,
+    entry.content,
+  );
+  const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
+  const runtime = (runtimeTag || "runtime:claude").replace(
+    /^runtime:/,
+    "",
+  ) as DispatcherRuntime;
+
+  // Single CAS ownership: reclaim with a fresh lease, keep delivery:pending.
+  const reclaimTags = buildClaimTags(
+    [...entry.tags.filter((t) => !t.startsWith("delivery:")), "delivery:pending"],
+    "running",
+  );
+  try {
+    const r = await munin.write(
+      taskNs,
+      "status",
+      entry.content,
+      reclaimTags,
+      entry.updated_at,
+    );
+    if (typeof r.updated_at === "string") entry.updated_at = r.updated_at;
+  } catch {
+    console.log(
+      `Skipping delivery reconciliation for ${taskNs} (lost CAS race)`,
+    );
+    return;
+  }
+
+  const resultEntry = await munin.read(taskNs, "result");
+  let baseDoc = resultEntry?.content ?? "## Result\n\n- **Exit code:** 0\n";
+  const dIdx = baseDoc.lastIndexOf("\n### Artifact Delivery");
+  if (dIdx !== -1) baseDoc = baseDoc.slice(0, dIdx);
+
+  let delivery: DeliveryResult;
+  let ok = true;
+  if (config.deliveryPolicy === "off" || !task?.artifactManifest) {
+    // Cannot re-deliver (feature off or manifest gone at recovery). Terminalize
+    // as a delivery failure WITHOUT a paid rerun — content stays preserved.
+    ok = false;
+    delivery = {
+      ok: false,
+      records: [],
+      failureKind: "infra",
+      error:
+        "delivery checkpoint unrecoverable (policy off or manifest missing at recovery)",
+    };
+  } else {
+    const logPath = path.join(LOG_DIR, `${extractTaskId(taskNs)}.log`);
+    const abort = new AbortController();
+    currentDeliveryAbort = abort;
+    try {
+      delivery = await deliverArtifacts({
+        manifest: task.artifactManifest,
+        // Symmetric with the active path (Codex review A): without
+        // stagingPrefixes the realpath-containment guard is disabled, so a
+        // recovered delivery could escape the staging root undetected.
+        stagingPrefixes: config.deliveryTargets.map(
+          (t) => t.localStagingPrefix,
+        ),
+        appendLog: (line) => {
+          try {
+            fs.appendFileSync(logPath, `${line}\n`);
+          } catch {
+            /* best-effort */
+          }
+        },
+        signal: abort.signal,
+      });
+    } finally {
+      currentDeliveryAbort = null;
+    }
+    if (!delivery.ok) {
+      // missing-local / unsafe-local (no trustworthy deliverable) are ALWAYS
+      // terminal regardless of policy; infra is terminal under `require`.
+      // Symmetric with the active path (Codex review B).
+      const terminal =
+        delivery.failureKind === "missing-local" ||
+        delivery.failureKind === "unsafe-local" ||
+        config.deliveryPolicy === "require";
+      if (terminal) ok = false;
+    }
+  }
+
+  if (!ok) {
+    baseDoc = baseDoc.replace(
+      /- \*\*Exit code:\*\* 0\b/,
+      "- **Exit code:** 2\n- **Failure kind:** DELIVERY_FAILED",
+    );
+  }
+  await munin.write(
+    taskNs,
+    "result",
+    `${baseDoc}${renderArtifactDeliverySection(delivery)}`,
+    undefined,
+    undefined,
+    classification,
+  );
+
+  const terminalDeliveryTag = delivery.ok
+    ? "delivery:verified"
+    : "delivery:failed";
+  await munin.write(
+    taskNs,
+    "status",
+    entry.content,
+    buildTerminalStatusTags(
+      ok ? "completed" : "failed",
+      [
+        ...entry.tags.filter((t) => !t.startsWith("delivery:")),
+        terminalDeliveryTag,
+      ],
+      runtimeTag || `runtime:${runtime}`,
+    ),
+    entry.updated_at,
+    classification,
+  );
+  if ((runtime as string) !== "pipeline") {
+    await writeStructuredTaskResult(
+      taskNs,
+      buildStructuredTaskResult({
+        schemaVersion: 1,
+        taskId: extractTaskId(taskNs),
+        taskNamespace: taskNs,
+        lifecycle: ok ? "completed" : "failed",
+        outcome: ok ? "completed" : "failed",
+        runtime,
+        executor: "dispatcher",
+        resultSource: "delivery-reconciliation",
+        exitCode: ok ? 0 : 2,
+        completedAt: new Date().toISOString(),
+        bodyKind: "response",
+        bodyText: "",
+        errorMessage: ok ? undefined : delivery.error ?? "delivery failed",
+        artifactDelivery: {
+          ok: delivery.ok,
+          failureKind: delivery.failureKind,
+          artifacts: delivery.records.map((r) => ({
+            id: r.id,
+            status: r.status,
+            remote: r.remote,
+            bytes: r.bytes,
+            sha256: r.sha256,
+            error: r.error,
+          })),
+        },
+      }),
+      classification,
+    );
+  }
+  await munin.log(
+    taskNs,
+    `Delivery reconciled on startup: ${delivery.ok ? "verified" : "failed"}`,
+  );
+  await promoteDependents(extractTaskId(taskNs));
+  await refreshPipelineSummaryFromContent(entry.content);
+}
+
 async function recoverStaleTasks(): Promise<void> {
   try {
     const { results } = await munin.query({
@@ -1595,6 +1811,20 @@ async function recoverStaleTasks(): Promise<void> {
       }
 
       if (!isOurs && !leaseExpired && !legacyStale) continue;
+
+      // Runtime-owned artefact delivery (issue #68): resume an interrupted
+      // delivery instead of generic-failing it (which would discard the
+      // deliverable and mis-render as success). MUST be gated on the same
+      // single-owner test above (Codex review #1) — reconciling a task still
+      // owned by a live worker would double-deliver. reconcileDeliveryPending
+      // additionally CAS-reclaims, so even a gate race cannot duplicate rsync.
+      if (entry.tags.includes("delivery:pending")) {
+        console.log(
+          `Reconciling delivery:pending task ${result.namespace} on startup`,
+        );
+        await reconcileDeliveryPending(result.namespace, entry);
+        continue;
+      }
 
       const elapsed = Math.round((now - new Date(entry.updated_at).getTime()) / 1000);
       const reason = isOurs || claimedBy === null
@@ -1692,6 +1922,18 @@ async function reapExpiredLeases(): Promise<void> {
         now: Date.now(),
       });
       if (!decision.reap) continue;
+
+      // Runtime-owned artefact delivery (issue #68): never generic-reap a
+      // delivery:pending checkpoint to terminal `failed` — the agent content is
+      // preserved there and reaping it would mis-render as success and discard
+      // the deliverable. Leave it for startup reconciliation
+      // (`recoverStaleTasks`), which re-delivers without a paid rerun.
+      if (entry.tags.includes("delivery:pending")) {
+        console.log(
+          `Skipping reap of ${result.namespace} — delivery:pending (left for startup reconciliation)`,
+        );
+        continue;
+      }
 
       const expiredForS = Math.round(decision.expiredByMs / 1000);
       const errorMessage = `Lease expired ${expiredForS}s ago (worker: ${decision.claimedBy || "unknown"})`;
@@ -2771,6 +3013,56 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       }
     }
 
+    // Runtime-owned artefact delivery (issue #68): reject a malformed /
+    // placeholder-leaking / disallowed-target manifest at claim time, BEFORE
+    // any execution or spend. Skipped when policy=off (rollback / old-skill
+    // compatibility) EXCEPT the grammar violation (### Artifacts after
+    // ### Prompt), which leaks the manifest into the agent prompt and so must
+    // be rejected regardless of policy (Codex review #5).
+    if (
+      parsedTask.artifactManifestError &&
+      (config.deliveryPolicy !== "off" ||
+        parsedTask.artifactManifestGrammarViolation)
+    ) {
+      const rejection = `Artefact manifest invalid: ${parsedTask.artifactManifestError}`;
+      const classification = getTaskArtifactClassification(parsedTask);
+      await munin.write(
+        taskNs,
+        "status",
+        entry.content,
+        buildTerminalStatusTags("failed", entry.tags),
+        entry.updated_at,
+        classification,
+      );
+      await munin.write(
+        taskNs,
+        "result",
+        `## Result\n\n- **Exit code:** 2\n- **Failure kind:** DELIVERY_MANIFEST_INVALID\n- **Error:** ${rejection}\n`,
+        undefined,
+        undefined,
+        classification,
+      );
+      await writeStructuredTaskResult(
+        taskNs,
+        createFailureStructuredResult(taskNs, parsedTask.runtime, rejection, {
+          executor: "dispatcher",
+          resultSource: "delivery-manifest-validation",
+          exitCode: 2,
+          replyTo: parsedTask.replyTo,
+          replyFormat: parsedTask.replyFormat,
+          group: parsedTask.group,
+          sequence: parsedTask.sequence,
+          pipeline: parsedTask.pipeline,
+          sensitivity: buildTaskSensitivitySnapshot(sensitivityAssessment),
+        }),
+        classification,
+      );
+      await munin.log(taskNs, `Task rejected: ${rejection}`);
+      await promoteDependents(extractTaskId(taskNs));
+      await refreshPipelineSummaryFromContent(entry.content);
+      return { hadTask: true, queueDepth };
+    }
+
     const securityViolation =
       getSecurityViolationForTask(parsedTask, sensitivityAssessment) ||
       getInjectionViolationForTask(parsedTask) ||
@@ -3193,9 +3485,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       logFile = spawnResult.logFile;
     }
 
-    // Stop lease renewal — task is done
+    // The agent run is done. Lease renewal is stopped HERE, before the
+    // delivery checkpoint, to remove the renewal-vs-checkpoint race (Codex
+    // review #2): a renewal tick firing during the checkpoint transition would
+    // rewrite `running` tags built from the OLD base set and strip
+    // `delivery:pending`. Delivery doesn't need lease renewal — the reaper
+    // explicitly skips `delivery:pending`, and delivery is bounded by its own
+    // timeout — so dropping renewal here is safe. The cancellation watch stays
+    // ACTIVE through delivery so an operator can still abort a hung rsync; it
+    // is stopped after delivery finalization below.
     stopLeaseRenewal();
-    stopCancellationWatch();
     currentSdkAbort = null;
     currentOllamaAbort = null;
 
@@ -3223,8 +3522,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     }
     currentCancellation = null;
     const isTimeout = exitCode === "TIMEOUT";
-    const ok = exitCode === 0;
-    const isCancelled = cancellation !== null;
+    let ok = exitCode === 0;
+    // `let` (not `const`): an operator cancel that lands DURING runtime-owned
+    // delivery is folded back in after the delivery block (Codex review #4) so
+    // the task finalizes as `cancelled`, not as a spurious DELIVERY_FAILED.
+    let isCancelled = cancellation !== null;
 
     // Post-task: finalize branch — auto-commit leftovers, push, open PR (#47)
     let prUrl: string | undefined;
@@ -3300,14 +3602,48 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       ? `${exfilOutcome.redactedBody}\n${exfilOutcome.securitySection}`
       : exfilOutcome.redactedBody;
 
-    // Write result to Munin (skip if timeout already wrote partial result via SDK)
-    if (!(isTimeout && isClaude)) {
+    // --- Runtime-owned artefact delivery (issue #68, lifecycle protocol) ---
+    // Hugin (not the agent) delivers + verifies declared artefacts. The agent
+    // content is durably checkpointed BEFORE delivery so a delivery failure
+    // never costs another paid run; a terminal delivery failure renders a
+    // POSITIVE numeric `Exit code: 2` (Ratatoskr's `(\d+)` regex treats
+    // non-numeric/negative as success → would mis-render a loss as success).
+    let bodyForResult = finalResultBody;
+    let deliveryResult: DeliveryResult | undefined;
+    let deliveryFailureKind: string | undefined;
+    let terminalDeliveryTag: string | undefined;
+    // updated_at of the delivery checkpoint status write. The terminal status
+    // flip CASes on this so a concurrent startup reconciler that reclaimed the
+    // checkpoint (single-owner model, Codex review #1) cannot be clobbered by
+    // this worker's late finalize.
+    let deliveryCheckpointUpdatedAt: string | undefined;
+    const deliveryEligible =
+      config.deliveryPolicy !== "off" &&
+      !!task.artifactManifest &&
+      ok &&
+      !isCancelled &&
+      !isTimeout;
+
+    if (deliveryEligible && task.artifactManifest) {
+      // 1. Durable NONTERMINAL checkpoint: persist exfil-scanned agent content
+      //    + a delivery-in-progress notice, CAS status → running +
+      //    delivery:pending. Never `pending` (dispatcher would re-execute) and
+      //    never terminal (Ratatoskr would read the checkpoint as final).
+      const checkpointEntry = await munin.read(taskNs, "status");
+      const checkpointContent = checkpointEntry?.content ?? entry.content;
+      const checkpointBaseTags = (
+        checkpointEntry?.tags ?? entry.tags
+      ).filter((t) => !t.startsWith("delivery:"));
+      const checkpointTags = buildClaimTags(
+        [...checkpointBaseTags, "delivery:pending"],
+        "running",
+      );
+      const checkpointBody = `${finalResultBody}\n\n### Artifact Delivery\n\n- **Delivery:** in progress (Hugin runtime owns delivery — see log)\n`;
       await munin.write(
         taskNs,
         "result",
         buildTaskResultDocument({
-          timedOut: isTimeout,
-          exitCode,
+          exitCode: 0,
           startedAt,
           completedAt,
           durationSeconds: Math.round(durationMs / 1000),
@@ -3320,7 +3656,116 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           replyFormat: task.replyFormat,
           group: task.group,
           sequence: task.sequence,
-          body: finalResultBody,
+          body: checkpointBody,
+          autoRouted: task.autoRouted,
+          routingReason: task.routingDecision?.reason,
+        }),
+        exfilOutcome.resultTags,
+        undefined,
+        taskClassification,
+      );
+      const checkpointWrite = await munin.write(
+        taskNs,
+        "status",
+        checkpointContent,
+        checkpointTags,
+        checkpointEntry?.updated_at,
+      );
+      // Lease renewal is deliberately NOT re-armed (Codex review #2): a
+      // renewal tick would race the terminal-finalize CAS below. The reaper
+      // skips delivery:pending and delivery is bounded, so no renewal is
+      // needed. The terminal flip CASes on this checkpoint's updated_at.
+      deliveryCheckpointUpdatedAt =
+        typeof checkpointWrite?.updated_at === "string"
+          ? checkpointWrite.updated_at
+          : undefined;
+
+      // 2. Deliver + verify. Bounded + abortable so a hung ssh cannot wedge
+      //    the single dispatcher slot, and operator cancel still aborts it.
+      const deliveryAbort = new AbortController();
+      currentDeliveryAbort = deliveryAbort;
+      const logPath = path.join(LOG_DIR, `${taskId}.log`);
+      try {
+        deliveryResult = await deliverArtifacts({
+          manifest: task.artifactManifest,
+          stagingPrefixes: config.deliveryTargets.map(
+            (t) => t.localStagingPrefix,
+          ),
+          appendLog: (line) => {
+            try {
+              fs.appendFileSync(logPath, `${line}\n`);
+            } catch {
+              /* log is best-effort; never fail delivery on a log write */
+            }
+          },
+          signal: deliveryAbort.signal,
+        });
+      } finally {
+        currentDeliveryAbort = null;
+      }
+
+      bodyForResult = `${finalResultBody}\n${renderArtifactDeliverySection(deliveryResult)}`;
+
+      // Fold in an operator cancel that landed during delivery (Codex review
+      // #4): finalize as `cancelled`, not as a spurious DELIVERY_FAILED.
+      if (!isCancelled && currentCancellation) {
+        cancellation = currentCancellation;
+        isCancelled = true;
+      }
+
+      if (isCancelled) {
+        // Cancelled mid-delivery — leave the checkpoint markers alone; the
+        // cancelled-finalize branch below owns the terminal write.
+        terminalDeliveryTag = "delivery:failed";
+      } else if (deliveryResult.ok) {
+        terminalDeliveryTag = "delivery:verified";
+      } else {
+        terminalDeliveryTag = "delivery:failed";
+        // missing-local / unsafe-local (no trustworthy deliverable) are ALWAYS
+        // terminal; infra is terminal under `require`.
+        const terminalFailure =
+          deliveryResult.failureKind === "missing-local" ||
+          deliveryResult.failureKind === "unsafe-local" ||
+          config.deliveryPolicy === "require";
+        if (terminalFailure) {
+          ok = false;
+          exitCode = 2;
+          deliveryFailureKind = "DELIVERY_FAILED";
+        }
+      }
+    }
+    currentCancellation = null;
+
+    // Agent run + delivery both finished. Lease renewal was already stopped
+    // before the delivery checkpoint (see ~L3487, Codex review #2) — the call
+    // below is an idempotent guard, not the primary stop. The cancellation
+    // watch, however, was kept ACTIVE through delivery so an operator could
+    // abort a hung rsync; THIS is where it is finally stopped.
+    stopLeaseRenewal();
+    stopCancellationWatch();
+
+    // Write result to Munin (skip if timeout already wrote partial result via SDK)
+    if (!(isTimeout && isClaude)) {
+      await munin.write(
+        taskNs,
+        "result",
+        buildTaskResultDocument({
+          timedOut: isTimeout,
+          exitCode,
+          failureKind: deliveryFailureKind,
+          startedAt,
+          completedAt,
+          durationSeconds: Math.round(durationMs / 1000),
+          executor: effectiveExecutor,
+          resultSource,
+          logFile: `~/.hugin/logs/${taskId}.log`,
+          costUsd,
+          prUrl,
+          replyTo: task.replyTo,
+          replyFormat: task.replyFormat,
+          group: task.group,
+          sequence: task.sequence,
+          body: bodyForResult,
           autoRouted: task.autoRouted,
           routingReason: task.routingDecision?.reason,
         }),
@@ -3368,6 +3813,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           }
         : baseRuntimeMetadata;
 
+    // Carry the terminal delivery marker (issue #68) into the persistent tag
+    // set so downstream consumers + startup reconciliation see a consistent
+    // terminal delivery state. Shared by the cancelled and normal branches —
+    // a cancel mid-delivery still set terminalDeliveryTag = "delivery:failed".
+    const finalizeBaseTags = terminalDeliveryTag
+      ? [
+          ...entry.tags.filter((t) => !t.startsWith("delivery:")),
+          terminalDeliveryTag,
+        ]
+      : entry.tags;
+
     if (isCancelled && cancellation) {
       await munin.write(
         taskNs,
@@ -3390,10 +3846,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         undefined,
         taskClassification,
       );
-      await finalizeTaskCompletion(munin, taskNs, {
+      const cancelledFinalize = await finalizeTaskCompletion(munin, taskNs, {
         statusContent: entry.content,
-        terminalTags: buildTerminalStatusTags("cancelled", entry.tags, `runtime:${task.runtime}`),
+        terminalTags: buildTerminalStatusTags("cancelled", finalizeBaseTags, `runtime:${task.runtime}`),
         classification: taskClassification,
+        // Single-owner CAS for runtime-owned delivery (#68, Codex review C):
+        // if a startup reconciler reclaimed the delivery checkpoint while we
+        // were delivering, this CAS is rejected and we must NOT finalize. When
+        // the task never entered delivery this is undefined → no CAS, same as
+        // the prior behaviour.
+        expectedUpdatedAt: deliveryCheckpointUpdatedAt,
         writeStructuredResult: () => writeStructuredTaskResult(
           taskNs,
           createCancelledStructuredResult(taskNs, task.runtime, cancellation.reason, {
@@ -3418,11 +3880,26 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         ),
         logMessage: `Task cancelled in ${Math.round(durationMs / 1000)}s (reason: ${cancellation.reason}, executor: ${executorLabel})`,
       });
+      if (cancelledFinalize.statusCasLost) {
+        // The startup reconciler re-owns this task (single-owner model). It
+        // will write the terminal state, promote dependents, and refresh the
+        // pipeline — doing it here too would double-fire those side effects.
+        console.warn(
+          `Task ${taskNs} cancelled-finalize CAS lost — delivery reconciliation owns terminalization`,
+        );
+        currentTask = null;
+        currentTaskConfig = null;
+        return { hadTask: true, queueDepth };
+      }
     } else {
-      await finalizeTaskCompletion(munin, taskNs, {
+      const finalizeOutcome = await finalizeTaskCompletion(munin, taskNs, {
         statusContent: entry.content,
-        terminalTags: buildTerminalStatusTags(ok ? "completed" : "failed", entry.tags, `runtime:${task.runtime}`),
+        terminalTags: buildTerminalStatusTags(ok ? "completed" : "failed", finalizeBaseTags, `runtime:${task.runtime}`),
         classification: taskClassification,
+        // Single-owner CAS for runtime-owned delivery (#68): if a startup
+        // reconciler reclaimed the checkpoint while we were delivering, this
+        // CAS is rejected and we must NOT finalize — the new owner stands.
+        expectedUpdatedAt: deliveryCheckpointUpdatedAt,
         writeStructuredResult: () => writeStructuredTaskResult(
           taskNs,
           buildStructuredTaskResult({
@@ -3447,16 +3924,45 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             prUrl,
             bodyKind: structuredBodyKind,
             bodyText: structuredBodyText,
-            errorMessage: ok ? undefined : structuredBodyText,
+            errorMessage: ok
+              ? undefined
+              : deliveryResult && !deliveryResult.ok
+                ? deliveryResult.error ?? structuredBodyText
+                : structuredBodyText,
             runtimeMetadata,
             pipeline: task.pipeline,
             approval: approvalMetadata,
             sensitivity: taskSensitivitySnapshot,
+            artifactDelivery: deliveryResult
+              ? {
+                  ok: deliveryResult.ok,
+                  failureKind: deliveryResult.failureKind,
+                  artifacts: deliveryResult.records.map((r) => ({
+                    id: r.id,
+                    status: r.status,
+                    remote: r.remote,
+                    bytes: r.bytes,
+                    sha256: r.sha256,
+                    error: r.error,
+                  })),
+                }
+              : undefined,
           }),
           taskClassification,
         ),
         logMessage: `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`,
       });
+      if (finalizeOutcome.statusCasLost) {
+        // The startup reconciler re-owns this task (single-owner model). It
+        // will write the terminal state, promote dependents, and refresh the
+        // pipeline — doing it here too would double-fire those side effects.
+        console.warn(
+          `Task ${taskNs} finalize CAS lost — delivery reconciliation owns terminalization`,
+        );
+        currentTask = null;
+        currentTaskConfig = null;
+        return { hadTask: true, queueDepth };
+      }
     }
 
     const shouldPromoteDependents =
@@ -3657,7 +4163,17 @@ async function shutdown(signal: string): Promise<void> {
     console.log(`Marking current task ${currentTask} as failed (shutdown)...`);
     try {
       const entry = await munin.read(currentTask, "status");
-      if (entry) {
+      if (entry && entry.tags.includes("delivery:pending")) {
+        // Runtime-owned artefact delivery (issue #68): a delivery:pending
+        // checkpoint is the nonterminal source of truth — the agent content is
+        // already preserved in `result`. Do NOT generic-overwrite it with a
+        // terminal `failed` (that would mis-render as success / discard the
+        // checkpoint). Leave it running+delivery:pending so startup
+        // reconciliation re-delivers without a paid rerun.
+        console.log(
+          `Leaving ${currentTask} as delivery:pending for startup reconciliation (shutdown)`,
+        );
+      } else if (entry) {
         const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
         await munin.write(
           currentTask,
@@ -3703,6 +4219,11 @@ async function shutdown(signal: string): Promise<void> {
     } catch (err) {
       console.error("Failed to mark task as failed during shutdown:", err);
     }
+  }
+
+  if (currentDeliveryAbort) {
+    console.log("Aborting running artefact delivery...");
+    currentDeliveryAbort.abort();
   }
 
   if (currentSdkAbort) {

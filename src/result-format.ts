@@ -7,6 +7,12 @@ export interface ResultRoutingMetadata {
 
 export interface TaskResultDocumentInput extends ResultRoutingMetadata {
   exitCode: number | string;
+  // Runtime-owned artefact delivery failure (issue #68). When set, renders a
+  // `- **Failure kind:** <kind>` line right after the exit code. The exit code
+  // itself MUST be a positive integer (e.g. 2) for delivery failures —
+  // Ratatoskr decides success by `/\*\*Exit code:\*\*\s*(\d+)/`, so a
+  // non-numeric/negative code mis-renders a failed delivery as success.
+  failureKind?: string;
   startedAt: string;
   completedAt: string;
   durationSeconds: number;
@@ -45,6 +51,7 @@ export function buildTaskResultDocument(input: TaskResultDocumentInput): string 
     input.timedOut ? "## Result (task timed out)" : "## Result",
     "",
     `- **Exit code:** ${input.exitCode}`,
+    ...(input.failureKind ? [`- **Failure kind:** ${input.failureKind}`] : []),
     `- **Started at:** ${input.startedAt}`,
     `- **Completed at:** ${input.completedAt}`,
     `- **Duration:** ${input.durationSeconds}s`,

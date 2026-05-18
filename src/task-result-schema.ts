@@ -94,6 +94,35 @@ export type TaskExecutionSensitivity = z.infer<
   typeof taskExecutionSensitivitySchema
 >;
 
+// Optional runtime-owned artefact delivery state (issue #68). Added under
+// schemaVersion 1 WITHOUT a version bump or `outcome` enum widening: Codex's
+// consumer grep confirmed Ratatoskr/broker/hugin-mcp neither pin
+// `schemaVersion` nor exhaustively switch `outcome`, so an extra optional
+// object is non-breaking. Old Zod readers strip it, so delivery state is ALSO
+// carried in status tags (`delivery:*`) + human markdown — this field is a
+// convenience for new consumers, not the source of truth.
+export const artifactDeliveryRecordSchema = z.object({
+  id: z.string().min(1),
+  status: z.enum([
+    "verified",
+    "missing-local",
+    "unsafe-local",
+    "delivery-failed",
+    "verify-failed",
+  ]),
+  remote: z.string().min(1),
+  bytes: z.number().int().nonnegative().optional(),
+  sha256: z.string().min(1).optional(),
+  error: z.string().min(1).optional(),
+});
+
+export const artifactDeliverySchema = z.object({
+  ok: z.boolean(),
+  failureKind: z.enum(["missing-local", "unsafe-local", "infra"]).optional(),
+  artifacts: z.array(artifactDeliveryRecordSchema).default([]),
+});
+export type ArtifactDeliveryStructured = z.infer<typeof artifactDeliverySchema>;
+
 export const structuredTaskResultSchema = z.object({
   schemaVersion: z.literal(1),
   taskId: z.string().min(1),
@@ -125,6 +154,7 @@ export const structuredTaskResultSchema = z.object({
   pipeline: taskExecutionPipelineContextSchema.optional(),
   approval: taskExecutionApprovalMetadataSchema.optional(),
   sensitivity: taskExecutionSensitivitySchema.optional(),
+  artifactDelivery: artifactDeliverySchema.optional(),
 });
 export type StructuredTaskResult = z.infer<typeof structuredTaskResultSchema>;
 

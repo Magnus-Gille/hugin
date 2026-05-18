@@ -5,6 +5,11 @@ const TYPE_PREFIX = "type:";
 const AUTHORITY_PREFIX = "authority:";
 const SENSITIVITY_PREFIX = "sensitivity:";
 const ROUTING_PREFIX = "routing:";
+// Runtime-owned artefact delivery (issue #68). `delivery:*` must survive lease
+// renewal AND the terminal status flip: the nonterminal `delivery:pending`
+// checkpoint and the terminal `delivery:verified`/`delivery:failed` markers are
+// the source of truth for downstream consumers and for startup reconciliation.
+const DELIVERY_PREFIX = "delivery:";
 
 function dedupeTags(tags: string[]): string[] {
   const seen = new Set<string>();
@@ -30,6 +35,7 @@ function getPersistentTags(tags: string[], runtimeFallback?: string): string[] {
   const authorityTags = tags.filter((tag) => tag.startsWith(AUTHORITY_PREFIX));
   const sensitivityTags = tags.filter((tag) => tag.startsWith(SENSITIVITY_PREFIX));
   const routingTags = tags.filter((tag) => tag.startsWith(ROUTING_PREFIX));
+  const deliveryTags = tags.filter((tag) => tag.startsWith(DELIVERY_PREFIX));
 
   return dedupeTags([
     ...(runtimeTag ? [runtimeTag] : []),
@@ -38,6 +44,7 @@ function getPersistentTags(tags: string[], runtimeFallback?: string): string[] {
     ...authorityTags,
     ...sensitivityTags,
     ...routingTags,
+    ...deliveryTags,
   ]);
 }
 
