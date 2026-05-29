@@ -1,0 +1,128 @@
+[
+  {
+    "id": "skill-distillation-C01",
+    "source": "codex-round-1",
+    "text": "Hugin #77 crash-recovery liveness + broker-not-enabled is a build-order constraint the design hides; a 10min-3h local run can be stranded non-terminal, delaying fallback and corrupting telemetry.",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-distillation-C02",
+    "source": "codex-round-1",
+    "text": "'eval-gated skill promotion' (boolean validatedSkills flag) is the wrong primitive; it discards partial-pass/latency signal. Use a versioned RouteBinding (taskClass, profile, cellManifest, evalSuite) -> policy + calibrated metrics with lifecycle states.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "skill-distillation-C03",
+    "source": "codex-round-1",
+    "text": "Draft treats Claude SKILL.md as portable; prior decision skills-in-munin says portable unit is a rewritten derivative. Author a runtime-neutral procedure package, compile a strict pi-local-30b profile; promote the profile not the Claude file.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-distillation-C04",
+    "source": "codex-round-1",
+    "text": "Munin-superior-to-QMD claim is unsupported/partly false (QMD is a serious retrieval system). Procedural retrieval needs its own schema/collection inside Munin + a fail-closed abstention contract; do not trust generic hybrid search.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "skill-distillation-C05",
+    "source": "codex-round-1",
+    "text": "validatedSkills registry field cannot answer revalidation. Promotion records must be immutable, content-addressed (all hashes: package/profile/eval/grader/wrapper/model/quant/context-cap/thinking-format/parser-result/hardware/tool-env) with only a small mutable active pointer.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "skill-distillation-C06",
+    "source": "codex-round-1",
+    "text": "Naming Goodhart risk (F1) isn't a fix. Split evals into positive/negative/retrieval/mutation fixtures; require >=1 independent oracle per route; LLM-judge advisory only; record the stage a failure was caught.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "skill-distillation-C07",
+    "source": "codex-round-1",
+    "text": "Mid-loop cloud escalation must be a state transition, not an exception handler: isolated worktree/sandbox, output as patch/artifact never live mutation, preflight gates, step budgets, early-abort detectors, fallback consumes original snapshot + validated intermediate.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "skill-distillation-C08",
+    "source": "codex-round-1",
+    "text": "Cloud fallback cannot be unconditional; Hugin routing carries provider/egress/zdrRequired/autoEligible. RouteBinding needs a pre-execution fallback policy (cloudAllowed, autoEscalateAllowed, requiresUserApproval, zdrRequired, egressClass, maxCloudCost, fallbackOnFailureKinds).",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-distillation-C09",
+    "source": "codex-round-1",
+    "text": "No security/policy controls named: tool allowlists, sandboxing, secrets, egress, signing, artifact trust. Frontier-authored skill+grader effectively grants operational permissions to the local model.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-distillation-C10",
+    "source": "codex-round-1",
+    "text": "Slice 'beats cloud on cost/latency' is the wrong gate for a premise-fixed build; gate on route correctness, fail-closed behavior, reproducible promotion, crash recovery, clean fallback. Record cost/latency as baseline only.",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "skill-distillation-C11",
+    "source": "codex-round-2",
+    "text": "RouteBinding makes TASK CLASSIFICATION load-bearing and neither side named it. A bad classifier picks wrong procedures, bypasses ZDR/egress policy, fails to abstain on ambiguity, inflates shadow metrics. Need a first-class versioned TaskClassifier/route-predicate artifact with hard negatives, thresholds, margins, recorded abstentions, and 'should/should-not classify' eval cases.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-distillation-C12",
+    "source": "codex-round-2",
+    "text": "PC1 dodge: 'shadow' conflates offline-fixture shadow (safe) with Hugin-integrated shadow (inherits #77). Hugin-integrated shadow runs cannot count as readiness evidence until #77 is fixed; the kill/restart test must be either expected-failing or the test that proves #77 fixed.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "skill-distillation-C13",
+    "source": "codex-round-2",
+    "text": "PC3 shallow if first row only adds nullable columns while router stays boolean. The first row must be CONSUMED by the route decision + execution path (TaskClass predicate, content-addressed profile, CellManifest, versioned EvalSuite, immutable ValidationRun, RouteBinding as only selectable object, RouteDecision recorded incl. abstentions).",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "skill-distillation-C14",
+    "source": "codex-round-2",
+    "text": "D2 dodge: a semaphore prevents concurrent 30B runs but doesn't specify priority, cancellation, lease/heartbeat, stale reconciliation, starvation limits, retry, or whether evals block cloud-eligible user work. Attach a policy to the semaphore.",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]
