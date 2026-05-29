@@ -329,6 +329,17 @@ let currentOllamaAbort: AbortController | null = null;
 // Runtime-owned artefact delivery (issue #68). Aborted by operator cancel /
 // shutdown so a hung `ssh`/`rsync` cannot wedge the single dispatcher slot.
 let currentDeliveryAbort: AbortController | null = null;
+// Separate abort slot for RECONCILE-path deliveries (`reconcileDeliveryPending`,
+// driven by startup recovery and the lease reaper). The reaper runs on its own
+// timer concurrently with the poll loop, so its reconcile must NOT share
+// `currentDeliveryAbort` with the live in-process delivery — clobbering that
+// shared slot would leave the live delivery un-abortable by operator cancel /
+// shutdown (review F1, #77). At most one reconcile runs at a time (startup
+// completes before the reaper timer arms; the reaper processes tasks serially
+// under `leaseReaperInFlight`), so a single slot is sufficient. Shutdown aborts
+// both slots; operator cancel targets only the live delivery (a reconcile is
+// always for a non-current, dead-owner task).
+let currentReconcileAbort: AbortController | null = null;
 let server: Server;
 let runningBroker: RunningBroker | null = null;
 let brokerReconciler: BrokerReconciler | null = null;
@@ -1670,7 +1681,9 @@ async function reconcileDeliveryPending(
   } else {
     const logPath = path.join(LOG_DIR, `${extractTaskId(taskNs)}.log`);
     const abort = new AbortController();
-    currentDeliveryAbort = abort;
+    // Reconcile-path slot, NOT the live-delivery slot (review F1): a reaper-driven
+    // reconcile must not clobber a concurrent live delivery's abort controller.
+    currentReconcileAbort = abort;
     try {
       delivery = await deliverArtifacts({
         manifest: task.artifactManifest,
@@ -1690,7 +1703,7 @@ async function reconcileDeliveryPending(
         signal: abort.signal,
       });
     } finally {
-      currentDeliveryAbort = null;
+      currentReconcileAbort = null;
     }
     if (!delivery.ok) {
       // missing-local / unsafe-local (no trustworthy deliverable) are ALWAYS
@@ -4247,6 +4260,11 @@ async function shutdown(signal: string): Promise<void> {
   if (currentDeliveryAbort) {
     console.log("Aborting running artefact delivery...");
     currentDeliveryAbort.abort();
+  }
+
+  if (currentReconcileAbort) {
+    console.log("Aborting running delivery reconciliation...");
+    currentReconcileAbort.abort();
   }
 
   if (currentSdkAbort) {
