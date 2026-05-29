@@ -15,7 +15,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, finalizeTaskCompletion } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion } from "./task-helpers.js";
 import { executeSdkTask } from "./sdk-executor.js";
 import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus, probeAllHosts, warmModel, getLoadedModels } from "./ollama-hosts.js";
@@ -261,6 +261,19 @@ const config = {
   // rather than silently mis-deliver.
   deliveryPolicy: parseDeliveryPolicy(process.env.HUGIN_DELIVERY_POLICY),
   deliveryTargets: loadDeliveryTargets(process.env.HUGIN_DELIVERY_TARGETS),
+  // Deferred-delivery retry budget (issue #72, only consulted under `defer`).
+  deliveryRetryMaxAttempts: parseInt(
+    process.env.HUGIN_DELIVERY_RETRY_MAX_ATTEMPTS || "10",
+    10,
+  ),
+  deliveryRetryMaxAgeMs: parseInt(
+    process.env.HUGIN_DELIVERY_RETRY_MAX_AGE_MS || "86400000", // 24h
+    10,
+  ),
+  deliveryRetryIntervalMs: parseInt(
+    process.env.HUGIN_DELIVERY_RETRY_INTERVAL_MS || "300000", // 5min
+    10,
+  ),
 };
 
 const brokerEnv = readBrokerEnv(process.env);
@@ -348,6 +361,9 @@ let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
 let cancelWatchTimer: ReturnType<typeof setInterval> | null = null;
 let leaseReaperTimer: ReturnType<typeof setInterval> | null = null;
 let leaseReaperInFlight = false;
+// Deferred-delivery retry reaper (#72), armed only under `HUGIN_DELIVERY_POLICY=defer`.
+let deliveryRetryReaperTimer: ReturnType<typeof setInterval> | null = null;
+let deliveryRetryReaperInFlight = false;
 let lastQueueDepth = 0;
 let lastBlockedTaskCount = 0;
 const startedAt = Date.now();
@@ -1614,6 +1630,53 @@ async function killOrphanDispatchers(): Promise<void> {
 // recovered (we just restarted, so they're orphaned). Tasks claimed by other
 // workers are only recovered if their lease has expired.
 
+// Deferred-delivery retry metadata (issue #72, `HUGIN_DELIVERY_POLICY=defer`).
+// Stored in a dedicated `delivery-retry` Munin key — NOT in status tags — so it
+// is decoupled from the lease/claim tag machinery (`buildClaimTags` only
+// preserves a fixed prefix set). `attempts` is the number of delivery attempts
+// completed so far; `firstAttemptAt` is the deferral-clock origin for the
+// max-age budget.
+interface DeliveryRetryMeta {
+  attempts: number;
+  firstAttemptAt: string;
+}
+
+async function readDeliveryRetryMeta(
+  taskNs: string,
+  client: MuninClient,
+): Promise<DeliveryRetryMeta | null> {
+  try {
+    const entry = await client.read(taskNs, "delivery-retry");
+    if (!entry?.content) return null;
+    const parsed = JSON.parse(entry.content) as Partial<DeliveryRetryMeta>;
+    if (
+      typeof parsed.attempts === "number" &&
+      typeof parsed.firstAttemptAt === "string"
+    ) {
+      return { attempts: parsed.attempts, firstAttemptAt: parsed.firstAttemptAt };
+    }
+  } catch {
+    /* missing / malformed → treat as no prior attempts */
+  }
+  return null;
+}
+
+async function writeDeliveryRetryMeta(
+  taskNs: string,
+  meta: DeliveryRetryMeta,
+  client: MuninClient,
+  classification?: string,
+): Promise<void> {
+  await client.write(
+    taskNs,
+    "delivery-retry",
+    JSON.stringify(meta),
+    undefined,
+    undefined,
+    classification,
+  );
+}
+
 // Runtime-owned artefact delivery (issue #68 / #77): a `running +
 // delivery:pending` checkpoint means the agent content is durably preserved in
 // `result` but delivery did not finalize (crash/restart mid-delivery).
@@ -1715,6 +1778,55 @@ async function reconcileDeliveryPending(
         config.deliveryPolicy === "require";
       if (terminal) ok = false;
     }
+  }
+
+  // Deferred policy (#72): an INFRA failure with retry budget remaining leaves
+  // the task `running + delivery:pending` (already reclaimed above) for the
+  // delivery-retry reaper to re-attempt — instead of terminalizing. Only `infra`
+  // reaches here non-terminal under `defer` (missing-local/unsafe-local set
+  // `ok=false` in the block above regardless of policy, so they are never
+  // deferrable). Budget exhaustion falls through to the terminal write below.
+  if (
+    config.deliveryPolicy === "defer" &&
+    !delivery.ok &&
+    delivery.failureKind === "infra"
+  ) {
+    const meta = await readDeliveryRetryMeta(taskNs, client);
+    const firstAttemptAt = meta?.firstAttemptAt ?? new Date().toISOString();
+    const attempts = (meta?.attempts ?? 0) + 1;
+    const decision = decideDeliveryRetry({
+      attempts,
+      firstAttemptAtMs: Date.parse(firstAttemptAt),
+      now: Date.now(),
+      maxAttempts: config.deliveryRetryMaxAttempts,
+      maxAgeMs: config.deliveryRetryMaxAgeMs,
+    });
+    if (decision.action === "retry") {
+      await writeDeliveryRetryMeta(
+        taskNs,
+        { attempts, firstAttemptAt },
+        client,
+        classification,
+      );
+      // Keep the result informative but the task NON-terminal — status is
+      // already `running + delivery:pending` from the reclaim above.
+      await client.write(
+        taskNs,
+        "result",
+        `${baseDoc}${renderArtifactDeliverySection(delivery)}\n- **Delivery:** deferred (attempt ${attempts}, infra failure) — will retry\n`,
+        undefined,
+        undefined,
+        classification,
+      );
+      await client.log(
+        taskNs,
+        `Delivery deferred (attempt ${attempts}): ${delivery.error ?? "infra failure"} — will retry`,
+      );
+      return;
+    }
+    // Budget exhausted → terminalize as a delivery failure (Exit 2 below).
+    ok = false;
+    await client.log(taskNs, `Delivery retry budget exhausted: ${decision.reason}`);
   }
 
   if (!ok) {
@@ -1956,6 +2068,16 @@ async function reapExpiredLeases(): Promise<void> {
       // host-stable workerId, which lets startup recovery handle the common
       // crash+restart case directly.
       if (entry.tags.includes("delivery:pending")) {
+        // Under `defer` (#72) the dedicated delivery-retry reaper owns
+        // delivery:pending at the configured cadence — leave it alone here so a
+        // lease-expiry tick doesn't race the retry reaper (both would be CAS-safe,
+        // but the retry reaper is the single, predictable driver under defer).
+        if (config.deliveryPolicy === "defer") {
+          console.log(
+            `Skipping reap of ${result.namespace} — delivery:pending under defer (delivery-retry reaper owns it)`,
+          );
+          continue;
+        }
         console.log(
           `Reconciling delivery:pending task ${result.namespace} via lease reaper (lease expired)`,
         );
@@ -2052,6 +2174,64 @@ function stopLeaseReaper(): void {
   if (leaseReaperTimer) {
     clearInterval(leaseReaperTimer);
     leaseReaperTimer = null;
+  }
+}
+
+// --- Deferred-delivery retry reaper (issue #72) ---
+// Under `HUGIN_DELIVERY_POLICY=defer`, an infra delivery failure leaves the task
+// `running + delivery:pending` instead of terminalizing. This periodic reaper
+// re-attempts those deliveries on its own configurable cadence
+// (`HUGIN_DELIVERY_RETRY_INTERVAL_MS`), independent of lease expiry.
+// `reconcileDeliveryPending` is the single attempt-and-finalize primitive: under
+// defer it CAS-reclaims, re-runs `deliverArtifacts` (skipping already-verified
+// artefacts is idempotent at the rsync+sha layer), and either re-defers (budget
+// remaining) or terminalizes (budget exhausted, → failed + Exit 2). The
+// `currentTask` guard skips the live in-process delivery; the CAS reclaim makes
+// it safe against any concurrent reconcile.
+async function reapDeferredDeliveries(): Promise<void> {
+  if (config.deliveryPolicy !== "defer") return;
+  try {
+    const { results } = await reaperMunin.query({
+      query: "task",
+      tags: ["running", "delivery:pending"],
+      namespace: "tasks/",
+      entry_type: "state",
+      limit: 20,
+    });
+    for (const result of results) {
+      if (!result.key || result.key !== "status") continue;
+      // Never touch the live in-process delivery (mirrors the lease reaper's
+      // currentTask guard) — reconciliation is only for non-current checkpoints.
+      if (result.namespace === currentTask) continue;
+      const entry = await reaperMunin.read(result.namespace, "status");
+      if (!entry || !entry.tags.includes("delivery:pending")) continue;
+      if (result.namespace === currentTask) continue; // re-check after the read
+      console.log(
+        `Delivery-retry reaper re-attempting ${result.namespace} (defer)`,
+      );
+      await reconcileDeliveryPending(result.namespace, entry, reaperMunin);
+    }
+  } catch (err) {
+    console.error("Failed to reap deferred deliveries:", err);
+  }
+}
+
+function startDeliveryRetryReaper(): void {
+  stopDeliveryRetryReaper();
+  if (config.deliveryPolicy !== "defer") return;
+  deliveryRetryReaperTimer = setInterval(() => {
+    if (deliveryRetryReaperInFlight || shuttingDown) return;
+    deliveryRetryReaperInFlight = true;
+    void reapDeferredDeliveries().finally(() => {
+      deliveryRetryReaperInFlight = false;
+    });
+  }, config.deliveryRetryIntervalMs);
+}
+
+function stopDeliveryRetryReaper(): void {
+  if (deliveryRetryReaperTimer) {
+    clearInterval(deliveryRetryReaperTimer);
+    deliveryRetryReaperTimer = null;
   }
 }
 
@@ -3646,6 +3826,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let deliveryResult: DeliveryResult | undefined;
     let deliveryFailureKind: string | undefined;
     let terminalDeliveryTag: string | undefined;
+    // #72: set when a live infra delivery failure under `defer` should leave the
+    // task delivery:pending for the retry reaper rather than terminalizing.
+    let deferDeliveryPending = false;
     // updated_at of the delivery checkpoint status write. The terminal status
     // flip CASes on this so a concurrent startup reconciler that reclaimed the
     // checkpoint (single-owner model, Codex review #1) cannot be clobbered by
@@ -3766,10 +3949,89 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           ok = false;
           exitCode = 2;
           deliveryFailureKind = "DELIVERY_FAILED";
+        } else if (
+          // Deferred policy (#72): a first-attempt INFRA failure under `defer`
+          // leaves the task `running + delivery:pending` (the pre-delivery
+          // checkpoint, already written above) for the delivery-retry reaper —
+          // resolved in the deferral block right after this loop.
+          config.deliveryPolicy === "defer" &&
+          deliveryResult.failureKind === "infra"
+        ) {
+          deferDeliveryPending = true;
         }
       }
     }
     currentCancellation = null;
+
+    // Deferred-delivery handling (#72): if the live first attempt hit an infra
+    // failure under `defer` and the retry budget is not yet exhausted, leave the
+    // task `running + delivery:pending` (status untouched — it is already the
+    // pre-delivery checkpoint) and EARLY-RETURN without terminalizing. The
+    // delivery-retry reaper re-attempts on its own cadence; budget exhaustion
+    // there (or here, if maxAttempts<=1) terminalizes as Exit 2 / DELIVERY_FAILED.
+    if (deferDeliveryPending && deliveryResult && !isCancelled) {
+      const meta = await readDeliveryRetryMeta(taskNs, munin);
+      const firstAttemptAt = meta?.firstAttemptAt ?? completedAt;
+      const attempts = (meta?.attempts ?? 0) + 1;
+      const decision = decideDeliveryRetry({
+        attempts,
+        firstAttemptAtMs: Date.parse(firstAttemptAt),
+        now: Date.now(),
+        maxAttempts: config.deliveryRetryMaxAttempts,
+        maxAgeMs: config.deliveryRetryMaxAgeMs,
+      });
+      if (decision.action === "retry") {
+        stopLeaseRenewal();
+        stopCancellationWatch();
+        await writeDeliveryRetryMeta(
+          taskNs,
+          { attempts, firstAttemptAt },
+          munin,
+          taskClassification,
+        );
+        await munin.write(
+          taskNs,
+          "result",
+          buildTaskResultDocument({
+            exitCode: 0,
+            startedAt,
+            completedAt,
+            durationSeconds: Math.round(durationMs / 1000),
+            executor: effectiveExecutor,
+            resultSource,
+            logFile: `~/.hugin/logs/${taskId}.log`,
+            costUsd,
+            prUrl,
+            replyTo: task.replyTo,
+            replyFormat: task.replyFormat,
+            group: task.group,
+            sequence: task.sequence,
+            body: `${finalResultBody}\n${renderArtifactDeliverySection(deliveryResult)}\n- **Delivery:** deferred (attempt ${attempts}, infra failure) — will retry\n`,
+            autoRouted: task.autoRouted,
+            routingReason: task.routingDecision?.reason,
+          }),
+          exfilOutcome.resultTags,
+          undefined,
+          taskClassification,
+        );
+        await munin.log(
+          taskNs,
+          `Delivery deferred (attempt ${attempts}): ${deliveryResult.error ?? "infra failure"} — will retry`,
+        );
+        currentTask = null;
+        currentTaskConfig = null;
+        return { hadTask: true, queueDepth };
+      }
+      // Budget already exhausted on the first attempt (e.g. maxAttempts<=1):
+      // terminalize as a delivery failure via the normal finalize path below.
+      ok = false;
+      exitCode = 2;
+      deliveryFailureKind = "DELIVERY_FAILED";
+      await munin.log(
+        taskNs,
+        `Delivery retry budget exhausted: ${decision.reason}`,
+      );
+    }
 
     // Agent run + delivery both finished. Lease renewal was already stopped
     // before the delivery checkpoint (see ~L3487, Codex review #2) — the call
@@ -4101,6 +4363,9 @@ async function pollLoop(): Promise<void> {
   // while pollOnce is blocked on a long-running current task. The poll loop no
   // longer invokes the reaper — this timer is the single source of truth.
   startLeaseReaper();
+  // #72: drive deferred-delivery retries on their own cadence (no-op unless
+  // HUGIN_DELIVERY_POLICY=defer).
+  startDeliveryRetryReaper();
 
   let pollCount = 0;
   while (!shuttingDown) {
@@ -4193,6 +4458,7 @@ async function shutdown(signal: string): Promise<void> {
   stopLeaseRenewal();
   stopCancellationWatch();
   stopLeaseReaper();
+  stopDeliveryRetryReaper();
 
   // Mark the current task as failed before killing the process
   if (currentTask) {

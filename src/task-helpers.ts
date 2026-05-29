@@ -198,6 +198,55 @@ export function shouldReapExpiredLease(input: ReapDecisionInput): ReapDecision {
   };
 }
 
+export interface DeliveryRetryInput {
+  /** How many delivery attempts have already completed (0 before the first). */
+  attempts: number;
+  /** Wall-clock ms of the FIRST delivery attempt (the deferral clock origin). */
+  firstAttemptAtMs: number;
+  /** Current wall-clock ms. */
+  now: number;
+  /** Max attempts before budget exhaustion (inclusive cap on attempts made). */
+  maxAttempts: number;
+  /** Max age in ms from the first attempt before budget exhaustion. */
+  maxAgeMs: number;
+}
+
+export interface DeliveryRetryDecision {
+  /** "retry" → attempt delivery again; "exhausted" → terminalize as failed. */
+  action: "retry" | "exhausted";
+  /** Human-readable reason (empty when action==="retry"). */
+  reason: string;
+}
+
+/**
+ * Decide whether a deferred (`HUGIN_DELIVERY_POLICY=defer`) delivery should be
+ * retried again or has exhausted its retry budget (issue #72). Budget is the
+ * conjunction of a max-attempts cap and a max-age cap — whichever trips first
+ * terminalizes, so a permanently-unreachable NAS still reaches a terminal state.
+ *
+ * `attempts` is the number of attempts ALREADY made. The decision is whether to
+ * make another one: exhausted once `attempts >= maxAttempts`, or once the elapsed
+ * time since the first attempt exceeds `maxAgeMs`.
+ */
+export function decideDeliveryRetry(
+  input: DeliveryRetryInput,
+): DeliveryRetryDecision {
+  if (input.attempts >= input.maxAttempts) {
+    return {
+      action: "exhausted",
+      reason: `delivery retry budget exhausted after ${input.attempts} attempt(s) (max ${input.maxAttempts})`,
+    };
+  }
+  const ageMs = input.now - input.firstAttemptAtMs;
+  if (ageMs >= input.maxAgeMs) {
+    return {
+      action: "exhausted",
+      reason: `delivery retry budget exhausted after ${Math.round(ageMs / 1000)}s (max age ${Math.round(input.maxAgeMs / 1000)}s)`,
+    };
+  }
+  return { action: "retry", reason: "" };
+}
+
 export interface StartupRecoveryInput {
   /** Status-entry tags (carry `claimed_by:` / `lease_expires:` / `delivery:pending`). */
   tags: string[];
