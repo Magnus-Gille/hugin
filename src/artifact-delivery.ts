@@ -16,14 +16,19 @@ import { z } from "zod";
 
 // --- Policy ---
 
-export type DeliveryPolicy = "off" | "warn" | "require";
+// `defer` (issue #72): an INFRA delivery failure (NAS unreachable, rsync/verify
+// timeout) leaves the task `running + delivery:pending` instead of terminalizing,
+// and a periodic retry reconciler re-attempts under a retry budget. missing-local
+// / unsafe-local are still ALWAYS terminal — a deferral never resurrects a
+// nonexistent or unsafe deliverable.
+export type DeliveryPolicy = "off" | "warn" | "require" | "defer";
 
 export function parseDeliveryPolicy(raw: string | undefined): DeliveryPolicy {
   const v = raw?.trim().toLowerCase();
-  if (v === "off" || v === "warn" || v === "require") return v;
+  if (v === "off" || v === "warn" || v === "require" || v === "defer") return v;
   if (v && v.length > 0) {
     throw new Error(
-      `Invalid HUGIN_DELIVERY_POLICY=${raw}; expected off | warn | require`,
+      `Invalid HUGIN_DELIVERY_POLICY=${raw}; expected off | warn | require | defer`,
     );
   }
   return "require";
