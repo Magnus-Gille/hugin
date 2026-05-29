@@ -101,6 +101,30 @@ else
   echo "  NAS reachability are fixed (else delivery-capable tasks will fail)."
 fi
 
+echo "==> Codex sandbox preflight (issue #59)..."
+# Codex's `codex exec` sandboxes shell commands and apply_patch through
+# bubblewrap. When the system `bwrap` is missing, Codex silently falls back to a
+# VENDORED bwrap that is incompatible with the Pi kernel: every shell command and
+# file write fails with `bwrap: loopback: Failed to create NETLINK_ROUTE socket`,
+# yet the task still exits 0 — so codex tasks "succeed" while delivering nothing
+# (issue #59). Ensure the system bwrap exists AND can actually create the
+# network namespace + loopback that Codex relies on. Non-fatal WARNING: this only
+# affects the codex runtime, so it must not block a deploy that runs claude/ollama
+# tasks. The runtime fix is `sudo apt install bubblewrap`.
+if ssh "$REMOTE" "
+  command -v bwrap >/dev/null 2>&1 || { echo 'NO_BWRAP'; exit 1; }
+  # Mirror codex's usage: unshare the network namespace and bring up loopback.
+  # This is the exact path that fails with the vendored bwrap on the Pi kernel.
+  bwrap --unshare-net --ro-bind / / --dev /dev /bin/true 2>/dev/null || { echo 'BWRAP_NETNS_FAIL'; exit 1; }
+"; then
+  echo "  OK: system bwrap present and network-namespace probe passed (codex sandbox healthy)"
+else
+  echo "  WARNING: codex sandbox preflight FAILED."
+  echo "  Codex tasks will exit 0 but deliver nothing (vendored-bwrap fallback is"
+  echo "  incompatible with the Pi kernel). Fix on the Pi: sudo apt install bubblewrap"
+  echo "  then re-run this probe. Until then, do not route code-capable tasks to codex."
+fi
+
 echo "==> Syncing global Claude config..."
 "$(dirname "$0")/sync-claude-config.sh" "$PI_HOST"
 
