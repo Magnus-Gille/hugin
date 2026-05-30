@@ -162,6 +162,7 @@ hugin/
     ├── enable-broker.sh          # One-shot: generate broker token on Pi, write to .env, restart, register hugin-mcp locally
     ├── submit-daily-analysis.sh  # Submit daily journal analysis as ollama task
     ├── submit-stale-status-review.sh
+    ├── submit-dep-bumps.sh       # Autonomous dep-bump tasks from security-scan results (#26)
     ├── sync-claude-config.sh     # Sync ~/.claude/ config to Pi
     ├── update-cli.sh             # Auto-update CLI tools (daily cron)
     ├── on-task-stop.mjs          # Task stop hook
