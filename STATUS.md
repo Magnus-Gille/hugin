@@ -1,9 +1,64 @@
 # Hugin — Status
 
-**Last session:** 2026-05-18
+**Last session:** 2026-05-30
 **Branch:** main
 
-## Completed This Session (2026-05-18)
+## Completed This Session (2026-05-30) — "fix all open issues"
+
+Started with 15 open issues; closed 7, with the remaining 8 being plan-only epics
+(by explicit scope decision). Opened + merged 7 PRs (#86–#93). All merged to main.
+
+**Bugs / features (fixed + merged):**
+- **#73** failure Exit codes were `-1` → Ratatoskr's `/(\d+)/` mis-read failures as success. New positive `DISPATCHER_FAILURE_EXIT_CODE` at all 8 failure sites. (PR #86)
+- **#77** crash-mid-delivery never auto-reconciled (PID-derived workerId → restart saw orphan as "not ours" + reaper deferred → deadlock). Fix: **host-stable `workerId`** (`hugin-<host>`, PID kept as `process_instance_id`) + reaper reconciles `delivery:pending`. Extracted pure `decideStartupRecovery`. Opus-reviewed (SHIP); F1 (reconcile-vs-live-delivery abort cross-talk) fixed via separate `currentReconcileAbort`. (PR #86) **Pi-verified** (see below).
+- **#59** codex bwrap: system `bubblewrap` was missing on the Pi → vendored bwrap incompatible w/ kernel → `NETLINK_ROUTE` error, tasks exit 0 delivering nothing. Installed `bubblewrap` 0.11.0 on the Pi + non-fatal deploy preflight. (PR #88)
+- **#5** methodology pipeline templates (research/review/implementation) + loader. (PR #87)
+- **#72** `defer` delivery policy + periodic retry reaper w/ budget (attempts ∧ age). Opus-reviewed; 2 No-ship bugs fixed (manifest-gone-under-defer terminalizes; NaN-budget fails safe). (PR #93)
+
+**Plan/spec only (merged docs, issues stay OPEN as future work, per scope decision):**
+- **#79–#84** skill-distillation A2–A7 implementation spec (`docs/design/skill-distillation-implementation.md`) + debate record. (PRs #89, #85)
+- **#26** autonomous dep-bump design; **#56** Privacy-Filter eval plan. (PR #90)
+- **#75/#78** delivery crash-recovery acceptance runbook (`docs/testing/delivery-recovery-e2e.md`). (PR #92)
+
+**Pi deploy + #77 verification (2026-05-30):** deployed main; `worker_id: hugin-huginmunin` (host-stable) confirmed live. Deterministic crash-recovery acceptance test: fabricated the exact post-crash deadlock state (`running + delivery:pending`, `claimed_by:hugin-huginmunin`, **live** lease, staged file + manifest) → single restart → `recoverStaleTasks` reconciled → artifact rsync+verified to NAS → terminal `completed + delivery:verified`. Closed #75, #77, #78. Literal SIGKILL-mid-rsync, cancel-race (S4), and defer-loop (S5) left for routine runbook re-runs.
+
+## Open (future work — plan/spec merged, not built)
+- #79–#84 skill-distillation build lane (A2–A7). #79 (RouteBinding) is the entry point; router change is small+additive, the discipline is the work.
+- #56 Privacy-Filter eval (needs Pi/Mac-Studio benchmarks). #26 dep-bump PRs (needs grimnir-bot wiring).
+
+## Next Steps
+1. Optional: run the remaining e2e scenarios (literal SIGKILL S3, cancel-race S4, defer-loop S5) from `docs/testing/delivery-recovery-e2e.md`.
+2. After #68/#72 fully exercised: update `~/.claude/skills/research-spike/SKILL.md` (drop agent-side rsync; `### Artifacts` before `### Prompt`).
+3. Begin #79 (RouteBinding) when the skill-distillation lane is prioritized.
+4. Enable broker on Pi; signing hygiene carry-forward.
+
+---
+
+## Completed Prior Session (2026-05-18) — Session 2
+
+### #68 Pi e2e (issue #75) + infra fix
+
+**Infra blocker resolved (PR #76, `3fc15d3`, merged + deployed):** `ProtectSystem` at *any* value (true/full/strict) read-only-bind-mounts `/usr`, tripping OpenSSH 10's strict config-ownership check on the symlinked `20-systemd-ssh-proxy.conf` → breaking the NAS rsync/ssh delivery. Bisected via `systemd-run` probes. Fix: drop `ProtectSystem` entirely, keep `NoNewPrivileges`, `PrivateTmp=false`, `RestrictAddressFamilies`.
+
+**#74 code review + fixes (same session):** Ran `/code-review` multi-agent workflow on PR #74 (runtime-owned artefact delivery). Two findings ≥80 confidence posted (A: staging-prefix missing in recovery path; B: require-policy not honoured in recovery terminal). Fixed A–E:
+- A: pass `stagingPrefixes` to `deliverArtifacts` in `reconcileDeliveryPending`
+- B: terminal check in recovery mirrors active path for `require` policy  
+- C: hoisted `finalizeBaseTags` above the cancelled/normal finalize fork; added CAS check for cancelled case
+- D: `realpath` errors (non-ENOENT) now trigger `unsafe-local` (not fall-through-to-missing)
+- E: corrected misleading comment about lease-renewal/cancel-watch ordering
+- Added 2 regression tests; suite 646→648 pass. PR #74 merged (`2e2d083`).
+
+**Pi e2e results:**
+
+| Scenario | Result |
+|---|---|
+| S1 happy-path | ✅ NAS file delivered, sha256 verified, `delivery:verified`, runtime `### Artifact Delivery` |
+| S2 missing-local (literal #68 bug) | ✅ Exit 2 + DELIVERY_FAILED, agent content preserved |
+| S3 kill mid-delivery → reconcile | ⚠️ Found liveness bug → **#77** |
+
+**S3 finding (#77):** SIGKILL during live `rsync` (agent ran once, `$0.0526`). #68 safety guarantee holds (checkpoint durable, no data loss, no paid rerun). But automatic `systemd` restart does NOT auto-reconcile: `workerId` is PID-derived → restarted process sees old task as `!isOurs`; still-live dead-worker lease → startup scan skips before reconcile branch (line 1804 `continue` before 1821); lease reaper deliberately defers `delivery:pending` to the one-shot startup scan → deadlock. Second post-lease-expiry restart does reconcile correctly. Filed **#77** on roadmap board. Recommended fix: stable host-based workerId + reaper reconciles `delivery:pending` itself.
+
+## Completed This Session (2026-05-18) — Session 1
 
 ### Artifact delivery #68 — Round 2 adversarial review
 
@@ -83,14 +138,15 @@ All added to Grimnir Roadmap project board.
 - Debate concluded: build it (user override), adopt smaller technical fixes from critique.
 - Summary + critique-log committed to `debate/friction-mcp-{summary,critique-log}.md`.
 
-## Next Steps (from 2026-05-17)
+## Next Steps
 
-1. **`npm audit fix`** (hugin#69) — `npm audit fix` → build → test → deploy. Fast, no breaking changes.
-2. **Merge grimnir PR #20** (`fix/deploy-user-units`) — deploy.sh user-scope fix. Has no conflicts.
-3. **grimnir#22** — fix secret-scan test-file exclusion (note: `fix(security-scan): skip test files in secret scan` commit `776664a` already exists on `feat/tallriksvis-sandbox` — may just need cherry-picking to main).
-4. **grimnir#21** after #22 — wire security-scan notification (depends on noise being cleared first).
-5. **grimnir#24** — investigate `sync-repos.service` (no journal → possibly never ran; check `loginctl` linger, systemd user session persistence).
-6. **Broker still disabled** on Pi — see broker enablement steps below.
+1. **Fix #77** (crash-recovery liveness): stable host-based `workerId` + `reapExpiredLeases` reconciles `delivery:pending` itself → defence in depth. Then re-run S3 e2e.
+2. **After #77 + S3 green:** update `~/.claude/skills/research-spike/SKILL.md` — drop agent-side rsync/delivery, add `### Artifacts` before `### Prompt`. (Mandatory order: deploy #77 to Pi BEFORE SKILL.md update.)
+3. ~~`npm audit fix` (hugin#69)~~ — **DONE** (PR #70 `714e348`, issue closed; `npm audit` clean as of 2026-05-18).
+4. **Merge grimnir PR #20** (`fix/deploy-user-units`).
+5. **grimnir#22** — fix secret-scan test-file exclusion; then **grimnir#21** notification.
+6. **grimnir#24** — investigate `sync-repos.service`.
+7. **Enable broker** on Pi: `scripts/enable-broker.sh`, register `hugin-mcp`, dogfood `/delegate`.
 
 ## In Progress
 
