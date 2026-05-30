@@ -77,4 +77,40 @@ describe("decideDeliveryRetry (#72 defer budget)", () => {
     });
     expect(d.action).toBe("exhausted");
   });
+
+  // Fail-safe: a malformed HUGIN_DELIVERY_RETRY_* env var that parsed to NaN (or
+  // a non-positive budget) must terminalize, never produce an immortal task.
+  it("exhausts (fail-safe) when maxAttempts is NaN", () => {
+    const d = decideDeliveryRetry({
+      attempts: 1,
+      firstAttemptAtMs: NOW,
+      now: NOW,
+      maxAttempts: NaN,
+      maxAgeMs: MAX_AGE_MS,
+    });
+    expect(d.action).toBe("exhausted");
+    expect(d.reason).toMatch(/invalid/);
+  });
+
+  it("exhausts (fail-safe) when maxAgeMs is NaN", () => {
+    const d = decideDeliveryRetry({
+      attempts: 1,
+      firstAttemptAtMs: NOW,
+      now: NOW,
+      maxAttempts: MAX_ATTEMPTS,
+      maxAgeMs: NaN,
+    });
+    expect(d.action).toBe("exhausted");
+  });
+
+  it("exhausts (fail-safe) when maxAttempts is non-positive", () => {
+    const d = decideDeliveryRetry({
+      attempts: 0,
+      firstAttemptAtMs: NOW,
+      now: NOW,
+      maxAttempts: 0,
+      maxAgeMs: MAX_AGE_MS,
+    });
+    expect(d.action).toBe("exhausted");
+  });
 });

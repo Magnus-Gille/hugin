@@ -211,6 +211,15 @@ const CANCEL_WATCH_INTERVAL_MS = 2000;
 
 // --- Configuration ---
 
+// Parse a positive-integer env var, falling back to a safe default on a
+// missing / non-finite / non-positive value. Used for the #72 retry-budget and
+// interval settings so a malformed env var (e.g. `NaN`) cannot produce an
+// immortal task or a tight-loop `setInterval` (review MED).
+function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
+  const n = parseInt((raw ?? "").trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 const config = {
   port: parseInt(process.env.HUGIN_PORT || "3032"),
   host: process.env.HUGIN_HOST || "127.0.0.1",
@@ -262,17 +271,19 @@ const config = {
   deliveryPolicy: parseDeliveryPolicy(process.env.HUGIN_DELIVERY_POLICY),
   deliveryTargets: loadDeliveryTargets(process.env.HUGIN_DELIVERY_TARGETS),
   // Deferred-delivery retry budget (issue #72, only consulted under `defer`).
-  deliveryRetryMaxAttempts: parseInt(
-    process.env.HUGIN_DELIVERY_RETRY_MAX_ATTEMPTS || "10",
+  // parsePositiveIntEnv falls back to the default on a malformed value so a bad
+  // env var can't disable the budget (immortal task) or tight-loop the reaper.
+  deliveryRetryMaxAttempts: parsePositiveIntEnv(
+    process.env.HUGIN_DELIVERY_RETRY_MAX_ATTEMPTS,
     10,
   ),
-  deliveryRetryMaxAgeMs: parseInt(
-    process.env.HUGIN_DELIVERY_RETRY_MAX_AGE_MS || "86400000", // 24h
-    10,
+  deliveryRetryMaxAgeMs: parsePositiveIntEnv(
+    process.env.HUGIN_DELIVERY_RETRY_MAX_AGE_MS,
+    86_400_000, // 24h
   ),
-  deliveryRetryIntervalMs: parseInt(
-    process.env.HUGIN_DELIVERY_RETRY_INTERVAL_MS || "300000", // 5min
-    10,
+  deliveryRetryIntervalMs: parsePositiveIntEnv(
+    process.env.HUGIN_DELIVERY_RETRY_INTERVAL_MS,
+    300_000, // 5min
   ),
 };
 
@@ -1789,14 +1800,26 @@ async function reconcileDeliveryPending(
   if (
     config.deliveryPolicy === "defer" &&
     !delivery.ok &&
-    delivery.failureKind === "infra"
+    delivery.failureKind === "infra" &&
+    // Only a RECOVERABLE infra failure is deferrable. The "manifest gone at
+    // recovery / policy off" synthetic failure above is also tagged `infra` but
+    // can NEVER succeed (no manifest to re-deliver), so it must terminalize, not
+    // burn the retry budget (review HIGH). A present manifest is the recoverable
+    // signal — deliverArtifacts actually ran.
+    !!task?.artifactManifest
   ) {
     const meta = await readDeliveryRetryMeta(taskNs, client);
-    const firstAttemptAt = meta?.firstAttemptAt ?? new Date().toISOString();
+    // Guard a corrupt/missing first-attempt timestamp so the max-age budget
+    // still bounds the task instead of being silently disabled (review note 7).
+    const parsedFirst = meta?.firstAttemptAt
+      ? Date.parse(meta.firstAttemptAt)
+      : NaN;
+    const firstAttemptAtMs = Number.isNaN(parsedFirst) ? Date.now() : parsedFirst;
+    const firstAttemptAt = new Date(firstAttemptAtMs).toISOString();
     const attempts = (meta?.attempts ?? 0) + 1;
     const decision = decideDeliveryRetry({
       attempts,
-      firstAttemptAtMs: Date.parse(firstAttemptAt),
+      firstAttemptAtMs,
       now: Date.now(),
       maxAttempts: config.deliveryRetryMaxAttempts,
       maxAgeMs: config.deliveryRetryMaxAgeMs,
@@ -3971,11 +3994,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // there (or here, if maxAttempts<=1) terminalizes as Exit 2 / DELIVERY_FAILED.
     if (deferDeliveryPending && deliveryResult && !isCancelled) {
       const meta = await readDeliveryRetryMeta(taskNs, munin);
-      const firstAttemptAt = meta?.firstAttemptAt ?? completedAt;
+      const parsedFirst = meta?.firstAttemptAt
+        ? Date.parse(meta.firstAttemptAt)
+        : Date.parse(completedAt);
+      const firstAttemptAtMs = Number.isNaN(parsedFirst)
+        ? Date.now()
+        : parsedFirst;
+      const firstAttemptAt = new Date(firstAttemptAtMs).toISOString();
       const attempts = (meta?.attempts ?? 0) + 1;
       const decision = decideDeliveryRetry({
         attempts,
-        firstAttemptAtMs: Date.parse(firstAttemptAt),
+        firstAttemptAtMs,
         now: Date.now(),
         maxAttempts: config.deliveryRetryMaxAttempts,
         maxAgeMs: config.deliveryRetryMaxAgeMs,
