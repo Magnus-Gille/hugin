@@ -3,7 +3,22 @@
 **Last session:** 2026-05-30
 **Branch:** main
 
-## Completed This Session (2026-05-30) — "fix all open issues"
+## Completed This Session (2026-05-30) — "fix all open issues" (full implement pass)
+
+**Final: 15 open issues → 2.** After the initial fix+plan pass (below), the user
+reversed the plan-only scope and asked to implement. Implemented + merged:
+- **#26** autonomous dep-bump driver — `scripts/submit-dep-bumps.sh` + `src/dep-bump-eligibility.ts` (PR #94, merged).
+- **#79–#84** eval-gated skill-distillation system — `src/skill/` foundation (`refs.ts` canonical hashing) + 5 artifact modules (RouteBinding, procedure-package/compiler, retrieval, TaskClassifier, eval-suite) + fail-closed `skill-lane.ts` orchestrator + `skillRoute` audit + `HUGIN_SKILL_LANE` flag (PR #95, merged; built by 5 parallel sub-agents, integrated onto one canonical refs.ts; full suite 877 green). Closed #79–#83.
+- **#84** stays open as the live go-live capstone (wire dispatch + author slice-one content + real ollama cell + →active promotion). Selection contract + all modules merged.
+- **#56** stays open as an eval gated on Pi/Mac-Studio benchmarks (plan in PR #90; can't be code-completed without hardware).
+
+Skill-distillation lesson: Agent `isolation:worktree` branches from `main`, NOT the
+current local branch — so sub-agents each recreated `refs.ts`; integration kept the
+canonical one and took only domain modules. (Pre-brief future fan-outs accordingly.)
+
+---
+
+## Completed Earlier This Session (2026-05-30) — initial fix + plan pass
 
 Started with 15 open issues; closed 7, with the remaining 8 being plan-only epics
 (by explicit scope decision). Opened + merged 7 PRs (#86–#93). All merged to main.
