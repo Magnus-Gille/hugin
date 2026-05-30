@@ -80,10 +80,12 @@ describe("parseDeliveryPolicy", () => {
     expect(parseDeliveryPolicy(undefined)).toBe("require");
     expect(parseDeliveryPolicy("")).toBe("require");
   });
-  it("accepts off | warn | require (case-insensitive)", () => {
+  it("accepts off | warn | require | defer (case-insensitive)", () => {
     expect(parseDeliveryPolicy("off")).toBe("off");
     expect(parseDeliveryPolicy("WARN")).toBe("warn");
     expect(parseDeliveryPolicy(" require ")).toBe("require");
+    expect(parseDeliveryPolicy("defer")).toBe("defer");
+    expect(parseDeliveryPolicy("DEFER")).toBe("defer");
   });
   it("throws on an invalid value", () => {
     expect(() => parseDeliveryPolicy("yolo")).toThrow(/HUGIN_DELIVERY_POLICY/);
