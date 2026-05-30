@@ -70,6 +70,21 @@ export const routingEliminationSchema = z.object({
   reason: z.string().min(1),
 });
 
+// Skill-lane routing decision (issue #84 / #79–#83). Recorded for EVERY task the
+// local-skill lane considers — including abstentions — so a route decision is
+// auditable. Additive + optional, same non-breaking rationale as artifactDelivery
+// below: old Zod readers strip it. The classifier/retrieval/binding selection
+// lives in src/skill/*; this is just the audit record carried in the result.
+export const skillRouteSchema = z.object({
+  bindingId: z.string().min(1).optional(),
+  bindingVersion: z.number().int().nonnegative().optional(),
+  classId: z.string().min(1).optional(),
+  classConfidence: z.number().min(0).max(1).optional(),
+  abstained: z.boolean().default(false),
+  abstainReason: z.string().min(1).optional(),
+});
+export type SkillRoute = z.infer<typeof skillRouteSchema>;
+
 export const taskExecutionRuntimeMetadataSchema = z.object({
   requestedModel: z.string().min(1).optional(),
   effectiveModel: z.string().min(1).optional(),
@@ -80,6 +95,7 @@ export const taskExecutionRuntimeMetadataSchema = z.object({
   autoRouted: z.boolean().optional(),
   routingReason: z.string().min(1).optional(),
   eliminatedRuntimes: z.array(routingEliminationSchema).optional(),
+  skillRoute: skillRouteSchema.optional(),
 });
 export type TaskExecutionRuntimeMetadata = z.infer<
   typeof taskExecutionRuntimeMetadataSchema
