@@ -285,6 +285,12 @@ const config = {
     process.env.HUGIN_DELIVERY_RETRY_INTERVAL_MS,
     300_000, // 5min
   ),
+  // Local-skill lane master switch (issue #84). Default OFF — the lane only ever
+  // runs local when an `active`, drift-free, sensitivity-cleared RouteBinding is
+  // selectable (src/skill/skill-lane.ts), which requires authored slice-one
+  // artifacts + a real cell that do not exist yet. Until then the orchestrator
+  // fails closed to the existing cloud auto-router, so flipping this on is a no-op.
+  skillLaneEnabled: process.env.HUGIN_SKILL_LANE === "on",
 };
 
 const brokerEnv = readBrokerEnv(process.env);
