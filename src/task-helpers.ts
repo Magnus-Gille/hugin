@@ -231,6 +231,20 @@ export interface DeliveryRetryDecision {
 export function decideDeliveryRetry(
   input: DeliveryRetryInput,
 ): DeliveryRetryDecision {
+  // Fail SAFE (terminal), not unsafe (immortal): a non-finite / non-positive
+  // budget — e.g. a malformed HUGIN_DELIVERY_RETRY_* env var that parsed to NaN
+  // — must terminalize, never produce an endlessly-retried task (review MED).
+  if (
+    !Number.isFinite(input.maxAttempts) ||
+    input.maxAttempts <= 0 ||
+    !Number.isFinite(input.maxAgeMs) ||
+    input.maxAgeMs < 0
+  ) {
+    return {
+      action: "exhausted",
+      reason: `delivery retry budget invalid (maxAttempts=${input.maxAttempts}, maxAgeMs=${input.maxAgeMs}) — terminalizing fail-safe`,
+    };
+  }
   if (input.attempts >= input.maxAttempts) {
     return {
       action: "exhausted",
