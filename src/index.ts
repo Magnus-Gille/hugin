@@ -15,7 +15,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, finalizeTaskCompletion } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, finalizeTaskCompletion } from "./task-helpers.js";
 import { executeSdkTask } from "./sdk-executor.js";
 import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus, probeAllHosts, warmModel, getLoadedModels } from "./ollama-hosts.js";
@@ -292,11 +292,27 @@ if (!config.muninApiKey) {
 
 // --- Worker identity ---
 
+// Positive, non-zero exit code for dispatcher-side failure paths (recovery,
+// reaper, shutdown, security rejection, generic failures). Ratatoskr decides
+// success by matching `/\*\*Exit code:\*\*\s*(\d+)/` and treats a NON-match as
+// success — a negative code (`-1`) fails `(\d+)`, so it was mis-rendered as a
+// successful task (issue #73). Any non-zero positive integer reads as failure.
+const DISPATCHER_FAILURE_EXIT_CODE = 1;
+
 const LEASE_DURATION_MS = 120_000; // 2 minutes — renewed during execution
 const LEASE_RENEWAL_INTERVAL_MS = 60_000; // renew every 60s
 const LEASE_REAPER_INTERVAL_MS = 60_000; // scan for expired foreign leases every 60s
 
-const workerId = `hugin-${os.hostname()}-${process.pid}`;
+// Worker identity is HOST-based, NOT PID-based (issue #77). A PID-derived id
+// meant that after a `kill -9` + systemd `Restart=always`, the new process got a
+// new id, so `recoverStaleTasks`/the reaper saw the dead incarnation's tasks as
+// "not ours" and — while the dead worker's lease was still live — refused to
+// recover them, stranding a `delivery:pending` checkpoint non-terminal until a
+// second, post-lease-expiry restart. systemd runs exactly one Hugin per host, so
+// a host-stable id lets a restarted process re-adopt and reconcile its own
+// in-flight tasks immediately. The PID is retained separately for observability.
+const workerId = `hugin-${os.hostname()}`;
+const processInstanceId = `${workerId}-${process.pid}`;
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -313,6 +329,17 @@ let currentOllamaAbort: AbortController | null = null;
 // Runtime-owned artefact delivery (issue #68). Aborted by operator cancel /
 // shutdown so a hung `ssh`/`rsync` cannot wedge the single dispatcher slot.
 let currentDeliveryAbort: AbortController | null = null;
+// Separate abort slot for RECONCILE-path deliveries (`reconcileDeliveryPending`,
+// driven by startup recovery and the lease reaper). The reaper runs on its own
+// timer concurrently with the poll loop, so its reconcile must NOT share
+// `currentDeliveryAbort` with the live in-process delivery — clobbering that
+// shared slot would leave the live delivery un-abortable by operator cancel /
+// shutdown (review F1, #77). At most one reconcile runs at a time (startup
+// completes before the reaper timer arms; the reaper processes tasks serially
+// under `leaseReaperInFlight`), so a single slot is sufficient. Shutdown aborts
+// both slots; operator cancel targets only the live delivery (a reconcile is
+// always for a non-current, dead-owner task).
+let currentReconcileAbort: AbortController | null = null;
 let server: Server;
 let runningBroker: RunningBroker | null = null;
 let brokerReconciler: BrokerReconciler | null = null;
@@ -987,7 +1014,7 @@ function createFailureStructuredResult(
     runtime,
     executor: options.executor,
     resultSource: options.resultSource,
-    exitCode: options.exitCode || -1,
+    exitCode: options.exitCode || DISPATCHER_FAILURE_EXIT_CODE,
     startedAt: options.startedAt,
     completedAt,
     durationSeconds: options.durationSeconds,
@@ -1084,7 +1111,7 @@ function buildApprovalRejectedTaskResultDocument(input: {
   return [
     "## Result",
     "",
-    "- **Exit code:** -1",
+    `- **Exit code:** ${DISPATCHER_FAILURE_EXIT_CODE}`,
     "- **Error:** Approval rejected for gated phase",
     `- **Task id:** ${input.taskId}`,
     `- **Pipeline id:** ${input.pipelineId}`,
@@ -1417,20 +1444,6 @@ function leaseExpiry(): string {
   return String(Date.now() + LEASE_DURATION_MS);
 }
 
-function parseLeaseExpiry(tags: string[]): number | null {
-  const tag = tags.find((t) => t.startsWith("lease_expires:"));
-  if (!tag) return null;
-  const raw = tag.slice("lease_expires:".length);
-  // Support both epoch-millis (new) and ISO 8601 (legacy)
-  const ts = /^\d+$/.test(raw) ? Number(raw) : new Date(raw).getTime();
-  return Number.isNaN(ts) ? null : ts;
-}
-
-function parseClaimedBy(tags: string[]): string | null {
-  const tag = tags.find((t) => t.startsWith("claimed_by:"));
-  return tag ? tag.slice("claimed_by:".length) : null;
-}
-
 /** Build tags preserving runtime/type tags and adding lease metadata. */
 function buildClaimTags(
   baseTags: string[],
@@ -1601,15 +1614,19 @@ async function killOrphanDispatchers(): Promise<void> {
 // recovered (we just restarted, so they're orphaned). Tasks claimed by other
 // workers are only recovered if their lease has expired.
 
-// Runtime-owned artefact delivery (issue #68): a `running + delivery:pending`
-// checkpoint means the agent content is durably preserved in `result` but
-// delivery did not finalize (crash/restart mid-delivery). Re-deliver ONCE under
-// a single CAS reclaim and finalize terminally — no paid rerun. Shared by
-// startup recovery; the reaper deliberately skips delivery:pending and leaves
-// it for this path.
+// Runtime-owned artefact delivery (issue #68 / #77): a `running +
+// delivery:pending` checkpoint means the agent content is durably preserved in
+// `result` but delivery did not finalize (crash/restart mid-delivery).
+// Re-deliver ONCE under a single CAS reclaim and finalize terminally — no paid
+// rerun. Invoked from two paths: startup recovery (`recoverStaleTasks`, default
+// `munin` client) and the lease reaper (`reapExpiredLeases`, passing
+// `reaperMunin` so its writes carry the reaper's own session id). The CAS
+// reclaim makes the two paths mutually safe — whichever reaches the task first
+// wins; the loser's CAS write fails and it bails out without double-delivering.
 async function reconcileDeliveryPending(
   taskNs: string,
   entry: MuninEntry,
+  client: MuninClient = munin,
 ): Promise<void> {
   const task = parseTask(entry.content);
   const classification = getTaskArtifactClassification(
@@ -1628,7 +1645,7 @@ async function reconcileDeliveryPending(
     "running",
   );
   try {
-    const r = await munin.write(
+    const r = await client.write(
       taskNs,
       "status",
       entry.content,
@@ -1643,7 +1660,7 @@ async function reconcileDeliveryPending(
     return;
   }
 
-  const resultEntry = await munin.read(taskNs, "result");
+  const resultEntry = await client.read(taskNs, "result");
   let baseDoc = resultEntry?.content ?? "## Result\n\n- **Exit code:** 0\n";
   const dIdx = baseDoc.lastIndexOf("\n### Artifact Delivery");
   if (dIdx !== -1) baseDoc = baseDoc.slice(0, dIdx);
@@ -1664,7 +1681,9 @@ async function reconcileDeliveryPending(
   } else {
     const logPath = path.join(LOG_DIR, `${extractTaskId(taskNs)}.log`);
     const abort = new AbortController();
-    currentDeliveryAbort = abort;
+    // Reconcile-path slot, NOT the live-delivery slot (review F1): a reaper-driven
+    // reconcile must not clobber a concurrent live delivery's abort controller.
+    currentReconcileAbort = abort;
     try {
       delivery = await deliverArtifacts({
         manifest: task.artifactManifest,
@@ -1684,7 +1703,7 @@ async function reconcileDeliveryPending(
         signal: abort.signal,
       });
     } finally {
-      currentDeliveryAbort = null;
+      currentReconcileAbort = null;
     }
     if (!delivery.ok) {
       // missing-local / unsafe-local (no trustworthy deliverable) are ALWAYS
@@ -1704,7 +1723,7 @@ async function reconcileDeliveryPending(
       "- **Exit code:** 2\n- **Failure kind:** DELIVERY_FAILED",
     );
   }
-  await munin.write(
+  await client.write(
     taskNs,
     "result",
     `${baseDoc}${renderArtifactDeliverySection(delivery)}`,
@@ -1716,7 +1735,7 @@ async function reconcileDeliveryPending(
   const terminalDeliveryTag = delivery.ok
     ? "delivery:verified"
     : "delivery:failed";
-  await munin.write(
+  await client.write(
     taskNs,
     "status",
     entry.content,
@@ -1762,14 +1781,15 @@ async function reconcileDeliveryPending(
         },
       }),
       classification,
+      client,
     );
   }
-  await munin.log(
+  await client.log(
     taskNs,
-    `Delivery reconciled on startup: ${delivery.ok ? "verified" : "failed"}`,
+    `Delivery reconciled: ${delivery.ok ? "verified" : "failed"}`,
   );
-  await promoteDependents(extractTaskId(taskNs));
-  await refreshPipelineSummaryFromContent(entry.content);
+  await promoteDependents(extractTaskId(taskNs), client);
+  await refreshPipelineSummaryFromContent(entry.content, client);
 }
 
 async function recoverStaleTasks(): Promise<void> {
@@ -1788,20 +1808,20 @@ async function recoverStaleTasks(): Promise<void> {
       const entry = await munin.read(result.namespace, "status");
       if (!entry) continue;
 
-      const claimedBy = parseClaimedBy(entry.tags);
-      const leaseExpires = parseLeaseExpiry(entry.tags);
       const now = Date.now();
 
-      // Decide whether to recover this task:
+      // Decide whether to recover this task (issue #77: workerId is host-stable
+      // so our own dead incarnation's tasks are recognised as "ours"):
       // - Our own tasks: always recover (we just restarted)
       // - Other worker's tasks: only if lease expired
-      // - No lease metadata (legacy): recover if older than default timeout
-      const isOurs = claimedBy === workerId || claimedBy === null;
-      const leaseExpired = leaseExpires !== null && now > leaseExpires;
-      const legacyStale = leaseExpires === null &&
-        (now - new Date(entry.updated_at).getTime()) > config.defaultTimeoutMs;
+      const decision = decideStartupRecovery({
+        tags: entry.tags,
+        workerId,
+        now,
+      });
+      const { claimedBy, leaseExpires, isOurs } = decision;
 
-      if (!isOurs && !leaseExpired) {
+      if (decision.action === "skip") {
         if (leaseExpires !== null) {
           console.log(
             `Skipping task ${result.namespace} — claimed by ${claimedBy}, lease expires in ${Math.round((leaseExpires - now) / 1000)}s`
@@ -1810,15 +1830,13 @@ async function recoverStaleTasks(): Promise<void> {
         continue;
       }
 
-      if (!isOurs && !leaseExpired && !legacyStale) continue;
-
       // Runtime-owned artefact delivery (issue #68): resume an interrupted
       // delivery instead of generic-failing it (which would discard the
       // deliverable and mis-render as success). MUST be gated on the same
       // single-owner test above (Codex review #1) — reconciling a task still
       // owned by a live worker would double-deliver. reconcileDeliveryPending
       // additionally CAS-reclaims, so even a gate race cannot duplicate rsync.
-      if (entry.tags.includes("delivery:pending")) {
+      if (decision.action === "reconcile-delivery") {
         console.log(
           `Reconciling delivery:pending task ${result.namespace} on startup`,
         );
@@ -1846,7 +1864,7 @@ async function recoverStaleTasks(): Promise<void> {
       await munin.write(
         result.namespace,
         "result",
-        `## Result\n\n- **Exit code:** -1\n- **Error:** Task recovered (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)\n`
+        `## Result\n\n- **Exit code:** ${DISPATCHER_FAILURE_EXIT_CODE}\n- **Error:** Task recovered (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)\n`
       );
       const runtime = (runtimeTag || "runtime:claude").replace(
         /^runtime:/,
@@ -1923,15 +1941,25 @@ async function reapExpiredLeases(): Promise<void> {
       });
       if (!decision.reap) continue;
 
-      // Runtime-owned artefact delivery (issue #68): never generic-reap a
-      // delivery:pending checkpoint to terminal `failed` — the agent content is
-      // preserved there and reaping it would mis-render as success and discard
-      // the deliverable. Leave it for startup reconciliation
-      // (`recoverStaleTasks`), which re-delivers without a paid rerun.
+      // Runtime-owned artefact delivery (issue #68 / #77): a delivery:pending
+      // checkpoint must NEVER be generic-reaped to terminal `failed` — the agent
+      // content is preserved there and a generic reap would discard the
+      // deliverable. Previously the reaper deferred to startup reconciliation,
+      // but a PID-stable workerId could deadlock that path (#77): startup
+      // recovery skipped a live-leased foreign task while the reaper skipped
+      // delivery:pending, so an orphaned checkpoint never reached a terminal
+      // state. We reach this branch only after `decision.reap` (lease expired,
+      // not the currently-executing task) — the owning worker is provably dead —
+      // so the reaper reconciles the delivery itself (re-delivers without a paid
+      // rerun, CAS-reclaiming first so it cannot double-deliver against a
+      // concurrent startup scan). This is defence in depth alongside the now
+      // host-stable workerId, which lets startup recovery handle the common
+      // crash+restart case directly.
       if (entry.tags.includes("delivery:pending")) {
         console.log(
-          `Skipping reap of ${result.namespace} — delivery:pending (left for startup reconciliation)`,
+          `Reconciling delivery:pending task ${result.namespace} via lease reaper (lease expired)`,
         );
+        await reconcileDeliveryPending(result.namespace, entry, reaperMunin);
         continue;
       }
 
@@ -1968,7 +1996,7 @@ async function reapExpiredLeases(): Promise<void> {
       await reaperMunin.write(
         result.namespace,
         "result",
-        `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`,
+        `## Result\n\n- **Exit code:** ${DISPATCHER_FAILURE_EXIT_CODE}\n- **Error:** ${errorMessage}\n`,
         undefined,
         undefined,
         classification,
@@ -2078,7 +2106,7 @@ async function failBlockedTask(
   await client.write(
     taskNs,
     "result",
-    `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`,
+    `## Result\n\n- **Exit code:** ${DISPATCHER_FAILURE_EXIT_CODE}\n- **Error:** ${errorMessage}\n`,
     undefined,
     undefined,
     classification
@@ -2766,7 +2794,7 @@ async function failTaskWithMessage(
   await munin.write(
     taskNs,
     "result",
-    `## Result\n\n- **Exit code:** -1\n- **Error:** ${errorMessage}\n`,
+    `## Result\n\n- **Exit code:** ${DISPATCHER_FAILURE_EXIT_CODE}\n- **Error:** ${errorMessage}\n`,
     undefined,
     undefined,
     classification
@@ -2790,6 +2818,7 @@ async function emitHeartbeat(queueDepth: number, blockedTasks: number): Promise<
   try {
     const heartbeat: Record<string, unknown> = {
       worker_id: workerId,
+      process_instance_id: processInstanceId,
       polled_at: new Date().toISOString(),
       queue_depth: queueDepth,
       blocked_tasks: blockedTasks,
@@ -3080,7 +3109,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       await munin.write(
         taskNs,
         "result",
-        `## Result\n\n- **Exit code:** -1\n- **Error:** ${securityViolation}\n`,
+        `## Result\n\n- **Exit code:** ${DISPATCHER_FAILURE_EXIT_CODE}\n- **Error:** ${securityViolation}\n`,
         undefined,
         undefined,
         classification,
@@ -3489,9 +3518,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // delivery checkpoint, to remove the renewal-vs-checkpoint race (Codex
     // review #2): a renewal tick firing during the checkpoint transition would
     // rewrite `running` tags built from the OLD base set and strip
-    // `delivery:pending`. Delivery doesn't need lease renewal — the reaper
-    // explicitly skips `delivery:pending`, and delivery is bounded by its own
-    // timeout — so dropping renewal here is safe. The cancellation watch stays
+    // `delivery:pending`. Delivery doesn't need lease renewal — the reaper never
+    // touches the currently-executing task (`shouldReapExpiredLease` returns
+    // reap:false for `namespace === currentTask`, regardless of lease), and
+    // delivery is bounded by its own timeout — so dropping renewal here is safe.
+    // (The reaper *does* reconcile a delivery:pending checkpoint once its lease
+    // expires AND it is not the current task, i.e. the owning worker is dead —
+    // see #77 — but that can never be this live in-process delivery.) The
+    // cancellation watch stays
     // ACTIVE through delivery so an operator can still abort a hung rsync; it
     // is stopped after delivery finalization below.
     stopLeaseRenewal();
@@ -3673,8 +3707,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       );
       // Lease renewal is deliberately NOT re-armed (Codex review #2): a
       // renewal tick would race the terminal-finalize CAS below. The reaper
-      // skips delivery:pending and delivery is bounded, so no renewal is
-      // needed. The terminal flip CASes on this checkpoint's updated_at.
+      // never reaps the currently-executing task (its `currentTask` guard, #77)
+      // and delivery is bounded, so no renewal is needed. The terminal flip
+      // CASes on this checkpoint's updated_at.
       deliveryCheckpointUpdatedAt =
         typeof checkpointWrite?.updated_at === "string"
           ? checkpointWrite.updated_at
@@ -4115,6 +4150,7 @@ app.get("/health", (_req, res) => {
     status: "ok",
     service: "hugin",
     worker_id: workerId,
+    process_instance_id: processInstanceId,
     current_task: currentTask,
     polling: !shuttingDown,
     queue_depth: lastQueueDepth,
@@ -4185,7 +4221,7 @@ async function shutdown(signal: string): Promise<void> {
         await munin.write(
           currentTask,
           "result",
-          `## Result\n\n- **Exit code:** -1\n- **Error:** Task interrupted by dispatcher shutdown (${signal}, worker: ${workerId})\n`
+          `## Result\n\n- **Exit code:** ${DISPATCHER_FAILURE_EXIT_CODE}\n- **Error:** Task interrupted by dispatcher shutdown (${signal}, worker: ${workerId})\n`
         );
         const task = parseTask(entry.content);
         const runtime = (runtimeTag || "runtime:claude").replace(
@@ -4224,6 +4260,11 @@ async function shutdown(signal: string): Promise<void> {
   if (currentDeliveryAbort) {
     console.log("Aborting running artefact delivery...");
     currentDeliveryAbort.abort();
+  }
+
+  if (currentReconcileAbort) {
+    console.log("Aborting running delivery reconciliation...");
+    currentReconcileAbort.abort();
   }
 
   if (currentSdkAbort) {
@@ -4266,7 +4307,7 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 
 // Ensure log directory exists
 ensureLogDir();
-console.log(`Worker ID: ${workerId}`);
+console.log(`Worker ID: ${workerId} (instance: ${processInstanceId})`);
 console.log(`Log directory: ${LOG_DIR}`);
 
 // Configure ollama hosts

@@ -198,6 +198,71 @@ export function shouldReapExpiredLease(input: ReapDecisionInput): ReapDecision {
   };
 }
 
+export interface StartupRecoveryInput {
+  /** Status-entry tags (carry `claimed_by:` / `lease_expires:` / `delivery:pending`). */
+  tags: string[];
+  /** This dispatcher's worker identity. HOST-stable since #77 (no PID). */
+  workerId: string;
+  /** Current wall-clock ms. */
+  now: number;
+}
+
+export type StartupRecoveryAction =
+  /** Owned by a still-live foreign worker — leave it alone. */
+  | "skip"
+  /** A `delivery:pending` checkpoint to re-deliver under CAS (#68). */
+  | "reconcile-delivery"
+  /** Generic stale/own task → terminalize as `failed`. */
+  | "recover-failed";
+
+export interface StartupRecoveryDecision {
+  action: StartupRecoveryAction;
+  isOurs: boolean;
+  leaseExpired: boolean;
+  claimedBy: string | null;
+  leaseExpires: number | null;
+}
+
+/**
+ * Decide what `recoverStaleTasks` should do with a `running` task seen at
+ * startup. Pure mirror of the inline gate in `src/index.ts`.
+ *
+ * Issue #77: `workerId` is HOST-stable (not PID-derived). After a crash +
+ * systemd restart, a `delivery:pending` checkpoint left by the dead incarnation
+ * carries `claimed_by:hugin-<host>` — which now equals the restarted process's
+ * `workerId` → `isOurs` is true → the gate falls through to "reconcile-delivery"
+ * even though the dead worker's lease has not yet expired. With the old
+ * PID-derived id `isOurs` was false and (lease still live) the task was
+ * "skip"ped, stranding it non-terminal until a second post-expiry restart.
+ *
+ * Note: the original second guard `if (!isOurs && !leaseExpired && !legacyStale)
+ * continue` was unreachable (the first `!isOurs && !leaseExpired` skip already
+ * caught those cases), so `legacyStale` never influenced the action — it is
+ * intentionally not modelled here.
+ */
+export function decideStartupRecovery(
+  input: StartupRecoveryInput,
+): StartupRecoveryDecision {
+  const claimedBy = parseClaimedByTag(input.tags);
+  const leaseExpires = parseLeaseExpiresTag(input.tags);
+  const isOurs = claimedBy === input.workerId || claimedBy === null;
+  const leaseExpired = leaseExpires !== null && input.now > leaseExpires;
+
+  if (!isOurs && !leaseExpired) {
+    return { action: "skip", isOurs, leaseExpired, claimedBy, leaseExpires };
+  }
+  if (input.tags.includes("delivery:pending")) {
+    return {
+      action: "reconcile-delivery",
+      isOurs,
+      leaseExpired,
+      claimedBy,
+      leaseExpires,
+    };
+  }
+  return { action: "recover-failed", isOurs, leaseExpired, claimedBy, leaseExpires };
+}
+
 // --- Branch-per-task git flow (#47) ---
 
 export interface TaskBranchOptions {
