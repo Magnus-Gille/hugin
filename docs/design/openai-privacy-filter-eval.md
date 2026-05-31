@@ -105,9 +105,11 @@ once it runs on a host.
 - **Report** — `npm run eval:pii` (or `scripts/run-pii-eval.ts --opf … --timings …`) prints a
   markdown + JSON report whose final section auto-evaluates the decision criteria below.
 
-## Next step
+## Results (2026-05-31)
 
-The harness is in place; the gating action is now purely **running `scripts/bench-opf.sh` on the Pi
-(and the laptop) once OPF is installed**, then scoring with `--opf`/`--timings`. Until the Pi latency
-and OPF recall numbers exist, no integration ships. (The Mac Studio option remains contingent on the
-`projects/home-server-inference-evaluation` buy decision; the Pi is the host we can benchmark today.)
+The empirical run is **done** — see [`docs/security/privacy-filter-evaluation.md`](../security/privacy-filter-evaluation.md)
+for the full write-up. Headline: OPF runs on the Pi only with an mkldnn workaround (A76 has no bf16),
+is *not* a clear win over the regex baseline (typed F1 86.5% vs 90.0%, detection recall 90.1% vs
+93.0%), wins decisively only on free-form addresses (40→100% recall), and is far too slow for inline
+use on the Pi (~44 s load, 8.8 tok/s, 324 s for 10 KB). **Verdict: reject OPF-replaces-regex; keep
+regex inline, reserve OPF for async person/address detection on a faster host if/when one exists.**

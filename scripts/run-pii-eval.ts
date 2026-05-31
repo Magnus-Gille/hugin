@@ -70,10 +70,14 @@ function opfPredictions(
   examples: LabelledExample[],
   predictionsPath: string,
 ): { preds: ExamplePrediction[]; missing: string[] } {
+  // OPF assigns its own content-hashed example_id (it ignores our info.id), so
+  // match predictions to fixtures by exact text rather than by id.
   const byId = parseOpfPredictionsJsonl(readFileSync(predictionsPath, "utf8"));
+  const byText = new Map<string, ReturnType<typeof byId.get>>();
+  for (const pred of byId.values()) byText.set(pred.text, pred);
   const missing: string[] = [];
   const preds = examples.map((example) => {
-    const found = byId.get(example.id);
+    const found = byText.get(example.text);
     if (!found) missing.push(example.id);
     return { example, predicted: found?.spans ?? [] };
   });
@@ -211,7 +215,8 @@ function main(): void {
   const jsonPath = arg("--json");
 
   const examples = loadFixtures(piiPath, cleanPath);
-  const reports: ScoreReport[] = [scoreDetector("regex-baseline", regexPredictions(examples))];
+  const regexPreds = regexPredictions(examples);
+  const reports: ScoreReport[] = [scoreDetector("regex-baseline", regexPreds)];
 
   if (opfPath) {
     const { preds, missing } = opfPredictions(examples, opfPath);
@@ -223,6 +228,21 @@ function main(): void {
       );
     }
     reports.push(scoreDetector("opf", preds));
+
+    // Union (regex ∪ OPF): the defense-in-depth configuration. Per example,
+    // combine both detectors' spans, dropping exact (label,start,end) dupes.
+    // Detection recall of the union is the practical leak-prevention ceiling.
+    const union: ExamplePrediction[] = examples.map((example, i) => {
+      const seen = new Set<string>();
+      const merged = [...regexPreds[i].predicted, ...preds[i].predicted].filter((s) => {
+        const k = `${s.label}:${s.start}:${s.end}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      return { example, predicted: merged };
+    });
+    reports.push(scoreDetector("regex ∪ opf", union));
   }
 
   let timings: Timings | null = null;
