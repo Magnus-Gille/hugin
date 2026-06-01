@@ -1,0 +1,49 @@
+{
+  "binding": {
+    "schemaVersion": 1,
+    "bindingId": "md-frontmatter-normalization-binding",
+    "version": 1,
+    "state": "draft",
+    "tuple": {
+      "taskClassId": "md-frontmatter-normalization",
+      "taskClassVersion": 1,
+      "taskClassHash": "58aa2d8626ed3a261417716653b85cec95c384b7bbe853f1eb36cb2bf07f64f3",
+      "skillProfileId": "markdown-frontmatter-normalization:pi-local-30b",
+      "skillProfileHash": "cf1486c008441e6425027af18884b94fc9fdadd3f095bc63b152b9272e636d0a",
+      "cellManifestId": "ollama-qwen3-coder-30b-local",
+      "cellManifestHash": "2447e7f72e7799726ebc182f8ad70c44dc52422a2633ea674514f5a2e18b2ccb",
+      "evalSuiteId": "eval-md-frontmatter-normalization-v1",
+      "evalSuiteHash": "d2eeffc5bcb121d1c914d57ab9635e13f4a12567d8eb28397af02038d7f51ef7"
+    },
+    "fallbackPolicy": {
+      "cloudAllowed": true,
+      "autoEscalateAllowed": true,
+      "requiresUserApproval": false,
+      "zdrRequired": false,
+      "egressClass": "local",
+      "fallbackProviderSet": [],
+      "fallbackOnFailureKinds": [
+        "parser",
+        "schema",
+        "tests",
+        "timeout",
+        "infra"
+      ]
+    },
+    "effectiveSensitivityCeiling": "internal",
+    "createdAt": "2026-06-01T00:00:00.000Z",
+    "updatedAt": "2026-06-01T00:00:00.000Z",
+    "notes": "Slice-one (#84) authored binding. DRAFT — go-live drives draft→candidate→shadow→active with a real ValidationRun against a deployed local cell. See docs."
+  },
+  "tuple": {
+    "taskClassId": "md-frontmatter-normalization",
+    "taskClassVersion": 1,
+    "taskClassHash": "58aa2d8626ed3a261417716653b85cec95c384b7bbe853f1eb36cb2bf07f64f3",
+    "skillProfileId": "markdown-frontmatter-normalization:pi-local-30b",
+    "skillProfileHash": "cf1486c008441e6425027af18884b94fc9fdadd3f095bc63b152b9272e636d0a",
+    "cellManifestId": "ollama-qwen3-coder-30b-local",
+    "cellManifestHash": "2447e7f72e7799726ebc182f8ad70c44dc52422a2633ea674514f5a2e18b2ccb",
+    "evalSuiteId": "eval-md-frontmatter-normalization-v1",
+    "evalSuiteHash": "d2eeffc5bcb121d1c914d57ab9635e13f4a12567d8eb28397af02038d7f51ef7"
+  }
+}

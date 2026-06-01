@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "classId": "md-frontmatter-normalization",
+  "version": 1,
+  "classifierHash": "58aa2d8626ed3a261417716653b85cec95c384b7bbe853f1eb36cb2bf07f64f3",
+  "predicate": {
+    "kind": "rule",
+    "rules": [
+      {
+        "match": "frontmatter",
+        "weight": 3
+      },
+      {
+        "match": "front matter",
+        "weight": 3
+      },
+      {
+        "match": "yaml header",
+        "weight": 3
+      },
+      {
+        "match": "normalize",
+        "weight": 1
+      }
+    ],
+    "confidenceThreshold": 0.4,
+    "topTwoMargin": 0.15
+  },
+  "hardNegatives": [
+    {
+      "input": "normalize the import",
+      "why": "Import normalization is a different (TS) skill; the word 'normalize' alone must not route here."
+    },
+    {
+      "input": "json config",
+      "why": "JSON config files have no YAML frontmatter; this is a look-alike."
+    }
+  ],
+  "contraindications": [
+    "do not modify the frontmatter"
+  ],
+  "shouldClassify": [
+    {
+      "input": "Normalize the YAML frontmatter in this markdown file."
+    },
+    {
+      "input": "Please clean up and normalize the front matter block."
+    }
+  ],
+  "shouldNotClassify": [
+    {
+      "input": "Normalize the import ordering in this TypeScript file."
+    },
+    {
+      "input": "Summarize this article in three sentences."
+    }
+  ],
+  "sensitivityCeiling": "internal"
+}

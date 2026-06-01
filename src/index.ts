@@ -79,6 +79,7 @@ import {
   type TaskExecutionPipelineContext,
   type TaskExecutionRuntimeMetadata,
   type TaskExecutionSensitivity,
+  type SkillRoute,
 } from "./task-result-schema.js";
 import {
   buildSensitivityAssessment,
@@ -112,6 +113,7 @@ import {
   type SigningPolicy,
   type VerificationResult,
 } from "./task-signing.js";
+import { consultSkillLane } from "./skill/skill-lane-dispatch.js";
 import { readBrokerEnv, startBroker, type RunningBroker } from "./broker/server.js";
 import { BrokerTaskStore } from "./broker/task-store.js";
 import { DelegationJournal } from "./broker/journal.js";
@@ -451,6 +453,11 @@ interface TaskConfig {
   capabilities?: RuntimeCapability[];
   autoRouted?: boolean;
   routingDecision?: RouterDecision;
+  // Local-skill lane audit record (issue #84). Set when HUGIN_SKILL_LANE=on and
+  // the lane was consulted. Carried into the structured result for auditability.
+  // Slice-one ships no `active` binding, so this is always an abstain record in
+  // production until go-live — the dispatcher routes cloud regardless.
+  skillRoute?: SkillRoute;
   // Runtime-owned artefact delivery (issue #68). Runtime-only — deliberately
   // NOT in SdkTaskConfig: the manifest must never reach the agent prompt.
   artifactManifest?: ArtifactManifest;
@@ -3188,6 +3195,54 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
   if (declaredRuntime !== "pipeline" && parsedTask) {
     const sensitivityAssessment = await assessTaskSecurity(parsedTask);
+
+    // Local-skill lane pre-step (issue #84), GUARDED by HUGIN_SKILL_LANE.
+    // Default OFF ⇒ consultSkillLane returns null ⇒ a true no-op: the dispatcher
+    // proceeds with the existing cloud auto-router exactly as before. When ON, it
+    // fails closed to cloud unless a fully verified `active` RouteBinding is
+    // selectable — which requires authored slice-one artifacts driven to active
+    // against a real local cell (a deliberate human go-live step). Until then the
+    // lane only ever records an abstain audit record; it never short-circuits to a
+    // local executor here (the local executor itself is a separate go-live step).
+    try {
+      const laneResult = await consultSkillLane(
+        {
+          prompt: parsedTask.prompt,
+          sensitivity: sensitivityAssessment.effective,
+        },
+        munin,
+        { enabled: config.skillLaneEnabled },
+      );
+      if (laneResult) {
+        parsedTask.skillRoute = laneResult.skillRoute;
+        if (laneResult.selectedLocal) {
+          // Defense-in-depth: slice-one ships no active binding and there is no
+          // local executor wired here yet. If a future change makes the lane
+          // select local, refuse to silently mis-route — record the abstain and
+          // fall through to cloud rather than pretend to execute locally.
+          console.warn(
+            `[skill-lane] ${taskNs}: lane selected a local route but no local ` +
+              `executor is wired; falling through to cloud (binding ` +
+              `${laneResult.skillRoute.bindingId ?? "?"}).`,
+          );
+          parsedTask.skillRoute = {
+            ...laneResult.skillRoute,
+            abstained: true,
+            abstainReason: "local-executor-not-wired",
+          };
+        } else {
+          console.log(
+            `[skill-lane] ${taskNs}: fall-through (${laneResult.skillRoute.abstainReason ?? "abstain"}) → cloud`,
+          );
+        }
+      }
+    } catch (err) {
+      // Fail-closed: any lane error must never block the existing cloud path.
+      console.warn(
+        `[skill-lane] ${taskNs}: consultation failed, ignoring (cloud path unaffected):`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
 
     // Auto-route: resolve concrete runtime before security check (defense-in-depth)
     if (parsedTask.autoRouted) {

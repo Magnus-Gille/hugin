@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "evalSuiteId": "eval-md-frontmatter-normalization-v1",
+  "evalSuiteHash": "d2eeffc5bcb121d1c914d57ab9635e13f4a12567d8eb28397af02038d7f51ef7",
+  "skillId": "markdown-frontmatter-normalization",
+  "taskClassId": "md-frontmatter-normalization",
+  "oracles": [
+    {
+      "id": "exact-match-normalizer",
+      "kind": "snapshot-diff",
+      "independent": true,
+      "ref": "src/skill/slice-one/frontmatter-normalize.ts#gradeFrontmatter"
+    }
+  ],
+  "judgeIsAdvisoryOnly": true,
+  "fixtures": {
+    "positive": [
+      {
+        "id": "pos-reorder-and-quote",
+        "input": {
+          "document": "---\nb: 2\na: 1\n---\nbody\n"
+        },
+        "expected": "---\na: \"1\"\nb: \"2\"\n---\nbody\n",
+        "allowedNondeterminism": []
+      },
+      {
+        "id": "pos-list-and-spacing",
+        "input": {
+          "document": "---\ntags:  [x, y]\ntitle:Hello\n---\n# Body\n"
+        },
+        "expected": "---\ntags:\n  - x\n  - y\ntitle: Hello\n---\n# Body\n",
+        "allowedNondeterminism": []
+      }
+    ],
+    "negative": [
+      {
+        "id": "neg-no-frontmatter",
+        "input": {
+          "document": "# Heading\n\nNo frontmatter.\n"
+        },
+        "expected": {
+          "abstain": true,
+          "reason": "no-frontmatter"
+        },
+        "allowedNondeterminism": []
+      },
+      {
+        "id": "neg-nested-map",
+        "input": {
+          "document": "---\nnested:\n  a: 1\n---\n"
+        },
+        "expected": {
+          "abstain": true,
+          "reason": "unsupported-frontmatter"
+        },
+        "allowedNondeterminism": []
+      }
+    ],
+    "retrieval": [
+      {
+        "id": "ret-positive",
+        "input": "Normalize the YAML frontmatter in this markdown file.",
+        "shouldSelect": true
+      },
+      {
+        "id": "ret-hard-negative-imports",
+        "input": "normalize the import ordering in this typescript file",
+        "shouldSelect": false
+      }
+    ],
+    "mutation": [
+      {
+        "id": "mut-body-must-not-change",
+        "input": {
+          "document": "---\nb: 2\na: 1\n---\nMUTATED body\n"
+        },
+        "expected": "---\na: \"1\"\nb: \"2\"\n---\nMUTATED body\n",
+        "allowedNondeterminism": []
+      }
+    ]
+  }
+}
