@@ -27,6 +27,7 @@ export const pipelineRuntimeIdSchema = z.enum([
   "codex-spawn",
   "ollama-pi",
   "ollama-laptop",
+  "ollama-orin",
 ]);
 export type PipelineRuntimeId = z.infer<typeof pipelineRuntimeIdSchema>;
 
@@ -38,7 +39,7 @@ export const pipelinePhaseIRSchema = z.object({
   taskNamespace: z.string().min(1),
   runtime: pipelineRuntimeIdSchema,
   dispatcherRuntime: z.enum(["claude", "codex", "ollama"]),
-  ollamaHost: z.enum(["pi", "laptop"]).optional(),
+  ollamaHost: z.enum(["pi", "laptop", "orin"]).optional(),
   model: z.string().min(1).optional(),
   context: z.string().min(1).optional(),
   dependsOn: z.array(z.string().min(1)),
