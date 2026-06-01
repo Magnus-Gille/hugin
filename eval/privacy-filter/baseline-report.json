@@ -1,0 +1,140 @@
+{
+  "reports": [
+    {
+      "detector": "regex-baseline",
+      "examples": 34,
+      "micro": {
+        "exact": {
+          "truePositives": 50,
+          "falsePositives": 19,
+          "falseNegatives": 21,
+          "precision": 0.7246376811594203,
+          "recall": 0.704225352112676,
+          "f1": 0.7142857142857142
+        },
+        "relaxed": {
+          "truePositives": 63,
+          "falsePositives": 6,
+          "falseNegatives": 8,
+          "precision": 0.9130434782608695,
+          "recall": 0.8873239436619719,
+          "f1": 0.9
+        },
+        "detection": {
+          "truePositives": 66,
+          "falsePositives": 3,
+          "falseNegatives": 5,
+          "precision": 0.9565217391304348,
+          "recall": 0.9295774647887324,
+          "f1": 0.9428571428571428
+        }
+      },
+      "macro": {
+        "exact": {
+          "f1": 0.6725867530215356
+        },
+        "relaxed": {
+          "f1": 0.8769903204685814
+        }
+      },
+      "perLabel": [
+        {
+          "label": "private_person",
+          "metrics": {
+            "truePositives": 20,
+            "falsePositives": 4,
+            "falseNegatives": 2,
+            "precision": 0.8333333333333334,
+            "recall": 0.9090909090909091,
+            "f1": 0.8695652173913043
+          }
+        },
+        {
+          "label": "private_email",
+          "metrics": {
+            "truePositives": 9,
+            "falsePositives": 0,
+            "falseNegatives": 0,
+            "precision": 1,
+            "recall": 1,
+            "f1": 1
+          }
+        },
+        {
+          "label": "private_phone",
+          "metrics": {
+            "truePositives": 6,
+            "falsePositives": 1,
+            "falseNegatives": 0,
+            "precision": 0.8571428571428571,
+            "recall": 1,
+            "f1": 0.923076923076923
+          }
+        },
+        {
+          "label": "private_address",
+          "metrics": {
+            "truePositives": 2,
+            "falsePositives": 0,
+            "falseNegatives": 3,
+            "precision": 1,
+            "recall": 0.4,
+            "f1": 0.5714285714285715
+          }
+        },
+        {
+          "label": "private_date",
+          "metrics": {
+            "truePositives": 13,
+            "falsePositives": 0,
+            "falseNegatives": 1,
+            "precision": 1,
+            "recall": 0.9285714285714286,
+            "f1": 0.962962962962963
+          }
+        },
+        {
+          "label": "private_url",
+          "metrics": {
+            "truePositives": 4,
+            "falsePositives": 1,
+            "falseNegatives": 0,
+            "precision": 0.8,
+            "recall": 1,
+            "f1": 0.888888888888889
+          }
+        },
+        {
+          "label": "account_number",
+          "metrics": {
+            "truePositives": 4,
+            "falsePositives": 0,
+            "falseNegatives": 2,
+            "precision": 1,
+            "recall": 0.6666666666666666,
+            "f1": 0.8
+          }
+        },
+        {
+          "label": "secret",
+          "metrics": {
+            "truePositives": 5,
+            "falsePositives": 0,
+            "falseNegatives": 0,
+            "precision": 1,
+            "recall": 1,
+            "f1": 1
+          }
+        }
+      ],
+      "falsePositives": {
+        "cleanExamples": 10,
+        "cleanExamplesWithPredictions": 1,
+        "spuriousSpans": 1,
+        "spuriousSpansPerExample": 0.1,
+        "contaminationRate": 0.1
+      }
+    }
+  ],
+  "timings": null
+}
