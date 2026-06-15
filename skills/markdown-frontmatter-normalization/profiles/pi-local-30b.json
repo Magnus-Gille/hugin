@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "skillId": "markdown-frontmatter-normalization",
+  "profileId": "markdown-frontmatter-normalization:pi-local-30b",
+  "sourcePackageHash": "5a3b2f815a418ba57b4caea44ed0949d32cb39c10b913ae5beb4fb6b439ccb58",
+  "systemPreamble": "You are a constrained operator executing the \"Normalize markdown YAML frontmatter\" skill (id: markdown-frontmatter-normalization).\n\nYour task class is: md-frontmatter-normalization\nEgress class: local (you MUST NOT make network calls beyond what this permits).\n\nAllowed tools: read_file, write_file.\nYou MUST NOT call any tool not in this allowlist.\n\nAbort immediately if any of the following conditions are true:\n  - The document does not start with a `---` frontmatter fence.\n  - The frontmatter block is unterminated (no closing `---`).\n  - The frontmatter contains nested maps, multi-line scalars, anchors, or flow maps (outside the supported subset).\n\nDo NOT use this skill if any of the following apply (anti-examples exist to guide you):\n  - The document has no frontmatter block; this skill must abstain, never invent one.\n  - Nested maps are outside the supported subset; abstain rather than mangle.\n\nProceed step by step. After each step, verify the checkpoint before continuing.\nDo not improvise beyond the defined steps.\n\nContraindications (do not proceed if any hold):\n  - do not modify the body\n  - leave frontmatter as-is",
+  "inputSchema": {
+    "document": {
+      "type": "string"
+    }
+  },
+  "outputSchema": {
+    "document": {
+      "type": "string"
+    }
+  },
+  "toolAllowlist": [
+    "read_file",
+    "write_file"
+  ],
+  "stepList": [
+    {
+      "id": "read-document",
+      "prompt": "Read the markdown document. Confirm it opens with a `---` fenced YAML frontmatter block.",
+      "checkpointAssertion": "The document text is loaded and a frontmatter block is detected at the start."
+    },
+    {
+      "id": "normalize-block",
+      "prompt": "Sort the frontmatter keys ascending, emit `key: value` with a single space after the colon, quote only values that require it, and render lists as `  - item` lines. Leave the body after the closing `---` byte-for-byte unchanged.",
+      "checkpointAssertion": "Keys are sorted; spacing/quoting is canonical; the body after the closing fence is unchanged."
+    },
+    {
+      "id": "write-document",
+      "prompt": "Write the normalized document back.",
+      "checkpointAssertion": "File written; the body bytes after the frontmatter are identical to the input."
+    }
+  ],
+  "examples": [
+    {
+      "input": {
+        "document": "---\nb: 2\na: 1\n---\nbody\n"
+      },
+      "output": {
+        "document": "---\na: \"1\"\nb: \"2\"\n---\nbody\n"
+      }
+    }
+  ],
+  "antiExamples": [
+    {
+      "input": {
+        "document": "# Just a heading\n\nNo frontmatter here.\n"
+      },
+      "why": "The document has no frontmatter block; this skill must abstain, never invent one."
+    },
+    {
+      "input": {
+        "document": "---\nnested:\n  a: 1\n---\n"
+      },
+      "why": "Nested maps are outside the supported subset; abstain rather than mangle."
+    }
+  ],
+  "abortConditions": [
+    "The document does not start with a `---` frontmatter fence.",
+    "The frontmatter block is unterminated (no closing `---`).",
+    "The frontmatter contains nested maps, multi-line scalars, anchors, or flow maps (outside the supported subset)."
+  ],
+  "maxContextChars": 32000,
+  "expectedArtifacts": [
+    "document"
+  ],
+  "perStepGraderHooks": [],
+  "egressClass": "local",
+  "profileHash": "cf1486c008441e6425027af18884b94fc9fdadd3f095bc63b152b9272e636d0a"
+}

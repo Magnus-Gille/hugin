@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "skillId": "markdown-frontmatter-normalization",
+  "title": "Normalize markdown YAML frontmatter",
+  "taskClassId": "md-frontmatter-normalization",
+  "inputSchema": {
+    "document": {
+      "type": "string"
+    }
+  },
+  "outputSchema": {
+    "document": {
+      "type": "string"
+    }
+  },
+  "toolAllowlist": [
+    "read_file",
+    "write_file"
+  ],
+  "steps": [
+    {
+      "id": "read-document",
+      "instruction": "Read the markdown document. Confirm it opens with a `---` fenced YAML frontmatter block.",
+      "checkpoint": "The document text is loaded and a frontmatter block is detected at the start."
+    },
+    {
+      "id": "normalize-block",
+      "instruction": "Sort the frontmatter keys ascending, emit `key: value` with a single space after the colon, quote only values that require it, and render lists as `  - item` lines. Leave the body after the closing `---` byte-for-byte unchanged.",
+      "checkpoint": "Keys are sorted; spacing/quoting is canonical; the body after the closing fence is unchanged."
+    },
+    {
+      "id": "write-document",
+      "instruction": "Write the normalized document back.",
+      "checkpoint": "File written; the body bytes after the frontmatter are identical to the input."
+    }
+  ],
+  "examples": [
+    {
+      "input": {
+        "document": "---\nb: 2\na: 1\n---\nbody\n"
+      },
+      "output": {
+        "document": "---\na: \"1\"\nb: \"2\"\n---\nbody\n"
+      }
+    }
+  ],
+  "antiExamples": [
+    {
+      "input": {
+        "document": "# Just a heading\n\nNo frontmatter here.\n"
+      },
+      "why": "The document has no frontmatter block; this skill must abstain, never invent one."
+    },
+    {
+      "input": {
+        "document": "---\nnested:\n  a: 1\n---\n"
+      },
+      "why": "Nested maps are outside the supported subset; abstain rather than mangle."
+    }
+  ],
+  "abortConditions": [
+    "The document does not start with a `---` frontmatter fence.",
+    "The frontmatter block is unterminated (no closing `---`).",
+    "The frontmatter contains nested maps, multi-line scalars, anchors, or flow maps (outside the supported subset)."
+  ],
+  "contraindications": [
+    "do not modify the body",
+    "leave frontmatter as-is"
+  ],
+  "egressClass": "local",
+  "evalSuiteId": "eval-md-frontmatter-normalization-v1"
+}
