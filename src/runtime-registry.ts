@@ -132,7 +132,10 @@ export const RUNTIME_REGISTRY: readonly RuntimeDefinition[] = [
     modelSize: "small",
     capabilities: [],
     ollamaHost: "orin",
-    defaultModel: "qwen2.5-coder:7b",
+    // qwen2.5-coder:7b OOMs on the 8 GB Orin Nano (contiguous CUDA buffer alloc fails;
+    // empirically verified 2026-06-15). qwen2.5-coder:3b is the largest coder model that
+    // fits and runs on GPU (~18 tok/s headless). Do not raise without re-testing on hardware.
+    defaultModel: "qwen2.5-coder:3b",
     provider: "ollama-local",
     egress: "local",
     zdrRequired: false,
