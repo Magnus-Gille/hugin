@@ -200,7 +200,7 @@ MUNIN_API_KEY=<key> MUNIN_URL=http://localhost:3030 npm run dev
 
 Default host: `huginmunin.local` (or Tailscale IP `100.97.117.37` if mDNS unavailable).
 
-The Pi needs a `.env` file at `/home/magnus/hugin/.env`:
+The Pi needs a `.env` file at `/home/magnus/repos/hugin/.env`:
 ```
 MUNIN_API_KEY=<same key Munin uses>
 ```

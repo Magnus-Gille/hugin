@@ -1,7 +1,21 @@
 # Hugin — Status
 
-**Last session:** 2026-06-15 (session 3 — merged the 4-PR sweep)
-**Branch:** main (clean at `3ddf550`; 0 PRs open)
+**Last session:** 2026-06-15 (session 4 — Orin deployed LIVE + registry fix #104 + pipeline demo)
+**Branch:** main (clean at `db86e14`; 0 PRs open)
+
+## Session 4 (2026-06-15) — Orin Nano GPU cell LIVE in Hugin
+
+End-to-end: recovered the Orin, benchmarked it, fixed a config bug, deployed to the Pi, smoke-tested, and demoed a draft→review pipeline.
+
+- **Recovered the cell.** Host ollama 0.24.0 had auto-started after a reboot and was squatting `:11434`, crash-looping the dustynv GPU container. Stopped host ollama → container healthy. Later **`sudo systemctl disable ollama`** on the Orin (Magnus) so it never recurs.
+- **Hardware-verified model envelope.** The 8 GB Orin is a hard **~3B cell**: `qwen2.5-coder:7b` AND `qwen3:4b` both **OOM** (contiguous CUDA buffer alloc fails). `qwen2.5-coder:3b` fits at **18 tok/s, 100% GPU**. 7B/8B coders need the BosGame/Mac-Studio tier.
+- **PR [#104](https://github.com/Magnus-Gille/hugin/pull/104) merged** (`db86e14`) — `ollama-orin` registry default `7b → 3b` (7b would 500 every defaulted task).
+- **GPU-memory wedge recovered without a reboot** — the big test pulls flooded page cache and broke even the 3b; deleting the oversized models freed it (drop_caches/reboot are password-gated, not in the Jetson NOPASSWD grant — friction logged).
+- **Deployed merged `main` to the Pi** via `deploy-pi.sh` (Pi was 5 commits behind on old code); added `OLLAMA_ORIN_URL` to Pi `.env`. Pre-deploy backup on Pi branch `pi-predeploy-20260615` (snapshot `5aa104b`).
+- **Smoke test:** task pinned `Ollama-host: orin` → `effectiveHost: orin`, exit 0, 5 s, no fallback. ✅
+- **Capability test (LRUCache, medium):** bare 3B passed the happy path but failed update-marks-MRU + crashed (KeyError) + missed O(1). Classic small-model profile.
+- **Pipeline demo (the fix):** `ollama-orin` draft → `claude-sdk` review (read draft from Munin, ~8¢) → corrected code passed all in-spec tests. Proves the cheap-local-draft + cloud-review pattern (the #84 skill-lane concept) works on real hardware.
+- **Architecture note:** Pi (`huginmunin`) runs Hugin+Munin and orchestrates; Orin (`magnus-desktop`/`100.127.176.78`) is the GPU workhorse Hugin calls over HTTP.
 
 ## Session 3 (2026-06-15) — all 4 sweep PRs reviewed & merged
 
@@ -16,8 +30,10 @@ Reviewed and merged the four PRs left open by the 2026-06-01 autonomous sweep. B
 
 ## ⏭️ Remaining — needs Magnus / hardware access (NOT code-completable)
 
-1. **Deploy Orin** — install ollama on Orin, pull `qwen2.5-coder:7b`, set `OLLAMA_ORIN_URL=http://100.127.176.78:11434` in Pi `.env`, restart hugin, smoke-test `Ollama-host: orin`. (Also: redeploy Hugin to the Pi to pick up the merged Orin wiring.)
-2. **Remediate #98** in Tailscale admin console — SSH `check` action, tags, scoped src excluding Pi; passphrase/HW-back the laptop `~/.ssh/id_ed25519`.
+1. ✅ **DONE (session 4): Deploy Orin** — live, smoke-tested, registry default fixed (#104), host ollama disabled. Orin is a 3B cell (`qwen2.5-coder:3b`).
+2. **Remediate #98** in Tailscale admin console — SSH `check` action is now active (it gated this session's Pi access — good); finish the rest (tags, scoped src excluding Pi; passphrase/HW-back the laptop `~/.ssh/id_ed25519`).
+   - Optional: add `vm.drop_caches` (+ scoped reboot) to the Orin `magnus-jetson-ops` NOPASSWD grant so a wedged Jetson GPU can self-heal unattended.
+   - Cleanup: delete Pi backup branch `pi-predeploy-20260615` once confident the deploy is solid.
 3. **Finish #101 OPF run** — SSH Orin manually, run the 4 followup commands (`pip install -e ... --no-deps`, rsync fixtures, `bench-opf.sh --device cuda`, rsync back + `run-pii-eval.ts`), commit results under `eval/privacy-filter/results/orin/`.
 4. **#84 go-live** — do **NOT** flip `HUGIN_SKILL_LANE=on` until a real active RouteBinding + live cell + local executor exist (6 go-live steps in PR #102 body; lane is a no-op today).
 5. **Remove `magnus-docker-debug`** sudoers grant once Orin setup is stable: `sudo rm /etc/sudoers.d/magnus-docker-debug`.
