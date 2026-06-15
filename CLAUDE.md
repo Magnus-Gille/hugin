@@ -49,7 +49,7 @@ Content format:
 - **Reply-to:** telegram:12345678
 - **Reply-format:** summary
 - **Model:** qwen2.5:7b
-- **Ollama-host:** pi | laptop
+- **Ollama-host:** pi | laptop | orin
 - **Reasoning:** true | false
 - **Fallback:** claude | none
 - **Context-refs:** meta/conventions/status, projects/heimdall/status
@@ -74,7 +74,7 @@ Content format:
 **Task groups:** `Group:` and `Sequence:` enable multi-step task orchestration. Both are forwarded in results and heartbeats.
 
 **Ollama-specific fields:**
-- `Ollama-host:` — prefer a specific host (`pi` for local, `laptop` for remote via Tailscale). Default: auto-select.
+- `Ollama-host:` — prefer a specific host (`pi` for local, `laptop` for remote via Tailscale, `orin` for the Jetson Orin Nano GPU cell via Tailscale). Default: auto-select.
 - `Reasoning:` — `true` to force `think:true` via native `/api/chat`, `false` to force `think:false`. Omit to auto: reasoning-model families (qwen3/3.5, deepseek-r1, magistral) default to `think:false` via `/api/chat`; other models use the OpenAI-compatible endpoint unchanged. `gpt-oss` uses level-based reasoning (`low`/`medium`/`high`) and is not auto-routed — set `Reasoning:` explicitly only once Hugin supports levels.
 - `Fallback:` — `claude` to fall back to Claude on infra failures (host unreachable, 5xx); `none` (default) to fail without fallback. Semantic failure (model responds but poorly) is never retried — that's experiment data.
 - `Context-refs:` — comma-separated Munin references (`namespace/key`) to fetch and inject into the prompt. Hugin enforces Munin classification against the task/runtime trust boundary before injecting them.
@@ -86,7 +86,7 @@ Content format:
 
 **Auto-routing:** Use `Runtime: auto` to let Hugin select the runtime. The router filters by trust tier (sensitivity ceiling), availability (ollama host probes), and capabilities, then ranks by cost (free > subscription), trust (trusted > semi-trusted), and model size. Optional `Capabilities: tools, code, structured-output` narrows candidates. Explicit runtimes remain the default — `auto` is opt-in. Routing decisions are logged and included in structured results.
 
-**Pipeline tasks:** Use `Runtime: pipeline` with a `### Pipeline` section instead of `### Prompt`. Pipeline phases use runtime IDs (`claude-sdk`, `codex-spawn`, `ollama-pi`, `ollama-laptop`, or `auto`) which differ from standalone runtime names. Per-phase `Capabilities:` is supported.
+**Pipeline tasks:** Use `Runtime: pipeline` with a `### Pipeline` section instead of `### Prompt`. Pipeline phases use runtime IDs (`claude-sdk`, `codex-spawn`, `ollama-pi`, `ollama-laptop`, `ollama-orin`, or `auto`) which differ from standalone runtime names. Per-phase `Capabilities:` is supported.
 
 **Artefact delivery (`### Artifacts` manifest, issue #68):** A task may declare an `### Artifacts` section so that **Hugin (not the agent)** owns and verifies delivery of the deliverables. The agent only writes content to the declared local staging paths and must make no delivery claims.
 
@@ -260,6 +260,7 @@ claude mcp add-json hugin '{"command":"node","args":["/Users/magnus/repos/hugin/
 | `HUGIN_ALLOWED_SUBMITTERS` | `Codex,Codex-desktop,ratatoskr,Codex-web,Codex-mobile,claude-code,claude-desktop,claude-web,claude-mobile,hugin` | Comma-separated list of allowed `Submitted by:` values. Includes both current Codex-facing names and legacy `claude-*` names during the transition. Set to `*` to allow all. |
 | `OLLAMA_PI_URL` | `http://127.0.0.1:11434` | Ollama endpoint on Pi (local) |
 | `OLLAMA_LAPTOP_URL` | — | Ollama endpoint on laptop (via Tailscale, empty = disabled) |
+| `OLLAMA_ORIN_URL` | — | Ollama endpoint on Jetson Orin Nano GPU cell (via Tailscale IP 100.127.176.78, empty = disabled) |
 | `OLLAMA_DEFAULT_MODEL` | `qwen2.5:3b` | Default model for ollama tasks without explicit Model field |
 | `HUGIN_ALLOWED_EGRESS_HOSTS` | — | Comma-separated extra hosts to allow for outbound fetch (added to built-in allowlist) |
 | `HUGIN_INJECTION_POLICY` | `warn` | Prompt-injection policy for context-refs: `off` (no scan), `warn` (prepend warning banner), `block` (quarantine high-severity refs, task continues), `fail` (reject task). See `docs/security/prompt-injection-scanner.md`. |

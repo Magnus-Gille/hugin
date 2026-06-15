@@ -48,6 +48,7 @@ export function buildDefaultEgressHosts(input: {
   muninUrl: string;
   ollamaPiUrl?: string;
   ollamaLaptopUrl?: string;
+  ollamaOrinUrl?: string;
   extraHosts?: string[];
 }): string[] {
   const hosts = new Set<string>([
@@ -64,6 +65,7 @@ export function buildDefaultEgressHosts(input: {
     input.muninUrl,
     input.ollamaPiUrl,
     input.ollamaLaptopUrl,
+    input.ollamaOrinUrl,
   ]) {
     const host = hostFromUrl(candidate);
     if (host) hosts.add(host);
