@@ -39,7 +39,7 @@ export const pipelinePhaseExecutionSummarySchema = z.object({
   taskNamespace: z.string().min(1),
   runtime: pipelineRuntimeIdSchema,
   dispatcherRuntime: z.enum(["claude", "codex", "ollama"]),
-  ollamaHost: z.enum(["pi", "laptop"]).optional(),
+  ollamaHost: z.enum(["pi", "laptop", "orin"]).optional(),
   model: z.string().min(1).optional(),
   declaredSensitivity: z.enum(["public", "internal", "private"]).optional(),
   effectiveSensitivity: z.enum(["public", "internal", "private"]).default("internal"),

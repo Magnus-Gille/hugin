@@ -17,6 +17,7 @@ describe("RUNTIME_REGISTRY", () => {
     expect(ids).toContain("codex-spawn");
     expect(ids).toContain("ollama-pi");
     expect(ids).toContain("ollama-laptop");
+    expect(ids).toContain("ollama-orin");
     expect(ids).toContain("openrouter");
     expect(ids).toContain("pi-harness");
   });
@@ -108,6 +109,23 @@ describe("buildRuntimeCandidates", () => {
     lastChecked: Date.now(),
   };
 
+  const orinOffline: OllamaHost = {
+    name: "orin",
+    baseUrl: "http://100.127.176.78:11434",
+    available: false,
+    models: [],
+    lastChecked: Date.now(),
+    lastError: "Connection refused",
+  };
+
+  const orinOnline: OllamaHost = {
+    name: "orin",
+    baseUrl: "http://100.127.176.78:11434",
+    available: true,
+    models: ["qwen2.5-coder:7b", "qwen2.5:3b"],
+    lastChecked: Date.now(),
+  };
+
   it("marks cloud runtimes as always available", () => {
     const candidates = buildRuntimeCandidates([piOnline, laptopOffline]);
     const claude = candidates.find((c) => c.id === "claude-sdk");
@@ -147,6 +165,26 @@ describe("buildRuntimeCandidates", () => {
     const candidates = buildRuntimeCandidates([piOnline, laptopOffline]);
     expect(candidates.length).toBe(RUNTIME_REGISTRY.length);
   });
+
+  it("marks orin host as unavailable when probe says so", () => {
+    const candidates = buildRuntimeCandidates([piOnline, laptopOffline, orinOffline]);
+    const orin = candidates.find((c) => c.id === "ollama-orin");
+    expect(orin?.available).toBe(false);
+    expect(orin?.models).toEqual([]);
+  });
+
+  it("marks orin host as available and populates models when online", () => {
+    const candidates = buildRuntimeCandidates([piOnline, laptopOffline, orinOnline]);
+    const orin = candidates.find((c) => c.id === "ollama-orin");
+    expect(orin?.available).toBe(true);
+    expect(orin?.models).toEqual(["qwen2.5-coder:7b", "qwen2.5:3b"]);
+  });
+
+  it("handles missing orin host entry gracefully", () => {
+    const candidates = buildRuntimeCandidates([piOnline]); // no orin host
+    const orin = candidates.find((c) => c.id === "ollama-orin");
+    expect(orin?.available).toBe(false);
+  });
 });
 
 describe("orchestrator v1 policy fields", () => {
@@ -173,7 +211,7 @@ describe("orchestrator v1 policy fields", () => {
   });
 
   it("existing one-shot runtimes are auto-eligible by default", () => {
-    for (const id of ["claude-sdk", "codex-spawn", "ollama-pi", "ollama-laptop"]) {
+    for (const id of ["claude-sdk", "codex-spawn", "ollama-pi", "ollama-laptop", "ollama-orin"]) {
       const entry = getRegistryEntryById(id);
       expect(entry?.autoEligible).toBe(true);
       expect(entry?.family).toBe("one-shot");

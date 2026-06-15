@@ -255,6 +255,7 @@ const config = {
     .filter(Boolean),
   ollamaPiUrl: process.env.OLLAMA_PI_URL || "http://127.0.0.1:11434",
   ollamaLaptopUrl: process.env.OLLAMA_LAPTOP_URL || "",
+  ollamaOrinUrl: process.env.OLLAMA_ORIN_URL || "",
   ollamaDefaultModel: process.env.OLLAMA_DEFAULT_MODEL || "qwen2.5:3b",
   extraAllowedEgressHosts: (process.env.HUGIN_ALLOWED_EGRESS_HOSTS || "")
     .split(",")
@@ -412,6 +413,7 @@ const egressPolicy = installFetchEgressPolicy(
     muninUrl: config.muninUrl,
     ollamaPiUrl: config.ollamaPiUrl,
     ollamaLaptopUrl: config.ollamaLaptopUrl,
+    ollamaOrinUrl: config.ollamaOrinUrl,
     extraHosts: config.extraAllowedEgressHosts,
   }),
 );
@@ -4670,12 +4672,16 @@ console.log(`Log directory: ${LOG_DIR}`);
 configureHosts({
   piUrl: config.ollamaPiUrl,
   laptopUrl: config.ollamaLaptopUrl,
+  orinUrl: config.ollamaOrinUrl,
 });
 if (config.ollamaPiUrl) {
   console.log(`Ollama Pi: ${config.ollamaPiUrl}`);
 }
 if (config.ollamaLaptopUrl) {
   console.log(`Ollama Laptop: ${config.ollamaLaptopUrl}`);
+}
+if (config.ollamaOrinUrl) {
+  console.log(`Ollama Orin: ${config.ollamaOrinUrl}`);
 }
 console.log(`Ollama default model: ${config.ollamaDefaultModel}`);
 

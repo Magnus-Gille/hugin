@@ -18,6 +18,7 @@ export interface OllamaHost {
 export interface OllamaHostsConfig {
   piUrl: string;
   laptopUrl: string; // empty string = disabled
+  orinUrl: string; // empty string = disabled
 }
 
 const CONNECT_TIMEOUT_MS = 3_000;
@@ -29,10 +30,13 @@ const hosts = new Map<string, OllamaHost>();
 let hostsConfig: OllamaHostsConfig = {
   piUrl: "http://127.0.0.1:11434",
   laptopUrl: "",
+  orinUrl: "",
 };
 
 export function configureHosts(config: OllamaHostsConfig): void {
   hostsConfig = config;
+  // Reset host entries so removed/disabled hosts do not persist across reconfiguration
+  hosts.clear();
   // Initialize host entries
   hosts.set("pi", {
     name: "pi",
@@ -45,6 +49,15 @@ export function configureHosts(config: OllamaHostsConfig): void {
     hosts.set("laptop", {
       name: "laptop",
       baseUrl: config.laptopUrl,
+      available: false,
+      models: [],
+      lastChecked: 0,
+    });
+  }
+  if (config.orinUrl) {
+    hosts.set("orin", {
+      name: "orin",
+      baseUrl: config.orinUrl,
       available: false,
       models: [],
       lastChecked: 0,
@@ -113,8 +126,8 @@ export async function resolveOllamaHost(
     }
   }
 
-  // Try all hosts in priority order: pi first (always-on), then laptop
-  const order = ["pi", "laptop"];
+  // Try all hosts in priority order: pi first (always-on), then laptop, then orin
+  const order = ["pi", "laptop", "orin"];
   for (const name of order) {
     const host = hosts.get(name);
     if (!host) continue;

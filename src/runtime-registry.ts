@@ -48,7 +48,7 @@ export interface RuntimeDefinition {
   costModel: CostModel;
   modelSize: ModelSize;
   capabilities: RuntimeCapability[];
-  ollamaHost?: "pi" | "laptop";
+  ollamaHost?: "pi" | "laptop" | "orin";
   defaultModel?: string;
 
   // Orthogonal policy fields (orchestrator v1, see docs/orchestrator-v1-data-model.md §6)
@@ -118,6 +118,21 @@ export const RUNTIME_REGISTRY: readonly RuntimeDefinition[] = [
     capabilities: [],
     ollamaHost: "laptop",
     defaultModel: "qwen3.5:35b-a3b",
+    provider: "ollama-local",
+    egress: "local",
+    zdrRequired: false,
+    autoEligible: true,
+    family: "one-shot",
+  },
+  {
+    id: "ollama-orin",
+    dispatcherRuntime: "ollama",
+    trustTier: "trusted",
+    costModel: "free",
+    modelSize: "small",
+    capabilities: [],
+    ollamaHost: "orin",
+    defaultModel: "qwen2.5-coder:7b",
     provider: "ollama-local",
     egress: "local",
     zdrRequired: false,
