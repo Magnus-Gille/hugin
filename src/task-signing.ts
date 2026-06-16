@@ -47,12 +47,21 @@ export type VerificationStatus =
   | "unknown-signer"
   | "submitter-mismatch"
   | "malformed"
-  | "unsupported-version";
+  | "unsupported-version"
+  | "expired"
+  | "future-skew";
 
 export interface VerificationResult {
   status: VerificationStatus;
   keyId?: string;
   reason?: string;
+}
+
+export interface VerifyOptions {
+  /** Maximum age in seconds for a valid signature. Set to 0 to disable the check. Default: 300. */
+  maxAgeS?: number;
+  /** Tolerance in seconds for submitted-at timestamps in the future (clock skew). Default: 60. */
+  futureToleranceS?: number;
 }
 
 export type KeyStore = Record<string, string>;
@@ -129,6 +138,7 @@ export function verifyTaskSignature(
   params: SigningParams,
   signatureRaw: string | null | undefined,
   keys: KeyStore,
+  opts: VerifyOptions = {},
 ): VerificationResult {
   if (!signatureRaw) return { status: "missing" };
 
@@ -175,6 +185,38 @@ export function verifyTaskSignature(
   }
   if (!timingSafeEqual(actual, expected)) {
     return { status: "invalid", keyId: parsed.keyId, reason: "signature does not match" };
+  }
+
+  // Age check — only evaluated after HMAC passes to avoid timing leaks.
+  // Default maxAgeS is 0 (disabled) when called without opts; callers that
+  // want enforcement pass an explicit maxAgeS (e.g. from HUGIN_SIGNING_MAX_AGE_S).
+  const maxAgeS = opts.maxAgeS ?? 0;
+  const futureToleranceS = opts.futureToleranceS ?? 60;
+
+  if (maxAgeS > 0) {
+    const submittedMs = Date.parse(params.submittedAt);
+    if (Number.isNaN(submittedMs)) {
+      return {
+        status: "invalid",
+        keyId: parsed.keyId,
+        reason: "submitted-at is not a valid ISO date",
+      };
+    }
+    const ageS = (Date.now() - submittedMs) / 1000;
+    if (ageS > maxAgeS) {
+      return {
+        status: "expired",
+        keyId: parsed.keyId,
+        reason: `signature expired: submitted-at is ${Math.round(ageS)}s ago (max ${maxAgeS}s)`,
+      };
+    }
+    if (ageS < -futureToleranceS) {
+      return {
+        status: "future-skew",
+        keyId: parsed.keyId,
+        reason: `signature from the future: submitted-at is ${Math.round(-ageS)}s ahead (tolerance ${futureToleranceS}s)`,
+      };
+    }
   }
 
   return { status: "valid", keyId: parsed.keyId };

@@ -262,6 +262,7 @@ const config = {
     .map((value) => value.trim())
     .filter(Boolean),
   signingPolicy: parseSigningPolicy(process.env.HUGIN_SIGNING_POLICY) as SigningPolicy,
+  signingMaxAgeS: parsePositiveIntEnv(process.env.HUGIN_SIGNING_MAX_AGE_S, 300),
   submitterKeys: loadKeyStoreFromEnv() as KeyStore,
   exfilPolicy: parseExfilPolicy(process.env.HUGIN_EXFIL_POLICY),
   externalPolicy: parseExternalPolicy(process.env.HUGIN_EXTERNAL_POLICY),
@@ -885,7 +886,9 @@ function verifyTaskEntrySignature(
     contextRefs: parsedTask.contextRefs,
   };
 
-  const result = verifyTaskSignature(params, signatureRaw, config.submitterKeys);
+  const result = verifyTaskSignature(params, signatureRaw, config.submitterKeys, {
+    maxAgeS: config.signingMaxAgeS,
+  });
 
   if (result.status === "valid") {
     console.log(`[signing] task ${taskNs} signature valid (keyId=${result.keyId})`);

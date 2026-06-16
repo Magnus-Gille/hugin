@@ -12,6 +12,7 @@ import {
   signTask,
   verifyTaskSignature,
   type SigningParams,
+  type VerifyOptions,
 } from "../src/task-signing.js";
 
 const SECRET_HEX = "a".repeat(64); // 32 bytes of 0xaa
@@ -311,6 +312,64 @@ describe("scripts/sign-task.mjs (cross-language drift guard)", () => {
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+describe("verifyTaskSignature — replay-window (maxAgeS / futureToleranceS)", () => {
+  function makeParamsAt(submittedAt: string): SigningParams {
+    return makeParams({ submittedAt });
+  }
+
+  function isoAt(offsetS: number): string {
+    return new Date(Date.now() + offsetS * 1000).toISOString();
+  }
+
+  it("returns 'expired' when submitted-at is older than maxAgeS", () => {
+    // 10 minutes ago, window is 300s → expired
+    const submittedAt = isoAt(-600);
+    const sig = signTask(makeParamsAt(submittedAt), KEY_ID, SECRET_HEX);
+    const result = verifyTaskSignature(makeParamsAt(submittedAt), sig, KEYS, { maxAgeS: 300 });
+    expect(result.status).toBe("expired");
+    expect(result.keyId).toBe(KEY_ID);
+    expect(result.reason).toMatch(/expired/);
+  });
+
+  it("returns 'valid' when maxAgeS is 0 (check disabled) even for stale signatures", () => {
+    const submittedAt = isoAt(-600);
+    const sig = signTask(makeParamsAt(submittedAt), KEY_ID, SECRET_HEX);
+    const result = verifyTaskSignature(makeParamsAt(submittedAt), sig, KEYS, { maxAgeS: 0 });
+    expect(result.status).toBe("valid");
+  });
+
+  it("returns 'valid' for a fresh signature (10s ago, maxAgeS 300)", () => {
+    const submittedAt = isoAt(-10);
+    const sig = signTask(makeParamsAt(submittedAt), KEY_ID, SECRET_HEX);
+    const result = verifyTaskSignature(makeParamsAt(submittedAt), sig, KEYS, { maxAgeS: 300 });
+    expect(result.status).toBe("valid");
+  });
+
+  it("returns 'future-skew' when submitted-at is more than futureToleranceS ahead", () => {
+    // 120s in the future, tolerance 60 → future-skew
+    const submittedAt = isoAt(120);
+    const sig = signTask(makeParamsAt(submittedAt), KEY_ID, SECRET_HEX);
+    const result = verifyTaskSignature(makeParamsAt(submittedAt), sig, KEYS, {
+      maxAgeS: 300,
+      futureToleranceS: 60,
+    });
+    expect(result.status).toBe("future-skew");
+    expect(result.keyId).toBe(KEY_ID);
+    expect(result.reason).toMatch(/future/);
+  });
+
+  it("returns 'valid' when submitted-at is slightly ahead but within futureToleranceS", () => {
+    // 30s in the future, tolerance 60 → valid (within tolerance)
+    const submittedAt = isoAt(30);
+    const sig = signTask(makeParamsAt(submittedAt), KEY_ID, SECRET_HEX);
+    const result = verifyTaskSignature(makeParamsAt(submittedAt), sig, KEYS, {
+      maxAgeS: 300,
+      futureToleranceS: 60,
+    });
+    expect(result.status).toBe("valid");
   });
 });
 
