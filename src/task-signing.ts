@@ -58,7 +58,9 @@ export interface VerificationResult {
 }
 
 export interface VerifyOptions {
-  /** Maximum age in seconds for a valid signature. Set to 0 to disable the check. Default: 300. */
+  /** Maximum age in seconds for a valid signature. Set to 0 to disable the check.
+   *  Default: 0 (disabled) at the function level — the dispatcher supplies the
+   *  configured window (HUGIN_SIGNING_MAX_AGE_S). */
   maxAgeS?: number;
   /** Tolerance in seconds for submitted-at timestamps in the future (clock skew). Default: 60. */
   futureToleranceS?: number;
@@ -322,6 +324,21 @@ function decodeSecret(raw: string): Buffer {
     }
   }
   return Buffer.from(trimmed, "utf8");
+}
+
+/**
+ * Parse a non-negative integer env var, falling back to the given default for
+ * unset, blank, negative, or non-integer values. Unlike parsePositiveIntEnv in
+ * src/index.ts this accepts 0, which callers use to disable a window/limit.
+ * Strict parse: "30s" (partial parseInt match) is rejected and returns the
+ * fallback so a misconfigured value cannot accidentally reduce a window to 30.
+ */
+export function parseNonNegativeIntEnv(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw === "") return fallback;
+  const trimmed = raw.trim();
+  if (trimmed === "" || String(parseInt(trimmed, 10)) !== trimmed) return fallback;
+  const n = parseInt(trimmed, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 export type SigningPolicy = "off" | "warn" | "require";

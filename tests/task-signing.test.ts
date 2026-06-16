@@ -7,6 +7,7 @@ import {
   canonicalizePrompt,
   extractSignatureField,
   loadKeyStoreFromEnv,
+  parseNonNegativeIntEnv,
   parseSignature,
   parseSigningPolicy,
   signTask,
@@ -408,5 +409,31 @@ describe("loadKeyStoreFromEnv", () => {
   it("returns an empty store when neither env var is set", () => {
     const store = loadKeyStoreFromEnv({} as NodeJS.ProcessEnv);
     expect(store).toEqual({});
+  });
+});
+
+describe("parseNonNegativeIntEnv", () => {
+  it("returns fallback for undefined", () => {
+    expect(parseNonNegativeIntEnv(undefined, 300)).toBe(300);
+  });
+
+  it("returns 0 for '0' (disables the check)", () => {
+    expect(parseNonNegativeIntEnv("0", 300)).toBe(0);
+  });
+
+  it("returns parsed value for '900'", () => {
+    expect(parseNonNegativeIntEnv("900", 300)).toBe(900);
+  });
+
+  it("returns fallback for '-1'", () => {
+    expect(parseNonNegativeIntEnv("-1", 300)).toBe(300);
+  });
+
+  it("returns fallback for '30s' (partial parse rejected)", () => {
+    expect(parseNonNegativeIntEnv("30s", 300)).toBe(300);
+  });
+
+  it("returns fallback for empty string", () => {
+    expect(parseNonNegativeIntEnv("", 300)).toBe(300);
   });
 });

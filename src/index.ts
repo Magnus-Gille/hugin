@@ -107,6 +107,7 @@ import {
 import {
   extractSignatureField,
   loadKeyStoreFromEnv,
+  parseNonNegativeIntEnv,
   parseSigningPolicy,
   verifyTaskSignature,
   type KeyStore,
@@ -262,7 +263,12 @@ const config = {
     .map((value) => value.trim())
     .filter(Boolean),
   signingPolicy: parseSigningPolicy(process.env.HUGIN_SIGNING_POLICY) as SigningPolicy,
-  signingMaxAgeS: parsePositiveIntEnv(process.env.HUGIN_SIGNING_MAX_AGE_S, 300),
+  // 900s (15 min) default: hugin polls every ~30s and runs one task at a time;
+  // with a 300s task timeout a legitimately queued signed task can exceed 300s
+  // before dispatch and would be wrongly rejected under `require`. A per-task-id
+  // seen-guard is the stronger long-term fix (not yet implemented).
+  // Set HUGIN_SIGNING_MAX_AGE_S=0 to disable the age check entirely.
+  signingMaxAgeS: parseNonNegativeIntEnv(process.env.HUGIN_SIGNING_MAX_AGE_S, 900),
   submitterKeys: loadKeyStoreFromEnv() as KeyStore,
   exfilPolicy: parseExfilPolicy(process.env.HUGIN_EXFIL_POLICY),
   externalPolicy: parseExternalPolicy(process.env.HUGIN_EXTERNAL_POLICY),
