@@ -45,6 +45,26 @@ export interface SdkExecutorOptions {
   abortController?: AbortController;
 }
 
+/**
+ * Format captured child stderr into a log block for task output on failure.
+ *
+ * Returns the formatted block (capped to the last 4000 chars of stderr) when
+ * `exitCode !== 0` and `stderrBuf` contains non-whitespace content.
+ * Returns null on success (exitCode 0) or when the buffer is empty/whitespace.
+ *
+ * Exported so it can be unit-tested independently without mocking the full SDK.
+ */
+export function formatChildStderr(
+  stderrBuf: string,
+  exitCode: number | "TIMEOUT",
+): string | null {
+  if (exitCode === 0 || !stderrBuf.trim()) {
+    return null;
+  }
+  const capped = stderrBuf.trim().slice(-4000);
+  return `\n[child stderr]\n${capped}\n`;
+}
+
 export async function executeSdkTask(
   task: SdkTaskConfig,
   taskId: string,
@@ -137,6 +157,9 @@ export async function executeSdkTask(
   let durationApiMs: number | null = null;
   let exitCode: number | "TIMEOUT" = 1;
   let queryInstance: Query | null = null;
+  // Accumulates stderr from the spawned Claude Code process.
+  // Declared outside try so the catch/finally can read it.
+  let stderrBuf = "";
 
   try {
     // Build MCP servers config so task-spawned agents get Munin access
@@ -210,6 +233,9 @@ export async function executeSdkTask(
           HOME: "/home/magnus",
           HUGIN_TASK_ID: taskId,
         },
+        // Capture stderr from the spawned Claude Code process.
+        // stderr is typed in Options as (data: string) => void — no cast needed.
+        stderr: (data: string) => { stderrBuf += data; },
       },
     });
 
@@ -288,6 +314,13 @@ export async function executeSdkTask(
       } catch {
         // Already closed
       }
+    }
+
+    // Append captured child stderr to the task log on failure.
+    // Capped to the last 4000 chars so very noisy processes don't flood the log.
+    const stderrBlock = formatChildStderr(stderrBuf, exitCode);
+    if (stderrBlock !== null) {
+      appendOutput(stderrBlock);
     }
 
     const durationS = Math.round((Date.now() - startMs) / 1000);

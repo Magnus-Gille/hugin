@@ -8,7 +8,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   query: vi.fn(),
 }));
 
-import { executeSdkTask, type SdkTaskConfig } from "../src/sdk-executor.js";
+import { executeSdkTask, formatChildStderr, type SdkTaskConfig } from "../src/sdk-executor.js";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 const mockedQuery = vi.mocked(query);
@@ -205,6 +205,63 @@ describe("SDK executor", () => {
     });
   });
 
+  it("passes a stderr callback in query options", async () => {
+    const messages = [createMockResultSuccess("Done")];
+    mockedQuery.mockReturnValue(createMockQuery(messages) as ReturnType<typeof query>);
+
+    await executeSdkTask(makeTaskConfig(), "test-task-stderr-cb", tmpLogDir);
+
+    const call = mockedQuery.mock.calls[0]?.[0] as {
+      options?: { stderr?: unknown };
+    };
+    expect(typeof call?.options?.stderr).toBe("function");
+  });
+
+  it("includes child stderr in output and log when the process fails", async () => {
+    // Simulate: the query throws (process exited code 1), and stderr was captured
+    // by the callback before the throw.
+    let capturedStderrCb: ((data: string) => void) | undefined;
+    const gen = createMockQuery([]);
+    gen.next = async () => {
+      // Invoke the stderr callback to simulate output from the child process
+      capturedStderrCb?.("Error: authentication token expired\n");
+      throw new Error("Claude Code process exited with code 1");
+    };
+    mockedQuery.mockImplementation(({ options }) => {
+      capturedStderrCb = options?.stderr;
+      return gen as ReturnType<typeof query>;
+    });
+
+    const result = await executeSdkTask(makeTaskConfig(), "test-task-stderr-content", tmpLogDir);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain("[child stderr]");
+    expect(result.output).toContain("authentication token expired");
+
+    const logContent = fs.readFileSync(result.logFile, "utf-8");
+    expect(logContent).toContain("[child stderr]");
+    expect(logContent).toContain("authentication token expired");
+  });
+
+  it("does not include [child stderr] in output on success", async () => {
+    let capturedStderrCb: ((data: string) => void) | undefined;
+    const gen = createMockQuery([createMockResultSuccess("All good.")]);
+    const originalNext = gen.next.bind(gen);
+    gen.next = async () => {
+      capturedStderrCb?.("some benign debug line\n");
+      return originalNext();
+    };
+    mockedQuery.mockImplementation(({ options }) => {
+      capturedStderrCb = options?.stderr;
+      return gen as ReturnType<typeof query>;
+    });
+
+    const result = await executeSdkTask(makeTaskConfig(), "test-task-stderr-success", tmpLogDir);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).not.toContain("[child stderr]");
+  });
+
   it("forwards muninSessionId as mcp-session-id header to the Munin MCP server", async () => {
     const messages = [createMockResultSuccess("Done")];
     mockedQuery.mockReturnValue(createMockQuery(messages) as ReturnType<typeof query>);
@@ -362,6 +419,53 @@ describe("SDK executor", () => {
     expect(result.exitCode).toBe("TIMEOUT");
     expect(onTimeout).toHaveBeenCalled();
     expect(result.output).toContain("TIMEOUT");
+  });
+});
+
+describe("formatChildStderr", () => {
+  it("returns null when exitCode is 0 (success), even with stderr content", () => {
+    expect(formatChildStderr("some error output", 0)).toBeNull();
+  });
+
+  it("returns null when stderrBuf is empty", () => {
+    expect(formatChildStderr("", 1)).toBeNull();
+  });
+
+  it("returns null when stderrBuf is whitespace-only", () => {
+    expect(formatChildStderr("   \n\t  ", 1)).toBeNull();
+  });
+
+  it("returns formatted block on non-zero exit code with stderr content", () => {
+    const result = formatChildStderr("Error: authentication failed\nCode: 1", 1);
+    expect(result).not.toBeNull();
+    expect(result).toContain("[child stderr]");
+    expect(result).toContain("Error: authentication failed");
+    expect(result).toContain("Code: 1");
+  });
+
+  it("returns formatted block on TIMEOUT exit code with stderr content", () => {
+    const result = formatChildStderr("timeout details", "TIMEOUT");
+    expect(result).not.toBeNull();
+    expect(result).toContain("[child stderr]");
+    expect(result).toContain("timeout details");
+  });
+
+  it("truncates stderrBuf to the last 4000 chars when it exceeds the cap", () => {
+    // Build a string: 5000 A's followed by 1000 B's = 6000 chars total.
+    // slice(-4000) keeps the last 4000: 3000 A's + 1000 B's.
+    // The first 2000 A's are discarded, so the result must not start with the
+    // leading A block but must contain the trailing B's.
+    const prefix = "A".repeat(5000);
+    const suffix = "B".repeat(1000);
+    const stderrBuf = prefix + suffix;
+    const result = formatChildStderr(stderrBuf, 1);
+    expect(result).not.toBeNull();
+    // The block must contain the tail (Bs)
+    expect(result).toContain("B".repeat(100));
+    // The captured content should be exactly 4000 chars (plus the wrapper lines)
+    const match = result!.match(/\[child stderr\]\n([\s\S]*)\n$/);
+    expect(match).not.toBeNull();
+    expect(match![1]!.length).toBeLessThanOrEqual(4000);
   });
 });
 
