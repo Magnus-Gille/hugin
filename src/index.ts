@@ -123,6 +123,9 @@ import { IdempotencyIndex } from "./broker/idempotency.js";
 import { BrokerReconciler } from "./broker/reconciliation.js";
 import { OrchWorker } from "./broker/orch-worker.js";
 import { OpenRouterClient } from "./openrouter-client.js";
+import { loadOrchestratorConfig } from "./orchestrator/config.js";
+import { createModelInvoker } from "./orchestrator/model-invoker.js";
+import { runOrchestratorTask } from "./orchestrator/orchestrator-executor.js";
 
 export type ExfilPolicy = "off" | "warn" | "flag" | "redact";
 
@@ -367,6 +370,7 @@ let currentTaskConfig: TaskConfig | null = null;
 let currentChild: ChildProcess | null = null;
 let currentSdkAbort: AbortController | null = null;
 let currentOllamaAbort: AbortController | null = null;
+let currentOrchestratorAbort: AbortController | null = null;
 // Runtime-owned artefact delivery (issue #68). Aborted by operator cancel /
 // shutdown so a hung `ssh`/`rsync` cannot wedge the single dispatcher slot.
 let currentDeliveryAbort: AbortController | null = null;
@@ -439,7 +443,7 @@ const reaperMunin = createMuninClient();
 
 interface TaskConfig {
   prompt: string;
-  runtime: "claude" | "codex" | "ollama";
+  runtime: "claude" | "codex" | "ollama" | "orchestrator";
   workingDir: string;
   context?: string;
   timeoutMs: number;
@@ -481,7 +485,7 @@ interface TaskConfig {
 type DeclaredRuntime = TaskConfig["runtime"] | "pipeline" | "auto";
 
 function parseDeclaredRuntime(content: string): DeclaredRuntime | undefined {
-  return content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|pipeline|auto)/i)?.[1]?.toLowerCase() as
+  return content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|pipeline|auto|orchestrator)/i)?.[1]?.toLowerCase() as
     | DeclaredRuntime
     | undefined;
 }
@@ -557,6 +561,7 @@ function parseTask(content: string): TaskConfig | null {
       | "claude"
       | "codex"
       | "ollama"
+      | "orchestrator"
       | undefined;
   const workingDir = content.match(
     /\*\*Working dir:\*\*\s*(.+)/i
@@ -1567,6 +1572,9 @@ function requestCancellationForCurrentTask(request: CancellationRequest): void {
   }
   if (currentOllamaAbort && !currentOllamaAbort.signal.aborted) {
     currentOllamaAbort.abort(request.reason);
+  }
+  if (currentOrchestratorAbort && !currentOrchestratorAbort.signal.aborted) {
+    currentOrchestratorAbort.abort(request.reason);
   }
   if (currentDeliveryAbort && !currentDeliveryAbort.signal.aborted) {
     currentDeliveryAbort.abort(request.reason);
@@ -3538,7 +3546,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
     const isOllama = task.runtime === "ollama";
     const isClaude = task.runtime === "claude";
-    const executorLabel = isOllama ? "ollama" : isClaude ? "agent-sdk" : "spawn";
+    const isOrchestrator = task.runtime === "orchestrator";
+    const executorLabel = isOllama ? "ollama" : isClaude ? "agent-sdk" : isOrchestrator ? "orchestrator" : "spawn";
 
     // Capture quota before task execution (skip for ollama — it's Claude-specific)
     const quotaBefore = isOllama ? { q5: null, q7: null } : await fetchQuota();
@@ -3786,6 +3795,52 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     logFile = sdkResult.logFile;
     resultText = sdkResult.resultText;
     costUsd = sdkResult.costUsd;
+    } else if (isOrchestrator) {
+    // --- Orchestrator execution path ---
+    console.log(`Using orchestrator executor for task ${taskNs}`);
+    const orchAbort = new AbortController();
+    currentOrchestratorAbort = orchAbort;
+    logFile = path.join(LOG_DIR, `${taskId}.log`);
+    const orchLogStream = fs.createWriteStream(logFile, { encoding: "utf-8" });
+    orchLogStream.write(
+      [
+        "=== Hugin Task Log (orchestrator) ===",
+        `Task: ${taskNs}`,
+        `Runtime: orchestrator`,
+        `Working dir: ${task.workingDir}`,
+        `Timeout: ${task.timeoutMs}`,
+        `Started: ${startedAt}`,
+        "===\n",
+      ].join("\n"),
+    );
+    const orchConfig = loadOrchestratorConfig(process.env);
+    const orchInvoker = createModelInvoker(orchConfig.roles, {
+      timeoutMs: orchConfig.perCallTimeoutMs,
+      maxOutputChars: config.maxOutputChars,
+    });
+    const orchResult = await runOrchestratorTask(
+      {
+        prompt: task.prompt,
+        sensitivity: task.effectiveSensitivity || "internal",
+        timeoutMs: task.timeoutMs,
+        maxOutputChars: config.maxOutputChars,
+      },
+      orchConfig,
+      {
+        invoker: orchInvoker,
+        onLog: (line) => {
+          console.log(`[orch:${taskId}] ${line}`);
+          orchLogStream.write(`${line}\n`);
+        },
+        signal: orchAbort.signal,
+      },
+    );
+    orchLogStream.end();
+    currentOrchestratorAbort = null;
+    exitCode = orchResult.exitCode;
+    output = orchResult.output;
+    resultText = orchResult.resultText;
+    costUsd = orchResult.costUsd;
     } else {
       const spawnResult = await spawnRuntime(task, { taskNs, muninClient: munin });
       exitCode = spawnResult.exitCode;
@@ -3810,6 +3865,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     stopLeaseRenewal();
     currentSdkAbort = null;
     currentOllamaAbort = null;
+    currentOrchestratorAbort = null;
 
     const durationMs = Date.now() - startMs;
     const completedAt = new Date().toISOString();
@@ -3878,12 +3934,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let rawBodyText: string;
     let structuredBodyKind: TaskExecutionBodyKind;
 
-    if ((isClaude || isOllama) && resultText) {
+    if ((isClaude || isOllama || isOrchestrator) && resultText) {
       resultSource = effectiveExecutor;
       rawBodyText = resultText;
       structuredBodyKind = "response";
       resultBody = `### Response\n\n${resultText}`;
-    } else if (!isClaude && !isOllama) {
+    } else if (!isClaude && !isOllama && !isOrchestrator) {
       const hookResult = readHookResult(taskId);
       if (hookResult) {
         resultSource = "hook";

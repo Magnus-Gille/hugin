@@ -12,6 +12,7 @@ export type LegacyDispatcherRuntime = "claude" | "codex" | "ollama";
 // never dispatched in-process.
 export type DispatcherRuntime =
   | LegacyDispatcherRuntime
+  | "orchestrator"
   | "openrouter"
   | "pi-harness"
   | "berget";
