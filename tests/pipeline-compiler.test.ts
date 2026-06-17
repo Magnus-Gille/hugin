@@ -370,7 +370,10 @@ Phase: explore
   });
 
   it("auto-routes private pipeline phase to trusted runtime only", () => {
-    const pipeline = makePipeline(`## Task: Private auto
+    // ollama-pi is now explicit-only (control-plane box), so private auto-routing
+    // must land on another trusted host. Make the laptop available for this case.
+    const pipeline = makePipeline(
+      `## Task: Private auto
 
 - **Runtime:** pipeline
 - **Sensitivity:** private
@@ -381,8 +384,18 @@ Phase: review
   Runtime: auto
   Prompt: |
     Review private notes.
-`);
-    // Private must route to trusted (ollama)
+`,
+      [
+        {
+          name: "laptop",
+          baseUrl: "http://100.1.2.3:11434",
+          available: true,
+          models: ["qwen3.5:35b-a3b"],
+          lastChecked: Date.now(),
+        },
+      ],
+    );
+    // Private must route to a trusted runtime (ollama, laptop host)
     expect(pipeline.phases[0]?.dispatcherRuntime).toBe("ollama");
     expect(pipeline.phases[0]?.autoRouted).toBe(true);
   });
