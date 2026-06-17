@@ -186,9 +186,22 @@ describe("executeHomeserverTask — delegate path", () => {
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.taskType).toBe("extract");
     expect(typeof body.prompt).toBe("string");
-    // The gateway /delegate handler ignores these fields, so the executor must not send them.
-    expect(body.modelId).toBeUndefined();
-    expect(body.frontierModelId).toBeUndefined();
+    // The gateway /delegate handler now accepts these — forward them.
+    expect(body.modelId).toBe("qwen3-coder"); // makeTaskConfig default model
+    expect(body.frontierModelId).toBe("anthropic/claude-opus-4-5");
+  });
+
+  it("forwards an opt-in verify spec on the delegate path", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({ delegated: true, outcome: "pass", score: 1, output: "1998" }));
+    await executeHomeserverTask(
+      makeTaskConfig({ path: "delegate", taskType: "extract", verify: { numeric: 1998, nonEmpty: true } }),
+      "delegate-verify",
+      tmpLogDir,
+    );
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
+    expect(body.verify).toEqual({ numeric: 1998, nonEmpty: true });
   });
 
   it("maps outcome 'fail'/'error' to a non-zero exit code, but 'unverified' to 0", async () => {

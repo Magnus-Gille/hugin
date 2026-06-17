@@ -26,18 +26,30 @@ import * as path from "node:path";
 
 export type HomeserverPath = "chat" | "delegate";
 
+/** Declarative grading forwarded to the gateway /delegate `verify` field (gateway-api-contract.md). */
+export interface HomeserverVerifySpec {
+  nonEmpty?: boolean;
+  answerIs?: string;
+  contains?: string[];
+  matches?: string;
+  numeric?: number;
+  json?: boolean;
+  ci?: boolean;
+}
+
 export interface HomeserverTaskConfig {
   prompt: string;
   gatewayBaseUrl: string; // e.g. http://127.0.0.1:8080
   apiKey: string; // Bearer token (may be "" on a keyless loopback gateway)
   path: HomeserverPath;
-  /** Required for "chat" (the model to serve). Ignored on "delegate" (the gateway/ledger selects). */
+  /** Required for "chat" (the model to serve). On "delegate" it forces the local model id. */
   model?: string;
   /** Forwarded to /delegate as the ledger bucket. */
   taskType?: string;
-  /** Reserved for forward-compat: the gateway /delegate HTTP endpoint does not yet accept a
-   *  frontier model, so this is currently NOT sent. Re-wire once the gateway exposes escalation. */
+  /** Forwarded to /delegate: OpenRouter model id to escalate to when the local attempt is non-viable. */
   frontierModelId?: string;
+  /** Forwarded to /delegate: opt-in deterministic grading so the ledger learns pass/fail. */
+  verify?: HomeserverVerifySpec;
   timeoutMs: number;
   maxOutputChars: number;
   injectedContext?: string;
@@ -238,11 +250,13 @@ export async function executeHomeserverTask(
     const body: Record<string, unknown> =
       task.path === "delegate"
         ? {
-            // The gateway /delegate HTTP handler only accepts prompt + taskType
-            // (+ systemPrompt/maxTokens). It does NOT accept modelId or frontierModelId
-            // today, so we don't send them — see gateway-api-contract.md.
+            // Mirrors the gateway /delegate contract (gateway-api-contract.md):
+            // prompt + optional taskType / modelId / frontierModelId / verify.
             prompt: userMessage,
             ...(task.taskType ? { taskType: task.taskType } : {}),
+            ...(task.model ? { modelId: task.model } : {}),
+            ...(task.frontierModelId ? { frontierModelId: task.frontierModelId } : {}),
+            ...(task.verify ? { verify: task.verify } : {}),
           }
         : {
             model: task.model,
