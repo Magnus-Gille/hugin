@@ -31,11 +31,12 @@ export interface HomeserverTaskConfig {
   gatewayBaseUrl: string; // e.g. http://127.0.0.1:8080
   apiKey: string; // Bearer token (may be "" on a keyless loopback gateway)
   path: HomeserverPath;
-  /** Required for "chat" (the model to serve). Optional for "delegate" (the gateway/ledger picks). */
+  /** Required for "chat" (the model to serve). Ignored on "delegate" (the gateway/ledger selects). */
   model?: string;
   /** Forwarded to /delegate as the ledger bucket. */
   taskType?: string;
-  /** Forwarded to /delegate to escalate the call to a frontier model when local is non-viable. */
+  /** Reserved for forward-compat: the gateway /delegate HTTP endpoint does not yet accept a
+   *  frontier model, so this is currently NOT sent. Re-wire once the gateway exposes escalation. */
   frontierModelId?: string;
   timeoutMs: number;
   maxOutputChars: number;
@@ -83,15 +84,27 @@ export interface HomeserverGatewayConfig {
  *   HOMESERVER_GATEWAY_URL      — e.g. http://127.0.0.1:8080 (required to enable)
  *   HOMESERVER_GATEWAY_API_KEY  — Bearer token (optional on a keyless loopback gateway)
  */
+/** localhost / 127.0.0.1 / ::1 — the only hosts where a keyless gateway is safe. */
+function isLoopbackUrl(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.replace(/^\[|\]$/g, "");
+    return h === "localhost" || h === "127.0.0.1" || h === "::1";
+  } catch {
+    return false;
+  }
+}
+
 export function loadHomeserverGatewayConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): HomeserverGatewayConfig | null {
-  const baseUrl = env.HOMESERVER_GATEWAY_URL?.trim();
-  if (!baseUrl) return null;
-  return {
-    baseUrl: baseUrl.replace(/\/$/, ""),
-    apiKey: env.HOMESERVER_GATEWAY_API_KEY?.trim() ?? "",
-  };
+  const raw = env.HOMESERVER_GATEWAY_URL?.trim();
+  if (!raw) return null;
+  const baseUrl = raw.replace(/\/$/, "");
+  const apiKey = env.HOMESERVER_GATEWAY_API_KEY?.trim() ?? "";
+  // A keyless gateway is only safe on loopback. Refuse to send unauthenticated
+  // requests to a remote/LAN/public gateway — treat it as not-configured.
+  if (!apiKey && !isLoopbackUrl(baseUrl)) return null;
+  return { baseUrl, apiKey };
 }
 
 // --- Constants ---
@@ -106,8 +119,12 @@ const SYSTEM_PROMPT =
 function parseRetryAfter(res: Response): number | null {
   const raw = res.headers.get("retry-after");
   if (!raw) return null;
+  // Retry-After is either delta-seconds or an HTTP-date (RFC 9110).
   const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
+  if (Number.isFinite(n)) return n >= 0 ? Math.round(n) : null;
+  const dateMs = Date.parse(raw);
+  if (!Number.isNaN(dateMs)) return Math.max(0, Math.round((dateMs - Date.now()) / 1000));
+  return null;
 }
 
 function buildUserMessage(task: HomeserverTaskConfig): string {
@@ -130,7 +147,11 @@ export async function executeHomeserverTask(
   const userMessage = buildUserMessage(task);
   const promptChars = SYSTEM_PROMPT.length + userMessage.length;
 
+  fs.mkdirSync(logDir, { recursive: true });
   const logStream = fs.createWriteStream(logFile, { encoding: "utf-8" });
+  // Best-effort log: never let a late stream error (ENOENT/EACCES after the dir is
+  // removed, a full disk, etc.) surface as an unhandled exception that crashes the worker.
+  logStream.on("error", () => {});
   logStream.write(
     [
       "=== Hugin Task Log (homeserver/M5) ===",
@@ -217,10 +238,11 @@ export async function executeHomeserverTask(
     const body: Record<string, unknown> =
       task.path === "delegate"
         ? {
+            // The gateway /delegate HTTP handler only accepts prompt + taskType
+            // (+ systemPrompt/maxTokens). It does NOT accept modelId or frontierModelId
+            // today, so we don't send them — see gateway-api-contract.md.
             prompt: userMessage,
             ...(task.taskType ? { taskType: task.taskType } : {}),
-            ...(task.model ? { modelId: task.model } : {}),
-            ...(task.frontierModelId ? { frontierModelId: task.frontierModelId } : {}),
           }
         : {
             model: task.model,
@@ -237,7 +259,9 @@ export async function executeHomeserverTask(
       body: JSON.stringify(body),
       signal: abortController.signal,
     });
-    clearTimeout(timer);
+    // NOTE: the abort timer stays armed until the body is fully consumed (see the
+    // finally below) — a gateway that flushes headers then stalls the body must not
+    // be able to wedge Hugin's single worker on res.json()/res.text().
 
     // Backpressure: the gateway is telling us to back off, not that the task failed.
     if (res.status === 429 || res.status === 503) {
@@ -286,7 +310,9 @@ export async function executeHomeserverTask(
         result.totalTokens = (result.promptTokens ?? 0) + (result.completionTokens ?? 0);
       }
       if (typeof outcome.metrics?.latencyMs === "number") result.inferenceMs = outcome.metrics.latencyMs;
-      result.exitCode = 0;
+      // A well-formed 200 DelegationOutcome can still report failure; don't mask fail/error
+      // as a successful Hugin execution (that would suppress retry/escalation downstream).
+      result.exitCode = outcome.outcome === "fail" || outcome.outcome === "error" ? 1 : 0;
       return finish();
     }
 
@@ -350,7 +376,6 @@ export async function executeHomeserverTask(
     }
     return finish();
   } catch (err) {
-    clearTimeout(timer);
     if (err instanceof Error && err.name === "AbortError") {
       result.exitCode = "TIMEOUT";
       appendOutput(`\n[Gateway request aborted after ${Math.round((Date.now() - startMs) / 1000)}s]\n`);
@@ -359,5 +384,8 @@ export async function executeHomeserverTask(
       appendOutput(`\n[Gateway error: ${err instanceof Error ? err.message : String(err)}]\n`);
     }
     return finish();
+  } finally {
+    // Clear the task timeout only after the response body has been fully consumed.
+    clearTimeout(timer);
   }
 }

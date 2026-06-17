@@ -36,6 +36,18 @@ function jsonResponse(obj: unknown, status = 200, headers: Record<string, string
   });
 }
 
+/** A streaming SSE response whose bytes are split exactly at the given chunk boundaries. */
+function streamResponse(chunks: string[]): Response {
+  const enc = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const c of chunks) controller.enqueue(enc.encode(c));
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
 let tmpLogDir: string;
 
 beforeEach(() => {
@@ -65,6 +77,25 @@ describe("loadHomeserverGatewayConfig", () => {
       HOMESERVER_GATEWAY_URL: "http://127.0.0.1:8080",
     } as NodeJS.ProcessEnv);
     expect(cfg).toEqual({ baseUrl: "http://127.0.0.1:8080", apiKey: "" });
+  });
+
+  it("allows a keyless gateway on loopback (localhost / 127.0.0.1 / ::1)", () => {
+    for (const url of ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"]) {
+      expect(loadHomeserverGatewayConfig({ HOMESERVER_GATEWAY_URL: url } as NodeJS.ProcessEnv))
+        .toEqual({ baseUrl: url, apiKey: "" });
+    }
+  });
+
+  it("REFUSES a keyless gateway on a non-loopback host (returns null)", () => {
+    expect(loadHomeserverGatewayConfig({ HOMESERVER_GATEWAY_URL: "http://10.0.0.5:8080" } as NodeJS.ProcessEnv)).toBeNull();
+    expect(loadHomeserverGatewayConfig({ HOMESERVER_GATEWAY_URL: "http://m5.lan:8080" } as NodeJS.ProcessEnv)).toBeNull();
+  });
+
+  it("allows a non-loopback gateway when a key is provided", () => {
+    expect(loadHomeserverGatewayConfig({
+      HOMESERVER_GATEWAY_URL: "http://10.0.0.5:8080",
+      HOMESERVER_GATEWAY_API_KEY: "k",
+    } as NodeJS.ProcessEnv)).toEqual({ baseUrl: "http://10.0.0.5:8080", apiKey: "k" });
   });
 });
 
@@ -154,9 +185,33 @@ describe("executeHomeserverTask — delegate path", () => {
     expect(url).toBe("http://m5.test:8080/delegate");
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.taskType).toBe("extract");
-    expect(body.modelId).toBe("qwen3-coder");
-    expect(body.frontierModelId).toBe("anthropic/claude-opus-4-5");
     expect(typeof body.prompt).toBe("string");
+    // The gateway /delegate handler ignores these fields, so the executor must not send them.
+    expect(body.modelId).toBeUndefined();
+    expect(body.frontierModelId).toBeUndefined();
+  });
+
+  it("maps outcome 'fail'/'error' to a non-zero exit code, but 'unverified' to 0", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({ delegated: true, outcome: "fail", score: 0, output: "nope" }),
+    );
+    const failR = await executeHomeserverTask(makeTaskConfig({ path: "delegate" }), "delegate-fail", tmpLogDir);
+    expect(failR.exitCode).toBe(1);
+    expect(failR.outcome).toBe("fail");
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({ delegated: true, outcome: "error", output: "" }),
+    );
+    const errR = await executeHomeserverTask(makeTaskConfig({ path: "delegate" }), "delegate-error", tmpLogDir);
+    expect(errR.exitCode).toBe(1);
+
+    // 'unverified' is the gateway's normal success-without-grading case — must stay exit 0.
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({ delegated: true, outcome: "unverified", output: "ran ok" }),
+    );
+    const unvR = await executeHomeserverTask(makeTaskConfig({ path: "delegate" }), "delegate-unverified", tmpLogDir);
+    expect(unvR.exitCode).toBe(0);
+    expect(unvR.resultText).toBe("ran ok");
   });
 });
 
@@ -195,5 +250,43 @@ describe("executeHomeserverTask — backpressure & errors", () => {
     expect(result.exitCode).toBe(401);
     expect(result.backpressure).toBe("none");
     expect(result.output).toContain("401");
+  });
+
+  it("parses an HTTP-date Retry-After on 503 (not just delta-seconds)", async () => {
+    const future = new Date(Date.now() + 30_000).toUTCString();
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("busy", { status: 503, headers: { "Retry-After": future } }),
+    );
+    const r = await executeHomeserverTask(makeTaskConfig(), "bp-503-date", tmpLogDir);
+    expect(r.backpressure).toBe("admission");
+    expect(r.retryAfterS).not.toBeNull();
+    expect(r.retryAfterS!).toBeGreaterThanOrEqual(0);
+    expect(r.retryAfterS!).toBeLessThanOrEqual(31);
+  });
+});
+
+describe("executeHomeserverTask — streaming edge cases", () => {
+  it("reassembles SSE frames split across byte chunks and parses a final chunk with no trailing newline", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      streamResponse([
+        'data: {"choices":[{"delta":{"content":"hel', // frame split mid-JSON
+        'lo"}}]}\n\n',
+        // final usage frame, deliberately NOT newline-terminated
+        'data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}',
+      ]),
+    );
+    const r = await executeHomeserverTask(makeTaskConfig(), "chat-split", tmpLogDir);
+    expect(r.exitCode).toBe(0);
+    expect(r.resultText).toBe("hello");
+    expect(r.totalTokens).toBe(4);
+  });
+
+  it("returns cleanly (no crash) when a 200 chat response has no body", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(null, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    );
+    const r = await executeHomeserverTask(makeTaskConfig(), "chat-nobody", tmpLogDir);
+    expect(r.resultText).toBeNull();
+    expect(r.output).toContain("no response body");
   });
 });
