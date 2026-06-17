@@ -13,7 +13,8 @@ export type LegacyDispatcherRuntime = "claude" | "codex" | "ollama";
 export type DispatcherRuntime =
   | LegacyDispatcherRuntime
   | "openrouter"
-  | "pi-harness";
+  | "pi-harness"
+  | "berget";
 
 const LEGACY_DISPATCHER_RUNTIMES: ReadonlySet<DispatcherRuntime> = new Set([
   "claude",
@@ -36,7 +37,8 @@ export type Provider =
   | "openai-spawn"
   | "ollama-local"
   | "openrouter"
-  | "pi-harness";
+  | "pi-harness"
+  | "berget";
 export type Egress = "subscription" | "local" | "third-party";
 export type RuntimeFamily = "one-shot" | "harness";
 export type ReasoningLevel = "low" | "medium" | "high";
@@ -171,6 +173,24 @@ export const RUNTIME_REGISTRY: readonly RuntimeDefinition[] = [
     harnessCmd: "pi",
     harnessFlags: ["--no-session", "--provider", "openrouter"],
   },
+  {
+    id: "berget",
+    dispatcherRuntime: "berget",
+    // Berget.ai is a Swedish company providing EU-sovereign GPU compute with
+    // GDPR-by-design architecture, NIS2 compliance, and no US jurisdiction.
+    // This makes it the sovereignty lane eligible to carry `private` data,
+    // unlike semi-trusted third-party runtimes that are capped at `internal`.
+    trustTier: "trusted",
+    costModel: "per-token",
+    modelSize: "large",
+    capabilities: ["code"],
+    provider: "berget",
+    egress: "third-party",
+    zdrRequired: false, // EU-native, no US nexus
+    autoEligible: false, // explicit-only for now, consistent with openrouter/pi-harness
+    family: "one-shot",
+    defaultModel: "mistralai/mistral-small-3.2-24b-instruct",
+  },
 ];
 
 const TRUST_TIER_MAX_SENSITIVITY: Record<TrustTier, Sensitivity> = {
@@ -215,7 +235,7 @@ export function buildRuntimeCandidates(
 // Stable aliases (orchestrator v1, see docs/orchestrator-v1-data-model.md §2)
 // ---------------------------------------------------------------------------
 
-export type Alias = "tiny" | "medium" | "large-reasoning" | "pi-large-coder";
+export type Alias = "tiny" | "medium" | "large-reasoning" | "pi-large-coder" | "berget-sovereign";
 
 export interface AliasResolution {
   alias: Alias;
@@ -273,6 +293,14 @@ export const ALIAS_MAP_V1: AliasMap = {
       host: "pi",
       notes:
         "Validated 2026-04-26: 5/6 strict, 6/6 lenient on aider eval. pi --no-session calling OR for the model.",
+    },
+    "berget-sovereign": {
+      alias: "berget-sovereign",
+      family: "one-shot",
+      model: "mistralai/mistral-small-3.2-24b-instruct",
+      runtimeId: "berget",
+      notes:
+        "EU-sovereignty lane for private/internal tasks. Berget.ai: Swedish co, GDPR-by-design, NIS2, no US jurisdiction.",
     },
   },
 };

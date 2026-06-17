@@ -42,9 +42,9 @@ describe("RUNTIME_REGISTRY", () => {
     }
   });
 
-  it("cloud entries are semi-trusted", () => {
+  it("cloud entries are semi-trusted (except berget which is trusted/EU-sovereign)", () => {
     const cloudEntries = RUNTIME_REGISTRY.filter(
-      (r) => r.dispatcherRuntime !== "ollama",
+      (r) => r.dispatcherRuntime !== "ollama" && r.id !== "berget",
     );
     for (const entry of cloudEntries) {
       expect(entry.trustTier).toBe("semi-trusted");
@@ -235,9 +235,9 @@ describe("alias map (v1)", () => {
     expect(ALIAS_MAP_V1.version).toBe(1);
   });
 
-  it("contains the four v1 aliases", () => {
+  it("contains the five v1 aliases (four original + berget-sovereign)", () => {
     const aliases = Object.keys(ALIAS_MAP_V1.aliases).sort();
-    expect(aliases).toEqual(["large-reasoning", "medium", "pi-large-coder", "tiny"]);
+    expect(aliases).toEqual(["berget-sovereign", "large-reasoning", "medium", "pi-large-coder", "tiny"]);
   });
 
   it("tiny resolves to ollama-pi/qwen2.5:3b", () => {
@@ -278,5 +278,33 @@ describe("alias map (v1)", () => {
 
   it("resolveAlias throws on unknown alias", () => {
     expect(() => resolveAlias("nonexistent" as never)).toThrow(/Unknown alias/);
+  });
+
+  it("berget-sovereign resolves to berget runtime with mistral-small", () => {
+    const r = resolveAlias("berget-sovereign");
+    expect(r.runtimeId).toBe("berget");
+    expect(r.model).toBe("mistralai/mistral-small-3.2-24b-instruct");
+    expect(r.family).toBe("one-shot");
+  });
+});
+
+describe("berget runtime", () => {
+  it("getRegistryEntryById returns berget with correct fields", () => {
+    const entry = getRegistryEntryById("berget");
+    expect(entry).toBeDefined();
+    expect(entry!.provider).toBe("berget");
+    expect(entry!.egress).toBe("third-party");
+    expect(entry!.trustTier).toBe("trusted");
+    expect(entry!.autoEligible).toBe(false);
+    expect(entry!.family).toBe("one-shot");
+    expect(entry!.zdrRequired).toBe(false);
+    expect(entry!.dispatcherRuntime).toBe("berget");
+  });
+
+  it("berget is available:true in buildRuntimeCandidates (cloud runtime)", () => {
+    const candidates = buildRuntimeCandidates([]);
+    const berget = candidates.find((c) => c.id === "berget");
+    expect(berget).toBeDefined();
+    expect(berget!.available).toBe(true);
   });
 });
