@@ -122,6 +122,9 @@ export class DirectModelExecutor implements WorkerExecutor {
       model: req.model,
       messages,
       stream: false,
+      // Explicitly cap completion tokens to avoid provider defaults (e.g. Berget
+      // auto-sets max_tokens=32768 which exceeds many small models' context windows).
+      max_tokens: 4096,
     };
 
     const controller = new AbortController();

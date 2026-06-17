@@ -20,11 +20,12 @@ describe("getModelPrice", () => {
   });
 
   it("returns the berget mistral-small entry", () => {
-    const price = getModelPrice("mistralai/mistral-small-3.2-24b-instruct");
+    // Real slug from Berget /v1/models (case-sensitive); price is EUR 0.30/M → USD ~0.34/M.
+    const price = getModelPrice("mistralai/Mistral-Small-3.2-24B-Instruct-2506");
     expect(price).toBeDefined();
     expect(price!.provider).toBe("berget");
-    expect(price!.inputUsdPerM).toBe(0.33);
-    expect(price!.outputUsdPerM).toBe(0.33);
+    expect(price!.inputUsdPerM).toBe(0.34);
+    expect(price!.outputUsdPerM).toBe(0.34);
   });
 });
 

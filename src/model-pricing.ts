@@ -27,9 +27,14 @@ export interface ModelPrice {
  *   - OpenRouter models (routed via openrouter runtime)
  *   - Berget models (EU-sovereign, routed via berget runtime)
  *   - Anthropic baseline (for savings comparison via CLAUDE_BASELINE_MODEL_ID)
+ *
+ * Berget prices are in EUR; converted to USD at EUR/USD ≈ 1.12 (June 2026).
+ * Berget slugs are case-sensitive and must match exactly as returned by the
+ * Berget /v1/models endpoint.
  */
 export const MODEL_PRICING: Readonly<Record<string, ModelPrice>> = {
   // ---- OpenRouter ----
+  // Verified via /api/v1/models on 2026-06-17.
   "deepseek/deepseek-v4-flash": {
     provider: "openrouter",
     inputUsdPerM: 0.09,
@@ -55,32 +60,55 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPrice>> = {
     inputUsdPerM: 0.68,
     outputUsdPerM: 3.41,
   },
+  // Planner/verifier/synthesizer default on OpenRouter
+  "anthropic/claude-sonnet-4.6": {
+    provider: "openrouter",
+    inputUsdPerM: 3.00,
+    outputUsdPerM: 15.00,
+  },
 
   // ---- Berget (EU-sovereign) ----
-  "mistralai/mistral-small-3.2-24b-instruct": {
+  // Verified slugs and prices from Berget /v1/models on 2026-06-17.
+  // Prices are EUR/M tokens × 1.12 (EUR→USD) rounded to 4 decimal places.
+  "meta-llama/Llama-3.1-8B-Instruct": {
     provider: "berget",
-    inputUsdPerM: 0.33,
-    outputUsdPerM: 0.33,
+    inputUsdPerM: 0.22,
+    outputUsdPerM: 0.22,
   },
-  "google/gemma-4-31b-instruct": {
+  "mistralai/Mistral-Small-3.2-24B-Instruct-2506": {
+    provider: "berget",
+    inputUsdPerM: 0.34,
+    outputUsdPerM: 0.34,
+  },
+  "google/gemma-4-31B-it": {
     provider: "berget",
     inputUsdPerM: 0.28,
-    outputUsdPerM: 0.55,
+    outputUsdPerM: 0.56,
   },
   "openai/gpt-oss-120b": {
     provider: "berget",
-    inputUsdPerM: 0.44,
-    outputUsdPerM: 0.99,
+    inputUsdPerM: 0.22,
+    outputUsdPerM: 0.84,
   },
-  "zhipu/glm-4.7": {
+  "zai-org/GLM-4.7-FP8": {
     provider: "berget",
-    inputUsdPerM: 0.77,
-    outputUsdPerM: 2.75,
+    inputUsdPerM: 0.78,
+    outputUsdPerM: 2.80,
   },
-  "mistralai/mistral-medium-3.5": {
+  "mistralai/Mistral-Medium-3.5-128B": {
     provider: "berget",
-    inputUsdPerM: 1.65,
-    outputUsdPerM: 5.50,
+    inputUsdPerM: 1.68,
+    outputUsdPerM: 5.60,
+  },
+  "meta-llama/Llama-3.3-70B-Instruct": {
+    provider: "berget",
+    inputUsdPerM: 1.01,
+    outputUsdPerM: 1.01,
+  },
+  "moonshotai/Kimi-K2.6": {
+    provider: "berget",
+    inputUsdPerM: 0.84,
+    outputUsdPerM: 3.92,
   },
 
   // ---- Anthropic baseline (for savings comparison) ----
