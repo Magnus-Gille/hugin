@@ -211,12 +211,18 @@ describe("orchestrator v1 policy fields", () => {
     expect(entry!.autoEligible).toBe(false);
   });
 
-  it("existing one-shot runtimes are auto-eligible by default", () => {
-    for (const id of ["claude-sdk", "codex-spawn", "ollama-pi", "ollama-laptop", "ollama-orin"]) {
+  it("existing one-shot runtimes are auto-eligible by default (except ollama-pi)", () => {
+    for (const id of ["claude-sdk", "codex-spawn", "ollama-laptop", "ollama-orin"]) {
       const entry = getRegistryEntryById(id);
       expect(entry?.autoEligible).toBe(true);
       expect(entry?.family).toBe("one-shot");
     }
+  });
+
+  it("ollama-pi is explicit-only (control plane, not a general auto-routed worker)", () => {
+    const entry = getRegistryEntryById("ollama-pi");
+    expect(entry?.autoEligible).toBe(false);
+    expect(entry?.family).toBe("one-shot");
   });
 
   it("ollama entries are local-egress and not ZDR-flagged", () => {

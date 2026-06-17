@@ -108,7 +108,10 @@ export const RUNTIME_REGISTRY: readonly RuntimeDefinition[] = [
     provider: "ollama-local",
     egress: "local",
     zdrRequired: false,
-    autoEligible: true,
+    // The Pi is the always-on control plane; its qwen2.5:3b is too limited
+    // to be a general auto-routed worker. Explicit-only: use Runtime: ollama
+    // + Ollama-host: pi to target it deliberately.
+    autoEligible: false,
     family: "one-shot",
   },
   {
