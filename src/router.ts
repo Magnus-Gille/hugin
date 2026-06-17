@@ -2,6 +2,7 @@ import type { Sensitivity } from "./sensitivity.js";
 import { compareSensitivity } from "./sensitivity.js";
 import { getRuntimeMaxSensitivity } from "./runtime-registry.js";
 import type { RuntimeCandidate, RuntimeCapability } from "./runtime-registry.js";
+import { getModelPrice } from "./model-pricing.js";
 
 export interface RouterInput {
   effectiveSensitivity: Sensitivity;
@@ -32,6 +33,19 @@ const SIZE_RANK: Record<string, number> = {
   medium: 1,
   small: 2,
 };
+
+/**
+ * Blended (input+output)/2 price in USD per million tokens for the candidate's
+ * default model. Returns `Number.POSITIVE_INFINITY` when the model is unknown
+ * or no defaultModel is set — unpriced candidates sink to the bottom within
+ * their cost tier.
+ */
+function representativePriceUsdPerM(candidate: RuntimeCandidate): number {
+  if (!candidate.defaultModel) return Number.POSITIVE_INFINITY;
+  const price = getModelPrice(candidate.defaultModel);
+  if (!price) return Number.POSITIVE_INFINITY;
+  return (price.inputUsdPerM + price.outputUsdPerM) / 2;
+}
 
 export function routeTask(input: RouterInput): RouterDecision {
   const { effectiveSensitivity, capabilities, preferredModel, availableRuntimes } = input;
@@ -118,9 +132,13 @@ export function routeTask(input: RouterInput): RouterDecision {
     const trustDiff = (TRUST_RANK[a.trustTier] ?? 1) - (TRUST_RANK[b.trustTier] ?? 1);
     if (trustDiff !== 0) return trustDiff;
 
-    // Size: larger > smaller (tiebreaker)
+    // Size: larger > smaller
     const sizeDiff = (SIZE_RANK[a.modelSize] ?? 2) - (SIZE_RANK[b.modelSize] ?? 2);
-    return sizeDiff;
+    if (sizeDiff !== 0) return sizeDiff;
+
+    // Price: cheaper defaultModel wins (within same tier/trust/size).
+    // Unpriced candidates (no defaultModel or unknown price) rank last.
+    return representativePriceUsdPerM(a) - representativePriceUsdPerM(b);
   });
 
   const selected = candidates[0];
@@ -140,7 +158,17 @@ function buildReason(
   if (modelAffinityMatch && selected === modelAffinityMatch) {
     parts.push(`model affinity match`);
   } else {
-    parts.push(`cost:${selected.costModel}, trust:${selected.trustTier}, size:${selected.modelSize}`);
+    const base = `cost:${selected.costModel}, trust:${selected.trustTier}, size:${selected.modelSize}`;
+    if (selected.costModel === "per-token" && selected.defaultModel) {
+      const price = representativePriceUsdPerM(selected);
+      if (price !== Number.POSITIVE_INFINITY) {
+        parts.push(`${base}, price:$${price.toFixed(3)}/M`);
+      } else {
+        parts.push(base);
+      }
+    } else {
+      parts.push(base);
+    }
   }
 
   if (eliminated.length > 0) {

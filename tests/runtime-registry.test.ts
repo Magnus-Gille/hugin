@@ -6,6 +6,7 @@ import {
   getAliasMap,
   getRegistryEntryById,
   getRuntimeMaxSensitivity,
+  parseActiveSubscriptions,
   resolveAlias,
 } from "../src/runtime-registry.js";
 import type { OllamaHost } from "../src/ollama-hosts.js";
@@ -306,5 +307,84 @@ describe("berget runtime", () => {
     const berget = candidates.find((c) => c.id === "berget");
     expect(berget).toBeDefined();
     expect(berget!.available).toBe(true);
+  });
+});
+
+describe("parseActiveSubscriptions", () => {
+  it("undefined returns undefined (all subscriptions active, backwards-compat)", () => {
+    expect(parseActiveSubscriptions(undefined)).toBeUndefined();
+  });
+
+  it("empty string returns undefined", () => {
+    expect(parseActiveSubscriptions("")).toBeUndefined();
+  });
+
+  it("whitespace-only string returns undefined", () => {
+    expect(parseActiveSubscriptions("   ")).toBeUndefined();
+  });
+
+  it("single runtime id returns a Set with that id", () => {
+    const result = parseActiveSubscriptions("claude-sdk");
+    expect(result).toBeInstanceOf(Set);
+    expect(result!.has("claude-sdk")).toBe(true);
+    expect(result!.size).toBe(1);
+  });
+
+  it("trims whitespace around comma-separated ids", () => {
+    const result = parseActiveSubscriptions("a, b ,c");
+    expect(result).toBeInstanceOf(Set);
+    expect(result!.has("a")).toBe(true);
+    expect(result!.has("b")).toBe(true);
+    expect(result!.has("c")).toBe(true);
+    expect(result!.size).toBe(3);
+  });
+
+  it("ignores empty segments from double commas", () => {
+    const result = parseActiveSubscriptions("claude-sdk,,codex-spawn");
+    expect(result).toBeInstanceOf(Set);
+    expect(result!.has("claude-sdk")).toBe(true);
+    expect(result!.has("codex-spawn")).toBe(true);
+    expect(result!.size).toBe(2);
+  });
+});
+
+describe("buildRuntimeCandidates with activeSubscriptions", () => {
+  it("with activeSubscriptions={claude-sdk}: claude-sdk available:true, codex-spawn available:false", () => {
+    const active = new Set(["claude-sdk"]);
+    const candidates = buildRuntimeCandidates([], { activeSubscriptions: active });
+    const claudeSdk = candidates.find((c) => c.id === "claude-sdk");
+    const codexSpawn = candidates.find((c) => c.id === "codex-spawn");
+    expect(claudeSdk?.available).toBe(true);
+    expect(codexSpawn?.available).toBe(false);
+  });
+
+  it("with activeSubscriptions=undefined: both claude-sdk and codex-spawn are available:true (regression)", () => {
+    const candidates = buildRuntimeCandidates([], { activeSubscriptions: undefined });
+    const claudeSdk = candidates.find((c) => c.id === "claude-sdk");
+    const codexSpawn = candidates.find((c) => c.id === "codex-spawn");
+    expect(claudeSdk?.available).toBe(true);
+    expect(codexSpawn?.available).toBe(true);
+  });
+
+  it("activeSubscriptions does not affect non-subscription runtimes (ollama stays available)", () => {
+    const piOnline: OllamaHost = {
+      name: "pi",
+      baseUrl: "http://127.0.0.1:11434",
+      available: true,
+      models: ["qwen2.5:3b"],
+      lastChecked: Date.now(),
+    };
+    const active = new Set(["claude-sdk"]); // does not include ollama runtimes
+    const candidates = buildRuntimeCandidates([piOnline], { activeSubscriptions: active });
+    const pi = candidates.find((c) => c.id === "ollama-pi");
+    expect(pi?.available).toBe(true); // free, unaffected by subscription filter
+  });
+
+  it("no opts argument keeps existing behaviour (both subscription runtimes available)", () => {
+    const candidates = buildRuntimeCandidates([]);
+    const claudeSdk = candidates.find((c) => c.id === "claude-sdk");
+    const codexSpawn = candidates.find((c) => c.id === "codex-spawn");
+    expect(claudeSdk?.available).toBe(true);
+    expect(codexSpawn?.available).toBe(true);
   });
 });

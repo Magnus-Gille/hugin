@@ -206,10 +206,37 @@ export function getRegistryEntryById(id: string): RuntimeDefinition | undefined 
   return RUNTIME_REGISTRY.find((r) => r.id === id);
 }
 
+/**
+ * Parse the HUGIN_ACTIVE_SUBSCRIPTIONS env var into a Set of runtime ids.
+ *
+ * - `undefined` / empty / whitespace → `undefined` (meaning "all subscriptions
+ *   active", backwards-compatible default).
+ * - Otherwise → a Set of trimmed, non-empty, comma-separated runtime ids.
+ */
+export function parseActiveSubscriptions(
+  env: string | undefined,
+): ReadonlySet<string> | undefined {
+  if (!env || !env.trim()) return undefined;
+  const ids = env
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (ids.length === 0) return undefined;
+  return new Set(ids);
+}
+
+export interface BuildRuntimeCandidatesOpts {
+  /** When provided, subscription-cost runtimes are only available if their id
+   *  is in this set. `undefined` = all subscriptions are active (default). */
+  activeSubscriptions?: ReadonlySet<string>;
+}
+
 export function buildRuntimeCandidates(
   ollamaHosts: OllamaHost[],
+  opts?: BuildRuntimeCandidatesOpts,
 ): RuntimeCandidate[] {
   const hostMap = new Map(ollamaHosts.map((h) => [h.name, h]));
+  const { activeSubscriptions } = opts ?? {};
 
   return RUNTIME_REGISTRY.map((def): RuntimeCandidate => {
     if (def.ollamaHost) {
@@ -220,12 +247,21 @@ export function buildRuntimeCandidates(
         models: host?.models ?? [],
       };
     }
-    // Cloud runtimes (claude, codex, openrouter, pi-harness) are assumed always
-    // available at the registry level. Per-call availability (e.g. OpenRouter
-    // rate limits, harness binary missing) is enforced by the executor.
+
+    // For subscription-cost runtimes, honour the active-subscriptions filter
+    // when provided. Non-subscription and unset behave as before.
+    const available =
+      def.costModel === "subscription" && activeSubscriptions !== undefined
+        ? activeSubscriptions.has(def.id)
+        : true;
+
+    // Cloud runtimes (claude, codex, openrouter, pi-harness, berget) are assumed
+    // always available at the registry level unless filtered out above. Per-call
+    // availability (e.g. OpenRouter rate limits, harness binary missing) is
+    // enforced by the executor.
     return {
       ...def,
-      available: true,
+      available,
       models: [],
     };
   });

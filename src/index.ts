@@ -102,6 +102,7 @@ import { routeTask, type RouterDecision } from "./router.js";
 import {
   buildRuntimeCandidates,
   isLegacyDispatcherRuntime,
+  parseActiveSubscriptions,
   type RuntimeCapability,
 } from "./runtime-registry.js";
 import {
@@ -3259,7 +3260,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     if (parsedTask.autoRouted) {
       try {
         const ollamaHosts = await probeAllHosts();
-        const candidates = buildRuntimeCandidates(ollamaHosts);
+        const activeSubscriptions = parseActiveSubscriptions(
+          process.env.HUGIN_ACTIVE_SUBSCRIPTIONS,
+        );
+        const candidates = buildRuntimeCandidates(ollamaHosts, { activeSubscriptions });
         const decision = routeTask({
           effectiveSensitivity: sensitivityAssessment.effective,
           capabilities: parsedTask.capabilities,
