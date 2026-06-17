@@ -6,6 +6,7 @@ import {
   getAliasMap,
   getRegistryEntryById,
   getRuntimeMaxSensitivity,
+  parseActiveSubscriptions,
   resolveAlias,
 } from "../src/runtime-registry.js";
 import type { OllamaHost } from "../src/ollama-hosts.js";
@@ -42,9 +43,9 @@ describe("RUNTIME_REGISTRY", () => {
     }
   });
 
-  it("cloud entries are semi-trusted", () => {
+  it("cloud entries are semi-trusted (except berget which is trusted/EU-sovereign)", () => {
     const cloudEntries = RUNTIME_REGISTRY.filter(
-      (r) => r.dispatcherRuntime !== "ollama",
+      (r) => r.dispatcherRuntime !== "ollama" && r.id !== "berget",
     );
     for (const entry of cloudEntries) {
       expect(entry.trustTier).toBe("semi-trusted");
@@ -210,12 +211,18 @@ describe("orchestrator v1 policy fields", () => {
     expect(entry!.autoEligible).toBe(false);
   });
 
-  it("existing one-shot runtimes are auto-eligible by default", () => {
-    for (const id of ["claude-sdk", "codex-spawn", "ollama-pi", "ollama-laptop", "ollama-orin"]) {
+  it("existing one-shot runtimes are auto-eligible by default (except ollama-pi)", () => {
+    for (const id of ["claude-sdk", "codex-spawn", "ollama-laptop", "ollama-orin"]) {
       const entry = getRegistryEntryById(id);
       expect(entry?.autoEligible).toBe(true);
       expect(entry?.family).toBe("one-shot");
     }
+  });
+
+  it("ollama-pi is explicit-only (control plane, not a general auto-routed worker)", () => {
+    const entry = getRegistryEntryById("ollama-pi");
+    expect(entry?.autoEligible).toBe(false);
+    expect(entry?.family).toBe("one-shot");
   });
 
   it("ollama entries are local-egress and not ZDR-flagged", () => {
@@ -278,5 +285,109 @@ describe("alias map (v1)", () => {
 
   it("resolveAlias throws on unknown alias", () => {
     expect(() => resolveAlias("nonexistent" as never)).toThrow(/Unknown alias/);
+  });
+
+  it("resolveAlias throws on berget-sovereign (removed from alias map)", () => {
+    expect(() => resolveAlias("berget-sovereign" as never)).toThrow(/Unknown alias/);
+  });
+});
+
+describe("berget runtime", () => {
+  it("getRegistryEntryById returns berget with correct fields", () => {
+    const entry = getRegistryEntryById("berget");
+    expect(entry).toBeDefined();
+    expect(entry!.provider).toBe("berget");
+    expect(entry!.egress).toBe("third-party");
+    expect(entry!.trustTier).toBe("trusted");
+    expect(entry!.autoEligible).toBe(false);
+    expect(entry!.family).toBe("one-shot");
+    expect(entry!.zdrRequired).toBe(false);
+    expect(entry!.dispatcherRuntime).toBe("berget");
+  });
+
+  it("berget is available:true in buildRuntimeCandidates (cloud runtime)", () => {
+    const candidates = buildRuntimeCandidates([]);
+    const berget = candidates.find((c) => c.id === "berget");
+    expect(berget).toBeDefined();
+    expect(berget!.available).toBe(true);
+  });
+});
+
+describe("parseActiveSubscriptions", () => {
+  it("undefined returns undefined (all subscriptions active, backwards-compat)", () => {
+    expect(parseActiveSubscriptions(undefined)).toBeUndefined();
+  });
+
+  it("empty string returns undefined", () => {
+    expect(parseActiveSubscriptions("")).toBeUndefined();
+  });
+
+  it("whitespace-only string returns undefined", () => {
+    expect(parseActiveSubscriptions("   ")).toBeUndefined();
+  });
+
+  it("single runtime id returns a Set with that id", () => {
+    const result = parseActiveSubscriptions("claude-sdk");
+    expect(result).toBeInstanceOf(Set);
+    expect(result!.has("claude-sdk")).toBe(true);
+    expect(result!.size).toBe(1);
+  });
+
+  it("trims whitespace around comma-separated ids", () => {
+    const result = parseActiveSubscriptions("a, b ,c");
+    expect(result).toBeInstanceOf(Set);
+    expect(result!.has("a")).toBe(true);
+    expect(result!.has("b")).toBe(true);
+    expect(result!.has("c")).toBe(true);
+    expect(result!.size).toBe(3);
+  });
+
+  it("ignores empty segments from double commas", () => {
+    const result = parseActiveSubscriptions("claude-sdk,,codex-spawn");
+    expect(result).toBeInstanceOf(Set);
+    expect(result!.has("claude-sdk")).toBe(true);
+    expect(result!.has("codex-spawn")).toBe(true);
+    expect(result!.size).toBe(2);
+  });
+});
+
+describe("buildRuntimeCandidates with activeSubscriptions", () => {
+  it("with activeSubscriptions={claude-sdk}: claude-sdk available:true, codex-spawn available:false", () => {
+    const active = new Set(["claude-sdk"]);
+    const candidates = buildRuntimeCandidates([], { activeSubscriptions: active });
+    const claudeSdk = candidates.find((c) => c.id === "claude-sdk");
+    const codexSpawn = candidates.find((c) => c.id === "codex-spawn");
+    expect(claudeSdk?.available).toBe(true);
+    expect(codexSpawn?.available).toBe(false);
+  });
+
+  it("with activeSubscriptions=undefined: both claude-sdk and codex-spawn are available:true (regression)", () => {
+    const candidates = buildRuntimeCandidates([], { activeSubscriptions: undefined });
+    const claudeSdk = candidates.find((c) => c.id === "claude-sdk");
+    const codexSpawn = candidates.find((c) => c.id === "codex-spawn");
+    expect(claudeSdk?.available).toBe(true);
+    expect(codexSpawn?.available).toBe(true);
+  });
+
+  it("activeSubscriptions does not affect non-subscription runtimes (ollama stays available)", () => {
+    const piOnline: OllamaHost = {
+      name: "pi",
+      baseUrl: "http://127.0.0.1:11434",
+      available: true,
+      models: ["qwen2.5:3b"],
+      lastChecked: Date.now(),
+    };
+    const active = new Set(["claude-sdk"]); // does not include ollama runtimes
+    const candidates = buildRuntimeCandidates([piOnline], { activeSubscriptions: active });
+    const pi = candidates.find((c) => c.id === "ollama-pi");
+    expect(pi?.available).toBe(true); // free, unaffected by subscription filter
+  });
+
+  it("no opts argument keeps existing behaviour (both subscription runtimes available)", () => {
+    const candidates = buildRuntimeCandidates([]);
+    const claudeSdk = candidates.find((c) => c.id === "claude-sdk");
+    const codexSpawn = candidates.find((c) => c.id === "codex-spawn");
+    expect(claudeSdk?.available).toBe(true);
+    expect(codexSpawn?.available).toBe(true);
   });
 });

@@ -12,8 +12,10 @@ export type LegacyDispatcherRuntime = "claude" | "codex" | "ollama";
 // never dispatched in-process.
 export type DispatcherRuntime =
   | LegacyDispatcherRuntime
+  | "orchestrator"
   | "openrouter"
-  | "pi-harness";
+  | "pi-harness"
+  | "berget";
 
 const LEGACY_DISPATCHER_RUNTIMES: ReadonlySet<DispatcherRuntime> = new Set([
   "claude",
@@ -36,7 +38,8 @@ export type Provider =
   | "openai-spawn"
   | "ollama-local"
   | "openrouter"
-  | "pi-harness";
+  | "pi-harness"
+  | "berget";
 export type Egress = "subscription" | "local" | "third-party";
 export type RuntimeFamily = "one-shot" | "harness";
 export type ReasoningLevel = "low" | "medium" | "high";
@@ -106,7 +109,10 @@ export const RUNTIME_REGISTRY: readonly RuntimeDefinition[] = [
     provider: "ollama-local",
     egress: "local",
     zdrRequired: false,
-    autoEligible: true,
+    // The Pi is the always-on control plane; its qwen2.5:3b is too limited
+    // to be a general auto-routed worker. Explicit-only: use Runtime: ollama
+    // + Ollama-host: pi to target it deliberately.
+    autoEligible: false,
     family: "one-shot",
   },
   {
@@ -171,6 +177,24 @@ export const RUNTIME_REGISTRY: readonly RuntimeDefinition[] = [
     harnessCmd: "pi",
     harnessFlags: ["--no-session", "--provider", "openrouter"],
   },
+  {
+    id: "berget",
+    dispatcherRuntime: "berget",
+    // Berget.ai is a Swedish company providing EU-sovereign GPU compute with
+    // GDPR-by-design architecture, NIS2 compliance, and no US jurisdiction.
+    // This makes it the sovereignty lane eligible to carry `private` data,
+    // unlike semi-trusted third-party runtimes that are capped at `internal`.
+    trustTier: "trusted",
+    costModel: "per-token",
+    modelSize: "large",
+    capabilities: ["code"],
+    provider: "berget",
+    egress: "third-party",
+    zdrRequired: false, // EU-native, no US nexus
+    autoEligible: false, // explicit-only for now, consistent with openrouter/pi-harness
+    family: "one-shot",
+    defaultModel: "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+  },
 ];
 
 const TRUST_TIER_MAX_SENSITIVITY: Record<TrustTier, Sensitivity> = {
@@ -186,10 +210,37 @@ export function getRegistryEntryById(id: string): RuntimeDefinition | undefined 
   return RUNTIME_REGISTRY.find((r) => r.id === id);
 }
 
+/**
+ * Parse the HUGIN_ACTIVE_SUBSCRIPTIONS env var into a Set of runtime ids.
+ *
+ * - `undefined` / empty / whitespace → `undefined` (meaning "all subscriptions
+ *   active", backwards-compatible default).
+ * - Otherwise → a Set of trimmed, non-empty, comma-separated runtime ids.
+ */
+export function parseActiveSubscriptions(
+  env: string | undefined,
+): ReadonlySet<string> | undefined {
+  if (!env || !env.trim()) return undefined;
+  const ids = env
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (ids.length === 0) return undefined;
+  return new Set(ids);
+}
+
+export interface BuildRuntimeCandidatesOpts {
+  /** When provided, subscription-cost runtimes are only available if their id
+   *  is in this set. `undefined` = all subscriptions are active (default). */
+  activeSubscriptions?: ReadonlySet<string>;
+}
+
 export function buildRuntimeCandidates(
   ollamaHosts: OllamaHost[],
+  opts?: BuildRuntimeCandidatesOpts,
 ): RuntimeCandidate[] {
   const hostMap = new Map(ollamaHosts.map((h) => [h.name, h]));
+  const { activeSubscriptions } = opts ?? {};
 
   return RUNTIME_REGISTRY.map((def): RuntimeCandidate => {
     if (def.ollamaHost) {
@@ -200,12 +251,21 @@ export function buildRuntimeCandidates(
         models: host?.models ?? [],
       };
     }
-    // Cloud runtimes (claude, codex, openrouter, pi-harness) are assumed always
-    // available at the registry level. Per-call availability (e.g. OpenRouter
-    // rate limits, harness binary missing) is enforced by the executor.
+
+    // For subscription-cost runtimes, honour the active-subscriptions filter
+    // when provided. Non-subscription and unset behave as before.
+    const available =
+      def.costModel === "subscription" && activeSubscriptions !== undefined
+        ? activeSubscriptions.has(def.id)
+        : true;
+
+    // Cloud runtimes (claude, codex, openrouter, pi-harness, berget) are assumed
+    // always available at the registry level unless filtered out above. Per-call
+    // availability (e.g. OpenRouter rate limits, harness binary missing) is
+    // enforced by the executor.
     return {
       ...def,
-      available: true,
+      available,
       models: [],
     };
   });

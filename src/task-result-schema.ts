@@ -25,11 +25,13 @@ export type TaskExecutionBodyKind = z.infer<typeof taskExecutionBodyKindSchema>;
 // sees the legacy executor runtimes (claude/codex/ollama). Orchestrator-only
 // runtimes (openrouter, pi-harness) flow through a separate broker path and
 // produce DelegationResult, never StructuredTaskResult.
+// "orchestrator" is the in-process multi-model fanout runtime (Phase 3b).
 export const dispatcherRuntimeSchema = z.enum([
   "claude",
   "codex",
   "ollama",
   "auto",
+  "orchestrator",
 ]);
 export type DispatcherRuntime = z.infer<typeof dispatcherRuntimeSchema>;
 

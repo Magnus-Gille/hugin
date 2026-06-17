@@ -371,4 +371,93 @@ describe("routeTask", () => {
       expect(decision.selectedRuntime.id).toBe("legacy-runtime");
     });
   });
+
+  describe("price-aware tiebreaker (Task B)", () => {
+    // deepseek/deepseek-v4-flash: input=$0.09/M, output=$0.18/M → blended ~$0.135/M
+    // mistralai/mistral-medium-3.5: input=$1.65/M, output=$5.50/M → blended ~$3.575/M
+    const cheapPerToken = makeCandidate({
+      id: "cheap-per-token",
+      trustTier: "semi-trusted",
+      costModel: "per-token",
+      modelSize: "large",
+      available: true,
+      autoEligible: true,
+      defaultModel: "deepseek/deepseek-v4-flash",
+    });
+
+    const pricierPerToken = makeCandidate({
+      id: "pricier-per-token",
+      trustTier: "semi-trusted",
+      costModel: "per-token",
+      modelSize: "large",
+      available: true,
+      autoEligible: true,
+      defaultModel: "mistralai/mistral-medium-3.5",
+    });
+
+    const unpricedPerToken = makeCandidate({
+      id: "unpriced-per-token",
+      trustTier: "semi-trusted",
+      costModel: "per-token",
+      modelSize: "large",
+      available: true,
+      autoEligible: true,
+      // no defaultModel → unpriced
+    });
+
+    const subscriptionRuntime = makeCandidate({
+      id: "sub-runtime",
+      trustTier: "semi-trusted",
+      costModel: "subscription",
+      modelSize: "large",
+      available: true,
+      autoEligible: true,
+      defaultModel: "deepseek/deepseek-v4-flash", // same cheap price — should still lose to tier
+    });
+
+    it("among per-token candidates with same trust/size, cheaper defaultModel wins", () => {
+      const input: RouterInput = {
+        effectiveSensitivity: "internal",
+        availableRuntimes: [pricierPerToken, cheapPerToken],
+      };
+      const decision = routeTask(input);
+      expect(decision.selectedRuntime.id).toBe("cheap-per-token");
+    });
+
+    it("subscription tier still beats a cheaper-priced per-token candidate (tier dominance)", () => {
+      const input: RouterInput = {
+        effectiveSensitivity: "internal",
+        availableRuntimes: [cheapPerToken, subscriptionRuntime],
+      };
+      const decision = routeTask(input);
+      expect(decision.selectedRuntime.id).toBe("sub-runtime");
+    });
+
+    it("unpriced per-token ranks below a priced per-token", () => {
+      const input: RouterInput = {
+        effectiveSensitivity: "internal",
+        availableRuntimes: [unpricedPerToken, cheapPerToken],
+      };
+      const decision = routeTask(input);
+      expect(decision.selectedRuntime.id).toBe("cheap-per-token");
+    });
+
+    it("both unpriced per-token candidates → either can win (no error)", () => {
+      const unpriced2 = makeCandidate({
+        id: "unpriced-2",
+        trustTier: "semi-trusted",
+        costModel: "per-token",
+        modelSize: "large",
+        available: true,
+        autoEligible: true,
+      });
+      const input: RouterInput = {
+        effectiveSensitivity: "internal",
+        availableRuntimes: [unpricedPerToken, unpriced2],
+      };
+      // Should not throw; one of the two is selected
+      const decision = routeTask(input);
+      expect(["unpriced-per-token", "unpriced-2"]).toContain(decision.selectedRuntime.id);
+    });
+  });
 });
