@@ -126,10 +126,20 @@ function parseVerdict(output: string): { ok: boolean; notes?: string } {
 // Cost aggregation
 // ---------------------------------------------------------------------------
 
+/**
+ * Sum costs across all invocations.
+ *
+ * Returns null if:
+ * - No costs were recorded (costs is empty).
+ * - ANY recorded cost is null (cost unknown for that invocation — reporting a
+ *   partial sum would under-report and mislead; null is the honest answer).
+ *
+ * Returns a numeric sum only when ALL costs are known.
+ */
 function sumCosts(costs: (number | null)[]): number | null {
-  const known = costs.filter((c): c is number => c !== null);
-  if (known.length === 0) return null;
-  return known.reduce((a, b) => a + b, 0);
+  if (costs.length === 0) return null;
+  if (costs.some((c) => c === null)) return null;
+  return (costs as number[]).reduce((a, b) => a + b, 0);
 }
 
 // ---------------------------------------------------------------------------

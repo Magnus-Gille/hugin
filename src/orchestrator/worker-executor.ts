@@ -437,9 +437,17 @@ function extractChatCompletion(raw: unknown): ExtractedCompletion | ExtractedErr
   if (!Array.isArray(choices) || choices.length === 0) {
     return { ok: false, error: "Response missing choices array" };
   }
-  const choice = choices[0] as Record<string, unknown>;
-  const message = choice["message"] as Record<string, unknown> | undefined;
-  const content = message?.["content"];
+  const choice = choices[0];
+  if (choice === null || typeof choice !== "object") {
+    return { ok: false, error: "Response choices[0] is not an object" };
+  }
+  const choiceObj = choice as Record<string, unknown>;
+  const message = choiceObj["message"];
+  if (message !== null && message !== undefined && typeof message !== "object") {
+    return { ok: false, error: "Response choices[0].message is not an object" };
+  }
+  const messageObj = message as Record<string, unknown> | undefined;
+  const content = messageObj?.["content"];
   if (typeof content !== "string") {
     return { ok: false, error: "Response missing choices[0].message.content (string)" };
   }

@@ -318,6 +318,50 @@ describe("DirectModelExecutor — missing API key path", () => {
   });
 });
 
+describe("DirectModelExecutor — malformed response bodies (Fix #3)", () => {
+  it("{choices:[null]} returns ok=false and does NOT throw", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ choices: [null] }), { status: 200, headers: { "content-type": "application/json" } }),
+      ),
+    );
+    const executor = new DirectModelExecutor();
+    const result = await executor.run({ provider: "openrouter", model: "deepseek/deepseek-v4-flash", prompt: "hi", timeoutMs: 5000 });
+    expect(result.ok).toBe(false);
+    expect(result.output).toBe("");
+  });
+
+  it("{choices:[{}]} returns ok=false and does NOT throw", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ choices: [{}] }), { status: 200, headers: { "content-type": "application/json" } }),
+      ),
+    );
+    const executor = new DirectModelExecutor();
+    const result = await executor.run({ provider: "openrouter", model: "deepseek/deepseek-v4-flash", prompt: "hi", timeoutMs: 5000 });
+    expect(result.ok).toBe(false);
+    expect(result.output).toBe("");
+  });
+
+  it("{choices:[{message:{content:123}}]} returns ok=false and does NOT throw", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ choices: [{ message: { content: 123 } }] }), { status: 200, headers: { "content-type": "application/json" } }),
+      ),
+    );
+    const executor = new DirectModelExecutor();
+    const result = await executor.run({ provider: "openrouter", model: "deepseek/deepseek-v4-flash", prompt: "hi", timeoutMs: 5000 });
+    expect(result.ok).toBe(false);
+    expect(result.output).toBe("");
+  });
+});
+
 describe("DirectModelExecutor — timeout/abort path", () => {
   it("returns ok=false with timeout error when fetch is aborted", async () => {
     vi.stubEnv("OPENROUTER_API_KEY", "test-key");

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { loadOrchestratorConfig } from "../../src/orchestrator/config.js";
+import { loadOrchestratorConfig, applyTaskModel } from "../../src/orchestrator/config.js";
 import { DEFAULT_ORCHESTRATOR_CONFIG } from "../../src/orchestrator/engine.js";
 
 describe("loadOrchestratorConfig", () => {
@@ -79,6 +79,31 @@ describe("loadOrchestratorConfig", () => {
     expect(cfg.maxSubtasks).toBe(DEFAULT_ORCHESTRATOR_CONFIG.maxSubtasks);
   });
 
+  it("rejects '0' for maxSubtasks (zero is not positive) → falls back to default", () => {
+    const cfg = loadOrchestratorConfig({ HUGIN_ORCH_MAX_SUBTASKS: "0" });
+    expect(cfg.maxSubtasks).toBe(DEFAULT_ORCHESTRATOR_CONFIG.maxSubtasks);
+  });
+
+  it("rejects '-1' for maxConcurrency (negative) → falls back to default", () => {
+    const cfg = loadOrchestratorConfig({ HUGIN_ORCH_MAX_CONCURRENCY: "-1" });
+    expect(cfg.maxConcurrency).toBe(DEFAULT_ORCHESTRATOR_CONFIG.maxConcurrency);
+  });
+
+  it("rejects '2abc' for perCallTimeoutMs (trailing junk) → falls back to default", () => {
+    const cfg = loadOrchestratorConfig({ HUGIN_ORCH_PER_CALL_TIMEOUT_MS: "2abc" });
+    expect(cfg.perCallTimeoutMs).toBe(DEFAULT_ORCHESTRATOR_CONFIG.perCallTimeoutMs);
+  });
+
+  it("rejects ' ' (whitespace) for maxSubtasks → falls back to default", () => {
+    const cfg = loadOrchestratorConfig({ HUGIN_ORCH_MAX_SUBTASKS: " " });
+    expect(cfg.maxSubtasks).toBe(DEFAULT_ORCHESTRATOR_CONFIG.maxSubtasks);
+  });
+
+  it("accepts '3' for maxSubtasks → 3", () => {
+    const cfg = loadOrchestratorConfig({ HUGIN_ORCH_MAX_SUBTASKS: "3" });
+    expect(cfg.maxSubtasks).toBe(3);
+  });
+
   it("applies multiple overrides simultaneously", () => {
     const cfg = loadOrchestratorConfig({
       HUGIN_ORCH_PLANNER_MODEL: "berget|llama-3.1-8b",
@@ -90,5 +115,49 @@ describe("loadOrchestratorConfig", () => {
     expect(cfg.maxConcurrency).toBe(2);
     expect(cfg.verifyWorkers).toBe(true);
     expect(cfg.maxSubtasks).toBe(4);
+  });
+});
+
+describe("applyTaskModel (Fix #6)", () => {
+  it("overrides worker model when taskModel is set", () => {
+    const cfg = applyTaskModel(DEFAULT_ORCHESTRATOR_CONFIG, "berget|some/model");
+    expect(cfg.roles.worker.model).toBe("berget|some/model");
+    expect(cfg.roles.worker.provider).toBe(DEFAULT_ORCHESTRATOR_CONFIG.roles.worker.provider);
+  });
+
+  it("overrides worker model, preserving the existing worker provider", () => {
+    const base = { ...DEFAULT_ORCHESTRATOR_CONFIG, roles: { ...DEFAULT_ORCHESTRATOR_CONFIG.roles, worker: { provider: "berget", model: "old-model" } } };
+    const cfg = applyTaskModel(base, "new-model");
+    expect(cfg.roles.worker.model).toBe("new-model");
+    expect(cfg.roles.worker.provider).toBe("berget");
+  });
+
+  it("leaves planner/verifier/synthesizer unchanged", () => {
+    const cfg = applyTaskModel(DEFAULT_ORCHESTRATOR_CONFIG, "some/override");
+    expect(cfg.roles.planner).toEqual(DEFAULT_ORCHESTRATOR_CONFIG.roles.planner);
+    expect(cfg.roles.verifier).toEqual(DEFAULT_ORCHESTRATOR_CONFIG.roles.verifier);
+    expect(cfg.roles.synthesizer).toEqual(DEFAULT_ORCHESTRATOR_CONFIG.roles.synthesizer);
+  });
+
+  it("returns the same config object when taskModel is undefined", () => {
+    const result = applyTaskModel(DEFAULT_ORCHESTRATOR_CONFIG, undefined);
+    expect(result).toBe(DEFAULT_ORCHESTRATOR_CONFIG);
+  });
+
+  it("returns the same config object when taskModel is empty string", () => {
+    const result = applyTaskModel(DEFAULT_ORCHESTRATOR_CONFIG, "");
+    expect(result).toBe(DEFAULT_ORCHESTRATOR_CONFIG);
+  });
+
+  it("returns the same config object when taskModel is whitespace-only", () => {
+    const result = applyTaskModel(DEFAULT_ORCHESTRATOR_CONFIG, "   ");
+    expect(result).toBe(DEFAULT_ORCHESTRATOR_CONFIG);
+  });
+
+  it("does not mutate the input config", () => {
+    const original = { ...DEFAULT_ORCHESTRATOR_CONFIG, roles: { ...DEFAULT_ORCHESTRATOR_CONFIG.roles } };
+    const originalWorkerModel = original.roles.worker.model;
+    applyTaskModel(original, "new-model");
+    expect(original.roles.worker.model).toBe(originalWorkerModel);
   });
 });

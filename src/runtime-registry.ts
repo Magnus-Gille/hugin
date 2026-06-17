@@ -193,7 +193,7 @@ export const RUNTIME_REGISTRY: readonly RuntimeDefinition[] = [
     zdrRequired: false, // EU-native, no US nexus
     autoEligible: false, // explicit-only for now, consistent with openrouter/pi-harness
     family: "one-shot",
-    defaultModel: "mistralai/mistral-small-3.2-24b-instruct",
+    defaultModel: "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
   },
 ];
 
@@ -275,7 +275,7 @@ export function buildRuntimeCandidates(
 // Stable aliases (orchestrator v1, see docs/orchestrator-v1-data-model.md §2)
 // ---------------------------------------------------------------------------
 
-export type Alias = "tiny" | "medium" | "large-reasoning" | "pi-large-coder" | "berget-sovereign";
+export type Alias = "tiny" | "medium" | "large-reasoning" | "pi-large-coder";
 
 export interface AliasResolution {
   alias: Alias;
@@ -333,14 +333,6 @@ export const ALIAS_MAP_V1: AliasMap = {
       host: "pi",
       notes:
         "Validated 2026-04-26: 5/6 strict, 6/6 lenient on aider eval. pi --no-session calling OR for the model.",
-    },
-    "berget-sovereign": {
-      alias: "berget-sovereign",
-      family: "one-shot",
-      model: "mistralai/mistral-small-3.2-24b-instruct",
-      runtimeId: "berget",
-      notes:
-        "EU-sovereignty lane for private/internal tasks. Berget.ai: Swedish co, GDPR-by-design, NIS2, no US jurisdiction.",
     },
   },
 };

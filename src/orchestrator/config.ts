@@ -25,13 +25,17 @@ function parseRoleEnv(
 }
 
 /**
- * Parse a non-negative integer environment variable, returning the fallback
- * value when the raw string is absent, empty, or not a valid finite integer.
+ * Parse a strictly-positive integer environment variable, returning the
+ * fallback value when the raw string is absent, empty, not a valid integer,
+ * has trailing junk ("2abc"), is zero, or is negative.
  */
 function parseIntEnv(raw: string | undefined, fallback: number): number {
   if (!raw || raw.trim() === "") return fallback;
-  const n = parseInt(raw.trim(), 10);
-  return Number.isFinite(n) ? n : fallback;
+  const trimmed = raw.trim();
+  // Reject anything that is not a pure integer string (no trailing junk).
+  if (!/^-?\d+$/.test(trimmed)) return fallback;
+  const n = Number(trimmed);
+  return Number.isSafeInteger(n) && n > 0 ? n : fallback;
 }
 
 /**
@@ -127,4 +131,25 @@ export function loadOrchestratorConfig(
   }
 
   return cfg;
+}
+
+/**
+ * If `taskModel` is a non-empty string, override the worker role's model in
+ * a copy of `config`, keeping the worker's existing provider. Planner,
+ * verifier, and synthesizer roles are left unchanged.
+ *
+ * Pure function — returns a new OrchestratorConfig; never mutates the input.
+ */
+export function applyTaskModel(
+  config: OrchestratorConfig,
+  taskModel?: string,
+): OrchestratorConfig {
+  if (!taskModel || !taskModel.trim()) return config;
+  return {
+    ...config,
+    roles: {
+      ...config.roles,
+      worker: { ...config.roles.worker, model: taskModel.trim() },
+    },
+  };
 }

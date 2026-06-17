@@ -187,6 +187,38 @@ describe("runOrchestration — verify on", () => {
   });
 });
 
+describe("runOrchestration — cost aggregation (Fix #9)", () => {
+  it("totalCostUsd is null when any invocation has costUsd:null (mixed priced + unpriced)", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      // One worker priced, one unpriced, one priced
+      ["worker", [ok("W1", 0.002), ok("W2", null), ok("W3", 0.004)]],
+      ["synthesizer", [ok("Final", 0.005)]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+
+    const result = await runOrchestration("Cost test task", invoker, { maxSubtasks: 12 });
+
+    expect(result.ok).toBe(true);
+    expect(result.totalCostUsd).toBeNull();
+  });
+
+  it("totalCostUsd is a numeric sum when ALL invocations are priced", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1", 0.002), ok("W2", 0.003), ok("W3", 0.004)]],
+      ["synthesizer", [ok("Final", 0.005)]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+
+    const result = await runOrchestration("All priced task", invoker, { maxSubtasks: 12 });
+
+    expect(result.ok).toBe(true);
+    // 0.01 + 0.002 + 0.003 + 0.004 + 0.005 = 0.024
+    expect(result.totalCostUsd).toBeCloseTo(0.024, 6);
+  });
+});
+
 describe("runOrchestration — concurrency cap", () => {
   it("6 subtasks with maxConcurrency:2 — no more than 2 in-flight simultaneously", async () => {
     const PLAN_6 = JSON.stringify({

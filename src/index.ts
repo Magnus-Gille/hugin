@@ -123,7 +123,7 @@ import { IdempotencyIndex } from "./broker/idempotency.js";
 import { BrokerReconciler } from "./broker/reconciliation.js";
 import { OrchWorker } from "./broker/orch-worker.js";
 import { OpenRouterClient } from "./openrouter-client.js";
-import { loadOrchestratorConfig } from "./orchestrator/config.js";
+import { loadOrchestratorConfig, applyTaskModel } from "./orchestrator/config.js";
 import { createModelInvoker } from "./orchestrator/model-invoker.js";
 import { runOrchestratorTask } from "./orchestrator/orchestrator-executor.js";
 
@@ -3813,7 +3813,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         "===\n",
       ].join("\n"),
     );
-    const orchConfig = loadOrchestratorConfig(process.env);
+    const orchConfig = applyTaskModel(loadOrchestratorConfig(process.env), task.model);
     const orchInvoker = createModelInvoker(orchConfig.roles, {
       timeoutMs: orchConfig.perCallTimeoutMs,
       maxOutputChars: config.maxOutputChars,

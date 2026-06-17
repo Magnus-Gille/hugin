@@ -61,4 +61,17 @@ describe("parsePlan", () => {
     expect(plan.strategy).toBe("single");
     expect(plan.subtasks[0].prompt).toBe(FALLBACK_PROMPT);
   });
+
+  it("falls back to single when maxSubtasks:0 empties the subtask list (Fix #5)", () => {
+    const raw = JSON.stringify({
+      subtasks: [
+        { id: "1", prompt: "Step 1" },
+        { id: "2", prompt: "Step 2" },
+      ],
+    });
+    const plan = parsePlan(raw, { maxSubtasks: 0, fallbackPrompt: FALLBACK_PROMPT });
+    expect(plan.strategy).toBe("single");
+    expect(plan.subtasks).toHaveLength(1);
+    expect(plan.subtasks[0].prompt).toBe(FALLBACK_PROMPT);
+  });
 });

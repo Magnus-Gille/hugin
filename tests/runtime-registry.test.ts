@@ -242,9 +242,9 @@ describe("alias map (v1)", () => {
     expect(ALIAS_MAP_V1.version).toBe(1);
   });
 
-  it("contains the five v1 aliases (four original + berget-sovereign)", () => {
+  it("contains the four v1 aliases", () => {
     const aliases = Object.keys(ALIAS_MAP_V1.aliases).sort();
-    expect(aliases).toEqual(["berget-sovereign", "large-reasoning", "medium", "pi-large-coder", "tiny"]);
+    expect(aliases).toEqual(["large-reasoning", "medium", "pi-large-coder", "tiny"]);
   });
 
   it("tiny resolves to ollama-pi/qwen2.5:3b", () => {
@@ -287,11 +287,8 @@ describe("alias map (v1)", () => {
     expect(() => resolveAlias("nonexistent" as never)).toThrow(/Unknown alias/);
   });
 
-  it("berget-sovereign resolves to berget runtime with mistral-small", () => {
-    const r = resolveAlias("berget-sovereign");
-    expect(r.runtimeId).toBe("berget");
-    expect(r.model).toBe("mistralai/mistral-small-3.2-24b-instruct");
-    expect(r.family).toBe("one-shot");
+  it("resolveAlias throws on berget-sovereign (removed from alias map)", () => {
+    expect(() => resolveAlias("berget-sovereign" as never)).toThrow(/Unknown alias/);
   });
 });
 

@@ -89,8 +89,10 @@ export function parsePlan(
   const validated = PlanSchema.safeParse(parsed);
   if (!validated.success) return fallback;
 
-  // Cap to maxSubtasks (keep first N)
+  // Cap to maxSubtasks (keep first N). If the cap reduces the list to empty
+  // (e.g. maxSubtasks < 1), fall back to the single-worker plan.
   const subtasks = validated.data.subtasks.slice(0, opts.maxSubtasks);
+  if (subtasks.length === 0) return fallback;
 
   return { strategy: "fanout", subtasks };
 }
