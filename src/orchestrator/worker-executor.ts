@@ -459,9 +459,15 @@ interface PiParsedOutput {
 /**
  * Parse JSON Lines output from `pi --mode json`.
  *
- * The pi CLI emits one JSON object per line. We scan for lines with
- * `type: "assistant"` or `type: "result"` to extract the final text and
- * usage tokens. The last assistant/result line wins if there are multiple.
+ * The pi CLI (version 3 schema) emits events of the form:
+ *   { "type": "message_start"|"message_end"|"turn_end", "message": { "role": "assistant", "content": [...], "usage": { "input": N, "output": N } } }
+ *
+ * Content is an array of content blocks; we concatenate all text blocks from
+ * the final assistant message. Usage is at message.usage.input / message.usage.output.
+ *
+ * Legacy / hypothetical shapes (type "assistant"/"result", flat content/text,
+ * flat usage with input_tokens/prompt_tokens) are also handled for forward
+ * compatibility with harness variants.
  */
 function parsePiJsonLines(raw: string): PiParsedOutput {
   let output = "";
@@ -480,6 +486,41 @@ function parsePiJsonLines(raw: string): PiParsedOutput {
     if (!obj || typeof obj !== "object") continue;
     const o = obj as Record<string, unknown>;
 
+    // --- Pi v3 event schema: message_start / message_end / turn_end ---
+    const msgTypes = ["message_start", "message_end", "turn_end"];
+    if (msgTypes.includes(o["type"] as string)) {
+      const msg = o["message"] as Record<string, unknown> | undefined;
+      if (msg && msg["role"] === "assistant") {
+        // Extract text from content array: [{ type: "text", text: "..." }, ...]
+        const contentArr = msg["content"];
+        if (Array.isArray(contentArr) && contentArr.length > 0) {
+          const texts = contentArr
+            .filter(
+              (b): b is Record<string, unknown> =>
+                b !== null && typeof b === "object" && (b as Record<string, unknown>)["type"] === "text",
+            )
+            .map((b) => (typeof b["text"] === "string" ? b["text"] : ""));
+          const joined = texts.join("");
+          if (joined.length > 0) {
+            output = joined;
+          }
+        }
+
+        // Usage: message.usage.input / message.usage.output
+        const msgUsage = msg["usage"] as Record<string, unknown> | undefined;
+        if (msgUsage) {
+          if (typeof msgUsage["input"] === "number") inputTokens = msgUsage["input"];
+          if (typeof msgUsage["output"] === "number") outputTokens = msgUsage["output"];
+          // Also check OpenAI-style field names used by some pi backends
+          if (typeof msgUsage["input_tokens"] === "number") inputTokens = msgUsage["input_tokens"];
+          if (typeof msgUsage["output_tokens"] === "number") outputTokens = msgUsage["output_tokens"];
+          if (typeof msgUsage["prompt_tokens"] === "number") inputTokens = msgUsage["prompt_tokens"];
+          if (typeof msgUsage["completion_tokens"] === "number") outputTokens = msgUsage["completion_tokens"];
+        }
+      }
+    }
+
+    // --- Legacy / flat event schema: type "assistant" or "result" ---
     if (o["type"] === "assistant" || o["type"] === "result") {
       if (typeof o["content"] === "string") {
         output = o["content"];
@@ -488,7 +529,7 @@ function parsePiJsonLines(raw: string): PiParsedOutput {
       }
     }
 
-    // Token usage may appear on any line (e.g. a separate "usage" event)
+    // --- Top-level usage (legacy, separate "usage" event) ---
     const usage = o["usage"] as Record<string, unknown> | undefined;
     if (usage) {
       if (typeof usage["input_tokens"] === "number") inputTokens = usage["input_tokens"];

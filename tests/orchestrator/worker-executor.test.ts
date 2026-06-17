@@ -476,6 +476,43 @@ describe("PiHarnessExecutor — timeout path", () => {
 });
 
 // ---------------------------------------------------------------------------
+// PiHarnessExecutor — pi v3 event schema (smoke-test format lock)
+// ---------------------------------------------------------------------------
+
+// Real pi --mode json output uses a v3 event schema: message_start + message_end
+// events carry the assistant content and usage inside a `message` envelope.
+const PI_V3_JSONL = [
+  JSON.stringify({ type: "message_start", message: { role: "assistant", content: [] } }),
+  JSON.stringify({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "pong" }],
+      usage: { input: 9, output: 1 },
+    },
+  }),
+].join("\n") + "\n";
+
+describe("PiHarnessExecutor — pi v3 event schema", () => {
+  it("extracts output and token counts from message_start/message_end events", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_V3_JSONL }];
+
+    const executor = new PiHarnessExecutor();
+    const result = await executor.run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "ping",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toBe("pong");
+    expect(result.inputTokens).toBe(9);
+    expect(result.outputTokens).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // DEFAULT_MAX_OUTPUT_CHARS constant
 // ---------------------------------------------------------------------------
 

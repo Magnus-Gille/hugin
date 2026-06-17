@@ -25,6 +25,10 @@ export const PROVIDER_CONFIG: Record<string, ProviderConfig> = {
     baseUrl: "https://api.berget.ai/v1",
     apiKeyEnvVar: "BERGET_API_KEY",
   },
+  google: {
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    apiKeyEnvVar: "GOOGLE_API_KEY",
+  },
 };
 
 /**

@@ -218,18 +218,26 @@ export async function runOrchestration(
     );
     allCosts.push(synthResp.costUsd ?? null);
     totalLatencyMs += synthResp.latencyMs;
-    finalOutput = synthResp.output;
+
+    // Robustness: if the synthesizer fails or returns empty/whitespace output,
+    // fall back to a concatenation of the successful worker outputs rather than
+    // returning an empty result. The workers succeeded — only the synth pass
+    // failed — so we preserve ok:true and the caller still gets usable content.
+    if (!synthResp.ok || !synthResp.output.trim()) {
+      finalOutput = successfulOutcomes
+        .map((o) => `## ${o.subtask.id}\n${o.result.output}`)
+        .join("\n\n");
+    } else {
+      finalOutput = synthResp.output;
+    }
   }
 
-  const ok = finalOutput.length > 0;
-
   return {
-    ok,
+    ok: true,
     finalOutput,
     plan,
     outcomes,
     totalCostUsd: sumCosts(allCosts),
     totalLatencyMs,
-    error: ok ? undefined : "Synthesizer returned empty output",
   };
 }

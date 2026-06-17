@@ -120,6 +120,49 @@ describe("runOrchestration — all workers fail", () => {
   });
 });
 
+describe("runOrchestration — synthesizer fallback", () => {
+  it("synthesizer returns ok:true but empty output → finalOutput is joined worker outputs, ok:true", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1", 0.002), ok("W2", 0.003), ok("W3", 0.004)]],
+      // synthesizer responds ok:true but with whitespace-only content
+      ["synthesizer", [ok("   ", 0.005)]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+
+    const result = await runOrchestration("Synth empty task", invoker);
+
+    expect(result.ok).toBe(true);
+    // Should contain all three worker outputs labeled by subtask id
+    expect(result.finalOutput).toContain("## 1");
+    expect(result.finalOutput).toContain("W1");
+    expect(result.finalOutput).toContain("## 2");
+    expect(result.finalOutput).toContain("W2");
+    expect(result.finalOutput).toContain("## 3");
+    expect(result.finalOutput).toContain("W3");
+  });
+
+  it("synthesizer returns ok:false → finalOutput is joined worker outputs, ok:true", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("Alpha", 0.002), ok("Beta", 0.003), ok("Gamma", 0.004)]],
+      ["synthesizer", [fail("synthesizer model error")]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+
+    const result = await runOrchestration("Synth fail task", invoker);
+
+    expect(result.ok).toBe(true);
+    expect(result.finalOutput).toContain("Alpha");
+    expect(result.finalOutput).toContain("Beta");
+    expect(result.finalOutput).toContain("Gamma");
+    // Each section labeled with the subtask id
+    expect(result.finalOutput).toContain("## 1");
+    expect(result.finalOutput).toContain("## 2");
+    expect(result.finalOutput).toContain("## 3");
+  });
+});
+
 describe("runOrchestration — verify on", () => {
   it("verifier invoked per successful worker, verdict attached", async () => {
     const PLAN_2 = JSON.stringify({
