@@ -21,6 +21,7 @@ Part of the Grimnir system: **Munin** (memory/brain), **Mímir** (file archive),
    - `claude` (default): Agent SDK `query()` for structured results
    - `codex`: `codex exec --full-auto` spawn
    - `ollama`: Calls ollama's OpenAI-compatible API with streaming. Supports context injection via `Context-refs` and infra-only fallback to Claude.
+   - `orchestrator`: Hugin's native fanout engine — planner decomposes into subtasks, workers fan out concurrently, optional verifier pass, synthesizer merges into the final answer. See **Orchestrator runtime** below.
 4. Captures output (SDK message events or stdout/stderr) + streams to per-task log file
 5. Writes result back to Munin, updates tags to `completed` or `failed`
 6. Emits heartbeat to `tasks/_heartbeat` after each poll cycle
@@ -40,7 +41,7 @@ Content format:
 ```markdown
 ## Task: <title>
 
-- **Runtime:** claude | codex | ollama | pipeline | auto
+- **Runtime:** claude | codex | ollama | pipeline | auto | orchestrator
 - **Context:** repo:heimdall
 - **Working dir:** /home/magnus/workspace
 - **Timeout:** 300000
@@ -88,6 +89,14 @@ Content format:
 
 **Pipeline tasks:** Use `Runtime: pipeline` with a `### Pipeline` section instead of `### Prompt`. Pipeline phases use runtime IDs (`claude-sdk`, `codex-spawn`, `ollama-pi`, `ollama-laptop`, `ollama-orin`, or `auto`) which differ from standalone runtime names. Per-phase `Capabilities:` is supported.
 
+**Orchestrator runtime (`Runtime: orchestrator`):** Hugin's native, vendor-neutral fanout engine — its own ultracode/Workflow equivalent, with no Claude Code harness or vendor lock-in.
+
+- **How it works:** A planner model decomposes the prompt into subtasks → workers fan out concurrently on cheap models → an optional verifier pass checks each worker output → a synthesizer merges survivors into the final answer. Each role is independently configurable.
+- **Role bindings:** Every role (planner, worker, verifier, synthesizer) is a `provider|model` binding. Defaults: workers on DeepSeek Flash via OpenRouter; planner and synthesizer on a stronger model. Override any role via the `HUGIN_ORCH_*_MODEL` env vars below.
+- **Resilience:** A planner-JSON parse failure falls back to single-worker mode. Individual worker failures do not sink the run — the synthesizer operates on surviving outputs.
+- **Sensitivity guard (fail-closed):** A task with `Sensitivity: private` is **rejected before any model call** unless every role is bound to a sovereign/local provider (currently only `berget`). Default OpenRouter workers cannot hold private data, so the guard trips at submit time, not at execution time.
+- **Task fields:** No additional task-level fields beyond the standard set. Use the `HUGIN_ORCH_*` env vars to tune role bindings and concurrency globally, or set `Model:` to select a non-default worker model (the planner/synth retain their defaults).
+
 **Artefact delivery (`### Artifacts` manifest, issue #68):** A task may declare an `### Artifacts` section so that **Hugin (not the agent)** owns and verifies delivery of the deliverables. The agent only writes content to the declared local staging paths and must make no delivery claims.
 
 - **Grammar (load-bearing):** `### Artifacts` MUST appear *before* `### Prompt`. Prompt extraction reads from `### Prompt` to EOF, so a manifest placed after it would leak into the agent prompt — Hugin rejects that ordering at submit time.
@@ -134,6 +143,17 @@ hugin/
 │   ├── task-graph.ts             # Task dependency graph for pipelines
 │   ├── result-format.ts          # Result formatting utilities
 │   ├── artifact-delivery.ts      # Runtime-owned artefact delivery (#68): manifest parse/validate, target allowlist, rsync→sha256→mv deliver+verify
+│   ├── model-pricing.ts          # Vendor-neutral $/M-token table for cost-aware routing and result metadata
+│   ├── orchestrator/             # Native fanout engine (Runtime: orchestrator)
+│   │   ├── engine.ts             # Top-level fanout loop: plan → fan-out workers → optional verify → synthesize
+│   │   ├── model-invoker.ts      # Role→provider+model dispatch; wraps OpenRouter/Berget/etc. behind a single interface
+│   │   ├── worker-executor.ts    # Per-subtask worker: pi-harness + direct-model paths
+│   │   ├── plan.ts               # Plan IR + planner-output parsing (JSON → subtask list, fallback to single-worker)
+│   │   ├── prompts.ts            # Role prompt templates (planner, worker, verifier, synthesizer)
+│   │   ├── config.ts             # DEFAULT_ORCHESTRATOR_CONFIG + env-var overrides for all roles
+│   │   ├── sensitivity-guard.ts  # Pre-flight: reject private tasks unless all roles are sovereign providers
+│   │   ├── provider-config.ts    # Provider registry (openrouter, berget, …) with base URLs and sovereignty flags
+│   │   └── orchestrator-executor.ts # Dispatcher adapter: TaskContent → engine → structured result
 │   ├── mcp-server.ts             # hugin-mcp stdio entrypoint (orchestrator-side, on the laptop)
 │   ├── friction-mcp.ts           # friction-mcp stdio entrypoint (report_friction tool for AI self-reporting)
 │   ├── friction/                 # friction-mcp internals
@@ -200,7 +220,7 @@ MUNIN_API_KEY=<key> MUNIN_URL=http://localhost:3030 npm run dev
 
 Default host: `huginmunin.local` (or Tailscale IP `100.97.117.37` if mDNS unavailable).
 
-The Pi needs a `.env` file at `/home/magnus/hugin/.env`:
+The Pi needs a `.env` file at `/home/magnus/repos/hugin/.env`:
 ```
 MUNIN_API_KEY=<same key Munin uses>
 ```
@@ -290,3 +310,13 @@ claude mcp add-json hugin '{"command":"node","args":["/Users/magnus/repos/hugin/
 | `HUGIN_DELIVERY_RETRY_INTERVAL_MS` | `300000` (5min) | Cadence of the deferred-delivery retry reaper (separate timer, armed only under `defer`). |
 | `HUGIN_SKILL_LANE` | `off` | Local-skill lane master switch (issues #79–#84). `on` enables the fail-closed local-skill route pre-step (`src/skill/skill-lane.ts`: classify → retrieve → select an `active` RouteBinding), wired into the dispatcher via `src/skill/skill-lane-dispatch.ts#consultSkillLane`. Slice-one artifacts are now authored (`skills/markdown-frontmatter-normalization/`, `src/skill/slice-one/`) but the committed RouteBinding is `draft`, the cell manifest is a placeholder, and no local executor is wired — so the lane still fails closed to the cloud auto-router even when `on`. Driving the binding to `active` against a real local cell is a deliberate human go-live step (see `skills/README.md`). |
 | `ARXIV_STORAGE_PATH` | — | Directory where arxiv-mcp-server caches downloaded papers. Forwarded into the arxiv MCP subprocess environment. |
+| `HUGIN_ACTIVE_SUBSCRIPTIONS` | (all active) | Comma-separated runtime IDs of subscriptions you actually pay for (e.g. `claude-sdk`). Subscription-cost runtimes are auto-eligible only if listed here; unset = all active subscription runtimes are eligible. Vendor-neutral — Claude today, Berget Code / ChatGPT later. |
+| `BERGET_API_KEY` | — | API key for the Berget.ai EU-sovereign provider (OpenAI-compatible, base URL `https://api.berget.ai/v1`). Required for any orchestrator role bound to the `berget` provider. The only currently recognized sovereign provider for `Sensitivity: private` orchestrator tasks. |
+| `HUGIN_ORCH_PLANNER_MODEL` | (see `DEFAULT_ORCHESTRATOR_CONFIG`) | Override the planner role model. Format: `provider\|model` (e.g. `openrouter\|anthropic/claude-3.5-sonnet`). Omit the `provider\|` prefix to keep the role's default provider. |
+| `HUGIN_ORCH_WORKER_MODEL` | (see `DEFAULT_ORCHESTRATOR_CONFIG`) | Override the worker role model. Default: DeepSeek Flash via OpenRouter. |
+| `HUGIN_ORCH_VERIFIER_MODEL` | (see `DEFAULT_ORCHESTRATOR_CONFIG`) | Override the verifier role model. Verifier pass only runs when `HUGIN_ORCH_VERIFY=on`. |
+| `HUGIN_ORCH_SYNTH_MODEL` | (see `DEFAULT_ORCHESTRATOR_CONFIG`) | Override the synthesizer role model. |
+| `HUGIN_ORCH_MAX_CONCURRENCY` | `4` | Max concurrent worker fan-out in the orchestrator engine. |
+| `HUGIN_ORCH_VERIFY` | `off` | Set to `on` or `true` to run a verifier pass on each successful worker output before synthesis. |
+| `HUGIN_ORCH_PER_CALL_TIMEOUT_MS` | `120000` | Per-model-call timeout (ms) inside the orchestrator engine, applied to planner, each worker, each verifier, and the synthesizer. |
+| `HUGIN_ORCH_MAX_SUBTASKS` | `12` | Cap on the number of subtasks the planner may produce. Plans exceeding this are truncated before fan-out. |

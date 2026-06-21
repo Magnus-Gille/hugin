@@ -35,7 +35,7 @@ for dir in "$REPOS_DIR"/*/; do
 
     if ! fetch_output=$(git -C "$dir" fetch origin 2>&1); then
         log "FAIL  $repo_name — fetch failed: $fetch_output"
-        ((failed++))
+        (( failed++ )) || true
         continue
     fi
 
@@ -43,13 +43,13 @@ for dir in "$REPOS_DIR"/*/; do
 
     if [ $pull_rc -ne 0 ]; then
         log "DIVERGED  $repo_name — cannot fast-forward: $pull_output"
-        ((diverged++))
+        (( diverged++ )) || true
     elif echo "$pull_output" | grep -q "Already up to date"; then
         log "OK  $repo_name — already up to date"
-        ((up_to_date++))
+        (( up_to_date++ )) || true
     else
         log "SYNCED  $repo_name — $pull_output"
-        ((synced++))
+        (( synced++ )) || true
     fi
 done
 
