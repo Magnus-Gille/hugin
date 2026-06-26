@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import express from "express";
+import { HEIMDALL_DESCRIPTOR } from "./heimdall-descriptor.js";
 import {
   buildDefaultEgressHosts,
   installFetchEgressPolicy,
@@ -4587,6 +4588,10 @@ app.get("/health", (_req, res) => {
       allowed_hosts: egressPolicy.allowedHosts,
     },
   });
+});
+
+app.get("/heimdall.json", (_req, res) => {
+  res.json(HEIMDALL_DESCRIPTOR);
 });
 
 // --- Graceful shutdown ---
