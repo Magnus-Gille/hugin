@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import express from "express";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { HEIMDALL_DESCRIPTOR } from "../src/heimdall-descriptor.js";
+import { HEIMDALL_DESCRIPTOR, registerHeimdallDescriptorRoute } from "../src/heimdall-descriptor.js";
 
 // ---------------------------------------------------------------------------
 // Descriptor shape tests (no HTTP needed)
@@ -66,9 +66,7 @@ describe("HEIMDALL_DESCRIPTOR", () => {
 
 async function startMinimalApp(): Promise<{ url: string; close: () => void }> {
   const app = express();
-  app.get("/heimdall.json", (_req, res) => {
-    res.json(HEIMDALL_DESCRIPTOR);
-  });
+  registerHeimdallDescriptorRoute(app);
   const server = createServer(app);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;

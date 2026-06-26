@@ -4,6 +4,9 @@
  * Returned verbatim by GET /heimdall.json — no auth required, same posture as /health.
  * Schema: https://heimdall.gille.ai/schema/service/v1
  */
+
+import type { Application } from "express";
+
 export const HEIMDALL_DESCRIPTOR = {
   _schema: "https://heimdall.gille.ai/schema/service/v1",
   service: {
@@ -30,3 +33,13 @@ export const HEIMDALL_DESCRIPTOR = {
   },
   ui: { icon: "cpu", category: "infra" },
 } as const;
+
+/**
+ * Register the GET /heimdall.json route on the given Express app.
+ * No auth required — same open posture as /health.
+ */
+export function registerHeimdallDescriptorRoute(app: Application): void {
+  app.get("/heimdall.json", (_req, res) => {
+    res.json(HEIMDALL_DESCRIPTOR);
+  });
+}
