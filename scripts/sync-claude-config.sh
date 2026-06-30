@@ -1,63 +1,20 @@
 #!/bin/bash
-set -euo pipefail
-
-# Sync global ~/.claude/ config from laptop to Pi
-# Usage: ./scripts/sync-claude-config.sh [hostname]
-
-TAILSCALE_IP="100.97.117.37"
-if [ -n "${1:-}" ]; then
-  PI_HOST="$1"
-elif ping -c1 -W1 huginmunin.local >/dev/null 2>&1; then
-  PI_HOST="huginmunin.local"
-else
-  echo "  mDNS unavailable, falling back to Tailscale IP"
-  PI_HOST="$TAILSCALE_IP"
-fi
-DEPLOY_USER="${DEPLOY_USER:-magnus}"
-REMOTE="$DEPLOY_USER@$PI_HOST"
-REMOTE_CLAUDE_DIR="/home/$DEPLOY_USER/.claude"
-LOCAL_CLAUDE_DIR="$HOME/.claude"
-
-if [ ! -d "$LOCAL_CLAUDE_DIR" ]; then
-  echo "ERROR: Local ~/.claude/ directory not found"
-  exit 1
-fi
-
-echo "==> Syncing global Claude config to $REMOTE..."
-
-# Ensure remote .claude directory exists
-ssh "$REMOTE" "mkdir -p $REMOTE_CLAUDE_DIR/skills $REMOTE_CLAUDE_DIR/commands"
-
-# Sync CLAUDE.md (global instructions)
-if [ -f "$LOCAL_CLAUDE_DIR/CLAUDE.md" ]; then
-  echo "  Syncing CLAUDE.md..."
-  rsync -av "$LOCAL_CLAUDE_DIR/CLAUDE.md" "$REMOTE:$REMOTE_CLAUDE_DIR/CLAUDE.md"
-fi
-
-# Sync skills/ directory
-if [ -d "$LOCAL_CLAUDE_DIR/skills" ]; then
-  echo "  Syncing skills/..."
-  rsync -av --delete "$LOCAL_CLAUDE_DIR/skills/" "$REMOTE:$REMOTE_CLAUDE_DIR/skills/"
-fi
-
-# Sync commands/ directory
-if [ -d "$LOCAL_CLAUDE_DIR/commands" ]; then
-  echo "  Syncing commands/..."
-  rsync -av --delete "$LOCAL_CLAUDE_DIR/commands/" "$REMOTE:$REMOTE_CLAUDE_DIR/commands/"
-fi
-
-# Sync settings.json with hooks stripped out
-if [ -f "$LOCAL_CLAUDE_DIR/settings.json" ]; then
-  echo "  Syncing settings.json (excluding hooks)..."
-  # Use node to strip hooks and laptop-specific entries
-  node -e "
-    const fs = require('fs');
-    const settings = JSON.parse(fs.readFileSync('$LOCAL_CLAUDE_DIR/settings.json', 'utf8'));
-    // Remove hooks (Pi environment differs)
-    delete settings.hooks;
-    // Remove any laptop-specific paths that won't exist on Pi
-    console.log(JSON.stringify(settings, null, 2));
-  " | ssh "$REMOTE" "cat > $REMOTE_CLAUDE_DIR/settings.json"
-fi
-
-echo "==> Claude config sync complete!"
+# DEPRECATED (2026-06-30). Do not use.
+#
+# This script used to rsync ~/.claude/ (CLAUDE.md, skills, commands, settings — hooks
+# stripped, plugins ignored) from the laptop to the Pi. It was lossy and one-directional.
+#
+# Config is now a versioned single source of truth across all machines:
+#   - Magnus-Gille/claude-config        (global CLAUDE.md, commands, hooks, agents, settings.base.json)
+#   - Magnus-Gille/claude-skills        (public skills)
+#   - Magnus-Gille/claude-skills-private (private skills, symlinked via ../skills-private)
+#
+# Each machine clones them into ~/repos and runs claude-config/bootstrap.sh, which symlinks
+# ~/.claude content and merges settings. The sync-repos timer keeps everything current.
+#
+# To refresh a machine's config now:
+#   ssh <host> 'cd ~/repos/claude-config && git pull --ff-only && ./bootstrap.sh'
+# (deploy-pi.sh does this automatically.)
+echo "sync-claude-config.sh is DEPRECATED — config now lives in the claude-config repo." >&2
+echo "Run: ssh <host> 'cd ~/repos/claude-config && git pull --ff-only && ./bootstrap.sh'" >&2
+exit 0

@@ -183,7 +183,7 @@ hugin/
     ├── submit-daily-analysis.sh  # Submit daily journal analysis as ollama task
     ├── submit-stale-status-review.sh
     ├── submit-dep-bumps.sh       # Autonomous dep-bump tasks from security-scan results (#26)
-    ├── sync-claude-config.sh     # Sync ~/.claude/ config to Pi
+    ├── sync-claude-config.sh     # DEPRECATED — config now lives in the claude-config repo (bootstrap.sh)
     ├── update-cli.sh             # Auto-update CLI tools (daily cron)
     ├── on-task-stop.mjs          # Task stop hook
     ├── sync-repos.sh             # Periodic git pull for all repos (15min timer)
