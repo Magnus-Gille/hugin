@@ -21,11 +21,15 @@
 # principal). The Pi must have a matching entry in HUGIN_SUBMITTER_KEYS for
 # verification to pass — see docs/security/task-signing.md.
 #
+# Install (once): symlink onto PATH so `hugin-sign` resolves as a bare command:
+#   ln -sf "$PWD/scripts/hugin-sign" ~/.local/bin/hugin-sign   # (~/.local/bin on PATH)
+#
 # One-time provisioning (run on the laptop; the secret transits a pipe into the
-# Keychain and never prints). Use the SAME hex on the Pi's HUGIN_SUBMITTER_KEYS:
-#   SECRET=$(openssl rand -hex 32)
-#   security add-generic-password -s hugin-signing -a claude-code -U -w "$SECRET"
-#   echo "store this on the Pi under HUGIN_SUBMITTER_KEYS as {\"claude-code\":\"$SECRET\"}"; SECRET=
+# Keychain and is NOT echoed). The SAME hex must also be registered on the Pi's
+# HUGIN_SUBMITTER_KEYS — do that by reading it back from the Keychain at
+# registration time (e.g. via `hugin-sign`), not by printing it here:
+#   security add-generic-password -s hugin-signing -a claude-code -U -w "$(openssl rand -hex 32)"
+#   # then register the claude-code keyId on the Pi — see docs/security/task-signing.md
 #
 # Rotate: re-run the provisioning (the `-U` upserts), then update the Pi's keystore.
 set -euo pipefail
