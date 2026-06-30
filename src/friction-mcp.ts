@@ -11,7 +11,9 @@
  *
  * Optional env:
  *   HUGIN_FRICTION_TASK_ID          — auto-tag events with task id (injected by SDK executor)
- *   HUGIN_FRICTION_MODEL_ID         — model identifier for the `model:<id>` tag (default "unknown")
+ *   HUGIN_FRICTION_MODEL_ID         — fallback model identifier for the `model:<id>` tag (default
+ *                                     "unknown"). The SDK executor injects this; interactive sessions
+ *                                     instead pass `model_id` as a tool input, which takes precedence.
  *   HUGIN_FRICTION_WRITE_TIMEOUT_MS — Munin write timeout, default 2000
  */
 
