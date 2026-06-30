@@ -125,7 +125,7 @@ hugin/
 └── scripts/
     ├── deploy-pi.sh
     ├── submit-daily-analysis.sh  # Submit daily journal analysis as ollama task
-    ├── sync-claude-config.sh     # Sync ~/.claude/ config to Pi
+    ├── sync-claude-config.sh     # DEPRECATED — config now lives in the claude-config repo (bootstrap.sh)
     └── update-cli.sh             # Auto-update CLI tools (daily cron)
 ```
 

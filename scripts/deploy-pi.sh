@@ -125,8 +125,12 @@ else
   echo "  then re-run this probe. Until then, do not route code-capable tasks to codex."
 fi
 
-echo "==> Syncing global Claude config..."
-"$(dirname "$0")/sync-claude-config.sh" "$PI_HOST"
+echo "==> Refreshing Claude config on the Pi (claude-config bootstrap)..."
+# Config now lives in the versioned Magnus-Gille/claude-config repo (+ claude-skills,
+# skills-private), consumed via symlinks. Pull latest + re-run bootstrap instead of the
+# old rsync (which would clobber the symlinks with real dirs). See claude-config/README.md.
+ssh "$REMOTE" 'cd ~/repos/claude-config 2>/dev/null && git pull -q --ff-only && ./bootstrap.sh --no-plugins' \
+  || echo "  WARNING: claude-config bootstrap failed — clone ~/repos/claude-config on the Pi first, then re-run."
 
 echo "==> Installing CLI update cron job..."
 CRON_CMD="0 4 * * * $REMOTE_DIR/scripts/update-cli.sh 2>&1 | logger -t hugin-update"
