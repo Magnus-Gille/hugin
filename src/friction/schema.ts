@@ -94,6 +94,13 @@ export const reportFrictionInputShape = {
     .max(200)
     .optional()
     .describe("Override for HUGIN_FRICTION_TASK_ID env."),
+  model_id: z
+    .string()
+    .max(200)
+    .optional()
+    .describe(
+      "Your own model identifier (e.g. claude-opus-4-8, claude-sonnet-4-6). Set this so the friction event is attributed to the right model — interactive sessions are not tagged via env. Falls back to the server's HUGIN_FRICTION_MODEL_ID env (default \"unknown\") when omitted.",
+    ),
   tags: z
     .array(z.string().max(80))
     .max(16)
