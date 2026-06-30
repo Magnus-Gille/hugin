@@ -120,9 +120,47 @@ items, Bitwarden, sealed envelope, etc.). The submitter stores it as
 the environment variable `HUGIN_SIGNING_SECRET`. **Never** commit secrets
 to the repo or log them.
 
+## Registering the `claude-code` keyId (laptop signing)
+
+The laptop `claude-code` submitter signs without a Pi round-trip by reading its
+secret from the macOS Keychain via `scripts/hugin-sign` (modelled on the
+`m5-auth` / himalaya pattern — the secret lives once in the Keychain, never in a
+dotfile or scratchpad). One-time setup binds the **same** hex secret to two
+places: the laptop Keychain (signer side) and the Pi's `HUGIN_SUBMITTER_KEYS`
+(verifier side).
+
+```bash
+# 0. Install hugin-sign onto PATH so it resolves as a bare command (once).
+ln -sf "$PWD/scripts/hugin-sign" ~/.local/bin/hugin-sign   # run from the hugin repo root
+
+# 1. Generate the secret and store it straight into the laptop Keychain (signer
+#    side) — it is never echoed or left in a shell variable. `-U` upserts on rotation.
+security add-generic-password -s hugin-signing -a claude-code -U -w "$(openssl rand -hex 32)"
+
+# 2. Register the SAME secret on the Pi as the `claude-code` keyId (verifier side),
+#    merging into the existing HUGIN_SUBMITTER_KEYS in /home/magnus/repos/hugin/.env,
+#    then restart Hugin. An operator with Pi access reads the value back from the
+#    Keychain at that moment (e.g. `hugin-sign`) — it never transits the repo or a log.
+```
+
+Once both sides hold the secret, `hugin-sign` returns it locally and
+`sign-task.mjs --submitter claude-code --key-id claude-code` produces a
+signature the Pi verifies. The `keyId` must equal the submitter (`claude-code`)
+or be a `claude-code-<rotation>` alias.
+
 ## Signing a task (submitter side)
 
 ```bash
+HUGIN_SIGNING_SECRET=$(hugin-sign) node scripts/sign-task.mjs \
+  --task-id 20260420-180000-a1b2 \
+  --submitter claude-code \
+  --submitted-at 2026-04-20T18:00:00Z \
+  --runtime claude \
+  --prompt-file /tmp/prompt.md \
+  --key-id claude-code
+# → v1:claude-code:abcdef1234...
+
+# Or, for any submitter with the secret already in env:
 HUGIN_SIGNING_SECRET=<hex> node scripts/sign-task.mjs \
   --task-id 20260420-180000-a1b2 \
   --submitter Codex-desktop \
@@ -178,7 +216,7 @@ Do the thing.
 | Submitter | Status | Notes |
 |-----------|--------|-------|
 | Ratatoskr | ✅ wired | `src/task-signing.ts` + `RATATOSKR_SIGNING_SECRET`. Cross-drift test spawns `sign-task.mjs`. |
-| `/submit-task` skill (claude-code) | ✅ wired | Step 7b invokes `scripts/sign-task.mjs` when `HUGIN_SIGNING_SECRET` is set. |
+| `/submit-task` skill (claude-code) | ⚠️ needs key registration | This row previously claimed "✅ wired", but the laptop shell never set `HUGIN_SIGNING_SECRET`, so Step 7b's signing silently skipped (hugin#119). This repo adds `scripts/hugin-sign` (reads the secret from the macOS Keychain — service `hugin-signing`, account `claude-code`); the skill's Step 7b is updated to call it in a companion `claude-skills-private` PR. Even with both, verification requires a `claude-code` entry in the Pi's `HUGIN_SUBMITTER_KEYS` — see "Registering the claude-code keyId" below. Until that key is registered, submissions are unsigned (fine under `off`/`warn`). |
 | claude-desktop / claude-web / claude-mobile | ⬜ deferred | No shell access to run the helper. Needs a Munin-side signer or a chat-host delegate before `require` is safe. |
 | Codex CLI (codex-desktop / codex-web / codex-mobile) | ⬜ deferred | Codex submits via `memory_write` MCP — needs either a CLI wrapper or an MCP signing tool. |
 

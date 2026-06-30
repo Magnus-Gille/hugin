@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+#
+# hugin-sign — the canonical, secret-safe way for the laptop to obtain the Hugin
+# task-signing secret (HUGIN_SIGNING_SECRET) for the `claude-code` submitter.
+#
+# The secret lives ONCE in the macOS Keychain (service "hugin-signing",
+# account "claude-code"), mirroring the himalaya / m5-auth pattern. Nothing
+# reads it from `~/.zshrc`, a scratchpad file, or the Pi's `.env` anymore — so
+# signing a task from the laptop no longer needs a Pi round-trip.
+#
+# Usage:
+#   HUGIN_SIGNING_SECRET=$(hugin-sign) node scripts/sign-task.mjs --task-id … --submitter claude-code …
+#   eval "$(hugin-sign --env)"        # export HUGIN_SIGNING_SECRET for a longer flow
+#
+# The secret is emitted ONLY for an EXACT bare call or an EXACT `--env`. `--help`/`-h`
+# and ANY other arguments (unknown flags OR trailing args after --env) print usage to
+# stderr WITHOUT touching the secret — a first-arg-only guard would leak the raw secret
+# on e.g. `hugin-sign --help` or `hugin-sign ""`.
+#
+# The keyId to pass to sign-task.mjs is `claude-code` (matches the `Submitted by:`
+# principal). The Pi must have a matching entry in HUGIN_SUBMITTER_KEYS for
+# verification to pass — see docs/security/task-signing.md.
+#
+# Install (once): symlink onto PATH so `hugin-sign` resolves as a bare command:
+#   ln -sf "$PWD/scripts/hugin-sign" ~/.local/bin/hugin-sign   # (~/.local/bin on PATH)
+#
+# One-time provisioning (run on the laptop; the secret transits a pipe into the
+# Keychain and is NOT echoed). The SAME hex must also be registered on the Pi's
+# HUGIN_SUBMITTER_KEYS — do that by reading it back from the Keychain at
+# registration time (e.g. via `hugin-sign`), not by printing it here:
+#   security add-generic-password -s hugin-signing -a claude-code -U -w "$(openssl rand -hex 32)"
+#   # then register the claude-code keyId on the Pi — see docs/security/task-signing.md
+#
+# Rotate: re-run the provisioning (the `-U` upserts), then update the Pi's keystore.
+set -euo pipefail
+
+readonly KEYCHAIN_SERVICE="hugin-signing"
+readonly KEYCHAIN_ACCOUNT="claude-code"
+
+usage() {
+  cat >&2 <<'USAGE'
+hugin-sign — emit the Hugin task-signing secret (claude-code) from the macOS Keychain.
+  hugin-sign            print the secret   (for: HUGIN_SIGNING_SECRET=$(hugin-sign))
+  hugin-sign --env      print: export HUGIN_SIGNING_SECRET=…
+The secret is read from Keychain service "hugin-signing", account "claude-code".
+If it is missing, provision it once (see the comment block in this script).
+USAGE
+}
+
+read_secret() {
+  local secret
+  if ! secret=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w 2>/dev/null); then
+    echo "hugin-sign: no secret in Keychain (service=$KEYCHAIN_SERVICE account=$KEYCHAIN_ACCOUNT)." >&2
+    echo "hugin-sign: provision it once — see the comment block in $(command -v hugin-sign || echo this script)." >&2
+    return 1
+  fi
+  if [ -z "$secret" ]; then
+    echo "hugin-sign: Keychain entry exists but is empty." >&2
+    return 1
+  fi
+  printf '%s' "$secret"
+}
+
+# Emit the secret ONLY for an exact bare call or an exact `--env`.
+if [ "$#" -eq 0 ]; then
+  read_secret
+  echo
+elif [ "$#" -eq 1 ] && [ "$1" = "--env" ]; then
+  secret=$(read_secret)
+  printf 'export HUGIN_SIGNING_SECRET=%q\n' "$secret"
+else
+  usage
+  # `--help`/`-h` is a successful usage request; anything else is an error.
+  case "${1:-}" in
+    -h|--help) exit 0 ;;
+    *) exit 2 ;;
+  esac
+fi
