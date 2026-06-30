@@ -48,7 +48,7 @@ function readOptionalNumber(name: string, fallback: number): number {
 export async function main(): Promise<void> {
   const muninUrl = readRequiredEnv("MUNIN_URL");
   const muninApiKey = readRequiredEnv("MUNIN_API_KEY");
-  const modelId = process.env.HUGIN_FRICTION_MODEL_ID ?? "unknown";
+  const modelId = process.env.HUGIN_FRICTION_MODEL_ID?.trim() || "unknown";
   const taskId = process.env.HUGIN_FRICTION_TASK_ID;
   const writeTimeoutMs = readOptionalNumber("HUGIN_FRICTION_WRITE_TIMEOUT_MS", 2_000);
 

@@ -165,6 +165,25 @@ describe("report_friction tool — model id resolution", () => {
     const [, , , tags] = write.mock.calls[0]!;
     expect(tags).toContain("model:claude-sonnet-4-6");
   });
+
+  it("blank deps.modelId AND blank input → model:unknown, never an empty tag", async () => {
+    const write = vi.fn(async () => ({}));
+    const tool = buildFrictionTool({
+      munin: fakeMunin(write),
+      modelId: "   ",
+      now: () => FIXED_NOW,
+    });
+    await tool.handler({
+      friction_type: "ambiguity",
+      severity: "low",
+      summary: "x",
+      detail: "y",
+    });
+    const [, , content, tags] = write.mock.calls[0]!;
+    expect(tags).toContain("model:unknown");
+    expect((tags as string[]).some((t) => t === "model:" || t === "model:   ")).toBe(false);
+    expect(JSON.parse(content as string).model_id).toBe("unknown");
+  });
 });
 
 describe("report_friction tool — failure modes", () => {

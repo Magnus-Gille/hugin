@@ -185,11 +185,11 @@ function pickTaskId(fromInput: string | undefined, fromDeps: string | undefined)
 
 /**
  * Caller-supplied model id (interactive sessions self-report) wins over the
- * process-wide env default. A blank/whitespace input falls back to deps so a
- * stray empty string never produces a `model:` tag with no value.
+ * process-wide env default. A blank/whitespace value at either layer falls
+ * through to the next, so a stray empty string (input OR a blank
+ * HUGIN_FRICTION_MODEL_ID env) never produces a `model:` tag with no value —
+ * the floor is always the documented `"unknown"`.
  */
 function pickModelId(fromInput: string | undefined, fromDeps: string): string {
-  const trimmed = fromInput?.trim();
-  if (trimmed) return trimmed;
-  return fromDeps;
+  return fromInput?.trim() || fromDeps.trim() || "unknown";
 }
