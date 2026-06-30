@@ -109,6 +109,83 @@ describe("report_friction tool — task id resolution", () => {
   });
 });
 
+describe("report_friction tool — model id resolution", () => {
+  it("input.model_id overrides deps.modelId in tags and content", async () => {
+    const write = vi.fn(async () => ({}));
+    const tool = buildFrictionTool({
+      munin: fakeMunin(write),
+      modelId: "unknown",
+      now: () => FIXED_NOW,
+    });
+    await tool.handler({
+      friction_type: "ambiguity",
+      severity: "low",
+      summary: "x",
+      detail: "y",
+      model_id: "claude-opus-4-8",
+    });
+    const [, , content, tags] = write.mock.calls[0]!;
+    expect(tags).toContain("model:claude-opus-4-8");
+    expect((tags as string[]).some((t) => t === "model:unknown")).toBe(false);
+    expect(JSON.parse(content as string).model_id).toBe("claude-opus-4-8");
+  });
+
+  it("falls back to deps.modelId when input.model_id absent", async () => {
+    const write = vi.fn(async () => ({}));
+    const tool = buildFrictionTool({
+      munin: fakeMunin(write),
+      modelId: "claude-sonnet-4-6",
+      now: () => FIXED_NOW,
+    });
+    await tool.handler({
+      friction_type: "ambiguity",
+      severity: "low",
+      summary: "x",
+      detail: "y",
+    });
+    const [, , content, tags] = write.mock.calls[0]!;
+    expect(tags).toContain("model:claude-sonnet-4-6");
+    expect(JSON.parse(content as string).model_id).toBe("claude-sonnet-4-6");
+  });
+
+  it("blank input.model_id falls back to deps.modelId (not empty tag)", async () => {
+    const write = vi.fn(async () => ({}));
+    const tool = buildFrictionTool({
+      munin: fakeMunin(write),
+      modelId: "claude-sonnet-4-6",
+      now: () => FIXED_NOW,
+    });
+    await tool.handler({
+      friction_type: "ambiguity",
+      severity: "low",
+      summary: "x",
+      detail: "y",
+      model_id: "   ",
+    });
+    const [, , , tags] = write.mock.calls[0]!;
+    expect(tags).toContain("model:claude-sonnet-4-6");
+  });
+
+  it("blank deps.modelId AND blank input → model:unknown, never an empty tag", async () => {
+    const write = vi.fn(async () => ({}));
+    const tool = buildFrictionTool({
+      munin: fakeMunin(write),
+      modelId: "   ",
+      now: () => FIXED_NOW,
+    });
+    await tool.handler({
+      friction_type: "ambiguity",
+      severity: "low",
+      summary: "x",
+      detail: "y",
+    });
+    const [, , content, tags] = write.mock.calls[0]!;
+    expect(tags).toContain("model:unknown");
+    expect((tags as string[]).some((t) => t === "model:" || t === "model:   ")).toBe(false);
+    expect(JSON.parse(content as string).model_id).toBe("unknown");
+  });
+});
+
 describe("report_friction tool — failure modes", () => {
   it("zod validation error → isError, kind input_validation", async () => {
     const write = vi.fn(async () => ({}));

@@ -119,16 +119,17 @@ export function buildFrictionTool(deps: FrictionToolDeps): FrictionTool {
 
       const recordedAt = now();
       const resolvedTaskId = pickTaskId(input.task_id, deps.taskId);
+      const resolvedModelId = pickModelId(input.model_id, deps.modelId);
       const namespace = buildFrictionNamespace();
       const key = buildFrictionKey(resolvedTaskId, recordedAt);
       const tags = buildFrictionTags({
         input,
-        modelId: deps.modelId,
+        modelId: resolvedModelId,
         resolvedTaskId,
       });
       const content = buildFrictionContent({
         input,
-        modelId: deps.modelId,
+        modelId: resolvedModelId,
         resolvedTaskId,
         recordedAt,
       });
@@ -180,4 +181,15 @@ function pickTaskId(fromInput: string | undefined, fromDeps: string | undefined)
   const candidate = fromInput?.trim() || fromDeps?.trim();
   if (!candidate) return undefined;
   return sanitiseTaskId(candidate);
+}
+
+/**
+ * Caller-supplied model id (interactive sessions self-report) wins over the
+ * process-wide env default. A blank/whitespace value at either layer falls
+ * through to the next, so a stray empty string (input OR a blank
+ * HUGIN_FRICTION_MODEL_ID env) never produces a `model:` tag with no value —
+ * the floor is always the documented `"unknown"`.
+ */
+function pickModelId(fromInput: string | undefined, fromDeps: string): string {
+  return fromInput?.trim() || fromDeps.trim() || "unknown";
 }
