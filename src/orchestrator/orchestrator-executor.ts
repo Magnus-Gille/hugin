@@ -18,6 +18,12 @@ export interface OrchestratorTaskInput {
   sensitivity: Sensitivity;
   timeoutMs: number;
   maxOutputChars: number;
+  /**
+   * Resolved `Context-refs` content to inject into the engine prompt, mirroring
+   * the Ollama path (Codex review of #127). Combined into the prompt only AFTER
+   * the sensitivity guard passes, so it never materializes for a rejected task.
+   */
+  injectedContext?: string;
 }
 
 export interface OrchestratorExecResult {
@@ -125,6 +131,15 @@ export async function runOrchestratorTask(
 
   onLog?.(`[orchestrator] starting (strategy will be determined by planner)`);
 
+  // Build the engine prompt only after the guard has passed: prepend any
+  // resolved Context-refs as a `## Context` section (Codex review of #127).
+  const enginePrompt = input.injectedContext
+    ? `## Context\n${input.injectedContext}\n\n${input.prompt}`
+    : input.prompt;
+  if (input.injectedContext) {
+    onLog?.(`[orchestrator] injected context: ${input.injectedContext.length} chars`);
+  }
+
   // --- 3. Task-level timeout race ---
   // Internal controller threaded into the engine (issue #110). It aborts when
   // the timeout wins OR the caller's signal fires, cancelling in-flight calls.
@@ -138,7 +153,7 @@ export async function runOrchestratorTask(
     timeoutHandle = setTimeout(() => resolve("TIMEOUT"), input.timeoutMs);
   });
 
-  const enginePromise = runOrchestration(input.prompt, deps.invoker, config, {
+  const enginePromise = runOrchestration(enginePrompt, deps.invoker, config, {
     signal: engineAbort.signal,
   }).then((result): OrchestrationResult | "TIMEOUT" => result);
 

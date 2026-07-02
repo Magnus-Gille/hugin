@@ -273,4 +273,78 @@ describe("runOrchestratorTask", () => {
     expect(result.exitCode).toBe(0);
     expect(result.resultText).toBe("Secure result");
   });
+
+  // --- Context-ref injection (Codex review of #127, Medium) ---
+
+  it("prepends injectedContext to the prompt reaching the engine", async () => {
+    let plannerPrompt: string | undefined;
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string, prompt: string): Promise<WorkerResult> => {
+        if (role === "planner") {
+          plannerPrompt = prompt;
+          return makeSuccessResult(
+            JSON.stringify({ strategy: "single", subtasks: [{ id: "t1", prompt: "Do it" }] }),
+          );
+        }
+        return makeSuccessResult("worker output");
+      }),
+    };
+
+    await runOrchestratorTask(
+      { ...defaultInput, injectedContext: "RESOLVED_CONTEXT_MARKER" },
+      DEFAULT_ORCHESTRATOR_CONFIG,
+      { invoker },
+    );
+
+    expect(plannerPrompt).toContain("RESOLVED_CONTEXT_MARKER");
+  });
+
+  it("private + OpenRouter with injectedContext → guard rejects, zero model calls, context never used (#111 handoff)", async () => {
+    const invoker = buildMockInvoker({});
+    const invokeSpy = vi.spyOn(invoker, "invoke");
+
+    const result = await runOrchestratorTask(
+      { ...defaultInput, sensitivity: "private", injectedContext: "PRIVATE_REF_CONTENT" },
+      DEFAULT_ORCHESTRATOR_CONFIG, // openrouter roles
+      { invoker },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain("private");
+    expect(invokeSpy).not.toHaveBeenCalled();
+  });
+
+  it("private + all-Berget with injectedContext → admitted and context reaches the engine", async () => {
+    const bergetConfig: OrchestratorConfig = {
+      ...DEFAULT_ORCHESTRATOR_CONFIG,
+      roles: {
+        planner: { provider: "berget", model: "llama" },
+        worker: { provider: "berget", model: "llama" },
+        verifier: { provider: "berget", model: "llama" },
+        synthesizer: { provider: "berget", model: "llama" },
+      },
+    };
+
+    let plannerPrompt: string | undefined;
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string, prompt: string): Promise<WorkerResult> => {
+        if (role === "planner") {
+          plannerPrompt = prompt;
+          return makeSuccessResult(
+            JSON.stringify({ strategy: "single", subtasks: [{ id: "t1", prompt: "Do it" }] }),
+          );
+        }
+        return makeSuccessResult("secure output");
+      }),
+    };
+
+    const result = await runOrchestratorTask(
+      { ...defaultInput, sensitivity: "private", injectedContext: "PRIVATE_REF_CONTENT" },
+      bergetConfig,
+      { invoker },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(plannerPrompt).toContain("PRIVATE_REF_CONTENT");
+  });
 });

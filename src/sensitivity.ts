@@ -460,6 +460,16 @@ export function sensitivityToMuninClassification(
 export function getDispatcherRuntimeMaxSensitivity(
   runtime: DispatcherRuntime,
 ): Sensitivity {
+  // The orchestrator runtime has no fixed dispatcher ceiling. It fans out to
+  // per-role providers and enforces sensitivity via its own fail-closed
+  // sovereign-provider guard (assertProvidersAllowSensitivity), which rejects a
+  // private task before any model call unless every role is bound to a sovereign
+  // provider (Berget). No RUNTIME_REGISTRY row maps dispatcherRuntime:
+  // "orchestrator", so without this special-case the lookup falls back to
+  // "internal" and the dispatcher would pre-reject every private orchestrator
+  // task before the role guard can allow an all-Berget binding (#111). Return
+  // the top of the lattice and defer to the role guard.
+  if (runtime === "orchestrator") return "private";
   const def = RUNTIME_REGISTRY.find((r) => r.dispatcherRuntime === runtime);
   if (!def) return "internal";
   return getRuntimeMaxSensitivity(def.trustTier);

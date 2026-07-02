@@ -322,6 +322,14 @@ describe("sensitivity helpers", () => {
     expect(getDispatcherRuntimeMaxSensitivity("ollama")).toBe("private");
   });
 
+  it("treats orchestrator as max-private, deferring enforcement to the role guard (#111)", () => {
+    // No RUNTIME_REGISTRY row maps dispatcherRuntime:"orchestrator"; without the
+    // special-case this would fall back to "internal" and the dispatcher would
+    // pre-reject every private orchestrator task before assertProvidersAllowSensitivity
+    // could allow an all-Berget binding.
+    expect(getDispatcherRuntimeMaxSensitivity("orchestrator")).toBe("private");
+  });
+
   describe("detectPromptSensitivity (#36)", () => {
     it("flags secret-shaped matches as hardPrivate", () => {
       expect(
