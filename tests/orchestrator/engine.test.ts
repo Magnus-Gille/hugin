@@ -127,6 +127,33 @@ describe("runOrchestration — truncation warnings (issue #112)", () => {
   });
 });
 
+describe("runOrchestration — AbortSignal threading (issue #110)", () => {
+  it("forwards opts.signal into every invoke call (planner, workers, synthesizer)", async () => {
+    const controller = new AbortController();
+    const seenSignals: (AbortSignal | undefined)[] = [];
+    const counters = new Map<OrchestratorRole, number>();
+    const queues = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), ok("W2"), ok("W3")]],
+      ["synthesizer", [ok("Final")]],
+    ]);
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: OrchestratorRole, _prompt: string, opts?: { signal?: AbortSignal }) => {
+        seenSignals.push(opts?.signal);
+        const idx = counters.get(role) ?? 0;
+        counters.set(role, idx + 1);
+        return (queues.get(role) ?? [])[idx] ?? fail(`none for ${role}[${idx}]`);
+      }),
+    };
+
+    await runOrchestration("task", invoker, undefined, { signal: controller.signal });
+
+    // planner + 3 workers + synthesizer = 5 calls, all carrying the signal
+    expect(seenSignals.length).toBe(5);
+    expect(seenSignals.every((s) => s === controller.signal)).toBe(true);
+  });
+});
+
 describe("runOrchestration — single fallback", () => {
   it("planner returns garbage → strategy single → 1 worker → finalOutput == worker output, no synth call", async () => {
     const synthSpy = vi.fn();

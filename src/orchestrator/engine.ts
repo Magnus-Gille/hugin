@@ -162,8 +162,10 @@ export async function runOrchestration(
   taskPrompt: string,
   invoker: ModelInvoker,
   config?: Partial<OrchestratorConfig>,
+  opts?: { signal?: AbortSignal },
 ): Promise<OrchestrationResult> {
   const cfg: OrchestratorConfig = { ...DEFAULT_ORCHESTRATOR_CONFIG, ...config };
+  const signal = opts?.signal;
   const allCosts: (number | null)[] = [];
   const warnings: string[] = [];
   let totalLatencyMs = 0;
@@ -171,7 +173,7 @@ export async function runOrchestration(
   // -------------------------------------------------------------------------
   // 1. Plan
   // -------------------------------------------------------------------------
-  const planResp = await invoker.invoke("planner", buildPlannerPrompt(taskPrompt));
+  const planResp = await invoker.invoke("planner", buildPlannerPrompt(taskPrompt), { signal });
   allCosts.push(planResp.costUsd ?? null);
   totalLatencyMs += planResp.latencyMs;
   if (planResp.ok && planResp.truncated) {
@@ -192,7 +194,9 @@ export async function runOrchestration(
     plan.subtasks,
     cfg.maxConcurrency,
     async (subtask): Promise<SubtaskOutcome> => {
-      const result = await invoker.invoke("worker", buildWorkerPrompt(taskPrompt, subtask));
+      const result = await invoker.invoke("worker", buildWorkerPrompt(taskPrompt, subtask), {
+        signal,
+      });
       allCosts.push(result.costUsd ?? null);
       totalLatencyMs += result.latencyMs;
       if (result.ok && result.truncated) {
@@ -213,6 +217,7 @@ export async function runOrchestration(
       const verifyResp = await invoker.invoke(
         "verifier",
         buildVerifierPrompt(outcome.subtask, outcome.result.output),
+        { signal },
       );
       allCosts.push(verifyResp.costUsd ?? null);
       totalLatencyMs += verifyResp.latencyMs;
@@ -254,6 +259,7 @@ export async function runOrchestration(
     const synthResp = await invoker.invoke(
       "synthesizer",
       buildSynthesizerPrompt(taskPrompt, successfulOutcomes),
+      { signal },
     );
     allCosts.push(synthResp.costUsd ?? null);
     totalLatencyMs += synthResp.latencyMs;

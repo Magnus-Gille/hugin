@@ -43,6 +43,12 @@ export interface WorkerRequest {
   maxOutputChars?: number;
   /** Completion-token cap sent to the model. Defaults to DEFAULT_MAX_TOKENS. */
   maxTokens?: number;
+  /**
+   * External cancellation signal (issue #110). When it fires, the in-flight
+   * fetch / child process is aborted; when already aborted at entry, run()
+   * short-circuits without spending. Combined with the per-call timeout.
+   */
+  signal?: AbortSignal;
 }
 
 export interface WorkerResult {
@@ -99,6 +105,21 @@ export class DirectModelExecutor implements WorkerExecutor {
     const start = Date.now();
     const maxOutput = req.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
 
+    // Short-circuit an already-cancelled call before spending anything (issue #110).
+    if (req.signal?.aborted) {
+      return {
+        ok: false,
+        output: "",
+        provider: req.provider,
+        model: req.model,
+        inputTokens: null,
+        outputTokens: null,
+        costUsd: null,
+        latencyMs: Date.now() - start,
+        error: "Request aborted before it started",
+      };
+    }
+
     const providerCfg = getProviderConfig(req.provider);
     if (!providerCfg) {
       return {
@@ -145,8 +166,17 @@ export class DirectModelExecutor implements WorkerExecutor {
       max_tokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
     };
 
+    // Combine the per-call timeout with the caller's cancellation signal
+    // (issue #110): whichever fires first aborts the fetch. `timedOut` lets us
+    // report the right reason (timeout vs external cancel).
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), req.timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, req.timeoutMs);
+    const onExternalAbort = () => controller.abort();
+    req.signal?.addEventListener("abort", onExternalAbort, { once: true });
 
     try {
       let response: Response;
@@ -158,9 +188,11 @@ export class DirectModelExecutor implements WorkerExecutor {
           signal: controller.signal,
         });
       } catch (fetchErr) {
-        const errMsg = isAbortError(fetchErr)
-          ? `Request timed out after ${req.timeoutMs}ms`
-          : `Network error: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`;
+        const errMsg = !isAbortError(fetchErr)
+          ? `Network error: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`
+          : timedOut
+            ? `Request timed out after ${req.timeoutMs}ms`
+            : "Request aborted";
         return {
           ok: false,
           output: "",
@@ -208,7 +240,9 @@ export class DirectModelExecutor implements WorkerExecutor {
             outputTokens: null,
             costUsd: null,
             latencyMs: Date.now() - start,
-            error: `Response body stalled and timed out after ${req.timeoutMs}ms`,
+            error: timedOut
+              ? `Response body stalled and timed out after ${req.timeoutMs}ms`
+              : "Request aborted while reading the response body",
           };
         }
         return {
@@ -258,6 +292,7 @@ export class DirectModelExecutor implements WorkerExecutor {
       };
     } finally {
       clearTimeout(timer);
+      req.signal?.removeEventListener("abort", onExternalAbort);
     }
   }
 }
@@ -293,12 +328,28 @@ export class PiHarnessExecutor implements WorkerExecutor {
       };
     }
 
+    // Short-circuit an already-cancelled call before spawning (issue #110).
+    if (req.signal?.aborted) {
+      return {
+        ok: false,
+        output: "",
+        provider: req.provider,
+        model: req.model,
+        inputTokens: null,
+        outputTokens: null,
+        costUsd: null,
+        latencyMs: Date.now() - start,
+        error: "Process aborted before it started",
+      };
+    }
+
     const args = buildPiArgs(req, entry);
 
     return new Promise<WorkerResult>((resolve) => {
       let stdout = "";
       let stderr = "";
       let killed = false;
+      let abortedBySignal = false;
 
       let child: ReturnType<typeof spawn>;
       try {
@@ -325,6 +376,15 @@ export class PiHarnessExecutor implements WorkerExecutor {
         child.kill("SIGTERM");
       }, req.timeoutMs);
 
+      // External cancellation (issue #110): kill the child when the caller's
+      // signal fires. `abortedBySignal` distinguishes it from a timeout kill.
+      const onExternalAbort = () => {
+        abortedBySignal = true;
+        killed = true;
+        child.kill("SIGTERM");
+      };
+      req.signal?.addEventListener("abort", onExternalAbort, { once: true });
+
       child.stdout?.on("data", (chunk: Buffer) => {
         stdout += chunk.toString();
       });
@@ -334,6 +394,7 @@ export class PiHarnessExecutor implements WorkerExecutor {
 
       child.on("error", (err) => {
         clearTimeout(killTimer);
+        req.signal?.removeEventListener("abort", onExternalAbort);
         resolve({
           ok: false,
           output: "",
@@ -349,6 +410,7 @@ export class PiHarnessExecutor implements WorkerExecutor {
 
       child.on("close", (code) => {
         clearTimeout(killTimer);
+        req.signal?.removeEventListener("abort", onExternalAbort);
 
         if (killed) {
           resolve({
@@ -360,7 +422,9 @@ export class PiHarnessExecutor implements WorkerExecutor {
             outputTokens: null,
             costUsd: null,
             latencyMs: Date.now() - start,
-            error: `Process timed out after ${req.timeoutMs}ms`,
+            error: abortedBySignal
+              ? "Process aborted"
+              : `Process timed out after ${req.timeoutMs}ms`,
           });
           return;
         }
