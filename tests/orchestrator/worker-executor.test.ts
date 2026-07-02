@@ -557,6 +557,50 @@ describe("DirectModelExecutor — external AbortSignal (issue #110)", () => {
   });
 });
 
+describe("DirectModelExecutor — abort-reason attribution is first-writer-wins (issue #110)", () => {
+  it("reports 'aborted' when the external abort precedes the timeout, even if the timer fires before the fetch settles", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+    vi.useFakeTimers();
+    try {
+      // fetch rejects with AbortError only when its (internal) signal aborts,
+      // and the rejection settles on a LATER macrotask (like real fetch teardown)
+      // — long enough that the per-call timeout timer fires in between.
+      vi.stubGlobal("fetch", vi.fn((_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            setTimeout(
+              () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+              100,
+            );
+          });
+        }),
+      ));
+
+      const controller = new AbortController();
+      const executor = new DirectModelExecutor();
+      const pending = executor.run({
+        provider: "openrouter",
+        model: "deepseek/deepseek-v4-flash",
+        prompt: "hi",
+        timeoutMs: 50, // fires AFTER the external abort but BEFORE the rejection settles
+        signal: controller.signal,
+      });
+
+      // External abort fires FIRST at t=0 → reason must lock to "external"…
+      controller.abort();
+      // …the timeout timer fires at t=50 (would flip timedOut), rejection at t=100.
+      await vi.advanceTimersByTimeAsync(200);
+
+      const result = await pending;
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/abort/i);
+      expect(result.error).not.toMatch(/timed out/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // PiHarnessExecutor
 // ---------------------------------------------------------------------------
