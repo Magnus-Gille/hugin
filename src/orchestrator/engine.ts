@@ -216,6 +216,11 @@ export async function runOrchestration(
       );
       allCosts.push(verifyResp.costUsd ?? null);
       totalLatencyMs += verifyResp.latencyMs;
+      if (verifyResp.ok && verifyResp.truncated) {
+        warnings.push(
+          `verifier output for subtask ${outcome.subtask.id} was truncated (finish_reason=length); the verdict may be unreliable`,
+        );
+      }
       outcome.verdict = parseVerdict(verifyResp.output);
     }
   }

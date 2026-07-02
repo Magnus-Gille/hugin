@@ -108,6 +108,23 @@ describe("runOrchestration — truncation warnings (issue #112)", () => {
     const result = await runOrchestration("task", buildMockInvoker(responses));
     expect(result.warnings.some((w) => w.toLowerCase().includes("planner"))).toBe(true);
   });
+
+  it("a truncated verifier surfaces a warning naming the subtask (verify pass on)", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), ok("W2"), ok("W3")]],
+      // verifier called once per successful worker; only the 2nd is truncated
+      ["verifier", [ok("PASS"), okTrunc("PA"), ok("PASS")]],
+      ["synthesizer", [ok("Final")]],
+    ]);
+    const result = await runOrchestration("task", buildMockInvoker(responses), {
+      verifyWorkers: true,
+    });
+    const verifierWarnings = result.warnings.filter((w) => w.toLowerCase().includes("verifier"));
+    expect(verifierWarnings.length).toBe(1);
+    expect(verifierWarnings[0]).toContain("2"); // subtask id
+    expect(verifierWarnings[0].toLowerCase()).toContain("truncat");
+  });
 });
 
 describe("runOrchestration — single fallback", () => {
