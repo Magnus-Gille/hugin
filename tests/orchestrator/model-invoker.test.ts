@@ -99,6 +99,22 @@ describe("createModelInvoker", () => {
     expect(capturedRequests[1].maxTokens).toBe(32000);
   });
 
+  it("threads opts.signal into WorkerRequest.signal (issue #110)", async () => {
+    const capturedRequests: WorkerRequest[] = [];
+    const mockExecutor: WorkerExecutor = {
+      run: vi.fn(async (req: WorkerRequest) => {
+        capturedRequests.push(req);
+        return makeResult("out");
+      }),
+    };
+
+    const invoker = createModelInvoker(roles, { timeoutMs: 5000 }, () => mockExecutor);
+    const controller = new AbortController();
+
+    await invoker.invoke("worker", "do it", { signal: controller.signal });
+    expect(capturedRequests[0].signal).toBe(controller.signal);
+  });
+
   it("passes systemPrompt when provided", async () => {
     const capturedRequests: WorkerRequest[] = [];
     const mockExecutor: WorkerExecutor = {

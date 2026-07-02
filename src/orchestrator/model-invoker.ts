@@ -17,7 +17,7 @@ export interface ModelInvoker {
   invoke(
     role: OrchestratorRole,
     prompt: string,
-    opts?: { systemPrompt?: string },
+    opts?: { systemPrompt?: string; signal?: AbortSignal },
   ): Promise<WorkerResult>;
 }
 
@@ -39,7 +39,7 @@ export function createModelInvoker(
     async invoke(
       role: OrchestratorRole,
       prompt: string,
-      opts?: { systemPrompt?: string },
+      opts?: { systemPrompt?: string; signal?: AbortSignal },
     ): Promise<WorkerResult> {
       const binding = roles[role];
       const executor = factory(binding.provider);
@@ -51,6 +51,7 @@ export function createModelInvoker(
         timeoutMs: defaults.timeoutMs,
         maxOutputChars: defaults.maxOutputChars,
         maxTokens: binding.maxTokens ?? defaults.maxTokens,
+        signal: opts?.signal,
       });
     },
   };

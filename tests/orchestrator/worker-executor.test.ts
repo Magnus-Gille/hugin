@@ -477,13 +477,18 @@ describe("DirectModelExecutor — malformed response bodies (Fix #3)", () => {
 });
 
 describe("DirectModelExecutor — timeout/abort path", () => {
-  it("returns ok=false with timeout error when fetch is aborted", async () => {
+  it("returns ok=false with timeout error when the per-call timeout fires", async () => {
     vi.stubEnv("OPENROUTER_API_KEY", "test-key");
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockRejectedValue(Object.assign(new Error("aborted"), { name: "AbortError" })),
-    );
+    // fetch that only rejects once its signal (the internal timeout controller)
+    // aborts — i.e. a genuine timeout, not an immediate/external cancel.
+    vi.stubGlobal("fetch", vi.fn((_url: string, init: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => {
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        });
+      }),
+    ));
 
     const executor = new DirectModelExecutor();
     const result = await executor.run({
@@ -496,6 +501,103 @@ describe("DirectModelExecutor — timeout/abort path", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/timed out/i);
     expect(result.output).toBe("");
+  });
+});
+
+describe("DirectModelExecutor — external AbortSignal (issue #110)", () => {
+  it("short-circuits without calling fetch when signal is already aborted", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+    const fetchMock = vi.fn().mockResolvedValue(successResponse("should not happen"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const controller = new AbortController();
+    controller.abort();
+
+    const executor = new DirectModelExecutor();
+    const result = await executor.run({
+      provider: "openrouter",
+      model: "deepseek/deepseek-v4-flash",
+      prompt: "hi",
+      timeoutMs: 5000,
+      signal: controller.signal,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/abort/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("aborts the in-flight fetch when the external signal fires", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+    // fetch mock that rejects with AbortError when its passed signal aborts.
+    vi.stubGlobal("fetch", vi.fn((_url: string, init: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => {
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        });
+      }),
+    ));
+
+    const controller = new AbortController();
+    const executor = new DirectModelExecutor();
+    const pending = executor.run({
+      provider: "openrouter",
+      model: "deepseek/deepseek-v4-flash",
+      prompt: "hi",
+      timeoutMs: 60000, // long — the abort, not the timeout, must end the call
+      signal: controller.signal,
+    });
+
+    controller.abort();
+    const result = await pending;
+
+    expect(result.ok).toBe(false);
+    expect(result.output).toBe("");
+    expect(result.error).toMatch(/abort/i);
+  });
+});
+
+describe("DirectModelExecutor — abort-reason attribution is first-writer-wins (issue #110)", () => {
+  it("reports 'aborted' when the external abort precedes the timeout, even if the timer fires before the fetch settles", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+    vi.useFakeTimers();
+    try {
+      // fetch rejects with AbortError only when its (internal) signal aborts,
+      // and the rejection settles on a LATER macrotask (like real fetch teardown)
+      // — long enough that the per-call timeout timer fires in between.
+      vi.stubGlobal("fetch", vi.fn((_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            setTimeout(
+              () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+              100,
+            );
+          });
+        }),
+      ));
+
+      const controller = new AbortController();
+      const executor = new DirectModelExecutor();
+      const pending = executor.run({
+        provider: "openrouter",
+        model: "deepseek/deepseek-v4-flash",
+        prompt: "hi",
+        timeoutMs: 50, // fires AFTER the external abort but BEFORE the rejection settles
+        signal: controller.signal,
+      });
+
+      // External abort fires FIRST at t=0 → reason must lock to "external"…
+      controller.abort();
+      // …the timeout timer fires at t=50 (would flip timedOut), rejection at t=100.
+      await vi.advanceTimersByTimeAsync(200);
+
+      const result = await pending;
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/abort/i);
+      expect(result.error).not.toMatch(/timed out/i);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -630,6 +732,51 @@ describe("PiHarnessExecutor — timeout path", () => {
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/timed out/i);
+  });
+});
+
+describe("PiHarnessExecutor — external AbortSignal (issue #110)", () => {
+  it("does not spawn when the signal is already aborted", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+    const controller = new AbortController();
+    controller.abort();
+
+    const executor = new PiHarnessExecutor();
+    const result = await executor.run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hi",
+      timeoutMs: 5000,
+      signal: controller.signal,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/abort/i);
+    expect(spawnCalls.length).toBe(0);
+  });
+
+  it("kills the child when the signal fires mid-run", async () => {
+    // Child would run for 500ms; we abort well before that.
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS, delayMs: 500 }];
+    const controller = new AbortController();
+
+    const executor = new PiHarnessExecutor();
+    const pending = executor.run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hi",
+      timeoutMs: 60000, // long — the abort, not the timeout, must end it
+      signal: controller.signal,
+    });
+
+    // Let the spawn happen, then abort.
+    await new Promise((r) => setTimeout(r, 20));
+    controller.abort();
+    const result = await pending;
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/abort/i);
+    expect(spawnCalls.length).toBe(1);
   });
 });
 

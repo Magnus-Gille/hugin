@@ -87,10 +87,11 @@ function buildSummary(
  * Run a task through the orchestration engine, enforcing sensitivity guards
  * and a task-level timeout.
  *
- * The `deps.signal` abort is checked before and after the engine run but does
- * NOT cancel in-flight model calls mid-engine (per-call timeouts via
- * `config.perCallTimeoutMs` bound spend). TODO: wire AbortSignal into
- * ModelInvoker.invoke() for mid-engine cancellation.
+ * Cancellation (issue #110): an internal AbortController is threaded into the
+ * engine and every model call. It fires when EITHER the task-level timeout wins
+ * the race OR the operator/shutdown `deps.signal` aborts — so a timeout/cancel
+ * aborts in-flight fetch/child work instead of letting it spend until the
+ * per-call timeout. Per-call timeouts remain the backstop.
  */
 export async function runOrchestratorTask(
   input: OrchestratorTaskInput,
@@ -125,15 +126,21 @@ export async function runOrchestratorTask(
   onLog?.(`[orchestrator] starting (strategy will be determined by planner)`);
 
   // --- 3. Task-level timeout race ---
+  // Internal controller threaded into the engine (issue #110). It aborts when
+  // the timeout wins OR the caller's signal fires, cancelling in-flight calls.
+  const engineAbort = new AbortController();
+  const forwardCallerAbort = () => engineAbort.abort();
+  deps.signal?.addEventListener("abort", forwardCallerAbort, { once: true });
+
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
   const timeoutPromise = new Promise<"TIMEOUT">((resolve) => {
     timeoutHandle = setTimeout(() => resolve("TIMEOUT"), input.timeoutMs);
   });
 
-  const enginePromise = runOrchestration(input.prompt, deps.invoker, config).then(
-    (result): OrchestrationResult | "TIMEOUT" => result,
-  );
+  const enginePromise = runOrchestration(input.prompt, deps.invoker, config, {
+    signal: engineAbort.signal,
+  }).then((result): OrchestrationResult | "TIMEOUT" => result);
 
   // Race the engine against the timeout.
   let raceResult: OrchestrationResult | "TIMEOUT";
@@ -141,6 +148,10 @@ export async function runOrchestratorTask(
     raceResult = await Promise.race([enginePromise, timeoutPromise]);
   } finally {
     if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+    // If the timeout won, abort the still-running engine so its in-flight model
+    // calls are cancelled rather than left spending until their per-call timeout.
+    if (!engineAbort.signal.aborted) engineAbort.abort();
+    deps.signal?.removeEventListener("abort", forwardCallerAbort);
   }
 
   // --- 4. Handle abort signal after run (if race completed first) ---

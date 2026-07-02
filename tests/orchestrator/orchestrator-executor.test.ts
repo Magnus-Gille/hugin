@@ -127,6 +127,55 @@ describe("runOrchestratorTask", () => {
     expect(invokeSpy).not.toHaveBeenCalled();
   });
 
+  it("task timeout aborts the signal threaded into the engine (issue #110)", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (_role: string, _prompt: string, opts?: { signal?: AbortSignal }) => {
+        capturedSignal = opts?.signal;
+        // Outlast the 50ms task timeout so the timeout wins the race.
+        await new Promise((r) => setTimeout(r, 500));
+        return makeSuccessResult("late");
+      }),
+    };
+
+    const result = await runOrchestratorTask(
+      { ...defaultInput, timeoutMs: 50 },
+      DEFAULT_ORCHESTRATOR_CONFIG,
+      { invoker },
+    );
+
+    expect(result.exitCode).toBe("TIMEOUT");
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal!.aborted).toBe(true);
+  });
+
+  it("forwards deps.signal abort into the engine signal mid-run (issue #110)", async () => {
+    const outer = new AbortController();
+    let capturedSignal: AbortSignal | undefined;
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string, _prompt: string, opts?: { signal?: AbortSignal }) => {
+        capturedSignal = opts?.signal;
+        // Abort the operator/deps signal while the first (planner) call is in flight.
+        outer.abort();
+        await new Promise((r) => setTimeout(r, 10));
+        if (role === "planner") {
+          return makeSuccessResult(
+            JSON.stringify({ strategy: "single", subtasks: [{ id: "t1", prompt: "Do it" }] }),
+          );
+        }
+        return makeSuccessResult("worker output");
+      }),
+    };
+
+    await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, {
+      invoker,
+      signal: outer.signal,
+    });
+
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal!.aborted).toBe(true);
+  });
+
   it("timeout path: invoker that never resolves + tiny timeoutMs → exitCode TIMEOUT", async () => {
     const invoker = buildMockInvoker({ neverResolve: true });
 

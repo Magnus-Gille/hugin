@@ -4493,6 +4493,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     stopCancellationWatch();
     currentSdkAbort = null;
     currentOllamaAbort = null;
+    currentOrchestratorAbort = null;
     currentCancellation = null;
     currentTask = null;
     currentTaskConfig = null;
