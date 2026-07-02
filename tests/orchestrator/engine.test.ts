@@ -17,6 +17,10 @@ function fail(error = "boom"): WorkerResult {
   };
 }
 
+function okTrunc(output: string, costUsd: number | null = 0.001): WorkerResult {
+  return { ...ok(output, costUsd), truncated: true };
+}
+
 const VALID_PLAN_3 = JSON.stringify({
   subtasks: [
     { id: "1", prompt: "Step 1" },
@@ -59,6 +63,50 @@ describe("runOrchestration — happy fanout", () => {
     expect(result.outcomes).toHaveLength(3);
     // totalCostUsd = planner(0.01) + workers(0.002+0.003+0.004) + synth(0.005) = 0.024
     expect(result.totalCostUsd).toBeCloseTo(0.024, 6);
+  });
+});
+
+describe("runOrchestration — truncation warnings (issue #112)", () => {
+  it("no truncation → warnings is an empty array", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), ok("W2"), ok("W3")]],
+      ["synthesizer", [ok("Final")]],
+    ]);
+    const result = await runOrchestration("task", buildMockInvoker(responses));
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("a truncated worker surfaces a warning naming the subtask id", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), okTrunc("W2 cut off"), ok("W3")]],
+      ["synthesizer", [ok("Final")]],
+    ]);
+    const result = await runOrchestration("task", buildMockInvoker(responses));
+    expect(result.warnings.length).toBe(1);
+    expect(result.warnings[0]).toContain("2"); // subtask id
+    expect(result.warnings[0].toLowerCase()).toContain("truncat");
+  });
+
+  it("a truncated synthesizer surfaces a warning", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), ok("W2"), ok("W3")]],
+      ["synthesizer", [okTrunc("truncated merge")]],
+    ]);
+    const result = await runOrchestration("task", buildMockInvoker(responses));
+    expect(result.warnings.some((w) => w.toLowerCase().includes("synthesizer"))).toBe(true);
+  });
+
+  it("a truncated planner surfaces a warning", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [okTrunc(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), ok("W2"), ok("W3")]],
+      ["synthesizer", [ok("Final")]],
+    ]);
+    const result = await runOrchestration("task", buildMockInvoker(responses));
+    expect(result.warnings.some((w) => w.toLowerCase().includes("planner"))).toBe(true);
   });
 });
 

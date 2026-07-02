@@ -22,6 +22,15 @@ import { getProviderConfig } from "./provider-config.js";
 /** Default maximum output characters when not specified in the request. */
 export const DEFAULT_MAX_OUTPUT_CHARS = 50_000;
 
+/**
+ * Default completion-token cap when the request does not specify one.
+ *
+ * A conservative 4096 avoids provider defaults that can exceed small models'
+ * context windows (e.g. Berget auto-sets max_tokens=32768). Callers that need
+ * longer output (typically the synthesizer role) override via WorkerRequest.
+ */
+export const DEFAULT_MAX_TOKENS = 4096;
+
 export interface WorkerRequest {
   /** Provider id: "openrouter" | "berget" | "pi-harness" */
   provider: string;
@@ -32,6 +41,8 @@ export interface WorkerRequest {
   timeoutMs: number;
   /** Truncate output to this many characters. Defaults to DEFAULT_MAX_OUTPUT_CHARS. */
   maxOutputChars?: number;
+  /** Completion-token cap sent to the model. Defaults to DEFAULT_MAX_TOKENS. */
+  maxTokens?: number;
 }
 
 export interface WorkerResult {
@@ -44,6 +55,12 @@ export interface WorkerResult {
   /** Cost in USD computed from model-pricing when both token counts are known. */
   costUsd: number | null;
   latencyMs: number;
+  /**
+   * True when the model stopped because it hit the completion-token cap
+   * (finish_reason === "length"), meaning `output` is incomplete. Callers
+   * should surface this rather than treat the result as fully successful.
+   */
+  truncated?: boolean;
   /** Set when ok=false. Never throws out of run(). */
   error?: string;
 }
@@ -124,7 +141,8 @@ export class DirectModelExecutor implements WorkerExecutor {
       stream: false,
       // Explicitly cap completion tokens to avoid provider defaults (e.g. Berget
       // auto-sets max_tokens=32768 which exceeds many small models' context windows).
-      max_tokens: 4096,
+      // Configurable per role/task (issue #112); DEFAULT_MAX_TOKENS is a safe floor.
+      max_tokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
     };
 
     const controller = new AbortController();
@@ -221,7 +239,7 @@ export class DirectModelExecutor implements WorkerExecutor {
         };
       }
 
-      const { content, inputTokens, outputTokens } = extracted;
+      const { content, inputTokens, outputTokens, finishReason } = extracted;
       const costUsd =
         inputTokens !== null && outputTokens !== null
           ? estimateCostUsd(req.model, inputTokens, outputTokens)
@@ -236,6 +254,7 @@ export class DirectModelExecutor implements WorkerExecutor {
         outputTokens,
         costUsd,
         latencyMs: Date.now() - start,
+        truncated: finishReason === "length",
       };
     } finally {
       clearTimeout(timer);
@@ -422,6 +441,8 @@ interface ExtractedCompletion {
   content: string;
   inputTokens: number | null;
   outputTokens: number | null;
+  /** OpenAI-style stop reason for choices[0]; null when absent. "length" ⇒ truncated. */
+  finishReason: string | null;
 }
 interface ExtractedError {
   ok: false;
@@ -458,7 +479,12 @@ function extractChatCompletion(raw: unknown): ExtractedCompletion | ExtractedErr
   const outputTokens =
     typeof usage?.["completion_tokens"] === "number" ? usage["completion_tokens"] : null;
 
-  return { ok: true, content, inputTokens, outputTokens };
+  const finishReason =
+    typeof choiceObj["finish_reason"] === "string"
+      ? (choiceObj["finish_reason"] as string)
+      : null;
+
+  return { ok: true, content, inputTokens, outputTokens, finishReason };
 }
 
 interface PiParsedOutput {

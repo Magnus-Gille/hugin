@@ -51,6 +51,7 @@ function parseIntEnv(raw: string | undefined, fallback: number): number {
  *   HUGIN_ORCH_VERIFY          — "on" | "true" → verifyWorkers = true
  *   HUGIN_ORCH_PER_CALL_TIMEOUT_MS — positive integer (ms)
  *   HUGIN_ORCH_MAX_SUBTASKS    — positive integer
+ *   HUGIN_ORCH_MAX_TOKENS      — positive integer (completion-token cap)
  *
  * Pure function — no side-effects, no I/O.
  */
@@ -127,6 +128,13 @@ export function loadOrchestratorConfig(
     cfg.maxSubtasks = parseIntEnv(
       env.HUGIN_ORCH_MAX_SUBTASKS,
       DEFAULT_ORCHESTRATOR_CONFIG.maxSubtasks,
+    );
+  }
+
+  if (env.HUGIN_ORCH_MAX_TOKENS) {
+    cfg.maxTokens = parseIntEnv(
+      env.HUGIN_ORCH_MAX_TOKENS,
+      DEFAULT_ORCHESTRATOR_CONFIG.maxTokens,
     );
   }
 

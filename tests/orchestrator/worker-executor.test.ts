@@ -75,6 +75,7 @@ const {
   DirectModelExecutor,
   PiHarnessExecutor,
   DEFAULT_MAX_OUTPUT_CHARS,
+  DEFAULT_MAX_TOKENS,
 } = await import("../../src/orchestrator/worker-executor.js");
 
 // ---------------------------------------------------------------------------
@@ -241,6 +242,119 @@ describe("DirectModelExecutor — success path", () => {
 
     expect(result.ok).toBe(true);
     expect(result.output.length).toBe(50);
+  });
+});
+
+describe("DirectModelExecutor — max_tokens (issue #112)", () => {
+  it("defaults max_tokens to DEFAULT_MAX_TOKENS (4096) when req.maxTokens is unset", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+    let capturedBody: { max_tokens?: number } = {};
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string);
+      return successResponse("ok");
+    }));
+
+    const executor = new DirectModelExecutor();
+    await executor.run({
+      provider: "openrouter",
+      model: "deepseek/deepseek-v4-flash",
+      prompt: "hi",
+      timeoutMs: 5000,
+    });
+
+    expect(capturedBody.max_tokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(DEFAULT_MAX_TOKENS).toBe(4096);
+  });
+
+  it("uses req.maxTokens override when provided", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+    let capturedBody: { max_tokens?: number } = {};
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string);
+      return successResponse("ok");
+    }));
+
+    const executor = new DirectModelExecutor();
+    await executor.run({
+      provider: "openrouter",
+      model: "deepseek/deepseek-v4-flash",
+      prompt: "hi",
+      timeoutMs: 5000,
+      maxTokens: 16384,
+    });
+
+    expect(capturedBody.max_tokens).toBe(16384);
+  });
+});
+
+describe("DirectModelExecutor — finish_reason surfacing (issue #112)", () => {
+  function responseWithFinish(content: string, finishReason: string): Response {
+    return new Response(
+      JSON.stringify({
+        model: "some/model",
+        choices: [{ message: { content }, finish_reason: finishReason }],
+        usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  it("marks truncated=true when finish_reason is 'length'", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(responseWithFinish("partial answer", "length")));
+
+    const executor = new DirectModelExecutor();
+    const result = await executor.run({
+      provider: "openrouter",
+      model: "deepseek/deepseek-v4-flash",
+      prompt: "write a long essay",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toBe("partial answer");
+    expect(result.truncated).toBe(true);
+  });
+
+  it("truncated is false when finish_reason is 'stop'", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(responseWithFinish("complete", "stop")));
+
+    const executor = new DirectModelExecutor();
+    const result = await executor.run({
+      provider: "openrouter",
+      model: "deepseek/deepseek-v4-flash",
+      prompt: "hi",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("truncated is false when finish_reason is absent", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          model: "some/model",
+          choices: [{ message: { content: "answer" } }],
+          usage: { prompt_tokens: 10, completion_tokens: 20 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    ));
+
+    const executor = new DirectModelExecutor();
+    const result = await executor.run({
+      provider: "openrouter",
+      model: "deepseek/deepseek-v4-flash",
+      prompt: "hi",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.truncated).toBe(false);
   });
 });
 

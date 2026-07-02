@@ -88,6 +88,27 @@ describe("runOrchestratorTask", () => {
     expect(result.output).toContain("Orchestration Result");
   });
 
+  it("renders a Warnings section when a worker output was truncated (issue #112)", async () => {
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") {
+          return makeSuccessResult(
+            JSON.stringify({ strategy: "single", subtasks: [{ id: "t1", prompt: "Do it" }] }),
+            0.0002,
+          );
+        }
+        // Worker returns a length-truncated result.
+        return { ...makeSuccessResult("partial worker output"), truncated: true };
+      }),
+    };
+
+    const result = await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, { invoker });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toContain("Warnings");
+    expect(result.output.toLowerCase()).toContain("truncat");
+  });
+
   it("sensitivity guard blocks private+openrouter — invoker.invoke never called", async () => {
     const invoker = buildMockInvoker({});
     const invokeSpy = vi.spyOn(invoker, "invoke");

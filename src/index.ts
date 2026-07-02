@@ -3818,6 +3818,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     const orchInvoker = createModelInvoker(orchConfig.roles, {
       timeoutMs: orchConfig.perCallTimeoutMs,
       maxOutputChars: config.maxOutputChars,
+      maxTokens: orchConfig.maxTokens,
     });
     const orchResult = await runOrchestratorTask(
       {

@@ -47,6 +47,14 @@ function buildSummary(
   lines.push(`- **Outcome:** ${result.ok ? "ok" : `failed${result.error ? ` — ${result.error}` : ""}`}`);
   lines.push(``);
 
+  if (result.warnings.length > 0) {
+    lines.push(`### Warnings`);
+    for (const w of result.warnings) {
+      lines.push(`- ⚠️ ${w}`);
+    }
+    lines.push(``);
+  }
+
   if (result.outcomes.length > 0) {
     lines.push(`### Subtask Outcomes`);
     for (const [i, outcome] of result.outcomes.entries()) {
@@ -167,6 +175,10 @@ export async function runOrchestratorTask(
     onLog?.(
       `[orchestrator] worker ${i + 1}/${result.outcomes.length} ${status}${costStr} — [${outcome.subtask.id}]`,
     );
+  }
+
+  for (const w of result.warnings) {
+    onLog?.(`[orchestrator] warning: ${w}`);
   }
 
   onLog?.(`[orchestrator] ${result.ok ? "done" : "failed"} — total_cost=${result.totalCostUsd !== null ? `$${result.totalCostUsd.toFixed(6)}` : "unknown"} latency=${result.totalLatencyMs}ms`);

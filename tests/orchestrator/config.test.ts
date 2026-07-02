@@ -74,6 +74,21 @@ describe("loadOrchestratorConfig", () => {
     expect(cfg.maxSubtasks).toBe(6);
   });
 
+  it("defaults maxTokens to 4096 (issue #112)", () => {
+    const cfg = loadOrchestratorConfig({});
+    expect(cfg.maxTokens).toBe(4096);
+  });
+
+  it("overrides maxTokens via HUGIN_ORCH_MAX_TOKENS (issue #112)", () => {
+    const cfg = loadOrchestratorConfig({ HUGIN_ORCH_MAX_TOKENS: "16384" });
+    expect(cfg.maxTokens).toBe(16384);
+  });
+
+  it("ignores bad int for maxTokens (falls back to default)", () => {
+    const cfg = loadOrchestratorConfig({ HUGIN_ORCH_MAX_TOKENS: "lots" });
+    expect(cfg.maxTokens).toBe(DEFAULT_ORCHESTRATOR_CONFIG.maxTokens);
+  });
+
   it("ignores bad int for maxSubtasks (falls back to default)", () => {
     const cfg = loadOrchestratorConfig({ HUGIN_ORCH_MAX_SUBTASKS: "abc" });
     expect(cfg.maxSubtasks).toBe(DEFAULT_ORCHESTRATOR_CONFIG.maxSubtasks);
