@@ -3826,6 +3826,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         sensitivity: task.effectiveSensitivity || "internal",
         timeoutMs: task.timeoutMs,
         maxOutputChars: config.maxOutputChars,
+        injectedContext: task.contextResolution?.content || undefined,
       },
       orchConfig,
       {
