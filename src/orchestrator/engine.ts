@@ -29,6 +29,11 @@ export interface OrchestratorConfig {
   perCallTimeoutMs: number;
   /** Cap the planner's subtask list to this many entries. */
   maxSubtasks: number;
+  /**
+   * Default completion-token cap sent to every model call (issue #112).
+   * A per-role RoleBinding.maxTokens overrides this for that role.
+   */
+  maxTokens: number;
 }
 
 export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
@@ -42,6 +47,7 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   verifyWorkers: false,
   perCallTimeoutMs: 120_000,
   maxSubtasks: 12,
+  maxTokens: 4096,
 };
 
 export interface SubtaskOutcome {
@@ -58,6 +64,12 @@ export interface OrchestrationResult {
   /** Sum of known costUsd across ALL invocations; null only if NO call had a known cost. */
   totalCostUsd: number | null;
   totalLatencyMs: number;
+  /**
+   * Non-fatal warnings surfaced to the caller (issue #112) — e.g. a planner,
+   * worker, or synthesizer response that hit the completion-token cap
+   * (finish_reason=length) and is therefore incomplete. Empty when clean.
+   */
+  warnings: string[];
   error?: string;
 }
 
@@ -153,6 +165,7 @@ export async function runOrchestration(
 ): Promise<OrchestrationResult> {
   const cfg: OrchestratorConfig = { ...DEFAULT_ORCHESTRATOR_CONFIG, ...config };
   const allCosts: (number | null)[] = [];
+  const warnings: string[] = [];
   let totalLatencyMs = 0;
 
   // -------------------------------------------------------------------------
@@ -161,6 +174,11 @@ export async function runOrchestration(
   const planResp = await invoker.invoke("planner", buildPlannerPrompt(taskPrompt));
   allCosts.push(planResp.costUsd ?? null);
   totalLatencyMs += planResp.latencyMs;
+  if (planResp.ok && planResp.truncated) {
+    warnings.push(
+      "planner output was truncated (finish_reason=length); the plan may be incomplete",
+    );
+  }
 
   const plan = parsePlan(planResp.ok ? planResp.output : "", {
     maxSubtasks: cfg.maxSubtasks,
@@ -177,6 +195,11 @@ export async function runOrchestration(
       const result = await invoker.invoke("worker", buildWorkerPrompt(taskPrompt, subtask));
       allCosts.push(result.costUsd ?? null);
       totalLatencyMs += result.latencyMs;
+      if (result.ok && result.truncated) {
+        warnings.push(
+          `worker output for subtask ${subtask.id} was truncated (finish_reason=length); output may be incomplete`,
+        );
+      }
       return { subtask, result };
     },
   );
@@ -193,6 +216,11 @@ export async function runOrchestration(
       );
       allCosts.push(verifyResp.costUsd ?? null);
       totalLatencyMs += verifyResp.latencyMs;
+      if (verifyResp.ok && verifyResp.truncated) {
+        warnings.push(
+          `verifier output for subtask ${outcome.subtask.id} was truncated (finish_reason=length); the verdict may be unreliable`,
+        );
+      }
       outcome.verdict = parseVerdict(verifyResp.output);
     }
   }
@@ -212,6 +240,7 @@ export async function runOrchestration(
       outcomes,
       totalCostUsd: sumCosts(allCosts),
       totalLatencyMs,
+      warnings,
       error: `All workers failed: ${errors}`,
     };
   }
@@ -228,6 +257,11 @@ export async function runOrchestration(
     );
     allCosts.push(synthResp.costUsd ?? null);
     totalLatencyMs += synthResp.latencyMs;
+    if (synthResp.ok && synthResp.truncated) {
+      warnings.push(
+        "synthesizer output was truncated (finish_reason=length); the final answer may be incomplete",
+      );
+    }
 
     // Robustness: if the synthesizer fails or returns empty/whitespace output,
     // fall back to a concatenation of the successful worker outputs rather than
@@ -249,5 +283,6 @@ export async function runOrchestration(
     outcomes,
     totalCostUsd: sumCosts(allCosts),
     totalLatencyMs,
+    warnings,
   };
 }

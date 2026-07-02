@@ -54,6 +54,51 @@ describe("createModelInvoker", () => {
     expect(req.maxOutputChars).toBe(10000);
   });
 
+  it("threads defaults.maxTokens into the WorkerRequest (issue #112)", async () => {
+    const capturedRequests: WorkerRequest[] = [];
+    const mockExecutor: WorkerExecutor = {
+      run: vi.fn(async (req: WorkerRequest) => {
+        capturedRequests.push(req);
+        return makeResult("out");
+      }),
+    };
+
+    const invoker = createModelInvoker(
+      roles,
+      { timeoutMs: 5000, maxTokens: 8192 },
+      () => mockExecutor,
+    );
+
+    await invoker.invoke("worker", "do it");
+    expect(capturedRequests[0].maxTokens).toBe(8192);
+  });
+
+  it("per-role binding maxTokens overrides the shared default (issue #112)", async () => {
+    const perRoleRoles: Record<OrchestratorRole, RoleBinding> = {
+      ...roles,
+      synthesizer: { provider: "openrouter", model: "synth-model", maxTokens: 32000 },
+    };
+    const capturedRequests: WorkerRequest[] = [];
+    const mockExecutor: WorkerExecutor = {
+      run: vi.fn(async (req: WorkerRequest) => {
+        capturedRequests.push(req);
+        return makeResult("out");
+      }),
+    };
+
+    const invoker = createModelInvoker(
+      perRoleRoles,
+      { timeoutMs: 5000, maxTokens: 8192 },
+      () => mockExecutor,
+    );
+
+    await invoker.invoke("worker", "w"); // no per-role → shared default
+    await invoker.invoke("synthesizer", "s"); // per-role override
+
+    expect(capturedRequests[0].maxTokens).toBe(8192);
+    expect(capturedRequests[1].maxTokens).toBe(32000);
+  });
+
   it("passes systemPrompt when provided", async () => {
     const capturedRequests: WorkerRequest[] = [];
     const mockExecutor: WorkerExecutor = {
