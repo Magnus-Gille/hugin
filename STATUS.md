@@ -1,7 +1,19 @@
 # Hugin — Status
 
-**Last session:** 2026-07-03 (session 8 — Heimdall ongoing-tasks view restored, #135)
-**Branch:** main (clean at `38ad855`; 0 PRs open)
+**Last session:** 2026-07-03 (session 9 — homeserver (M5) sovereign orchestrator provider live, PR #137)
+**Branch:** main (clean at `3ab3208`; 0 PRs open)
+
+## Session 9 (2026-07-03) — Homeserver (M5) wired as sovereign orchestrator provider + go-live (#137)
+
+The Session-5 roadmap head ("wire a `homeserver` worker provider once the M5 gateway is reachable") unblocked and shipped: gateway live on the tailnet (`100.76.72.59:8080`), Pi's existing PR #107 credential verified working (no key mint needed).
+
+- **PR [#137](https://github.com/Magnus-Gille/hugin/pull/137) → `3ab3208`:** `PROVIDER_CONFIG.homeserver` with request-time env-resolved base URL (`HOMESERVER_GATEWAY_URL` = gateway ROOT, `/v1` appended via new `resolveProviderBaseUrl`); `homeserver` joins `berget` in `SOVEREIGN_OR_LOCAL_PROVIDERS` (**first local private lane**); gateway host derived into the egress allowlist; explicit **$0 pricing** for the 7 gateway chat models; `Model:` accepts `provider|model` (per-task local routing).
+- **Reviews (both fixed test-first pre-merge):** Codex gpt-5.5 xhigh — 1 Medium (unconstrained URL trusted as sovereign → `isSovereignGatewayHost` fail-closed validation: loopback/RFC1918/CGNAT/.ts.net/.local only; public hosts incl. `inference.gille.ai` rejected pre-call) + 2 Low. Parallel 4-lens Claude workflow with refute pass — 2 confirmed Medium (env-leaking tests, reproduced by execution; untested guard-vs-`Model:`-override ordering → new `effectiveOrchestratorConfig` + composition tests pin guard-judges-post-override-config).
+- **35 new/updated tests; suite 1216 green** (incl. a run with `HOMESERVER_GATEWAY_*` deliberately exported); `tsc` clean; CI green.
+- **Go-live done:** Pi `.env` roles all bound `homeserver|qwen3-30b-instruct` (one model — llama-swap holds one; Pi has no cloud keys, so orchestrator was previously non-functional there); deployed via `deploy-pi.sh` (active, healthy). **Live-validated the headline capability:** a `Sensitivity: private` orchestrator task was admitted (all-homeserver roles), planner fanout=3, workers at explicit `$0.000000`, synthesizer merged survivors, 12.5s, exit 0.
+- **Follow-up filed: [#138](https://github.com/Magnus-Gille/hugin/issues/138)** — 429/503 backpressure awareness (worker 3/3 failed on parallel fan-out against the single-model gateway — expected symptom; engine resilience covered it). Also noted there: bare pricing-slug namespace assumption.
+
+**Next:** PR2 (learning/verdict layer — /delegate ledger path, real delegation volume now flowing) → PR3 (savings tracker — explicit $0 vs Claude baseline now measurable) → PR4 (Pi control / M5 execution host split). Open issues: **#138** (backpressure), **#123** (worker version-drift), **#117** (repo sprawl), **#98** (Tailscale admin console), **#84** (skill-lane go-live — M5 is now a viable cell). Still: clone `claude-config` on the Pi (deploy WARNING).
 
 ## Session 8 (2026-07-03) — Heimdall ongoing-tasks view restored (#135)
 
