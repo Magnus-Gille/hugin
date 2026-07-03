@@ -135,10 +135,10 @@ export class DirectModelExecutor implements WorkerExecutor {
       };
     }
 
-    // Env-resolved providers (homeserver) have no usable address without
-    // their env var; fail before touching credentials or the network.
-    const baseUrl = resolveProviderBaseUrl(providerCfg);
-    if (!baseUrl) {
+    // Env-resolved providers (homeserver) validate their gateway URL at
+    // request time; fail before touching credentials or the network.
+    const resolved = resolveProviderBaseUrl(providerCfg);
+    if (!resolved.ok) {
       return {
         ok: false,
         output: "",
@@ -148,9 +148,10 @@ export class DirectModelExecutor implements WorkerExecutor {
         outputTokens: null,
         costUsd: null,
         latencyMs: Date.now() - start,
-        error: `Missing base URL: environment variable ${providerCfg.baseUrlEnvVar} is not set`,
+        error: resolved.reason,
       };
     }
+    const baseUrl = resolved.baseUrl;
 
     const apiKey = process.env[providerCfg.apiKeyEnvVar];
     if (!apiKey) {

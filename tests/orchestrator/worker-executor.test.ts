@@ -318,6 +318,24 @@ describe("DirectModelExecutor — homeserver provider (env-resolved base URL)", 
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("returns ok=false and makes no request for a public (non-sovereign) gateway URL", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "https://example.com");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new DirectModelExecutor().run({
+      provider: "homeserver",
+      model: "qwen3-30b-instruct",
+      prompt: "hi",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("HOMESERVER_GATEWAY_URL");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("returns ok=false when HOMESERVER_GATEWAY_API_KEY is unset", async () => {
     vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
     const fetchMock = vi.fn();

@@ -3,6 +3,7 @@ import {
   PROVIDER_CONFIG,
   getProviderConfig,
   resolveProviderBaseUrl,
+  isSovereignGatewayHost,
 } from "../../src/orchestrator/provider-config.js";
 
 describe("PROVIDER_CONFIG", () => {
@@ -58,33 +59,126 @@ describe("getProviderConfig", () => {
 });
 
 describe("resolveProviderBaseUrl", () => {
+  const homeserver = () => PROVIDER_CONFIG["homeserver"];
+
   it("returns the static baseUrl for providers without baseUrlEnvVar", () => {
     const cfg = PROVIDER_CONFIG["openrouter"];
-    expect(resolveProviderBaseUrl(cfg, {})).toBe("https://openrouter.ai/api/v1");
+    expect(resolveProviderBaseUrl(cfg, {})).toEqual({
+      ok: true,
+      baseUrl: "https://openrouter.ai/api/v1",
+    });
   });
 
   it("resolves homeserver from the gateway-root env var, appending /v1", () => {
-    const cfg = PROVIDER_CONFIG["homeserver"];
     expect(
-      resolveProviderBaseUrl(cfg, { HOMESERVER_GATEWAY_URL: "http://100.76.72.59:8080" }),
-    ).toBe("http://100.76.72.59:8080/v1");
+      resolveProviderBaseUrl(homeserver(), { HOMESERVER_GATEWAY_URL: "http://100.76.72.59:8080" }),
+    ).toEqual({ ok: true, baseUrl: "http://100.76.72.59:8080/v1" });
   });
 
   it("strips trailing slashes from the gateway root before appending /v1", () => {
-    const cfg = PROVIDER_CONFIG["homeserver"];
     expect(
-      resolveProviderBaseUrl(cfg, { HOMESERVER_GATEWAY_URL: "http://gateway:8080/" }),
-    ).toBe("http://gateway:8080/v1");
+      resolveProviderBaseUrl(homeserver(), { HOMESERVER_GATEWAY_URL: "http://192.168.1.20:8080/" }),
+    ).toEqual({ ok: true, baseUrl: "http://192.168.1.20:8080/v1" });
   });
 
-  it("returns null when the env var is unset", () => {
-    const cfg = PROVIDER_CONFIG["homeserver"];
-    expect(resolveProviderBaseUrl(cfg, {})).toBeNull();
+  it("fails with a 'not set' reason when the env var is unset, empty, or whitespace", () => {
+    for (const env of [{}, { HOMESERVER_GATEWAY_URL: "" }, { HOMESERVER_GATEWAY_URL: "   " }]) {
+      const result = resolveProviderBaseUrl(homeserver(), env);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toContain("HOMESERVER_GATEWAY_URL is not set");
+    }
   });
 
-  it("returns null when the env var is empty or whitespace", () => {
-    const cfg = PROVIDER_CONFIG["homeserver"];
-    expect(resolveProviderBaseUrl(cfg, { HOMESERVER_GATEWAY_URL: "" })).toBeNull();
-    expect(resolveProviderBaseUrl(cfg, { HOMESERVER_GATEWAY_URL: "   " })).toBeNull();
+  it("rejects a public host — sovereignty must not hinge on a typo'd env var", () => {
+    const result = resolveProviderBaseUrl(homeserver(), {
+      HOMESERVER_GATEWAY_URL: "https://example.com",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("example.com");
+  });
+
+  it("rejects the public Cloudflare route to the gateway (not sovereign transit)", () => {
+    const result = resolveProviderBaseUrl(homeserver(), {
+      HOMESERVER_GATEWAY_URL: "https://inference.gille.ai",
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects URLs with credentials, query, fragment, or a path", () => {
+    for (const url of [
+      "http://user:pw@100.76.72.59:8080",
+      "http://100.76.72.59:8080?x=1",
+      "http://100.76.72.59:8080#frag",
+      "http://100.76.72.59:8080/api",
+      "http://100.76.72.59:8080/v1",
+    ]) {
+      const result = resolveProviderBaseUrl(homeserver(), { HOMESERVER_GATEWAY_URL: url });
+      expect(result.ok, url).toBe(false);
+    }
+  });
+
+  it("rejects non-http(s) schemes and unparseable URLs", () => {
+    for (const url of ["ftp://100.76.72.59:8080", "not a url"]) {
+      const result = resolveProviderBaseUrl(homeserver(), { HOMESERVER_GATEWAY_URL: url });
+      expect(result.ok, url).toBe(false);
+    }
+  });
+
+  it("accepts loopback, RFC1918, tailnet CGNAT, .ts.net, .local, and single-label hosts", () => {
+    for (const url of [
+      "http://localhost:8080",
+      "http://127.0.0.1:8080",
+      "http://10.0.0.5:8080",
+      "http://172.16.0.1:8080",
+      "http://192.168.1.5:8080",
+      "http://100.64.0.1:8080",
+      "http://100.127.255.254:8080",
+      "http://m5:8080",
+      "http://m5.tail1234.ts.net:8080",
+      "http://gateway.local:8080",
+    ]) {
+      const result = resolveProviderBaseUrl(homeserver(), { HOMESERVER_GATEWAY_URL: url });
+      expect(result.ok, url).toBe(true);
+    }
+  });
+});
+
+describe("isSovereignGatewayHost", () => {
+  it("accepts operator-controlled network space", () => {
+    for (const host of [
+      "localhost",
+      "127.0.0.1",
+      "10.1.2.3",
+      "172.31.255.255",
+      "192.168.0.1",
+      "100.64.0.0",
+      "100.76.72.59",
+      "100.127.255.255",
+      "m5",
+      "huginmunin",
+      "box.ts.net",
+      "nas.local",
+      "[::1]",
+      "::1",
+    ]) {
+      expect(isSovereignGatewayHost(host), host).toBe(true);
+    }
+  });
+
+  it("rejects public IPs and public DNS names", () => {
+    for (const host of [
+      "8.8.8.8",
+      "100.63.255.255",
+      "100.128.0.0",
+      "172.15.0.1",
+      "172.32.0.1",
+      "11.0.0.1",
+      "example.com",
+      "inference.gille.ai",
+      "api.openai.com",
+      "evil.ts.net.attacker.com",
+    ]) {
+      expect(isSovereignGatewayHost(host), host).toBe(false);
+    }
   });
 });

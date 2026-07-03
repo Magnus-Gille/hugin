@@ -4,7 +4,7 @@
  * Used for price-aware routing and savings tracking. Prices are approximate
  * and sourced from provider documentation / OpenRouter listings.
  *
- * **Last updated: 2026-06-16.**
+ * **Last updated: 2026-07-03.**
  *
  * This is a manual snapshot, not a live feed. Bump the comment date when
  * you refresh prices. If a model is not in the table, `getModelPrice` returns
@@ -26,6 +26,7 @@ export interface ModelPrice {
  * Sections:
  *   - OpenRouter models (routed via openrouter runtime)
  *   - Berget models (EU-sovereign, routed via berget runtime)
+ *   - Homeserver models (M5 local gateway — explicit $0, not unknown)
  *   - Anthropic baseline (for savings comparison via CLAUDE_BASELINE_MODEL_ID)
  *
  * Berget prices are in EUR; converted to USD at EUR/USD ≈ 1.12 (June 2026).

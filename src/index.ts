@@ -132,6 +132,7 @@ import { BrokerReconciler } from "./broker/reconciliation.js";
 import { OrchWorker } from "./broker/orch-worker.js";
 import { OpenRouterClient } from "./openrouter-client.js";
 import { loadOrchestratorConfig, applyTaskModel } from "./orchestrator/config.js";
+import { isSovereignGatewayHost } from "./orchestrator/provider-config.js";
 import { createModelInvoker } from "./orchestrator/model-invoker.js";
 import { runOrchestratorTask } from "./orchestrator/orchestrator-executor.js";
 
@@ -492,6 +493,16 @@ function hostnameOf(url: string): string | null {
 const ratatoskrEgressHost = config.ratatoskrSendUrl
   ? hostnameOf(config.ratatoskrSendUrl)
   : null;
+// Only a sovereign (loopback/private-LAN/tailnet) gateway host is
+// egress-allowlisted; a public host in HOMESERVER_GATEWAY_URL is rejected by
+// resolveProviderBaseUrl anyway, and must not widen the allowlist either.
+const homeserverEgressHost = config.homeserverGatewayUrl
+  ? hostnameOf(config.homeserverGatewayUrl)
+  : null;
+const homeserverEgressUrl =
+  homeserverEgressHost && isSovereignGatewayHost(homeserverEgressHost)
+    ? config.homeserverGatewayUrl
+    : undefined;
 
 const egressPolicy = installFetchEgressPolicy(
   buildDefaultEgressHosts({
@@ -499,7 +510,7 @@ const egressPolicy = installFetchEgressPolicy(
     ollamaPiUrl: config.ollamaPiUrl,
     ollamaLaptopUrl: config.ollamaLaptopUrl,
     ollamaOrinUrl: config.ollamaOrinUrl,
-    homeserverGatewayUrl: config.homeserverGatewayUrl || undefined,
+    homeserverGatewayUrl: homeserverEgressUrl,
     extraHosts: [
       ...config.extraAllowedEgressHosts,
       ...(ratatoskrEgressHost ? [ratatoskrEgressHost] : []),
