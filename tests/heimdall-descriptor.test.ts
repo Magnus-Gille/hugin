@@ -41,6 +41,18 @@ describe("HEIMDALL_DESCRIPTOR", () => {
     }
   });
 
+  it("declares the Tasks and Task history panels so Heimdall renders them (Tier-1 services own their panels, #135)", () => {
+    const panels = HEIMDALL_DESCRIPTOR.panels as ReadonlyArray<Record<string, unknown>>;
+
+    // Shape must match Heimdall's descriptor panel contract
+    // (heimdall src/contract/schema.js normalizePanels: id required; plugin/view/
+    // label/refresh/fullWidth pass through) and the pre-#116 known-panels set.
+    expect(panels).toEqual([
+      { id: "hugin-tasks", plugin: "hugin", view: "tasks", label: "Tasks", refresh: 60, fullWidth: true },
+      { id: "hugin-history", plugin: "hugin", view: "history", label: "Task history", refresh: 120, fullWidth: true },
+    ]);
+  });
+
   it("returns the expected static descriptor values", () => {
     expect(HEIMDALL_DESCRIPTOR).toMatchObject({
       service: {
