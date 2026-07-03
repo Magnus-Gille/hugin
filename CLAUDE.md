@@ -117,6 +117,7 @@ hugin/
 ├── hugin.service
 ├── src/
 │   ├── index.ts                  # Dispatcher: poll loop, task execution, health endpoint
+│   ├── heimdall-descriptor.ts    # GET /heimdall.json self-describe descriptor. Hugin OWNS its Heimdall page content: Tier-1 services' panels come from this descriptor only (Heimdall's known-panels fallback is not consulted), so the Tasks/Task-history panels MUST stay declared here (#116/#135)
 │   ├── sdk-executor.ts           # Agent SDK executor (query() based, default for claude runtime)
 │   ├── ollama-executor.ts        # Ollama executor (streaming, OpenAI-compatible API)
 │   ├── ollama-hosts.ts           # Lazy host resolution with negative caching

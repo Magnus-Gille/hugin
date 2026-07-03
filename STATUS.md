@@ -1,7 +1,16 @@
 # Hugin — Status
 
-**Last session:** 2026-07-03 (session 7 — overnight-auth-failure fix #129: classify + pre-flight + proactive alarm, shipped + deployed + go-live)
-**Branch:** main (clean at `0a500b2`; 0 PRs open)
+**Last session:** 2026-07-03 (session 8 — Heimdall ongoing-tasks view restored, #135)
+**Branch:** main (clean at `38ad855`; 0 PRs open)
+
+## Session 8 (2026-07-03) — Heimdall ongoing-tasks view restored (#135)
+
+Magnus couldn't find the ongoing Hugin tasks on the reworked Heimdall page (new split: Heimdall = platform, owning service = content). Root cause: our `GET /heimdall.json` (#116, 2026-06-27) promoted hugin to **Tier-1 self-describing** in Heimdall's discovery, and Tier-1 panels come **only from the descriptor** — Heimdall's static `knownPanelsFor('hugin')` fallback (which carried the Tasks + Task history panels) stopped being consulted, while the v1 `/tasks` page was retired in the same rework. Our `panels: []` blanked the page.
+
+- **Fix (PR [#136](https://github.com/Magnus-Gille/hugin/pull/136) → `38ad855`, closes #135):** declare both panels in `HEIMDALL_DESCRIPTOR.panels` — `{id: hugin-tasks, plugin: hugin, view: tasks, refresh: 60}` + `{id: hugin-history, view: history, refresh: 120}` — the exact shape Heimdall's fallback used (validated against heimdall `src/contract/schema.js` `normalizePanels`). Heimdall's existing `plugins/hugin.js` renders them live from the Munin DB; no push loop, no Heimdall change.
+- Red/green TDD; suite 1184 green; `tsc` clean; **Codex review (gpt-5.5 xhigh): clean, no findings**; CI green.
+- **Deployed to Pi + verified live:** Pi serves the descriptor with both panels; Heimdall `/services/hugin` (port 3033, Tailscale-bound) references both; fragments render real data (`/api/plugins/hugin/hugin/hugin-tasks` shows the live queue; Task History shows 313 tasks).
+- **Ownership note (durable):** hugin's Heimdall page content is declared in `src/heimdall-descriptor.ts` — panels removed there disappear from the dashboard. Heimdall's fallback only applies if the descriptor endpoint is unreachable.
 
 ## Session 7 (2026-07-03) — Expired Pi Claude auth: silent overnight drain → classified, pre-flighted, and alarmed (#129)
 
