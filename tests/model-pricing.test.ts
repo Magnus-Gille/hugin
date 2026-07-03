@@ -27,6 +27,25 @@ describe("getModelPrice", () => {
     expect(price!.inputUsdPerM).toBe(0.34);
     expect(price!.outputUsdPerM).toBe(0.34);
   });
+
+  it("returns explicit $0 entries for homeserver (M5 gateway) models", () => {
+    // Slugs from the gateway's /v1/models (verified 2026-07-03).
+    for (const modelId of [
+      "mellum",
+      "qwen3-30b-instruct",
+      "qwen3-coder-next-80b",
+      "gpt-oss-120b",
+      "gemma4",
+      "qwen36-a3b",
+      "tongyi-dr",
+    ]) {
+      const price = getModelPrice(modelId);
+      expect(price, modelId).toBeDefined();
+      expect(price!.provider, modelId).toBe("homeserver");
+      expect(price!.inputUsdPerM, modelId).toBe(0);
+      expect(price!.outputUsdPerM, modelId).toBe(0);
+    }
+  });
 });
 
 describe("estimateCostUsd", () => {
@@ -41,6 +60,11 @@ describe("estimateCostUsd", () => {
 
   it("returns null for an unknown model", () => {
     expect(estimateCostUsd("unknown/model", 100, 100)).toBeNull();
+  });
+
+  it("returns an explicit 0 (not null) for homeserver models", () => {
+    // Known-free local inference must be distinguishable from unknown cost.
+    expect(estimateCostUsd("qwen3-30b-instruct", 1_000_000, 1_000_000)).toBe(0);
   });
 
   it("returns 0 for zero tokens", () => {

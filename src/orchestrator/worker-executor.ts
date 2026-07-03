@@ -17,7 +17,7 @@
 import { spawn } from "node:child_process";
 import { estimateCostUsd } from "../model-pricing.js";
 import { getRegistryEntryById } from "../runtime-registry.js";
-import { getProviderConfig } from "./provider-config.js";
+import { getProviderConfig, resolveProviderBaseUrl } from "./provider-config.js";
 
 /** Default maximum output characters when not specified in the request. */
 export const DEFAULT_MAX_OUTPUT_CHARS = 50_000;
@@ -135,6 +135,23 @@ export class DirectModelExecutor implements WorkerExecutor {
       };
     }
 
+    // Env-resolved providers (homeserver) have no usable address without
+    // their env var; fail before touching credentials or the network.
+    const baseUrl = resolveProviderBaseUrl(providerCfg);
+    if (!baseUrl) {
+      return {
+        ok: false,
+        output: "",
+        provider: req.provider,
+        model: req.model,
+        inputTokens: null,
+        outputTokens: null,
+        costUsd: null,
+        latencyMs: Date.now() - start,
+        error: `Missing base URL: environment variable ${providerCfg.baseUrlEnvVar} is not set`,
+      };
+    }
+
     const apiKey = process.env[providerCfg.apiKeyEnvVar];
     if (!apiKey) {
       return {
@@ -184,7 +201,7 @@ export class DirectModelExecutor implements WorkerExecutor {
     try {
       let response: Response;
       try {
-        response = await fetch(`${providerCfg.baseUrl}/chat/completions`, {
+        response = await fetch(`${baseUrl}/chat/completions`, {
           method: "POST",
           headers: buildHeaders(req.provider, apiKey),
           body: JSON.stringify(body),

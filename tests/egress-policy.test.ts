@@ -48,6 +48,14 @@ describe("buildDefaultEgressHosts", () => {
     expect(hosts).toContain("100.97.117.37");
   });
 
+  it("extracts the hostname from the homeserver gateway URL", () => {
+    const hosts = buildDefaultEgressHosts({
+      muninUrl: "http://localhost:3030",
+      homeserverGatewayUrl: "http://100.76.72.59:8080",
+    });
+    expect(hosts).toContain("100.76.72.59");
+  });
+
   it("includes extra hosts and deduplicates", () => {
     const hosts = buildDefaultEgressHosts({
       muninUrl: "http://localhost:3030",

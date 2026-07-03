@@ -134,10 +134,18 @@ describe("loadOrchestratorConfig", () => {
 });
 
 describe("applyTaskModel (Fix #6)", () => {
-  it("overrides worker model when taskModel is set", () => {
+  it("parses provider|model syntax, overriding the worker provider and model", () => {
     const cfg = applyTaskModel(DEFAULT_ORCHESTRATOR_CONFIG, "berget|some/model");
-    expect(cfg.roles.worker.model).toBe("berget|some/model");
-    expect(cfg.roles.worker.provider).toBe(DEFAULT_ORCHESTRATOR_CONFIG.roles.worker.provider);
+    expect(cfg.roles.worker.provider).toBe("berget");
+    expect(cfg.roles.worker.model).toBe("some/model");
+  });
+
+  it("routes a task to the homeserver provider via provider|model syntax", () => {
+    const cfg = applyTaskModel(DEFAULT_ORCHESTRATOR_CONFIG, "homeserver|qwen3-30b-instruct");
+    expect(cfg.roles.worker.provider).toBe("homeserver");
+    expect(cfg.roles.worker.model).toBe("qwen3-30b-instruct");
+    // Only the worker role is task-overridable.
+    expect(cfg.roles.planner).toEqual(DEFAULT_ORCHESTRATOR_CONFIG.roles.planner);
   });
 
   it("overrides worker model, preserving the existing worker provider", () => {

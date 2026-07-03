@@ -111,6 +111,47 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPrice>> = {
     outputUsdPerM: 3.92,
   },
 
+  // ---- Homeserver (M5 local-inference gateway, ADR-004) ----
+  // Owned hardware: marginal cost is $0 (electricity not metered here).
+  // Explicit $0 entries keep local runs distinguishable from unknown-cost
+  // models (null). Slugs match the gateway /v1/models ids exactly
+  // (verified 2026-07-03).
+  "mellum": {
+    provider: "homeserver",
+    inputUsdPerM: 0,
+    outputUsdPerM: 0,
+  },
+  "qwen3-30b-instruct": {
+    provider: "homeserver",
+    inputUsdPerM: 0,
+    outputUsdPerM: 0,
+  },
+  "qwen3-coder-next-80b": {
+    provider: "homeserver",
+    inputUsdPerM: 0,
+    outputUsdPerM: 0,
+  },
+  "gpt-oss-120b": {
+    provider: "homeserver",
+    inputUsdPerM: 0,
+    outputUsdPerM: 0,
+  },
+  "gemma4": {
+    provider: "homeserver",
+    inputUsdPerM: 0,
+    outputUsdPerM: 0,
+  },
+  "qwen36-a3b": {
+    provider: "homeserver",
+    inputUsdPerM: 0,
+    outputUsdPerM: 0,
+  },
+  "tongyi-dr": {
+    provider: "homeserver",
+    inputUsdPerM: 0,
+    outputUsdPerM: 0,
+  },
+
   // ---- Anthropic baseline (for savings comparison) ----
   "claude-opus-4-8": {
     provider: "anthropic",

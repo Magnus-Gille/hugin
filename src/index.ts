@@ -282,6 +282,11 @@ const config = {
   ollamaLaptopUrl: process.env.OLLAMA_LAPTOP_URL || "",
   ollamaOrinUrl: process.env.OLLAMA_ORIN_URL || "",
   ollamaDefaultModel: process.env.OLLAMA_DEFAULT_MODEL || "qwen2.5:3b",
+  // M5 local-inference gateway root (shared with the orchestrator's
+  // homeserver provider via PROVIDER_CONFIG's baseUrlEnvVar and with the
+  // standalone homeserver-executor). Read here only to allowlist its host
+  // for egress; the provider itself re-reads the env var at request time.
+  homeserverGatewayUrl: process.env.HOMESERVER_GATEWAY_URL?.trim() || "",
   extraAllowedEgressHosts: (process.env.HUGIN_ALLOWED_EGRESS_HOSTS || "")
     .split(",")
     .map((value) => value.trim())
@@ -494,6 +499,7 @@ const egressPolicy = installFetchEgressPolicy(
     ollamaPiUrl: config.ollamaPiUrl,
     ollamaLaptopUrl: config.ollamaLaptopUrl,
     ollamaOrinUrl: config.ollamaOrinUrl,
+    homeserverGatewayUrl: config.homeserverGatewayUrl || undefined,
     extraHosts: [
       ...config.extraAllowedEgressHosts,
       ...(ratatoskrEgressHost ? [ratatoskrEgressHost] : []),

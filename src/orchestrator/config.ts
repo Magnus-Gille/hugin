@@ -142,9 +142,11 @@ export function loadOrchestratorConfig(
 }
 
 /**
- * If `taskModel` is a non-empty string, override the worker role's model in
- * a copy of `config`, keeping the worker's existing provider. Planner,
- * verifier, and synthesizer roles are left unchanged.
+ * If `taskModel` is a non-empty string, override the worker role in a copy
+ * of `config`. Accepts the same `provider|model` format as the
+ * HUGIN_ORCH_*_MODEL env vars (e.g. `homeserver|qwen3-30b-instruct`); a bare
+ * model string keeps the worker's existing provider. Planner, verifier, and
+ * synthesizer roles are left unchanged.
  *
  * Pure function — returns a new OrchestratorConfig; never mutates the input.
  */
@@ -153,11 +155,15 @@ export function applyTaskModel(
   taskModel?: string,
 ): OrchestratorConfig {
   if (!taskModel || !taskModel.trim()) return config;
+  const { provider, model } = parseRoleEnv(
+    taskModel.trim(),
+    config.roles.worker.provider,
+  );
   return {
     ...config,
     roles: {
       ...config.roles,
-      worker: { ...config.roles.worker, model: taskModel.trim() },
+      worker: { ...config.roles.worker, provider, model },
     },
   };
 }

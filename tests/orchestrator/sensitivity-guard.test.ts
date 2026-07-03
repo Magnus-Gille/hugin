@@ -17,6 +17,17 @@ const bergetConfig: OrchestratorConfig = {
   },
 };
 
+// All-homeserver config (M5 local-inference gateway — sovereign/local)
+const homeserverConfig: OrchestratorConfig = {
+  ...defaultConfig,
+  roles: {
+    planner: { provider: "homeserver", model: "qwen3-30b-instruct" },
+    worker: { provider: "homeserver", model: "qwen3-30b-instruct" },
+    verifier: { provider: "homeserver", model: "qwen3-30b-instruct" },
+    synthesizer: { provider: "homeserver", model: "qwen3-30b-instruct" },
+  },
+};
+
 describe("assertProvidersAllowSensitivity", () => {
   it("private + default openrouter config → not ok", () => {
     const result = assertProvidersAllowSensitivity(defaultConfig, "private");
@@ -62,5 +73,28 @@ describe("assertProvidersAllowSensitivity", () => {
   it("internal + all-berget config → ok", () => {
     const result = assertProvidersAllowSensitivity(bergetConfig, "internal");
     expect(result.ok).toBe(true);
+  });
+
+  it("private + all-homeserver config → ok (local hardware is sovereign)", () => {
+    const result = assertProvidersAllowSensitivity(homeserverConfig, "private");
+    expect(result.ok).toBe(true);
+  });
+
+  it("private + homeserver/openrouter mix → not ok, lists only openrouter", () => {
+    const mixedConfig: OrchestratorConfig = {
+      ...defaultConfig,
+      roles: {
+        planner: { provider: "homeserver", model: "qwen3-30b-instruct" },
+        worker: { provider: "openrouter", model: "deepseek/deepseek-v4-flash" },
+        verifier: { provider: "homeserver", model: "qwen3-30b-instruct" },
+        synthesizer: { provider: "homeserver", model: "qwen3-30b-instruct" },
+      },
+    };
+    const result = assertProvidersAllowSensitivity(mixedConfig, "private");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("openrouter");
+      expect(result.reason).not.toContain("homeserver");
+    }
   });
 });

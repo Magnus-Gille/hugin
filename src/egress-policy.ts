@@ -49,6 +49,7 @@ export function buildDefaultEgressHosts(input: {
   ollamaPiUrl?: string;
   ollamaLaptopUrl?: string;
   ollamaOrinUrl?: string;
+  homeserverGatewayUrl?: string;
   extraHosts?: string[];
 }): string[] {
   const hosts = new Set<string>([
@@ -66,6 +67,7 @@ export function buildDefaultEgressHosts(input: {
     input.ollamaPiUrl,
     input.ollamaLaptopUrl,
     input.ollamaOrinUrl,
+    input.homeserverGatewayUrl,
   ]) {
     const host = hostFromUrl(candidate);
     if (host) hosts.add(host);

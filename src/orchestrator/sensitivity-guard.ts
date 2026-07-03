@@ -8,9 +8,12 @@ import type { Sensitivity } from "../sensitivity.js";
  * or in a jurisdiction that permits private data processing. Cloud
  * providers are excluded because they transmit data to third-party APIs.
  *
+ * `homeserver` is the M5 local-inference gateway — owned hardware reached
+ * over the tailnet, so private data never leaves the operator's machines.
+ *
  * Future: add "ollama" / "local" once local execution is wired.
  */
-const SOVEREIGN_OR_LOCAL_PROVIDERS = new Set<string>(["berget"]);
+const SOVEREIGN_OR_LOCAL_PROVIDERS = new Set<string>(["berget", "homeserver"]);
 
 export type SensitivityGuardResult =
   | { ok: true }

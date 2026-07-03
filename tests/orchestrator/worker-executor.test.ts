@@ -126,6 +126,10 @@ describe("createWorkerExecutor", () => {
     expect(createWorkerExecutor("berget")).toBeInstanceOf(DirectModelExecutor);
   });
 
+  it("returns DirectModelExecutor for homeserver", () => {
+    expect(createWorkerExecutor("homeserver")).toBeInstanceOf(DirectModelExecutor);
+  });
+
   it("returns DirectModelExecutor for unknown provider (handled as error in run)", () => {
     expect(createWorkerExecutor("unknown-xyz")).toBeInstanceOf(DirectModelExecutor);
   });
@@ -242,6 +246,111 @@ describe("DirectModelExecutor — success path", () => {
 
     expect(result.ok).toBe(true);
     expect(result.output.length).toBe(50);
+  });
+});
+
+describe("DirectModelExecutor — homeserver provider (env-resolved base URL)", () => {
+  it("resolves the base URL from HOMESERVER_GATEWAY_URL and sends bearer auth", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+
+    let capturedUrl = "";
+    let capturedInit: RequestInit | undefined;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url: string, init: RequestInit) => {
+      capturedUrl = url;
+      capturedInit = init;
+      return successResponse("local answer", 30, 40);
+    }));
+
+    const executor = new DirectModelExecutor();
+    const result = await executor.run({
+      provider: "homeserver",
+      model: "qwen3-30b-instruct",
+      prompt: "say hello",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toBe("local answer");
+    expect(capturedUrl).toBe("http://100.76.72.59:8080/v1/chat/completions");
+    const headers = capturedInit?.headers as Record<string, string>;
+    expect(headers["authorization"]).toBe("Bearer hs-test-key");
+    // OpenRouter-only attribution headers must not leak to other providers.
+    expect(headers["http-referer"]).toBeUndefined();
+    expect(headers["x-title"]).toBeUndefined();
+  });
+
+  it("normalizes a trailing slash on the gateway root", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://gateway:8080/");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+
+    let capturedUrl = "";
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url: string) => {
+      capturedUrl = url;
+      return successResponse("ok");
+    }));
+
+    const result = await new DirectModelExecutor().run({
+      provider: "homeserver",
+      model: "mellum",
+      prompt: "hi",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(capturedUrl).toBe("http://gateway:8080/v1/chat/completions");
+  });
+
+  it("returns ok=false with a distinct error when HOMESERVER_GATEWAY_URL is unset", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new DirectModelExecutor().run({
+      provider: "homeserver",
+      model: "qwen3-30b-instruct",
+      prompt: "hi",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("HOMESERVER_GATEWAY_URL");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns ok=false when HOMESERVER_GATEWAY_API_KEY is unset", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new DirectModelExecutor().run({
+      provider: "homeserver",
+      model: "qwen3-30b-instruct",
+      prompt: "hi",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe(
+      "Missing API key: environment variable HOMESERVER_GATEWAY_API_KEY is not set",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("costUsd is an explicit 0 (not null) for gateway models in the pricing table", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(successResponse("answer", 100, 200)));
+
+    const result = await new DirectModelExecutor().run({
+      provider: "homeserver",
+      model: "qwen3-coder-next-80b",
+      prompt: "hi",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.costUsd).toBe(0);
   });
 });
 
