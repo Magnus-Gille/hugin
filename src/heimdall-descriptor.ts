@@ -24,7 +24,13 @@ export const HEIMDALL_DESCRIPTOR = {
     platform: "bare-metal",
   },
   metrics: [],
-  panels: [],
+  // Tier-1 services own their panels: Heimdall's static known-panels fallback is
+  // not consulted once /heimdall.json exists, so the task views must be declared
+  // here (#135). Rendered live by Heimdall's plugins/hugin.js from the Munin DB.
+  panels: [
+    { id: "hugin-tasks", plugin: "hugin", view: "tasks", label: "Tasks", refresh: 60, fullWidth: true },
+    { id: "hugin-history", plugin: "hugin", view: "history", label: "Task history", refresh: 120, fullWidth: true },
+  ],
   alerts: { rules: [], active_count: 0, firing: [] },
   links: {
     self: "/heimdall.json",
