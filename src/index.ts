@@ -17,7 +17,8 @@ import {
   type MuninReadResult,
 } from "./munin-client.js";
 import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion } from "./task-helpers.js";
-import { executeSdkTask } from "./sdk-executor.js";
+import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig } from "./sdk-executor.js";
+import { classifyClaudeFailure } from "./failure-classification.js";
 import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus, probeAllHosts, warmModel, getLoadedModels } from "./ollama-hosts.js";
 import { resolveContextRefs } from "./context-loader.js";
@@ -306,6 +307,14 @@ const config = {
   // artifacts + a real cell that do not exist yet. Until then the orchestrator
   // fails closed to the existing cloud auto-router, so flipping this on is a no-op.
   skillLaneEnabled: process.env.HUGIN_SKILL_LANE === "on",
+  // Pre-flight Claude auth check (issue #129). When `on` (default), a Claude SDK
+  // task probes the Pi's Claude credential BEFORE the (paid, slot-consuming) run
+  // and short-circuits to a distinctly-classified AUTH_FAILED failure if the
+  // credential is definitively invalid (HTTP 401) — instead of a silent ~9s
+  // burn that reads as a generic `failed`. Fail-open: any non-401 probe result
+  // (network error, missing endpoint, no creds file) lets the task run as before.
+  // Set to `off` to disable the probe entirely.
+  claudeAuthPreflight: (process.env.HUGIN_CLAUDE_AUTH_PREFLIGHT ?? "on") !== "off",
 };
 
 const brokerEnv = readBrokerEnv(process.env);
@@ -1254,12 +1263,30 @@ interface QuotaSnapshot {
   q7: number | null;
 }
 
-async function fetchQuota(): Promise<QuotaSnapshot> {
+/**
+ * Probe the Pi's Claude credential against the OAuth usage endpoint.
+ *
+ * Doubles as the quota snapshot source AND the pre-flight auth signal (issue
+ * #129): the usage endpoint is authed with the same OAuth token the SDK task
+ * uses, so a definitive 401 here means the task run would 401 too. `auth`:
+ * - `ok`           — endpoint returned 2xx, credential is valid.
+ * - `unauthorized` — endpoint returned 401, credential is expired/absent.
+ * - `unknown`      — no creds file, no token, network error, a non-401 HTTP
+ *                    status (incl. 403 — a forbidden *endpoint* is not a bad
+ *                    *credential*, and the SDK auth may still work), or any
+ *                    other non-auth failure. Callers MUST fail open on `unknown`
+ *                    so a transient probe glitch never blocks a fine task.
+ */
+async function probeClaudeUsage(): Promise<{
+  auth: "ok" | "unauthorized" | "unknown";
+  snapshot: QuotaSnapshot;
+}> {
+  const none: QuotaSnapshot = { q5: null, q7: null };
   try {
     const credPath = path.join(process.env.HOME || "/home/magnus", ".claude", ".credentials.json");
     const creds = JSON.parse(fs.readFileSync(credPath, "utf-8"));
     const token = creds?.claudeAiOauth?.accessToken;
-    if (!token) return { q5: null, q7: null };
+    if (!token) return { auth: "unknown", snapshot: none };
 
     const res = await fetch("https://api.anthropic.com/api/oauth/usage", {
       headers: {
@@ -1268,15 +1295,85 @@ async function fetchQuota(): Promise<QuotaSnapshot> {
       },
       signal: AbortSignal.timeout(5000),
     });
-    if (!res.ok) return { q5: null, q7: null };
+    if (res.status === 401) {
+      return { auth: "unauthorized", snapshot: none };
+    }
+    if (!res.ok) return { auth: "unknown", snapshot: none };
     const data = await res.json() as Record<string, Record<string, number>>;
     return {
-      q5: data?.five_hour?.utilization ?? null,
-      q7: data?.seven_day?.utilization ?? null,
+      auth: "ok",
+      snapshot: {
+        q5: data?.five_hour?.utilization ?? null,
+        q7: data?.seven_day?.utilization ?? null,
+      },
     };
   } catch {
-    return { q5: null, q7: null };
+    return { auth: "unknown", snapshot: none };
   }
+}
+
+async function fetchQuota(): Promise<QuotaSnapshot> {
+  return (await probeClaudeUsage()).snapshot;
+}
+
+/**
+ * Run a Claude SDK task, but first (issue #129) probe the Pi credential and
+ * short-circuit to a synthetic AUTH_FAILED result when it is definitively
+ * invalid — avoiding a paid, slot-consuming run that would only 401. Fail-open:
+ * any non-401 probe outcome (or the probe disabled) runs the task normally. The
+ * synthetic output carries the 401 signature so the shared finalize path
+ * classifies + tags it identically to a real runtime auth failure.
+ */
+async function executeClaudeSdkWithAuthPreflight(
+  cfg: SdkTaskConfig,
+  taskId: string,
+  logDir: string,
+  options?: SdkExecutorOptions,
+): Promise<SdkExecutorResult> {
+  if (config.claudeAuthPreflight) {
+    const probe = await probeClaudeUsage();
+    if (probe.auth === "unauthorized") {
+      const logFile = path.join(logDir, `${taskId}.log`);
+      const reason =
+        "Pre-flight Claude auth check failed. API Error: 401 authentication_error: " +
+        "Invalid authentication credentials. Refresh the Pi's Claude Code credential.";
+      try {
+        fs.writeFileSync(
+          logFile,
+          [
+            "=== Hugin Task Log (SDK) ===",
+            `Task: ${taskId}`,
+            "Runtime: claude (agent-sdk)",
+            `Started: ${new Date().toISOString()}`,
+            "===",
+            reason,
+            "",
+            "===",
+            "Exit code: 1",
+            "Failure kind: AUTH_FAILED",
+            "===",
+            "",
+          ].join("\n"),
+          { encoding: "utf-8" },
+        );
+      } catch {
+        /* log is best-effort — never fail the task on a log write */
+      }
+      console.error(
+        `Pre-flight Claude auth check failed for task ${taskId} — short-circuiting to AUTH_FAILED (no paid run)`,
+      );
+      return {
+        exitCode: 1,
+        output: reason,
+        logFile,
+        resultText: null,
+        costUsd: 0,
+        numTurns: 0,
+        durationApiMs: 0,
+      };
+    }
+  }
+  return executeSdkTask(cfg, taskId, logDir, options);
 }
 
 // --- Invocation journal ---
@@ -3601,7 +3698,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         // Execute via Claude SDK with fallback
         const sdkAbort = new AbortController();
         currentSdkAbort = sdkAbort;
-        const sdkResult = await executeSdkTask(
+        const sdkResult = await executeClaudeSdkWithAuthPreflight(
           {
             prompt: task.prompt,
             workingDir: task.workingDir,
@@ -3661,7 +3758,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
         const sdkAbort = new AbortController();
         currentSdkAbort = sdkAbort;
-        const sdkResult = await executeSdkTask(
+        const sdkResult = await executeClaudeSdkWithAuthPreflight(
           {
             prompt: task.prompt,
             workingDir: task.workingDir,
@@ -3752,7 +3849,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     console.log(`Using Agent SDK executor for task ${taskNs}`);
     const sdkAbort = new AbortController();
     currentSdkAbort = sdkAbort;
-    const sdkResult = await executeSdkTask(
+    const sdkResult = await executeClaudeSdkWithAuthPreflight(
       {
         prompt: task.prompt,
         workingDir: task.workingDir,
@@ -3899,6 +3996,21 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // delivery is folded back in after the delivery block (Codex review #4) so
     // the task finalizes as `cancelled`, not as a spurious DELIVERY_FAILED.
     let isCancelled = cancellation !== null;
+
+    // Distinct failure classification (issue #129): a Claude SDK run (direct or
+    // via ollama→claude fallback) that failed to authenticate (401 / expired Pi
+    // credential) is tagged + surfaced distinctly from a generic task-logic
+    // failure, so the cause is legible in Munin instead of buried in the raw log.
+    const failureClassification =
+      !ok && !isTimeout && !isCancelled && (isClaude || fallbackTriggered)
+        ? classifyClaudeFailure(output)
+        : null;
+    if (failureClassification) {
+      await munin.log(
+        taskNs,
+        `Task failed to authenticate (${failureClassification.kind}): ${failureClassification.reason}`,
+      );
+    }
 
     // Post-task: finalize branch — auto-commit leftovers, push, open PR (#47)
     let prUrl: string | undefined;
@@ -4213,7 +4325,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         buildTaskResultDocument({
           timedOut: isTimeout,
           exitCode,
-          failureKind: deliveryFailureKind,
+          failureKind: deliveryFailureKind ?? failureClassification?.kind,
           startedAt,
           completedAt,
           durationSeconds: Math.round(durationMs / 1000),
@@ -4353,9 +4465,18 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         return { hadTask: true, queueDepth };
       }
     } else {
+      // Append the distinct failure tag (issue #129) AFTER buildTerminalStatusTags,
+      // whose persistent-tag filter would otherwise drop a `failure:*` tag.
+      const terminalTags = buildTerminalStatusTags(
+        ok ? "completed" : "failed",
+        finalizeBaseTags,
+        `runtime:${task.runtime}`,
+      );
       const finalizeOutcome = await finalizeTaskCompletion(munin, taskNs, {
         statusContent: entry.content,
-        terminalTags: buildTerminalStatusTags(ok ? "completed" : "failed", finalizeBaseTags, `runtime:${task.runtime}`),
+        terminalTags: failureClassification
+          ? [...terminalTags, failureClassification.tag]
+          : terminalTags,
         classification: taskClassification,
         // Single-owner CAS for runtime-owned delivery (#68): if a startup
         // reconciler reclaimed the checkpoint while we were delivering, this
@@ -4387,9 +4508,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             bodyText: structuredBodyText,
             errorMessage: ok
               ? undefined
-              : deliveryResult && !deliveryResult.ok
-                ? deliveryResult.error ?? structuredBodyText
-                : structuredBodyText,
+              : failureClassification
+                ? failureClassification.reason
+                : deliveryResult && !deliveryResult.ok
+                  ? deliveryResult.error ?? structuredBodyText
+                  : structuredBodyText,
             runtimeMetadata,
             pipeline: task.pipeline,
             approval: approvalMetadata,
