@@ -1341,7 +1341,16 @@ interface QuotaSnapshot {
 async function probeClaudeUsage(): Promise<{
   auth: "ok" | "unauthorized" | "unknown";
   snapshot: QuotaSnapshot;
-  /** Token expiry (epoch ms) from the credential file, or null if unreadable. */
+  /**
+   * Effective credential expiry (epoch ms), or null when there is nothing to
+   * pre-warn about. NOTE: the credential file's `expiresAt` is the SHORT-LIVED
+   * *access* token's expiry (~8h), which Claude Code silently auto-refreshes
+   * using the long-lived `refreshToken` in the same file — so it is NOT when
+   * autonomous tasks break. We therefore only surface `expiresAt` as a real
+   * expiry when NO refresh token is present (nothing can auto-refresh it);
+   * otherwise null, and we rely on the actual `unauthorized` transition (a
+   * failed refresh / logout) to alarm. Prevents an ~8h false-alarm loop.
+   */
   expiresAtMs: number | null;
 }> {
   const none: QuotaSnapshot = { q5: null, q7: null };
@@ -1351,7 +1360,14 @@ async function probeClaudeUsage(): Promise<{
     const creds = JSON.parse(fs.readFileSync(credPath, "utf-8"));
     const token = creds?.claudeAiOauth?.accessToken;
     const rawExpiry = creds?.claudeAiOauth?.expiresAt;
-    if (typeof rawExpiry === "number" && Number.isFinite(rawExpiry)) {
+    const hasRefreshToken =
+      typeof creds?.claudeAiOauth?.refreshToken === "string" &&
+      creds.claudeAiOauth.refreshToken.length > 0;
+    if (
+      !hasRefreshToken &&
+      typeof rawExpiry === "number" &&
+      Number.isFinite(rawExpiry)
+    ) {
       expiresAtMs = rawExpiry;
     }
     if (!token) return { auth: "unknown", snapshot: none, expiresAtMs };
@@ -1364,7 +1380,19 @@ async function probeClaudeUsage(): Promise<{
       signal: AbortSignal.timeout(5000),
     });
     if (res.status === 401) {
-      return { auth: "unauthorized", snapshot: none, expiresAtMs };
+      // A 401 from the file's access token is only CONCLUSIVE when there is no
+      // refresh token. With a refresh token present, Claude Code refreshes the
+      // (merely stale) access token on next use — so the probe must NOT claim
+      // the credential is dead: that would false-alarm AND make the #130
+      // pre-flight block an overnight task that would have refreshed and
+      // succeeded (regressing #129). Fail open to `unknown`; the reliable
+      // dead-credential signal is an actual runtime AUTH_FAILED, fed into the
+      // alarm reactively (see noteClaudeAuthOutcome).
+      return {
+        auth: hasRefreshToken ? "unknown" : "unauthorized",
+        snapshot: none,
+        expiresAtMs,
+      };
     }
     if (!res.ok) return { auth: "unknown", snapshot: none, expiresAtMs };
     const data = await res.json() as Record<string, Record<string, number>>;
@@ -2545,27 +2573,45 @@ async function persistAuthAlarmState(): Promise<void> {
   }
 }
 
-async function runAuthAlarmProbe(): Promise<void> {
-  const prevState = authAlarmState;
-  const probe = await probeClaudeUsage();
-  const { alerts, nextState } = decideAuthAlarm(
-    prevState,
-    { auth: probe.auth, expiresAtMs: probe.expiresAtMs },
-    { nowMs: Date.now(), expiryWarnMs: config.authAlarmExpiryWarnMs },
+// Serialize all mutations of `authAlarmState`. The periodic reaper AND the
+// reactive task-outcome path (noteClaudeAuthOutcome) both drive the same edge
+// state; without this a reaper `ok` read racing a reactive `unauthorized` could
+// lost-update and mask the critical alert. The chain queues rather than drops,
+// so no reading is lost. Frequency is tiny (hourly probe + task completions),
+// so the queue is effectively never deep.
+let authAlarmLock: Promise<void> = Promise.resolve();
+function withAuthAlarmLock(fn: () => Promise<void>): Promise<void> {
+  const run = authAlarmLock.then(fn, fn);
+  authAlarmLock = run.then(
+    () => {},
+    () => {},
   );
+  return run;
+}
 
-  // Deliver first, commit second (Codex review, High): advancing the edge state
-  // before a successful push would permanently suppress the alert if the push
-  // failed (next tick sees no transition). A `failed` delivery therefore leaves
-  // the state unchanged so the SAME alert is retried next tick until it lands;
-  // `delivered`/`skipped` are terminal and let the transition commit.
+/**
+ * Apply one auth reading to the alarm state machine: decide → deliver → commit.
+ * MUST be called while holding {@link withAuthAlarmLock}. Delivery gates the
+ * commit (Codex review, High): a `failed` push holds the old state so the SAME
+ * alert retries; `delivered`/`skipped` let the transition commit.
+ */
+async function applyAuthReadingLocked(reading: {
+  auth: "ok" | "unauthorized" | "unknown";
+  expiresAtMs: number | null;
+}): Promise<void> {
+  const prevState = authAlarmState;
+  const { alerts, nextState } = decideAuthAlarm(prevState, reading, {
+    nowMs: Date.now(),
+    expiryWarnMs: config.authAlarmExpiryWarnMs,
+  });
+
   let allDelivered = true;
   for (const alert of alerts) {
     const status = await sendRatatoskrAlert(alert);
     if (status === "failed") allDelivered = false;
   }
   if (alerts.length > 0 && !allDelivered) {
-    // Hold the old state; retry the undelivered alert on the next tick.
+    // Hold the old state; retry the undelivered alert on the next reading.
     return;
   }
 
@@ -2578,15 +2624,50 @@ async function runAuthAlarmProbe(): Promise<void> {
   }
 }
 
+function processAuthReading(reading: {
+  auth: "ok" | "unauthorized" | "unknown";
+  expiresAtMs: number | null;
+}): Promise<void> {
+  return withAuthAlarmLock(() => applyAuthReadingLocked(reading));
+}
+
+async function runAuthAlarmProbe(): Promise<void> {
+  // Probe INSIDE the lock (Codex review, TOCTOU): if the network probe ran
+  // outside it, a slow `ok` reading captured before a newer reactive
+  // `unauthorized` could be applied AFTER it — a false recovery masking the real
+  // alarm. Acquiring the lock first makes readings apply in lock-acquisition
+  // order and the probe reflect reality at apply time.
+  await withAuthAlarmLock(async () => {
+    const probe = await probeClaudeUsage();
+    await applyAuthReadingLocked({ auth: probe.auth, expiresAtMs: probe.expiresAtMs });
+  });
+}
+
+/**
+ * Feed a CONFIRMED Claude runtime auth outcome into the alarm (#131). Unlike the
+ * periodic probe against a possibly-stale access token, an actual task result is
+ * authoritative: an `AUTH_FAILED` classification means the credential is truly
+ * dead (a failed refresh / logout), and a success means it authenticates. This
+ * is the reliable proactive-alarm trigger for the normal (refresh-token-present)
+ * credential the probe can't conclusively judge. Deduped by the shared edge
+ * state, so N failing overnight tasks yield ONE alert, not N.
+ */
+async function noteClaudeAuthOutcome(auth: "ok" | "unauthorized"): Promise<void> {
+  if (!config.authAlarm) return;
+  await processAuthReading({ auth, expiresAtMs: null });
+}
+
 function startAuthAlarmReaper(): void {
   stopAuthAlarmReaper();
   if (!config.authAlarm) return;
   authAlarmTimer = setInterval(() => {
     if (authAlarmInFlight || shuttingDown) return;
     authAlarmInFlight = true;
-    void runAuthAlarmProbe().finally(() => {
-      authAlarmInFlight = false;
-    });
+    void runAuthAlarmProbe()
+      .catch((err) => console.error("[auth-alarm] Periodic probe failed:", err))
+      .finally(() => {
+        authAlarmInFlight = false;
+      });
   }, config.authAlarmIntervalMs);
 }
 
@@ -4218,6 +4299,23 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         taskNs,
         `Task failed to authenticate (${failureClassification.kind}): ${failureClassification.reason}`,
       );
+    }
+
+    // #131: feed the CONFIRMED Claude auth outcome into the proactive alarm. A
+    // real runtime AUTH_FAILED is the reliable dead-credential signal (the probe
+    // can't judge a refreshable token); a Claude success confirms recovery. Only
+    // for Claude-involving runs — an ollama/orchestrator outcome says nothing
+    // about the Pi Claude credential. Best-effort: never let it fail the task.
+    if (isClaude || fallbackTriggered) {
+      if (failureClassification) {
+        await noteClaudeAuthOutcome("unauthorized").catch((err) =>
+          console.error("[auth-alarm] reactive unauthorized note failed:", err),
+        );
+      } else if (ok) {
+        await noteClaudeAuthOutcome("ok").catch((err) =>
+          console.error("[auth-alarm] reactive ok note failed:", err),
+        );
+      }
     }
 
     // Post-task: finalize branch — auto-commit leftovers, push, open PR (#47)
