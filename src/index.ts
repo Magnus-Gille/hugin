@@ -19,6 +19,12 @@ import {
 import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion } from "./task-helpers.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig } from "./sdk-executor.js";
 import { classifyClaudeFailure } from "./failure-classification.js";
+import {
+  decideAuthAlarm,
+  INITIAL_AUTH_ALARM_STATE,
+  type AlertEnvelope,
+  type AuthAlarmState,
+} from "./auth-alarm.js";
 import { executeOllamaTask } from "./ollama-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus, probeAllHosts, warmModel, getLoadedModels } from "./ollama-hosts.js";
 import { resolveContextRefs } from "./context-loader.js";
@@ -229,6 +235,18 @@ function parsePositiveIntEnv(raw: string | undefined, fallback: number): number 
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+/**
+ * Parse a Telegram chat id (a positive integer) for the auth-alarm Ratatoskr
+ * send target. Returns null when unset/malformed — the alarm then probes + logs
+ * but sends nothing, rather than POSTing a bad chat_id Ratatoskr would 400/403.
+ */
+function parseChatIdEnv(raw: string | undefined): number | null {
+  const trimmed = (raw ?? "").trim();
+  if (trimmed === "") return null;
+  const n = Number(trimmed);
+  return Number.isInteger(n) ? n : null;
+}
+
 const config = {
   port: parseInt(process.env.HUGIN_PORT || "3032"),
   host: process.env.HUGIN_HOST || "127.0.0.1",
@@ -315,6 +333,27 @@ const config = {
   // (network error, missing endpoint, no creds file) lets the task run as before.
   // Set to `off` to disable the probe entirely.
   claudeAuthPreflight: (process.env.HUGIN_CLAUDE_AUTH_PREFLIGHT ?? "on") !== "off",
+  // Proactive Pi Claude credential-expiry alarm (issue #131). A periodic probe
+  // (the same OAuth-usage check the pre-flight uses) feeds the edge-triggered
+  // state machine in src/auth-alarm.ts; a transition to `unauthorized` (or an
+  // impending expiry) is pushed to the user via Ratatoskr's Alert Bus. Default
+  // on, but inert unless a Ratatoskr send target + chat id are configured.
+  authAlarm: (process.env.HUGIN_AUTH_ALARM ?? "on") !== "off",
+  authAlarmIntervalMs: parsePositiveIntEnv(
+    process.env.HUGIN_AUTH_ALARM_INTERVAL_MS,
+    3_600_000, // 1h
+  ),
+  authAlarmExpiryWarnMs: parsePositiveIntEnv(
+    process.env.HUGIN_AUTH_ALARM_EXPIRY_WARN_MS,
+    43_200_000, // 12h
+  ),
+  // Ratatoskr Alert Bus target (ratatoskr/src/send-handler.ts, POST /api/send).
+  // Empty send URL/key/chat id → the alarm still probes + logs, but cannot push
+  // Telegram (graceful degrade). Kept out of the fetch egress allowlist by
+  // design — this is a same-host Grimnir control-plane call, not task egress.
+  ratatoskrSendUrl: process.env.HUGIN_RATATOSKR_SEND_URL?.trim() || "",
+  ratatoskrSendApiKey: process.env.HUGIN_RATATOSKR_SEND_API_KEY?.trim() || "",
+  authAlarmChatId: parseChatIdEnv(process.env.HUGIN_AUTH_ALARM_CHAT_ID),
 };
 
 const brokerEnv = readBrokerEnv(process.env);
@@ -406,6 +445,10 @@ let leaseReaperInFlight = false;
 // Deferred-delivery retry reaper (#72), armed only under `HUGIN_DELIVERY_POLICY=defer`.
 let deliveryRetryReaperTimer: ReturnType<typeof setInterval> | null = null;
 let deliveryRetryReaperInFlight = false;
+// Proactive Claude auth-alarm reaper (#131), armed only under `HUGIN_AUTH_ALARM` on.
+let authAlarmTimer: ReturnType<typeof setInterval> | null = null;
+let authAlarmInFlight = false;
+let authAlarmState: AuthAlarmState = INITIAL_AUTH_ALARM_STATE;
 let lastQueueDepth = 0;
 let lastBlockedTaskCount = 0;
 const startedAt = Date.now();
@@ -430,13 +473,31 @@ function createMuninClient(
   });
 }
 
+// The auth-alarm push (#131) uses the global fetch, which is egress-gated below.
+// The Ratatoskr Alert Bus host (typically `huginmunin` or the Pi Tailscale IP,
+// not loopback — see ratatoskr bind-resilience notes) must therefore be
+// allowlisted or the alarm's own POST would be denied before it leaves the box.
+function hostnameOf(url: string): string | null {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return null;
+  }
+}
+const ratatoskrEgressHost = config.ratatoskrSendUrl
+  ? hostnameOf(config.ratatoskrSendUrl)
+  : null;
+
 const egressPolicy = installFetchEgressPolicy(
   buildDefaultEgressHosts({
     muninUrl: config.muninUrl,
     ollamaPiUrl: config.ollamaPiUrl,
     ollamaLaptopUrl: config.ollamaLaptopUrl,
     ollamaOrinUrl: config.ollamaOrinUrl,
-    extraHosts: config.extraAllowedEgressHosts,
+    extraHosts: [
+      ...config.extraAllowedEgressHosts,
+      ...(ratatoskrEgressHost ? [ratatoskrEgressHost] : []),
+    ],
   }),
 );
 
@@ -1280,13 +1341,20 @@ interface QuotaSnapshot {
 async function probeClaudeUsage(): Promise<{
   auth: "ok" | "unauthorized" | "unknown";
   snapshot: QuotaSnapshot;
+  /** Token expiry (epoch ms) from the credential file, or null if unreadable. */
+  expiresAtMs: number | null;
 }> {
   const none: QuotaSnapshot = { q5: null, q7: null };
+  let expiresAtMs: number | null = null;
   try {
     const credPath = path.join(process.env.HOME || "/home/magnus", ".claude", ".credentials.json");
     const creds = JSON.parse(fs.readFileSync(credPath, "utf-8"));
     const token = creds?.claudeAiOauth?.accessToken;
-    if (!token) return { auth: "unknown", snapshot: none };
+    const rawExpiry = creds?.claudeAiOauth?.expiresAt;
+    if (typeof rawExpiry === "number" && Number.isFinite(rawExpiry)) {
+      expiresAtMs = rawExpiry;
+    }
+    if (!token) return { auth: "unknown", snapshot: none, expiresAtMs };
 
     const res = await fetch("https://api.anthropic.com/api/oauth/usage", {
       headers: {
@@ -1296,9 +1364,9 @@ async function probeClaudeUsage(): Promise<{
       signal: AbortSignal.timeout(5000),
     });
     if (res.status === 401) {
-      return { auth: "unauthorized", snapshot: none };
+      return { auth: "unauthorized", snapshot: none, expiresAtMs };
     }
-    if (!res.ok) return { auth: "unknown", snapshot: none };
+    if (!res.ok) return { auth: "unknown", snapshot: none, expiresAtMs };
     const data = await res.json() as Record<string, Record<string, number>>;
     return {
       auth: "ok",
@@ -1306,9 +1374,10 @@ async function probeClaudeUsage(): Promise<{
         q5: data?.five_hour?.utilization ?? null,
         q7: data?.seven_day?.utilization ?? null,
       },
+      expiresAtMs,
     };
   } catch {
-    return { auth: "unknown", snapshot: none };
+    return { auth: "unknown", snapshot: none, expiresAtMs };
   }
 }
 
@@ -2386,6 +2455,145 @@ function stopDeliveryRetryReaper(): void {
   if (deliveryRetryReaperTimer) {
     clearInterval(deliveryRetryReaperTimer);
     deliveryRetryReaperTimer = null;
+  }
+}
+
+// --- Proactive Claude auth-expiry alarm (#131) ---
+
+const AUTH_ALARM_NS = "tasks/_auth_alarm";
+
+/**
+ * Deliver an alert envelope to the user via Ratatoskr's Alert Bus
+ * (POST /api/send → Telegram + Heimdall echo). Best-effort: a missing send
+ * target or a network error is logged and swallowed so the alarm loop never
+ * throws. The alarm condition is always `console.error`'d regardless, so the
+ * journal has it even when the push can't go out.
+ */
+// `delivered` — Ratatoskr accepted it (2xx). `skipped` — no send target
+// configured, nothing more we can do (treated as terminal so we don't re-log
+// every tick). `failed` — configured but the push errored/non-2xx, so the
+// caller must NOT advance the edge state and should retry next tick.
+type AlertDeliveryStatus = "delivered" | "skipped" | "failed";
+
+async function sendRatatoskrAlert(alert: AlertEnvelope): Promise<AlertDeliveryStatus> {
+  const logLine = `[auth-alarm] ${alert.severity ?? "info"}: ${alert.title}`;
+  if (alert.severity === "error" || alert.severity === "critical") {
+    console.error(logLine);
+  } else {
+    console.warn(logLine);
+  }
+  if (!config.ratatoskrSendUrl || !config.ratatoskrSendApiKey || config.authAlarmChatId === null) {
+    console.warn(
+      "[auth-alarm] Ratatoskr send target not fully configured — alarm logged but not pushed to Telegram",
+    );
+    return "skipped";
+  }
+  try {
+    const res = await fetch(config.ratatoskrSendUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.ratatoskrSendApiKey}`,
+      },
+      body: JSON.stringify({ chat_id: config.authAlarmChatId, alert }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) {
+      console.error(`[auth-alarm] Ratatoskr /api/send returned ${res.status}`);
+      return "failed";
+    }
+    return "delivered";
+  } catch (err) {
+    console.error("[auth-alarm] Failed to push alarm to Ratatoskr:", err);
+    return "failed";
+  }
+}
+
+/**
+ * Hydrate the edge-trigger state from Munin on startup so a dispatcher restart
+ * doesn't re-fire an alarm for a condition already notified before the restart.
+ * A missing/malformed entry falls back to the initial state (fail-safe: the
+ * worst case is one duplicate alert, never a missed one).
+ */
+async function hydrateAuthAlarmState(): Promise<void> {
+  try {
+    const entry = await reaperMunin.read(AUTH_ALARM_NS, "state");
+    if (!entry) return;
+    const parsed = JSON.parse(entry.content) as Partial<AuthAlarmState>;
+    authAlarmState = {
+      lastAuth:
+        parsed.lastAuth === "ok" || parsed.lastAuth === "unauthorized"
+          ? parsed.lastAuth
+          : null,
+      expiryWarned: parsed.expiryWarned === true,
+    };
+  } catch {
+    // Keep INITIAL_AUTH_ALARM_STATE.
+  }
+}
+
+async function persistAuthAlarmState(): Promise<void> {
+  try {
+    await reaperMunin.write(
+      AUTH_ALARM_NS,
+      "state",
+      JSON.stringify(authAlarmState),
+      ["auth-alarm"],
+    );
+  } catch (err) {
+    console.error("[auth-alarm] Failed to persist alarm state:", err);
+  }
+}
+
+async function runAuthAlarmProbe(): Promise<void> {
+  const prevState = authAlarmState;
+  const probe = await probeClaudeUsage();
+  const { alerts, nextState } = decideAuthAlarm(
+    prevState,
+    { auth: probe.auth, expiresAtMs: probe.expiresAtMs },
+    { nowMs: Date.now(), expiryWarnMs: config.authAlarmExpiryWarnMs },
+  );
+
+  // Deliver first, commit second (Codex review, High): advancing the edge state
+  // before a successful push would permanently suppress the alert if the push
+  // failed (next tick sees no transition). A `failed` delivery therefore leaves
+  // the state unchanged so the SAME alert is retried next tick until it lands;
+  // `delivered`/`skipped` are terminal and let the transition commit.
+  let allDelivered = true;
+  for (const alert of alerts) {
+    const status = await sendRatatoskrAlert(alert);
+    if (status === "failed") allDelivered = false;
+  }
+  if (alerts.length > 0 && !allDelivered) {
+    // Hold the old state; retry the undelivered alert on the next tick.
+    return;
+  }
+
+  const changed =
+    nextState.lastAuth !== prevState.lastAuth ||
+    nextState.expiryWarned !== prevState.expiryWarned;
+  authAlarmState = nextState;
+  if (changed) {
+    await persistAuthAlarmState();
+  }
+}
+
+function startAuthAlarmReaper(): void {
+  stopAuthAlarmReaper();
+  if (!config.authAlarm) return;
+  authAlarmTimer = setInterval(() => {
+    if (authAlarmInFlight || shuttingDown) return;
+    authAlarmInFlight = true;
+    void runAuthAlarmProbe().finally(() => {
+      authAlarmInFlight = false;
+    });
+  }, config.authAlarmIntervalMs);
+}
+
+function stopAuthAlarmReaper(): void {
+  if (authAlarmTimer) {
+    clearInterval(authAlarmTimer);
+    authAlarmTimer = null;
   }
 }
 
@@ -4654,6 +4862,17 @@ async function pollLoop(): Promise<void> {
   // #72: drive deferred-delivery retries on their own cadence (no-op unless
   // HUGIN_DELIVERY_POLICY=defer).
   startDeliveryRetryReaper();
+  // #131: proactive Claude auth-expiry alarm. Hydrate the edge-trigger state
+  // from Munin (so a restart doesn't re-fire), run one probe immediately (catch
+  // an already-dead credential at boot rather than waiting a full interval),
+  // then arm the periodic reaper.
+  if (config.authAlarm) {
+    await hydrateAuthAlarmState();
+    await runAuthAlarmProbe().catch((err) =>
+      console.error("[auth-alarm] Initial probe failed:", err),
+    );
+    startAuthAlarmReaper();
+  }
 
   let pollCount = 0;
   while (!shuttingDown) {
@@ -4749,6 +4968,7 @@ async function shutdown(signal: string): Promise<void> {
   stopCancellationWatch();
   stopLeaseReaper();
   stopDeliveryRetryReaper();
+  stopAuthAlarmReaper();
 
   // Mark the current task as failed before killing the process
   if (currentTask) {
