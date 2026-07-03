@@ -10,8 +10,9 @@ import {
 import type { ModelInvoker } from "./model-invoker.js";
 import { assertProvidersAllowSensitivity } from "./sensitivity-guard.js";
 import type { Sensitivity } from "../sensitivity.js";
-import type { VerdictStoreLike, VerdictEvent } from "./verdict-store.js";
+import type { VerdictStoreLike, VerdictEvent, VerdictBatchEvent } from "./verdict-store.js";
 import type { LedgerClientLike } from "./ledger-client.js";
+import { parseIntEnv } from "./config.js";
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -163,10 +164,22 @@ export async function runOrchestratorTask(
 
   onLog?.(`[orchestrator] starting (strategy will be determined by planner)`);
 
-  // --- 2.5. Adaptive verify gate confidence source (V5) ---
+  // --- 2.5. Wire abort forwarding BEFORE the confidence-source load (Fix #3).
+  // Internal controller threaded into the engine (issue #110). It aborts when
+  // the timeout wins OR the caller's signal fires, cancelling in-flight calls.
+  // This MUST be set up before buildConfidenceFn's internal await (a store
+  // read / ledger fetch) — otherwise an abort that fires DURING that await is
+  // lost: deps.signal already flips to aborted before the listener exists,
+  // and addEventListener never retroactively fires for a past event.
+  const engineAbort = new AbortController();
+  const forwardCallerAbort = () => engineAbort.abort();
+  deps.signal?.addEventListener("abort", forwardCallerAbort, { once: true });
+
+  // --- 2.6. Adaptive verify gate confidence source (V5) ---
   // Built ONCE per task (one store read / one ledger fetch, per the ADR's
   // "hydrates nothing at boot" wiring note) and wrapped in a plain sync
-  // closure so the pure engine never does I/O of its own.
+  // closure so the pure engine never does I/O of its own. Time-bounded
+  // (Fix #3) — a hanging store/ledger read must not stall the task.
   const confidenceFn = await buildConfidenceFn(config, deps, onLog);
 
   // Build the engine prompt only after the guard has passed: prepend any
@@ -179,12 +192,6 @@ export async function runOrchestratorTask(
   }
 
   // --- 3. Task-level timeout race ---
-  // Internal controller threaded into the engine (issue #110). It aborts when
-  // the timeout wins OR the caller's signal fires, cancelling in-flight calls.
-  const engineAbort = new AbortController();
-  const forwardCallerAbort = () => engineAbort.abort();
-  deps.signal?.addEventListener("abort", forwardCallerAbort, { once: true });
-
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
   const timeoutPromise = new Promise<"TIMEOUT">((resolve) => {
@@ -230,9 +237,12 @@ export async function runOrchestratorTask(
   // --- 6. Map OrchestrationResult → OrchestratorExecResult ---
   const result = raceResult;
 
-  // --- 6a. Verdict recording (V3/V4) — fire-and-forget per outcome, never
-  // throws (VerdictStore.record self-catches; recordVerdictEvents guards too).
-  await recordVerdictEvents(deps.verdictStore, result.outcomes, onLog);
+  // --- 6a. Verdict recording (Fix #1/#2) — TRULY fire-and-forget: task
+  // completion must NEVER wait on Munin traffic. Not awaited — deliberately.
+  // recordVerdictEvents/VerdictStore.recordBatch already self-catch; the
+  // trailing .catch() here is defense in depth against a rogue
+  // VerdictStoreLike implementation (e.g. in tests) throwing synchronously.
+  void recordVerdictEvents(deps.verdictStore, result.outcomes, onLog).catch(() => {});
 
   onLog?.(`[orchestrator] planner ok — strategy=${result.plan.strategy} subtasks=${result.outcomes.length}`);
 
@@ -262,8 +272,41 @@ export async function runOrchestratorTask(
 }
 
 // ---------------------------------------------------------------------------
-// Verdict layer helpers (V3/V4/V5/V7)
+// Verdict layer helpers (V1/V3/V4/V5/V7 + Fix #1/#2/#3/#9)
 // ---------------------------------------------------------------------------
+
+/**
+ * Deadline (Fix #3) for the confidence-source load inside buildConfidenceFn:
+ * a hanging Munin read or gateway fetch must not stall the whole task. On
+ * timeout the source degrades to "no signal", which every call site here
+ * treats as `null` — the engine's adaptive gate reads `null` as "verify"
+ * (fail toward caution, never toward silently skipping verification).
+ */
+export const CONFIDENCE_SOURCE_TIMEOUT_MS = 5_000;
+
+/**
+ * Default re-probe threshold (Fix #1, HUGIN_ORCH_REPROBE_UNVERIFIED). Once a
+ * (model × taskType) row's unverified-pass streak reaches this many
+ * consecutive unverified successes, the adaptive gate forces one more
+ * verify even though the derived recommendation is "delegate-local" —
+ * otherwise a row that only ever skips verification (because it's trusted)
+ * can never generate the VERIFIED pass/fail that would refresh its
+ * confidence, making "delegate-local" an absorbing state.
+ */
+const DEFAULT_REPROBE_UNVERIFIED = 10;
+
+/** Race `promise` against a timeout; resolves to `onTimeout` if it fires first. Never rejects on timeout. */
+async function withDeadline<T>(promise: Promise<T>, timeoutMs: number, onTimeout: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(onTimeout), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 /**
  * Build the engine's synchronous confidence lookup (V5) from whichever
@@ -271,11 +314,18 @@ export async function runOrchestratorTask(
  *   - `homeserver` worker provider → the M5 gateway ledger (V7, D5's local
  *     lane), read verbatim (the gateway already computes `recommendation`).
  *   - any other provider → Hugin's own verdict store (V4), pre-loaded once
- *     into a plain Map and looked up synchronously.
+ *     into a plain Map and looked up synchronously. A row whose
+ *     recommendation is "delegate-local" but whose unverified-pass streak
+ *     has crossed HUGIN_ORCH_REPROBE_UNVERIFIED is downgraded to "explore"
+ *     (Fix #1's re-probe — breaks the absorbing state).
  *
- * Returns `undefined` when adaptive verify is off, or when the applicable
- * dependency wasn't supplied — the engine then falls back to its unchanged
- * default (no adaptive gating).
+ * Returns `undefined` ONLY when adaptive verify itself is off (config flag),
+ * in which case the engine never even consults `confidence`. When adaptive
+ * verify IS on but the applicable dependency (verdictStore/ledgerClient) is
+ * missing, or its load times out or fails, this ALWAYS returns a function
+ * that resolves to `null` (Fix #9) — the engine reads `null` as "verify",
+ * so a missing/broken confidence source fails TOWARD caution, never toward
+ * silently skipping verification.
  */
 async function buildConfidenceFn(
   config: OrchestratorConfig,
@@ -287,8 +337,12 @@ async function buildConfidenceFn(
   const workerProvider = config.roles.worker.provider;
 
   if (workerProvider === "homeserver") {
-    if (!deps.ledgerClient) return undefined;
-    const ledger = await deps.ledgerClient.getLedger();
+    if (!deps.ledgerClient) return () => null;
+    const ledger = await withDeadline(
+      deps.ledgerClient.getLedger(),
+      CONFIDENCE_SOURCE_TIMEOUT_MS,
+      null,
+    );
     if (!ledger) {
       onLog?.(
         "[orchestrator] ledger unavailable for adaptive verify — degrading to always-verify",
@@ -301,18 +355,65 @@ async function buildConfidenceFn(
     };
   }
 
-  if (!deps.verdictStore) return undefined;
-  const recommendations = await deps.verdictStore.loadRecommendations();
-  return (model, taskType) => recommendations.get(`${model}|${taskType}`) ?? "explore";
+  if (!deps.verdictStore) return () => null;
+  const reprobeThreshold = parseIntEnv(
+    process.env.HUGIN_ORCH_REPROBE_UNVERIFIED,
+    DEFAULT_REPROBE_UNVERIFIED,
+  );
+  const recommendations = await withDeadline(
+    deps.verdictStore.loadRecommendations(),
+    CONFIDENCE_SOURCE_TIMEOUT_MS,
+    null,
+  );
+  if (!recommendations) {
+    onLog?.(
+      "[orchestrator] verdict store unavailable for adaptive verify — degrading to always-verify",
+    );
+    return () => null;
+  }
+  return (model, taskType) => {
+    const row = recommendations.get(`${model}|${taskType}`);
+    if (!row) return "explore";
+    if (row.recommendation === "delegate-local" && row.unverifiedPasses >= reprobeThreshold) {
+      // Fix #1 — re-probe: force one more verify so a permanently unverified
+      // "trusted" row can generate the VERIFIED event that refreshes it.
+      return "explore";
+    }
+    return row.recommendation;
+  };
 }
 
 /**
- * Record exactly one verdict event per outcome (V3): "error" for an infra
- * worker failure, "fail" for an explicit failed verifier verdict, "pass"
- * otherwise (including a never-verified or verifier-outage-unknown outcome).
- * No-op when no verdictStore was supplied. Never throws — VerdictStore.record
- * already self-catches; the try/catch here is defense in depth so a rogue
- * VerdictStoreLike implementation (e.g. in tests) can't break the task.
+ * Classify one outcome into exactly one verdict event (Fix #1 — the
+ * verified/unverified separation that closes the confidence-poisoning gap):
+ *   - "error"      — the worker call itself failed (infra).
+ *   - "fail"        — the worker succeeded but the verifier gave an explicit
+ *                     failed verdict.
+ *   - "pass"        — the worker succeeded AND the verifier gave an explicit
+ *                     PASSED verdict. The ONLY event that counts as verified
+ *                     quality signal alongside "fail".
+ *   - "unverified"  — the worker succeeded but was NEVER checked by a
+ *                     verifier (verdict undefined — skipped by the adaptive
+ *                     gate, or the verifier call/parse failed). This must
+ *                     NEVER be recorded as "pass": that was the bug (every
+ *                     unverified success poisoned the store with fake
+ *                     confidence, making "delegate-local" — and therefore
+ *                     skip-verification — an absorbing state).
+ */
+function classifyVerdictEvent(outcome: SubtaskOutcome): VerdictEvent {
+  if (!outcome.result.ok) return "error";
+  if (outcome.verdict?.ok === true) return "pass";
+  if (outcome.verdict?.ok === false) return "fail";
+  return "unverified";
+}
+
+/**
+ * Record ALL of a run's outcomes in ONE batched call (Fix #2) — bounds
+ * worst-case Munin traffic per task to a single read + single write
+ * regardless of subtask count. No-op when no verdictStore was supplied.
+ * Never throws — VerdictStore.recordBatch already self-catches; the
+ * try/catch here is defense in depth so a rogue VerdictStoreLike
+ * implementation (e.g. in tests) can't break the task.
  */
 async function recordVerdictEvents(
   verdictStore: VerdictStoreLike | undefined,
@@ -320,25 +421,19 @@ async function recordVerdictEvents(
   onLog?: (line: string) => void,
 ): Promise<void> {
   if (!verdictStore) return;
-  for (const outcome of outcomes) {
-    const event: VerdictEvent = !outcome.result.ok
-      ? "error"
-      : outcome.verdict?.ok === false
-        ? "fail"
-        : "pass";
-    try {
-      await verdictStore.record(
-        outcome.result.model,
-        outcome.subtask.taskType,
-        event,
-        outcome.result.latencyMs,
-      );
-    } catch (err) {
-      onLog?.(
-        `[orchestrator] verdict recording failed unexpectedly: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
+  const events: VerdictBatchEvent[] = outcomes.map((outcome) => ({
+    modelId: outcome.result.model,
+    taskType: outcome.subtask.taskType,
+    event: classifyVerdictEvent(outcome),
+    latencyMs: outcome.result.latencyMs,
+  }));
+  try {
+    await verdictStore.recordBatch(events);
+  } catch (err) {
+    onLog?.(
+      `[orchestrator] verdict recording failed unexpectedly: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
   }
 }

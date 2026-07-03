@@ -11,6 +11,7 @@ export type OrchestratorRole = "planner" | "worker" | "verifier" | "synthesizer"
  * (D5's "converge to a single KB later").
  */
 export const TASK_TYPES = [
+  "claim-verify",
   "classify",
   "code-edit",
   "code-implement",
@@ -149,8 +150,13 @@ export function parsePlan(
   const capped = validated.data.subtasks.slice(0, opts.maxSubtasks);
   if (capped.length === 0) return fallback;
 
-  const subtasks: SubTask[] = capped.map((s) => ({
-    id: s.id,
+  const subtasks: SubTask[] = capped.map((s, index) => ({
+    // Fix #7: a planner-emitted empty/whitespace id would otherwise pass
+    // SubTaskSchema (z.string(), no minLength) but violate
+    // orchestratorOutcomeSchema's subtaskId.min(1) at structured-result write
+    // time — AFTER a successful (and possibly expensive) run. Normalize here,
+    // at plan-parse time, using the subtask's position in the CAPPED list.
+    id: s.id.trim() ? s.id : `subtask-${index + 1}`,
     prompt: s.prompt,
     rationale: s.rationale,
     taskType: normalizeTaskType(s.taskType),

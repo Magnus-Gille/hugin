@@ -529,6 +529,12 @@ const munin = createMuninClient();
 const leaseMunin = createMuninClient();
 const cancelWatchMunin = createMuninClient();
 const reaperMunin = createMuninClient();
+// Verdict-store traffic (batched record + confidence-source read, Fix #2c)
+// gets its own dedicated client, same precedent as leaseMunin/cancelWatchMunin
+// above: verdict recording is fire-and-forget background work and must never
+// queue behind — or be queued behind by — task-completion writes on the main
+// client's serial request slot.
+const orchVerdictMunin = createMuninClient();
 
 // Verdict layer (docs/orchestrator-verdict-layer.md, V4/V7). Gated on a
 // single master switch (HUGIN_ORCH_VERDICT_STORE, default "on") — when
@@ -538,7 +544,7 @@ const reaperMunin = createMuninClient();
 // Hydrates nothing at boot: the store reads its Munin doc lazily per task.
 const verdictLayerEnabled = isVerdictStoreEnabled(process.env);
 const orchVerdictStore = verdictLayerEnabled
-  ? new VerdictStore(munin, (line) => console.log(`[verdict-store] ${line}`))
+  ? new VerdictStore(orchVerdictMunin, (line) => console.log(`[verdict-store] ${line}`))
   : undefined;
 const orchLedgerClient = verdictLayerEnabled ? new LedgerClient({ env: process.env }) : undefined;
 

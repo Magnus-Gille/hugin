@@ -151,4 +151,162 @@ describe("LedgerClient.getLedger", () => {
     await client.getLedger();
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  // -------------------------------------------------------------------------
+  // Row validation (Fix #5): drop invalid rows instead of trusting the shape
+  // -------------------------------------------------------------------------
+
+  it("drops a null row but keeps otherwise-valid rows", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      makeLedgerResponse({
+        json: async () => ({
+          report: [
+            null,
+            {
+              taskType: "summarize",
+              modelId: "qwen3-30b-instruct",
+              verdict: "viable",
+              attempts: 10,
+              passes: 9,
+              fails: 1,
+              errors: 0,
+              successRate: 0.9,
+              frozen: false,
+              recommendation: "delegate-local",
+            },
+          ],
+        }),
+      } as Partial<Response>),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new LedgerClient();
+    const ledger = await client.getLedger();
+
+    expect(ledger).not.toBeNull();
+    expect(ledger!.report).toHaveLength(1);
+    expect(ledger!.report[0].modelId).toBe("qwen3-30b-instruct");
+  });
+
+  it("drops a row with a non-string modelId/taskType", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      makeLedgerResponse({
+        json: async () => ({
+          report: [
+            { taskType: 123, modelId: "m", recommendation: "delegate-local" },
+            { taskType: "summarize", modelId: 456, recommendation: "delegate-local" },
+          ],
+        }),
+      } as Partial<Response>),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new LedgerClient();
+    const ledger = await client.getLedger();
+
+    expect(ledger).not.toBeNull();
+    expect(ledger!.report).toHaveLength(0);
+  });
+
+  it("drops a row with a recommendation outside the known enum", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      makeLedgerResponse({
+        json: async () => ({
+          report: [{ taskType: "summarize", modelId: "m", recommendation: "yolo" }],
+        }),
+      } as Partial<Response>),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new LedgerClient();
+    const ledger = await client.getLedger();
+
+    expect(ledger).not.toBeNull();
+    expect(ledger!.report).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Negative cache (Fix #5): a down gateway doesn't add a request-timeout
+  // stall to every task while the negative-cache window is active.
+  // -------------------------------------------------------------------------
+
+  it("negative-caches a non-2xx response — a second call within the window does not refetch", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: vi.fn().mockResolvedValue("server error"),
+    } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    let now = 1_000_000;
+    const client = new LedgerClient({ negativeTtlMs: 60_000, now: () => now });
+
+    expect(await client.getLedger()).toBeNull();
+    now += 10_000; // still within the negative-cache window
+    expect(await client.getLedger()).toBeNull();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("consumes the response body on a non-2xx response (releases the keep-alive socket)", async () => {
+    const textSpy = vi.fn().mockResolvedValue("server error");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 500, text: textSpy } as unknown as Response),
+    );
+
+    const client = new LedgerClient();
+    await client.getLedger();
+
+    expect(textSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("refetches once the negative-cache window has elapsed", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: vi.fn().mockResolvedValue("server error"),
+    } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    let now = 1_000_000;
+    const client = new LedgerClient({ negativeTtlMs: 60_000, now: () => now });
+
+    expect(await client.getLedger()).toBeNull();
+    now += 70_000; // past the negative-cache window
+    expect(await client.getLedger()).toBeNull();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("negative-caches a network error (fetch throws) the same as a non-2xx response", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    let now = 1_000_000;
+    const client = new LedgerClient({ negativeTtlMs: 60_000, now: () => now });
+
+    expect(await client.getLedger()).toBeNull();
+    now += 1_000; // within the negative-cache window
+    expect(await client.getLedger()).toBeNull();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("a successful fetch after a negative-cache window clears the negative cache (no lingering nulls)", async () => {
+    let now = 1_000_000;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 500, text: vi.fn().mockResolvedValue("err") } as unknown as Response)
+      .mockResolvedValueOnce(makeLedgerResponse());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new LedgerClient({ negativeTtlMs: 1_000, now: () => now });
+
+    expect(await client.getLedger()).toBeNull();
+    now += 2_000; // past negative TTL
+    const ledger = await client.getLedger();
+    expect(ledger).not.toBeNull();
+    expect(ledger!.report).toHaveLength(1);
+  });
 });

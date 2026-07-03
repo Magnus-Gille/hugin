@@ -77,10 +77,12 @@ describe("parsePlan", () => {
 });
 
 describe("parsePlan — taskType taxonomy (V2)", () => {
-  it("TASK_TYPES is the 21-value taxonomy including 'other'", () => {
+  it("TASK_TYPES is the 22-value taxonomy including 'other' and 'claim-verify' (Fix #6), with no duplicates", () => {
     expect(TASK_TYPES).toContain("other");
-    expect(TASK_TYPES).toHaveLength(21);
-    expect([...TASK_TYPES].sort()).toEqual([...TASK_TYPES].slice().sort());
+    expect(TASK_TYPES).toContain("claim-verify");
+    expect(TASK_TYPES).toHaveLength(22);
+    const unique = new Set(TASK_TYPES);
+    expect(unique.size).toBe(TASK_TYPES.length);
   });
 
   it("carries a valid planner-emitted taskType through per subtask", () => {
@@ -113,5 +115,44 @@ describe("parsePlan — taskType taxonomy (V2)", () => {
     const plan = parsePlan("garbage, not json", { maxSubtasks: 10, fallbackPrompt: FALLBACK_PROMPT });
     expect(plan.strategy).toBe("single");
     expect(plan.subtasks[0].taskType).toBe("other");
+  });
+});
+
+describe("parsePlan — subtask id normalization (Fix #7)", () => {
+  it("normalizes an empty id to subtask-<index+1>", () => {
+    const raw = JSON.stringify({
+      subtasks: [{ id: "", prompt: "Step 1" }, { id: "2", prompt: "Step 2" }],
+    });
+    const plan = parsePlan(raw, { maxSubtasks: 10, fallbackPrompt: FALLBACK_PROMPT });
+    expect(plan.subtasks[0].id).toBe("subtask-1");
+    expect(plan.subtasks[1].id).toBe("2"); // untouched — already non-empty
+  });
+
+  it("normalizes a whitespace-only id to subtask-<index+1>", () => {
+    const raw = JSON.stringify({ subtasks: [{ id: "   ", prompt: "Step 1" }] });
+    const plan = parsePlan(raw, { maxSubtasks: 10, fallbackPrompt: FALLBACK_PROMPT });
+    expect(plan.subtasks[0].id).toBe("subtask-1");
+  });
+
+  it("uses the POST-cap index for the fallback id (index within the capped list)", () => {
+    const raw = JSON.stringify({
+      subtasks: [
+        { id: "a", prompt: "Step 1" },
+        { id: "", prompt: "Step 2" },
+        { id: "c", prompt: "Step 3" },
+      ],
+    });
+    const plan = parsePlan(raw, { maxSubtasks: 10, fallbackPrompt: FALLBACK_PROMPT });
+    expect(plan.subtasks[1].id).toBe("subtask-2");
+  });
+
+  it("never produces an empty-string subtask id (structured-result schema requires min length 1)", () => {
+    const raw = JSON.stringify({
+      subtasks: [{ id: "", prompt: "Step 1" }, { id: "", prompt: "Step 2" }],
+    });
+    const plan = parsePlan(raw, { maxSubtasks: 10, fallbackPrompt: FALLBACK_PROMPT });
+    for (const subtask of plan.subtasks) {
+      expect(subtask.id.length).toBeGreaterThan(0);
+    }
   });
 });

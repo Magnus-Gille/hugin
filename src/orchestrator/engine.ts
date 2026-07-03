@@ -136,8 +136,24 @@ async function mapWithConcurrency<T, R>(
 // Verdict parser
 // ---------------------------------------------------------------------------
 
-function parseVerdict(output: string): { ok: boolean; notes?: string } {
-  // Try JSON first: { "ok": true/false, "notes"?: string }
+/**
+ * Parse a verifier response into a verdict, or `undefined` when the output
+ * can't be reliably read as PASS/FAIL (Fix #4).
+ *
+ * Priority order:
+ *   1. JSON `{ "ok": true/false, "notes"?: string }` anywhere in the output.
+ *   2. A PASS/FAIL token at the START of the first non-empty line (the shape
+ *      buildVerifierPrompt asks for) — this is checked BEFORE any substring
+ *      search so a note like "PASS — would otherwise FAIL on X" is read as
+ *      PASS, not misclassified as FAIL by a naive "contains FAIL" check.
+ *   3. Fallback: an UNAMBIGUOUS single occurrence of PASS or FAIL anywhere
+ *      (word-boundary) — only when exactly one of the two appears.
+ *   4. Otherwise (empty, gibberish, or both/neither present) → `undefined`.
+ *      Never defaults to `{ ok: true }` — an unparseable verdict must never
+ *      masquerade as a verified pass.
+ */
+function parseVerdict(output: string): { ok: boolean; notes?: string } | undefined {
+  // 1. Try JSON first: { "ok": true/false, "notes"?: string }
   const braceStart = output.indexOf("{");
   if (braceStart !== -1) {
     try {
@@ -153,13 +169,24 @@ function parseVerdict(output: string): { ok: boolean; notes?: string } {
     }
   }
 
-  // Text parsing: look for PASS/FAIL (case-insensitive)
-  const upper = output.toUpperCase();
-  if (upper.includes("FAIL")) return { ok: false, notes: output.trim() };
-  if (upper.includes("PASS")) return { ok: true, notes: output.trim() };
+  // 2. Leading token on the first non-empty line.
+  const firstLine = output
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  const leadingMatch = firstLine?.match(/^(PASS|FAIL)\b/i);
+  if (leadingMatch) {
+    return { ok: leadingMatch[1].toUpperCase() === "PASS", notes: output.trim() || undefined };
+  }
 
-  // Default: assume ok if unparseable
-  return { ok: true, notes: output.trim() || undefined };
+  // 3. Fallback: trust an unambiguous lone occurrence anywhere in the text.
+  const hasPass = /\bPASS\b/i.test(output);
+  const hasFail = /\bFAIL\b/i.test(output);
+  if (hasPass && !hasFail) return { ok: true, notes: output.trim() || undefined };
+  if (hasFail && !hasPass) return { ok: false, notes: output.trim() || undefined };
+
+  // 4. Unparseable / ambiguous (both or neither) — never assume ok.
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +329,18 @@ export async function runOrchestration(
       continue;
     }
 
-    outcome.verdict = parseVerdict(verifyResp.output);
+    const verdict = parseVerdict(verifyResp.output);
+    if (verdict === undefined) {
+      // Fix #4: the verifier responded, but its output couldn't be reliably
+      // read as PASS/FAIL (empty, gibberish, or ambiguous). Leave the verdict
+      // unknown rather than defaulting to a fake PASS — this outcome counts
+      // as "unverified" (Fix #1), never as verified quality signal.
+      warnings.push(
+        `verifier output for subtask ${outcome.subtask.id} could not be parsed as PASS/FAIL; verdict left unknown`,
+      );
+      continue;
+    }
+    outcome.verdict = verdict;
   }
 
   // -------------------------------------------------------------------------
