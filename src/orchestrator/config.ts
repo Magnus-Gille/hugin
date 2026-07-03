@@ -4,24 +4,29 @@ import {
 } from "./engine.js";
 
 /**
- * Parse a role model specifier from an environment variable.
+ * Parse a role model specifier from an environment variable or task field.
  *
  * Format: `provider|model`  — split on the FIRST `|`.
  * If no `|` present, the entire string is treated as the model and the
  * default provider for that role is preserved.
+ *
+ * Returns `null` for malformed input (empty model, or an empty half around
+ * the separator) — callers keep their default binding instead of sending a
+ * blank provider/model downstream.
  */
 function parseRoleEnv(
   raw: string,
   defaultProvider: string,
-): { provider: string; model: string } {
+): { provider: string; model: string } | null {
   const sep = raw.indexOf("|");
   if (sep === -1) {
-    return { provider: defaultProvider, model: raw.trim() };
+    const model = raw.trim();
+    return model ? { provider: defaultProvider, model } : null;
   }
-  return {
-    provider: raw.slice(0, sep).trim(),
-    model: raw.slice(sep + 1).trim(),
-  };
+  const provider = raw.slice(0, sep).trim();
+  const model = raw.slice(sep + 1).trim();
+  if (!provider || !model) return null;
+  return { provider, model };
 }
 
 /**
@@ -66,40 +71,44 @@ export function loadOrchestratorConfig(
   if (env.HUGIN_ORCH_PLANNER_MODEL) {
     cfg.roles = {
       ...cfg.roles,
-      planner: parseRoleEnv(
-        env.HUGIN_ORCH_PLANNER_MODEL,
-        DEFAULT_ORCHESTRATOR_CONFIG.roles.planner.provider,
-      ),
+      planner:
+        parseRoleEnv(
+          env.HUGIN_ORCH_PLANNER_MODEL,
+          DEFAULT_ORCHESTRATOR_CONFIG.roles.planner.provider,
+        ) ?? cfg.roles.planner,
     };
   }
 
   if (env.HUGIN_ORCH_WORKER_MODEL) {
     cfg.roles = {
       ...cfg.roles,
-      worker: parseRoleEnv(
-        env.HUGIN_ORCH_WORKER_MODEL,
-        DEFAULT_ORCHESTRATOR_CONFIG.roles.worker.provider,
-      ),
+      worker:
+        parseRoleEnv(
+          env.HUGIN_ORCH_WORKER_MODEL,
+          DEFAULT_ORCHESTRATOR_CONFIG.roles.worker.provider,
+        ) ?? cfg.roles.worker,
     };
   }
 
   if (env.HUGIN_ORCH_VERIFIER_MODEL) {
     cfg.roles = {
       ...cfg.roles,
-      verifier: parseRoleEnv(
-        env.HUGIN_ORCH_VERIFIER_MODEL,
-        DEFAULT_ORCHESTRATOR_CONFIG.roles.verifier.provider,
-      ),
+      verifier:
+        parseRoleEnv(
+          env.HUGIN_ORCH_VERIFIER_MODEL,
+          DEFAULT_ORCHESTRATOR_CONFIG.roles.verifier.provider,
+        ) ?? cfg.roles.verifier,
     };
   }
 
   if (env.HUGIN_ORCH_SYNTH_MODEL) {
     cfg.roles = {
       ...cfg.roles,
-      synthesizer: parseRoleEnv(
-        env.HUGIN_ORCH_SYNTH_MODEL,
-        DEFAULT_ORCHESTRATOR_CONFIG.roles.synthesizer.provider,
-      ),
+      synthesizer:
+        parseRoleEnv(
+          env.HUGIN_ORCH_SYNTH_MODEL,
+          DEFAULT_ORCHESTRATOR_CONFIG.roles.synthesizer.provider,
+        ) ?? cfg.roles.synthesizer,
     };
   }
 
@@ -142,8 +151,11 @@ export function loadOrchestratorConfig(
 }
 
 /**
- * If `taskModel` is a non-empty string, override the worker role's model in
- * a copy of `config`, keeping the worker's existing provider. Planner,
+ * If `taskModel` is a non-empty string, override the worker role in a copy
+ * of `config`. Accepts the same `provider|model` format as the
+ * HUGIN_ORCH_*_MODEL env vars (e.g. `homeserver|qwen3-30b-instruct`); a bare
+ * model string keeps the worker's existing provider. Malformed values (an
+ * empty half around `|`) are ignored — the defaults are kept. Planner,
  * verifier, and synthesizer roles are left unchanged.
  *
  * Pure function — returns a new OrchestratorConfig; never mutates the input.
@@ -153,11 +165,30 @@ export function applyTaskModel(
   taskModel?: string,
 ): OrchestratorConfig {
   if (!taskModel || !taskModel.trim()) return config;
+  const parsed = parseRoleEnv(taskModel.trim(), config.roles.worker.provider);
+  if (!parsed) return config;
   return {
     ...config,
     roles: {
       ...config.roles,
-      worker: { ...config.roles.worker, model: taskModel.trim() },
+      worker: { ...config.roles.worker, provider: parsed.provider, model: parsed.model },
     },
   };
+}
+
+/**
+ * The effective orchestrator config for a task: env-derived role bindings
+ * with the task-level `Model:` override folded in.
+ *
+ * The sensitivity guard MUST run on this post-override config — `Model:` can
+ * switch the worker's provider, so guarding the env-only config would let a
+ * task steer a private run to a cloud provider after the check. The
+ * dispatcher goes through this helper so that ordering lives in tested code
+ * (see the composition tests in sensitivity-guard.test.ts).
+ */
+export function effectiveOrchestratorConfig(
+  env: NodeJS.ProcessEnv,
+  taskModel?: string,
+): OrchestratorConfig {
+  return applyTaskModel(loadOrchestratorConfig(env), taskModel);
 }

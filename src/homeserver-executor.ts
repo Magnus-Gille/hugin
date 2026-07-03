@@ -99,7 +99,9 @@ export function loadHomeserverGatewayConfig(
 ): HomeserverGatewayConfig | null {
   const raw = env.HOMESERVER_GATEWAY_URL?.trim();
   if (!raw) return null;
-  const baseUrl = raw.replace(/\/$/, "");
+  // Strip ALL trailing slashes — same normalization as the orchestrator's
+  // resolveProviderBaseUrl, which reads this env var too.
+  const baseUrl = raw.replace(/\/+$/, "");
   const apiKey = env.HOMESERVER_GATEWAY_API_KEY?.trim() ?? "";
   // A keyless gateway is only safe on loopback. Refuse to send unauthenticated
   // requests to a remote/LAN/public gateway — treat it as not-configured.

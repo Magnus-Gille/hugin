@@ -133,11 +133,43 @@ describe("loadOrchestratorConfig", () => {
   });
 });
 
+describe("loadOrchestratorConfig — malformed role overrides", () => {
+  it("keeps the default binding when a role env override has an empty half", () => {
+    const cfg = loadOrchestratorConfig({
+      HUGIN_ORCH_WORKER_MODEL: "berget|",
+      HUGIN_ORCH_PLANNER_MODEL: "|some-model",
+    });
+    expect(cfg.roles.worker).toEqual(DEFAULT_ORCHESTRATOR_CONFIG.roles.worker);
+    expect(cfg.roles.planner).toEqual(DEFAULT_ORCHESTRATOR_CONFIG.roles.planner);
+  });
+});
+
 describe("applyTaskModel (Fix #6)", () => {
-  it("overrides worker model when taskModel is set", () => {
+  it("parses provider|model syntax, overriding the worker provider and model", () => {
     const cfg = applyTaskModel(DEFAULT_ORCHESTRATOR_CONFIG, "berget|some/model");
-    expect(cfg.roles.worker.model).toBe("berget|some/model");
-    expect(cfg.roles.worker.provider).toBe(DEFAULT_ORCHESTRATOR_CONFIG.roles.worker.provider);
+    expect(cfg.roles.worker.provider).toBe("berget");
+    expect(cfg.roles.worker.model).toBe("some/model");
+  });
+
+  it("routes a task to the homeserver provider via provider|model syntax", () => {
+    const cfg = applyTaskModel(DEFAULT_ORCHESTRATOR_CONFIG, "homeserver|qwen3-30b-instruct");
+    expect(cfg.roles.worker.provider).toBe("homeserver");
+    expect(cfg.roles.worker.model).toBe("qwen3-30b-instruct");
+    // Only the worker role is task-overridable.
+    expect(cfg.roles.planner).toEqual(DEFAULT_ORCHESTRATOR_CONFIG.roles.planner);
+  });
+
+  it("ignores malformed provider|model values (empty half) and keeps the defaults", () => {
+    for (const malformed of ["|qwen3-30b-instruct", "openrouter|", "|", " | "]) {
+      const result = applyTaskModel(DEFAULT_ORCHESTRATOR_CONFIG, malformed);
+      expect(result, malformed).toBe(DEFAULT_ORCHESTRATOR_CONFIG);
+    }
+  });
+
+  it("trims whitespace around the provider|model separator", () => {
+    const cfg = applyTaskModel(DEFAULT_ORCHESTRATOR_CONFIG, " homeserver | qwen3-30b-instruct ");
+    expect(cfg.roles.worker.provider).toBe("homeserver");
+    expect(cfg.roles.worker.model).toBe("qwen3-30b-instruct");
   });
 
   it("overrides worker model, preserving the existing worker provider", () => {

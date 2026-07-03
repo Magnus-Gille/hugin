@@ -4,7 +4,7 @@
  * Used for price-aware routing and savings tracking. Prices are approximate
  * and sourced from provider documentation / OpenRouter listings.
  *
- * **Last updated: 2026-06-16.**
+ * **Last updated: 2026-07-03.**
  *
  * This is a manual snapshot, not a live feed. Bump the comment date when
  * you refresh prices. If a model is not in the table, `getModelPrice` returns
@@ -26,6 +26,7 @@ export interface ModelPrice {
  * Sections:
  *   - OpenRouter models (routed via openrouter runtime)
  *   - Berget models (EU-sovereign, routed via berget runtime)
+ *   - Homeserver models (M5 local gateway — explicit $0, not unknown)
  *   - Anthropic baseline (for savings comparison via CLAUDE_BASELINE_MODEL_ID)
  *
  * Berget prices are in EUR; converted to USD at EUR/USD ≈ 1.12 (June 2026).
@@ -109,6 +110,52 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPrice>> = {
     provider: "berget",
     inputUsdPerM: 0.84,
     outputUsdPerM: 3.92,
+  },
+
+  // ---- Homeserver (M5 local-inference gateway, ADR-004) ----
+  // Owned hardware: marginal cost is $0 (electricity not metered here).
+  // Explicit $0 entries keep local runs distinguishable from unknown-cost
+  // models (null). Slugs match the gateway /v1/models ids exactly
+  // (verified 2026-07-03).
+  // NAMESPACE ASSUMPTION: these are the table's only bare (vendor-unprefixed)
+  // slugs, and lookups key on model id alone. Safe today because OpenRouter/
+  // Berget ids are always vendor-prefixed ("openai/gpt-oss-120b"), so a bare
+  // id cannot collide — if a cloud provider ever exposes bare ids, scope the
+  // lookup by provider before adding them.
+  "mellum": {
+    provider: "homeserver",
+    inputUsdPerM: 0,
+    outputUsdPerM: 0,
+  },
+  "qwen3-30b-instruct": {
+    provider: "homeserver",
+    inputUsdPerM: 0,
+    outputUsdPerM: 0,
+  },
+  "qwen3-coder-next-80b": {
+    provider: "homeserver",
+    inputUsdPerM: 0,
+    outputUsdPerM: 0,
+  },
+  "gpt-oss-120b": {
+    provider: "homeserver",
+    inputUsdPerM: 0,
+    outputUsdPerM: 0,
+  },
+  "gemma4": {
+    provider: "homeserver",
+    inputUsdPerM: 0,
+    outputUsdPerM: 0,
+  },
+  "qwen36-a3b": {
+    provider: "homeserver",
+    inputUsdPerM: 0,
+    outputUsdPerM: 0,
+  },
+  "tongyi-dr": {
+    provider: "homeserver",
+    inputUsdPerM: 0,
+    outputUsdPerM: 0,
   },
 
   // ---- Anthropic baseline (for savings comparison) ----
