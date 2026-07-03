@@ -302,6 +302,9 @@ describe("DirectModelExecutor — homeserver provider (env-resolved base URL)", 
   });
 
   it("returns ok=false with a distinct error when HOMESERVER_GATEWAY_URL is unset", async () => {
+    // Explicitly delete — the ambient shell may export this var (it's the one
+    // operators set), and unstubAllEnvs only reverts stubs.
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", undefined);
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -338,6 +341,7 @@ describe("DirectModelExecutor — homeserver provider (env-resolved base URL)", 
 
   it("returns ok=false when HOMESERVER_GATEWAY_API_KEY is unset", async () => {
     vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", undefined);
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -351,6 +355,26 @@ describe("DirectModelExecutor — homeserver provider (env-resolved base URL)", 
     expect(result.ok).toBe(false);
     expect(result.error).toBe(
       "Missing API key: environment variable HOMESERVER_GATEWAY_API_KEY is not set",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reports the missing base URL first when BOTH env vars are missing", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", undefined);
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", undefined);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new DirectModelExecutor().run({
+      provider: "homeserver",
+      model: "qwen3-30b-instruct",
+      prompt: "hi",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe(
+      "Missing base URL: environment variable HOMESERVER_GATEWAY_URL is not set",
     );
     expect(fetchMock).not.toHaveBeenCalled();
   });

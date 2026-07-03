@@ -175,3 +175,20 @@ export function applyTaskModel(
     },
   };
 }
+
+/**
+ * The effective orchestrator config for a task: env-derived role bindings
+ * with the task-level `Model:` override folded in.
+ *
+ * The sensitivity guard MUST run on this post-override config — `Model:` can
+ * switch the worker's provider, so guarding the env-only config would let a
+ * task steer a private run to a cloud provider after the check. The
+ * dispatcher goes through this helper so that ordering lives in tested code
+ * (see the composition tests in sensitivity-guard.test.ts).
+ */
+export function effectiveOrchestratorConfig(
+  env: NodeJS.ProcessEnv,
+  taskModel?: string,
+): OrchestratorConfig {
+  return applyTaskModel(loadOrchestratorConfig(env), taskModel);
+}

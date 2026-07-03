@@ -117,6 +117,11 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPrice>> = {
   // Explicit $0 entries keep local runs distinguishable from unknown-cost
   // models (null). Slugs match the gateway /v1/models ids exactly
   // (verified 2026-07-03).
+  // NAMESPACE ASSUMPTION: these are the table's only bare (vendor-unprefixed)
+  // slugs, and lookups key on model id alone. Safe today because OpenRouter/
+  // Berget ids are always vendor-prefixed ("openai/gpt-oss-120b"), so a bare
+  // id cannot collide — if a cloud provider ever exposes bare ids, scope the
+  // lookup by provider before adding them.
   "mellum": {
     provider: "homeserver",
     inputUsdPerM: 0,
