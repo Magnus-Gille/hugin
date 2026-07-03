@@ -99,29 +99,13 @@ export function isSovereignGatewayHost(hostname: string): boolean {
 }
 
 /**
- * Resolve the effective base URL for a provider.
- *
- * Static providers return their `baseUrl` as-is. Env-resolved providers
- * (`baseUrlEnvVar` set) read the gateway ROOT from the environment and
- * validate it before use: http(s) only, no credentials/path/query/fragment,
- * and the host must satisfy `isSovereignGatewayHost` — then trailing slashes
- * are stripped and `/v1` appended. Any failure returns `{ok: false}` with a
- * human-readable reason; callers must surface it as a configuration error
- * rather than attempting a request.
+ * Shared validation for a gateway ROOT URL read from an environment variable:
+ * http(s) only, no credentials/path/query/fragment, and the host must satisfy
+ * `isSovereignGatewayHost`. Returns the root with trailing slashes stripped
+ * (no `/v1` appended — that's the caller's job, see resolveProviderBaseUrl vs
+ * resolveGatewayRootUrl below).
  */
-export function resolveProviderBaseUrl(
-  config: ProviderConfig,
-  env: NodeJS.ProcessEnv = process.env,
-): ResolvedBaseUrl {
-  if (!config.baseUrlEnvVar) return { ok: true, baseUrl: config.baseUrl };
-  const envVar = config.baseUrlEnvVar;
-  const raw = env[envVar]?.trim();
-  if (!raw) {
-    return {
-      ok: false,
-      reason: `Missing base URL: environment variable ${envVar} is not set`,
-    };
-  }
+function validateGatewayRootUrl(raw: string, envVar: string): ResolvedBaseUrl {
   let parsed: URL;
   try {
     parsed = new URL(raw);
@@ -140,7 +124,7 @@ export function resolveProviderBaseUrl(
   if (parsed.pathname !== "" && parsed.pathname !== "/") {
     return {
       ok: false,
-      reason: `Invalid ${envVar}: must be a gateway ROOT URL without a path (got "${parsed.pathname}"; /v1 is appended automatically)`,
+      reason: `Invalid ${envVar}: must be a gateway ROOT URL without a path (got "${parsed.pathname}")`,
     };
   }
   if (!isSovereignGatewayHost(parsed.hostname)) {
@@ -149,5 +133,54 @@ export function resolveProviderBaseUrl(
       reason: `Invalid ${envVar}: host "${parsed.hostname}" is not loopback/private-LAN/tailnet — a sovereign gateway must live in operator-controlled network space`,
     };
   }
-  return { ok: true, baseUrl: `${raw.replace(/\/+$/, "")}/v1` };
+  return { ok: true, baseUrl: raw.replace(/\/+$/, "") };
+}
+
+/**
+ * Resolve the effective base URL for a provider.
+ *
+ * Static providers return their `baseUrl` as-is. Env-resolved providers
+ * (`baseUrlEnvVar` set) read the gateway ROOT from the environment, validate
+ * it via `validateGatewayRootUrl`, then append `/v1` to reach the
+ * OpenAI-compatible surface. Any failure returns `{ok: false}` with a
+ * human-readable reason; callers must surface it as a configuration error
+ * rather than attempting a request.
+ */
+export function resolveProviderBaseUrl(
+  config: ProviderConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): ResolvedBaseUrl {
+  if (!config.baseUrlEnvVar) return { ok: true, baseUrl: config.baseUrl };
+  const envVar = config.baseUrlEnvVar;
+  const raw = env[envVar]?.trim();
+  if (!raw) {
+    return {
+      ok: false,
+      reason: `Missing base URL: environment variable ${envVar} is not set`,
+    };
+  }
+  const validated = validateGatewayRootUrl(raw, envVar);
+  if (!validated.ok) return validated;
+  return { ok: true, baseUrl: `${validated.baseUrl}/v1` };
+}
+
+/**
+ * Resolve the gateway ROOT URL (no `/v1` appended) for the ledger client
+ * (verdict layer V7, docs/orchestrator-verdict-layer.md). Same validation as
+ * `resolveProviderBaseUrl` — sibling resolver, distinct only in that the
+ * `/ledger` endpoint lives on the gateway root rather than the OpenAI-
+ * compatible `/v1` surface.
+ */
+export function resolveGatewayRootUrl(
+  env: NodeJS.ProcessEnv = process.env,
+  envVar: string = "HOMESERVER_GATEWAY_URL",
+): ResolvedBaseUrl {
+  const raw = env[envVar]?.trim();
+  if (!raw) {
+    return {
+      ok: false,
+      reason: `Missing base URL: environment variable ${envVar} is not set`,
+    };
+  }
+  return validateGatewayRootUrl(raw, envVar);
 }

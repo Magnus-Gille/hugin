@@ -1,20 +1,26 @@
 import type { SubTask, SubtaskOutcome } from "./engine.js";
+import { TASK_TYPES } from "./plan.js";
 
 /**
  * Build the prompt for the planner role.
  *
  * The planner must return ONLY valid JSON matching:
- *   { "subtasks": [{ "id": string, "prompt": string, "rationale"?: string }] }
+ *   { "subtasks": [{ "id": string, "prompt": string, "rationale"?: string, "taskType"?: string }] }
  *
- * No prose before or after the JSON object.
+ * No prose before or after the JSON object. `taskType` (V2, verdict layer) is
+ * requested per subtask from the taxonomy in TASK_TYPES; an unrecognized or
+ * missing value normalizes to "other" downstream in parsePlan.
  */
 export function buildPlannerPrompt(taskPrompt: string): string {
   return `You are an expert task planner. Decompose the following task into parallel subtasks.
 
 Return ONLY a JSON object — no prose, no markdown fences — in this exact shape:
-{"subtasks":[{"id":"1","prompt":"...","rationale":"..."},...]}
+{"subtasks":[{"id":"1","prompt":"...","rationale":"...","taskType":"..."},...]}
 
 Each subtask must be independently executable. Keep subtasks focused and distinct.
+
+For each subtask, set "taskType" to exactly one of these values (use "other" if none fit):
+${TASK_TYPES.join(", ")}
 
 Task:
 ${taskPrompt}`;

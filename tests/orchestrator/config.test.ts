@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { loadOrchestratorConfig, applyTaskModel } from "../../src/orchestrator/config.js";
+import {
+  loadOrchestratorConfig,
+  applyTaskModel,
+  isVerdictStoreEnabled,
+} from "../../src/orchestrator/config.js";
 import { DEFAULT_ORCHESTRATOR_CONFIG } from "../../src/orchestrator/engine.js";
 
 describe("loadOrchestratorConfig", () => {
@@ -119,6 +123,26 @@ describe("loadOrchestratorConfig", () => {
     expect(cfg.maxSubtasks).toBe(3);
   });
 
+  it("defaults adaptiveVerify to false (HUGIN_ORCH_ADAPTIVE_VERIFY unset)", () => {
+    const cfg = loadOrchestratorConfig({});
+    expect(cfg.adaptiveVerify).toBe(false);
+  });
+
+  it('enables adaptiveVerify when HUGIN_ORCH_ADAPTIVE_VERIFY=on', () => {
+    const cfg = loadOrchestratorConfig({ HUGIN_ORCH_ADAPTIVE_VERIFY: "on" });
+    expect(cfg.adaptiveVerify).toBe(true);
+  });
+
+  it('enables adaptiveVerify when HUGIN_ORCH_ADAPTIVE_VERIFY=true', () => {
+    const cfg = loadOrchestratorConfig({ HUGIN_ORCH_ADAPTIVE_VERIFY: "true" });
+    expect(cfg.adaptiveVerify).toBe(true);
+  });
+
+  it("ignores an unrecognized value for HUGIN_ORCH_ADAPTIVE_VERIFY", () => {
+    const cfg = loadOrchestratorConfig({ HUGIN_ORCH_ADAPTIVE_VERIFY: "yes-please" });
+    expect(cfg.adaptiveVerify).toBe(false);
+  });
+
   it("applies multiple overrides simultaneously", () => {
     const cfg = loadOrchestratorConfig({
       HUGIN_ORCH_PLANNER_MODEL: "berget|llama-3.1-8b",
@@ -206,5 +230,24 @@ describe("applyTaskModel (Fix #6)", () => {
     const originalWorkerModel = original.roles.worker.model;
     applyTaskModel(original, "new-model");
     expect(original.roles.worker.model).toBe(originalWorkerModel);
+  });
+});
+
+describe("isVerdictStoreEnabled (V4)", () => {
+  it("defaults to enabled (on) when HUGIN_ORCH_VERDICT_STORE is unset", () => {
+    expect(isVerdictStoreEnabled({})).toBe(true);
+  });
+
+  it("disables when HUGIN_ORCH_VERDICT_STORE=off", () => {
+    expect(isVerdictStoreEnabled({ HUGIN_ORCH_VERDICT_STORE: "off" })).toBe(false);
+  });
+
+  it("is case-insensitive and trims whitespace", () => {
+    expect(isVerdictStoreEnabled({ HUGIN_ORCH_VERDICT_STORE: " OFF " })).toBe(false);
+  });
+
+  it("stays enabled for any other value", () => {
+    expect(isVerdictStoreEnabled({ HUGIN_ORCH_VERDICT_STORE: "on" })).toBe(true);
+    expect(isVerdictStoreEnabled({ HUGIN_ORCH_VERDICT_STORE: "banana" })).toBe(true);
   });
 });

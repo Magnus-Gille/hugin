@@ -34,6 +34,14 @@ export interface OrchestratorConfig {
    * A per-role RoleBinding.maxTokens overrides this for that role.
    */
   maxTokens: number;
+  /**
+   * Adaptive quality gate (verdict layer V5, HUGIN_ORCH_ADAPTIVE_VERIFY).
+   * When true (and `verifyWorkers` is false), the verifier is consulted
+   * selectively per subtask based on the injected `confidence` lookup rather
+   * than run on every successful worker. `verifyWorkers: true` always wins
+   * (verify everything) regardless of this flag.
+   */
+  adaptiveVerify: boolean;
 }
 
 export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
@@ -48,7 +56,27 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   perCallTimeoutMs: 120_000,
   maxSubtasks: 12,
   maxTokens: 4096,
+  adaptiveVerify: false,
 };
+
+/**
+ * Confidence recommendation for a (model × task-type) pair, as derived by the
+ * verdict store (cloud providers) or read verbatim from the M5 gateway ledger
+ * (homeserver-bound workers). See docs/orchestrator-verdict-layer.md V4/V5/V7.
+ */
+export type ConfidenceRecommendation = "delegate-local" | "escalate-frontier" | "explore";
+
+/**
+ * Lookup injected into the engine for the adaptive verify gate (V5). Returns
+ * `null` when no signal is available (fail-open — treated as "verify").
+ * Synchronous by design: the executor pre-fetches store/ledger data once per
+ * task and wraps it in a plain closure, keeping the engine itself pure (no
+ * I/O of its own).
+ */
+export type ConfidenceFn = (
+  model: string,
+  taskType: string,
+) => ConfidenceRecommendation | null;
 
 export interface SubtaskOutcome {
   subtask: SubTask;
@@ -108,8 +136,24 @@ async function mapWithConcurrency<T, R>(
 // Verdict parser
 // ---------------------------------------------------------------------------
 
-function parseVerdict(output: string): { ok: boolean; notes?: string } {
-  // Try JSON first: { "ok": true/false, "notes"?: string }
+/**
+ * Parse a verifier response into a verdict, or `undefined` when the output
+ * can't be reliably read as PASS/FAIL (Fix #4).
+ *
+ * Priority order:
+ *   1. JSON `{ "ok": true/false, "notes"?: string }` anywhere in the output.
+ *   2. A PASS/FAIL token at the START of the first non-empty line (the shape
+ *      buildVerifierPrompt asks for) — this is checked BEFORE any substring
+ *      search so a note like "PASS — would otherwise FAIL on X" is read as
+ *      PASS, not misclassified as FAIL by a naive "contains FAIL" check.
+ *   3. Fallback: an UNAMBIGUOUS single occurrence of PASS or FAIL anywhere
+ *      (word-boundary) — only when exactly one of the two appears.
+ *   4. Otherwise (empty, gibberish, or both/neither present) → `undefined`.
+ *      Never defaults to `{ ok: true }` — an unparseable verdict must never
+ *      masquerade as a verified pass.
+ */
+function parseVerdict(output: string): { ok: boolean; notes?: string } | undefined {
+  // 1. Try JSON first: { "ok": true/false, "notes"?: string }
   const braceStart = output.indexOf("{");
   if (braceStart !== -1) {
     try {
@@ -125,13 +169,24 @@ function parseVerdict(output: string): { ok: boolean; notes?: string } {
     }
   }
 
-  // Text parsing: look for PASS/FAIL (case-insensitive)
-  const upper = output.toUpperCase();
-  if (upper.includes("FAIL")) return { ok: false, notes: output.trim() };
-  if (upper.includes("PASS")) return { ok: true, notes: output.trim() };
+  // 2. Leading token on the first non-empty line.
+  const firstLine = output
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  const leadingMatch = firstLine?.match(/^(PASS|FAIL)\b/i);
+  if (leadingMatch) {
+    return { ok: leadingMatch[1].toUpperCase() === "PASS", notes: output.trim() || undefined };
+  }
 
-  // Default: assume ok if unparseable
-  return { ok: true, notes: output.trim() || undefined };
+  // 3. Fallback: trust an unambiguous lone occurrence anywhere in the text.
+  const hasPass = /\bPASS\b/i.test(output);
+  const hasFail = /\bFAIL\b/i.test(output);
+  if (hasPass && !hasFail) return { ok: true, notes: output.trim() || undefined };
+  if (hasFail && !hasPass) return { ok: false, notes: output.trim() || undefined };
+
+  // 4. Unparseable / ambiguous (both or neither) — never assume ok.
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,11 +213,41 @@ function sumCosts(costs: (number | null)[]): number | null {
 // runOrchestration
 // ---------------------------------------------------------------------------
 
+export interface RunOrchestrationOpts {
+  signal?: AbortSignal;
+  /** Adaptive verify gate lookup (V5) — see ConfidenceFn. */
+  confidence?: ConfidenceFn;
+}
+
+/**
+ * Decide whether a given subtask's worker output should be sent through the
+ * verifier.
+ *
+ *   - `verifyWorkers: true` always wins — verify everything (unchanged).
+ *   - Else, if adaptive verify is on AND a confidence fn was supplied, verify
+ *     unless the derived recommendation is exactly "delegate-local" (trust).
+ *     A `null` (unknown/no-signal) recommendation still verifies — fail-open
+ *     toward caution.
+ *   - Else, no verification (unchanged default behavior).
+ */
+function shouldVerifySubtask(
+  cfg: OrchestratorConfig,
+  confidence: ConfidenceFn | undefined,
+  model: string,
+  taskType: string,
+): boolean {
+  if (cfg.verifyWorkers) return true;
+  if (cfg.adaptiveVerify && confidence) {
+    return confidence(model, taskType) !== "delegate-local";
+  }
+  return false;
+}
+
 export async function runOrchestration(
   taskPrompt: string,
   invoker: ModelInvoker,
   config?: Partial<OrchestratorConfig>,
-  opts?: { signal?: AbortSignal },
+  opts?: RunOrchestrationOpts,
 ): Promise<OrchestrationResult> {
   const cfg: OrchestratorConfig = { ...DEFAULT_ORCHESTRATOR_CONFIG, ...config };
   const signal = opts?.signal;
@@ -209,25 +294,53 @@ export async function runOrchestration(
   );
 
   // -------------------------------------------------------------------------
-  // 3. Verify (optional)
+  // 3. Verify (optional / adaptive — verdict layer V3 + V5)
   // -------------------------------------------------------------------------
-  if (cfg.verifyWorkers) {
-    for (const outcome of outcomes) {
-      if (!outcome.result.ok) continue; // skip failed workers
-      const verifyResp = await invoker.invoke(
-        "verifier",
-        buildVerifierPrompt(outcome.subtask, outcome.result.output),
-        { signal },
+  for (const outcome of outcomes) {
+    if (!outcome.result.ok) continue; // skip failed workers
+    const verify = shouldVerifySubtask(
+      cfg,
+      opts?.confidence,
+      outcome.result.model,
+      outcome.subtask.taskType,
+    );
+    if (!verify) continue;
+
+    const verifyResp = await invoker.invoke(
+      "verifier",
+      buildVerifierPrompt(outcome.subtask, outcome.result.output),
+      { signal },
+    );
+    allCosts.push(verifyResp.costUsd ?? null);
+    totalLatencyMs += verifyResp.latencyMs;
+    if (verifyResp.ok && verifyResp.truncated) {
+      warnings.push(
+        `verifier output for subtask ${outcome.subtask.id} was truncated (finish_reason=length); the verdict may be unreliable`,
       );
-      allCosts.push(verifyResp.costUsd ?? null);
-      totalLatencyMs += verifyResp.latencyMs;
-      if (verifyResp.ok && verifyResp.truncated) {
-        warnings.push(
-          `verifier output for subtask ${outcome.subtask.id} was truncated (finish_reason=length); the verdict may be unreliable`,
-        );
-      }
-      outcome.verdict = parseVerdict(verifyResp.output);
     }
+
+    if (!verifyResp.ok) {
+      // V3 bug fix: a failed verifier CALL (infra outage) must not read as a
+      // silent PASS via parseVerdict(""). Leave the verdict undefined — the
+      // outcome still counts as a plain worker pass, never a verified pass.
+      warnings.push(
+        `verifier call failed for subtask ${outcome.subtask.id}: ${verifyResp.error ?? "unknown error"}; verdict left unknown`,
+      );
+      continue;
+    }
+
+    const verdict = parseVerdict(verifyResp.output);
+    if (verdict === undefined) {
+      // Fix #4: the verifier responded, but its output couldn't be reliably
+      // read as PASS/FAIL (empty, gibberish, or ambiguous). Leave the verdict
+      // unknown rather than defaulting to a fake PASS — this outcome counts
+      // as "unverified" (Fix #1), never as verified quality signal.
+      warnings.push(
+        `verifier output for subtask ${outcome.subtask.id} could not be parsed as PASS/FAIL; verdict left unknown`,
+      );
+      continue;
+    }
+    outcome.verdict = verdict;
   }
 
   // -------------------------------------------------------------------------
@@ -250,15 +363,37 @@ export async function runOrchestration(
     };
   }
 
+  // V6: exclude outcomes with an EXPLICIT failed verdict from synthesis. An
+  // absent verdict (never verified, or verifier call failed → V3) still
+  // counts as a plain pass and stays in.
+  const verifiedOutcomes = successfulOutcomes.filter((o) => o.verdict?.ok !== false);
+  let synthInputOutcomes = verifiedOutcomes;
+  if (verifiedOutcomes.length === 0) {
+    // All successful outputs failed verification — degraded output beats
+    // none: fall back to including them rather than synthesizing from
+    // nothing.
+    synthInputOutcomes = successfulOutcomes;
+    warnings.push(
+      "all successful worker outputs failed verification; including them anyway to avoid empty synthesis",
+    );
+  } else if (verifiedOutcomes.length < successfulOutcomes.length) {
+    const excludedIds = successfulOutcomes
+      .filter((o) => o.verdict?.ok === false)
+      .map((o) => o.subtask.id);
+    warnings.push(
+      `excluded ${excludedIds.length} worker output(s) that failed verification from synthesis: ${excludedIds.join(", ")}`,
+    );
+  }
+
   let finalOutput: string;
 
-  if (plan.strategy === "single" || successfulOutcomes.length === 1) {
+  if (plan.strategy === "single" || synthInputOutcomes.length === 1) {
     // Skip synth call to save cost
-    finalOutput = successfulOutcomes[0].result.output;
+    finalOutput = synthInputOutcomes[0].result.output;
   } else {
     const synthResp = await invoker.invoke(
       "synthesizer",
-      buildSynthesizerPrompt(taskPrompt, successfulOutcomes),
+      buildSynthesizerPrompt(taskPrompt, synthInputOutcomes),
       { signal },
     );
     allCosts.push(synthResp.costUsd ?? null);
@@ -274,7 +409,7 @@ export async function runOrchestration(
     // returning an empty result. The workers succeeded — only the synth pass
     // failed — so we preserve ok:true and the caller still gets usable content.
     if (!synthResp.ok || !synthResp.output.trim()) {
-      finalOutput = successfulOutcomes
+      finalOutput = synthInputOutcomes
         .map((o) => `## ${o.subtask.id}\n${o.result.output}`)
         .join("\n\n");
     } else {

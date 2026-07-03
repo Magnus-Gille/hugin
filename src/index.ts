@@ -131,10 +131,13 @@ import { IdempotencyIndex } from "./broker/idempotency.js";
 import { BrokerReconciler } from "./broker/reconciliation.js";
 import { OrchWorker } from "./broker/orch-worker.js";
 import { OpenRouterClient } from "./openrouter-client.js";
-import { effectiveOrchestratorConfig } from "./orchestrator/config.js";
+import { effectiveOrchestratorConfig, isVerdictStoreEnabled } from "./orchestrator/config.js";
 import { isSovereignGatewayHost } from "./orchestrator/provider-config.js";
 import { createModelInvoker } from "./orchestrator/model-invoker.js";
 import { runOrchestratorTask } from "./orchestrator/orchestrator-executor.js";
+import { VerdictStore } from "./orchestrator/verdict-store.js";
+import { LedgerClient } from "./orchestrator/ledger-client.js";
+import type { SubtaskOutcome } from "./orchestrator/engine.js";
 
 export type ExfilPolicy = "off" | "warn" | "flag" | "redact";
 
@@ -526,6 +529,24 @@ const munin = createMuninClient();
 const leaseMunin = createMuninClient();
 const cancelWatchMunin = createMuninClient();
 const reaperMunin = createMuninClient();
+// Verdict-store traffic (batched record + confidence-source read, Fix #2c)
+// gets its own dedicated client, same precedent as leaseMunin/cancelWatchMunin
+// above: verdict recording is fire-and-forget background work and must never
+// queue behind — or be queued behind by — task-completion writes on the main
+// client's serial request slot.
+const orchVerdictMunin = createMuninClient();
+
+// Verdict layer (docs/orchestrator-verdict-layer.md, V4/V7). Gated on a
+// single master switch (HUGIN_ORCH_VERDICT_STORE, default "on") — when
+// disabled, neither is constructed, so runOrchestratorTask receives no
+// verdictStore/ledgerClient and both recording and the adaptive confidence
+// gate are inert (the engine falls back to its unchanged default behavior).
+// Hydrates nothing at boot: the store reads its Munin doc lazily per task.
+const verdictLayerEnabled = isVerdictStoreEnabled(process.env);
+const orchVerdictStore = verdictLayerEnabled
+  ? new VerdictStore(orchVerdictMunin, (line) => console.log(`[verdict-store] ${line}`))
+  : undefined;
+const orchLedgerClient = verdictLayerEnabled ? new LedgerClient({ env: process.env }) : undefined;
 
 // --- Task parsing ---
 
@@ -3969,6 +3990,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let logFile: string;
     let resultText: string | null = null;
     let costUsd: number | null = null;
+    // Verdict layer (V8): per-worker outcomes from the orchestrator engine,
+    // carried into the structured result below. Empty for every other runtime.
+    let orchOutcomes: SubtaskOutcome[] = [];
     let ollamaJournalExtras: Record<string, unknown> = {};
     let effectiveExecutor = executorLabel;
     let fallbackTriggered = false;
@@ -4241,6 +4265,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           orchLogStream.write(`${line}\n`);
         },
         signal: orchAbort.signal,
+        verdictStore: orchVerdictStore,
+        ledgerClient: orchLedgerClient,
       },
     );
     orchLogStream.end();
@@ -4249,6 +4275,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     output = orchResult.output;
     resultText = orchResult.resultText;
     costUsd = orchResult.costUsd;
+    orchOutcomes = orchResult.outcomes;
     } else {
       const spawnResult = await spawnRuntime(task, { taskNs, muninClient: munin });
       exitCode = spawnResult.exitCode;
@@ -4711,6 +4738,25 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           }
         : baseRuntimeMetadata;
 
+    // Verdict layer (V8): surface the engine's per-worker outcomes in the
+    // structured result. Additive/optional — undefined for every non-
+    // orchestrator runtime and for orchestrator runs with no recorded
+    // outcomes (e.g. a rejected/aborted/timed-out run — see
+    // OrchestratorExecResult.outcomes' doc).
+    const orchestratorOutcomes =
+      isOrchestrator && orchOutcomes.length > 0
+        ? orchOutcomes.map((o) => ({
+            subtaskId: o.subtask.id,
+            taskType: o.subtask.taskType,
+            provider: o.result.provider,
+            model: o.result.model,
+            ok: o.result.ok,
+            verdictOk: o.verdict !== undefined ? o.verdict.ok : null,
+            costUsd: o.result.costUsd,
+            latencyMs: o.result.latencyMs,
+          }))
+        : undefined;
+
     // Carry the terminal delivery marker (issue #68) into the persistent tag
     // set so downstream consumers + startup reconciliation see a consistent
     // terminal delivery state. Shared by the cancelled and normal branches —
@@ -4856,6 +4902,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
                   })),
                 }
               : undefined,
+            orchestratorOutcomes,
           }),
           taskClassification,
         ),
