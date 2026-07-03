@@ -138,4 +138,67 @@ describe("structured task result schema", () => {
     expect(result.pipeline?.sideEffects).toEqual(["deploy.service"]);
     expect(result.approval?.status).toBe("approved");
   });
+
+  it("accepts orchestratorOutcomes (verdict layer V8) with a mix of ok/verdict states", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "20260703-orch",
+      taskNamespace: "tasks/20260703-orch",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "orchestrator",
+      executor: "orchestrator",
+      resultSource: "orchestrator",
+      exitCode: 0,
+      completedAt: "2026-07-03T10:00:02Z",
+      bodyKind: "response",
+      bodyText: "Final synthesized answer",
+      orchestratorOutcomes: [
+        {
+          subtaskId: "1",
+          taskType: "summarize",
+          provider: "openrouter",
+          model: "deepseek/deepseek-v4-flash",
+          ok: true,
+          verdictOk: true,
+          costUsd: 0.002,
+          latencyMs: 800,
+        },
+        {
+          subtaskId: "2",
+          taskType: "other",
+          provider: "openrouter",
+          model: "deepseek/deepseek-v4-flash",
+          ok: false,
+          verdictOk: null,
+          costUsd: null,
+          latencyMs: 50,
+        },
+      ],
+    });
+
+    expect(result.orchestratorOutcomes).toHaveLength(2);
+    expect(result.orchestratorOutcomes?.[0].verdictOk).toBe(true);
+    expect(result.orchestratorOutcomes?.[1].verdictOk).toBeNull();
+    expect(result.orchestratorOutcomes?.[1].costUsd).toBeNull();
+  });
+
+  it("omits orchestratorOutcomes for non-orchestrator runtimes (additive/optional)", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "20260703-claude",
+      taskNamespace: "tasks/20260703-claude",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "claude",
+      executor: "agent-sdk",
+      resultSource: "agent-sdk",
+      exitCode: 0,
+      completedAt: "2026-07-03T10:00:02Z",
+      bodyKind: "response",
+      bodyText: "answer",
+    });
+
+    expect(result.orchestratorOutcomes).toBeUndefined();
+  });
 });

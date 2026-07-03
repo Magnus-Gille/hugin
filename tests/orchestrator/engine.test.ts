@@ -311,6 +311,186 @@ describe("runOrchestration — cost aggregation (Fix #9)", () => {
   });
 });
 
+describe("runOrchestration — verifier infra failure is UNKNOWN, not PASS (V3)", () => {
+  it("a failed verifier CALL leaves verdict undefined and adds a warning, not a silent PASS", async () => {
+    const PLAN_2 = JSON.stringify({
+      subtasks: [
+        { id: "1", prompt: "Step 1" },
+        { id: "2", prompt: "Step 2" },
+      ],
+    });
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(PLAN_2, 0.01)]],
+      ["worker", [ok("W1", 0.002), ok("W2", 0.003)]],
+      // First verifier call fails outright (infra); second succeeds.
+      ["verifier", [fail("verifier outage"), ok("PASS", 0.001)]],
+      ["synthesizer", [ok("Final", 0.002)]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+
+    const result = await runOrchestration("Verify task", invoker, { verifyWorkers: true });
+
+    expect(result.outcomes[0].verdict).toBeUndefined();
+    expect(result.outcomes[1].verdict!.ok).toBe(true);
+    expect(result.warnings.some((w) => w.toLowerCase().includes("verifier"))).toBe(true);
+  });
+});
+
+describe("runOrchestration — adaptive verify gate (V5)", () => {
+  it("verifyWorkers:false, adaptiveVerify:false → verifier never invoked even with a confidence fn", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), ok("W2"), ok("W3")]],
+      ["synthesizer", [ok("Final")]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+    const confidence = vi.fn(() => "escalate-frontier" as const);
+
+    const result = await runOrchestration("task", invoker, {}, { confidence });
+
+    expect(confidence).not.toHaveBeenCalled();
+    expect(result.outcomes.every((o) => o.verdict === undefined)).toBe(true);
+  });
+
+  it("adaptiveVerify:true, recommendation delegate-local → verifier skipped (trust)", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), ok("W2"), ok("W3")]],
+      ["synthesizer", [ok("Final")]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+    const confidence = vi.fn(() => "delegate-local" as const);
+
+    const result = await runOrchestration(
+      "task",
+      invoker,
+      { adaptiveVerify: true },
+      { confidence },
+    );
+
+    expect(confidence).toHaveBeenCalled();
+    expect(result.outcomes.every((o) => o.verdict === undefined)).toBe(true);
+  });
+
+  it("adaptiveVerify:true, recommendation escalate-frontier → verifier runs", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), ok("W2"), ok("W3")]],
+      ["verifier", [ok("PASS"), ok("PASS"), ok("PASS")]],
+      ["synthesizer", [ok("Final")]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+    const confidence = vi.fn(() => "escalate-frontier" as const);
+
+    const result = await runOrchestration(
+      "task",
+      invoker,
+      { adaptiveVerify: true },
+      { confidence },
+    );
+
+    expect(result.outcomes.every((o) => o.verdict?.ok === true)).toBe(true);
+  });
+
+  it("adaptiveVerify:true, confidence returns null (unknown) → verifier runs", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), ok("W2"), ok("W3")]],
+      ["verifier", [ok("PASS"), ok("PASS"), ok("PASS")]],
+      ["synthesizer", [ok("Final")]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+    const confidence = vi.fn(() => null);
+
+    const result = await runOrchestration(
+      "task",
+      invoker,
+      { adaptiveVerify: true },
+      { confidence },
+    );
+
+    expect(result.outcomes.every((o) => o.verdict?.ok === true)).toBe(true);
+  });
+
+  it("verifyWorkers:true overrides adaptiveVerify — always verifies regardless of confidence", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), ok("W2"), ok("W3")]],
+      ["verifier", [ok("PASS"), ok("PASS"), ok("PASS")]],
+      ["synthesizer", [ok("Final")]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+    const confidence = vi.fn(() => "delegate-local" as const);
+
+    const result = await runOrchestration(
+      "task",
+      invoker,
+      { verifyWorkers: true, adaptiveVerify: true },
+      { confidence },
+    );
+
+    expect(result.outcomes.every((o) => o.verdict?.ok === true)).toBe(true);
+  });
+});
+
+describe("runOrchestration — verified-fail outputs excluded from synthesis (V6)", () => {
+  it("a subtask with an explicit failed verdict is excluded from the synthesizer input + warned", async () => {
+    // 3 subtasks so 2 survivors still trigger a real synth call (a lone
+    // survivor takes the "skip synth to save cost" path instead).
+    let synthPrompt = "";
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("GOOD_OUTPUT_1"), ok("GOOD_OUTPUT_2"), ok("BAD_OUTPUT")]],
+      ["verifier", [ok("PASS"), ok("PASS"), ok("FAIL - wrong")]],
+      ["synthesizer", [ok("Final")]],
+    ]);
+    const invoker = buildMockInvoker(responses, (role, prompt) => {
+      if (role === "synthesizer") synthPrompt = prompt;
+    });
+
+    const result = await runOrchestration("task", invoker, { verifyWorkers: true });
+
+    expect(result.ok).toBe(true);
+    expect(synthPrompt).toContain("GOOD_OUTPUT_1");
+    expect(synthPrompt).toContain("GOOD_OUTPUT_2");
+    expect(synthPrompt).not.toContain("BAD_OUTPUT");
+    expect(result.warnings.some((w) => w.toLowerCase().includes("verif"))).toBe(true);
+  });
+
+  it("ALL successful outputs fail verification → included anyway with a warning (degraded beats none)", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), ok("W2"), ok("W3")]],
+      ["verifier", [ok("FAIL - a"), ok("FAIL - b"), ok("FAIL - c")]],
+      ["synthesizer", [ok("Final synth")]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+
+    const result = await runOrchestration("task", invoker, { verifyWorkers: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.finalOutput).toBe("Final synth");
+    expect(
+      result.warnings.some((w) => w.toLowerCase().includes("failed verification")),
+    ).toBe(true);
+  });
+
+  it("single-strategy plan whose sole outcome fails verification still returns that output (no empty synthesis)", async () => {
+    const invoker = buildMockInvoker(
+      new Map<OrchestratorRole, WorkerResult[]>([
+        ["planner", [ok("not valid json")]],
+        ["worker", [ok("Solo output")]],
+        ["verifier", [ok("FAIL - bad")]],
+      ]),
+    );
+
+    const result = await runOrchestration("task", invoker, { verifyWorkers: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.finalOutput).toBe("Solo output");
+  });
+});
+
 describe("runOrchestration — concurrency cap", () => {
   it("6 subtasks with maxConcurrency:2 — no more than 2 in-flight simultaneously", async () => {
     const PLAN_6 = JSON.stringify({

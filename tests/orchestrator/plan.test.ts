@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parsePlan } from "../../src/orchestrator/plan.js";
+import { parsePlan, TASK_TYPES } from "../../src/orchestrator/plan.js";
 
 const FALLBACK_PROMPT = "Do the whole task yourself.";
 
@@ -73,5 +73,45 @@ describe("parsePlan", () => {
     expect(plan.strategy).toBe("single");
     expect(plan.subtasks).toHaveLength(1);
     expect(plan.subtasks[0].prompt).toBe(FALLBACK_PROMPT);
+  });
+});
+
+describe("parsePlan — taskType taxonomy (V2)", () => {
+  it("TASK_TYPES is the 21-value taxonomy including 'other'", () => {
+    expect(TASK_TYPES).toContain("other");
+    expect(TASK_TYPES).toHaveLength(21);
+    expect([...TASK_TYPES].sort()).toEqual([...TASK_TYPES].slice().sort());
+  });
+
+  it("carries a valid planner-emitted taskType through per subtask", () => {
+    const raw = JSON.stringify({
+      subtasks: [
+        { id: "1", prompt: "Step 1", taskType: "summarize" },
+        { id: "2", prompt: "Step 2", taskType: "code-review" },
+      ],
+    });
+    const plan = parsePlan(raw, { maxSubtasks: 10, fallbackPrompt: FALLBACK_PROMPT });
+    expect(plan.subtasks[0].taskType).toBe("summarize");
+    expect(plan.subtasks[1].taskType).toBe("code-review");
+  });
+
+  it("normalizes an unknown taskType value to 'other'", () => {
+    const raw = JSON.stringify({
+      subtasks: [{ id: "1", prompt: "Step 1", taskType: "not-a-real-type" }],
+    });
+    const plan = parsePlan(raw, { maxSubtasks: 10, fallbackPrompt: FALLBACK_PROMPT });
+    expect(plan.subtasks[0].taskType).toBe("other");
+  });
+
+  it("defaults taskType to 'other' when the planner omits the field", () => {
+    const raw = JSON.stringify({ subtasks: [{ id: "1", prompt: "Step 1" }] });
+    const plan = parsePlan(raw, { maxSubtasks: 10, fallbackPrompt: FALLBACK_PROMPT });
+    expect(plan.subtasks[0].taskType).toBe("other");
+  });
+
+  it("defaults taskType to 'other' on the single-worker fallback plan", () => {
+    const plan = parsePlan("garbage, not json", { maxSubtasks: 10, fallbackPrompt: FALLBACK_PROMPT });
+    expect(plan.strategy).toBe("single");
+    expect(plan.subtasks[0].taskType).toBe("other");
   });
 });

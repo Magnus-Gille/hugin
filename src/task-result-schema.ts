@@ -141,6 +141,25 @@ export const artifactDeliverySchema = z.object({
 });
 export type ArtifactDeliveryStructured = z.infer<typeof artifactDeliverySchema>;
 
+// Optional per-worker outcome record (verdict layer V8, issue #137 follow-up —
+// docs/orchestrator-verdict-layer.md). Additive + optional, same non-breaking
+// rationale as artifactDelivery/skillRoute above: old Zod readers strip it.
+// This is the raw material for a future savings tracker (PR3) and closes the
+// "rich per-worker data computed then discarded" gap in the orchestrator
+// runtime. `verdictOk` is `null` when the subtask was never verified (or the
+// verifier call itself failed — V3), distinct from an explicit pass/fail.
+export const orchestratorOutcomeSchema = z.object({
+  subtaskId: z.string().min(1),
+  taskType: z.string().min(1),
+  provider: z.string().min(1),
+  model: z.string().min(1),
+  ok: z.boolean(),
+  verdictOk: z.boolean().nullable(),
+  costUsd: z.number().nonnegative().nullable(),
+  latencyMs: z.number().int().nonnegative(),
+});
+export type OrchestratorOutcomeRecord = z.infer<typeof orchestratorOutcomeSchema>;
+
 export const structuredTaskResultSchema = z.object({
   schemaVersion: z.literal(1),
   taskId: z.string().min(1),
@@ -173,6 +192,7 @@ export const structuredTaskResultSchema = z.object({
   approval: taskExecutionApprovalMetadataSchema.optional(),
   sensitivity: taskExecutionSensitivitySchema.optional(),
   artifactDelivery: artifactDeliverySchema.optional(),
+  orchestratorOutcomes: z.array(orchestratorOutcomeSchema).optional(),
 });
 export type StructuredTaskResult = z.infer<typeof structuredTaskResultSchema>;
 

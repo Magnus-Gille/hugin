@@ -33,8 +33,12 @@ function parseRoleEnv(
  * Parse a strictly-positive integer environment variable, returning the
  * fallback value when the raw string is absent, empty, not a valid integer,
  * has trailing junk ("2abc"), is zero, or is negative.
+ *
+ * Exported for reuse by other orchestrator env-parsing sites (e.g.
+ * ledger-client.ts's HUGIN_ORCH_LEDGER_TTL_MS) that want the exact same
+ * validation rules rather than a duplicated parser.
  */
-function parseIntEnv(raw: string | undefined, fallback: number): number {
+export function parseIntEnv(raw: string | undefined, fallback: number): number {
   if (!raw || raw.trim() === "") return fallback;
   const trimmed = raw.trim();
   // Reject anything that is not a pure integer string (no trailing junk).
@@ -57,6 +61,7 @@ function parseIntEnv(raw: string | undefined, fallback: number): number {
  *   HUGIN_ORCH_PER_CALL_TIMEOUT_MS — positive integer (ms)
  *   HUGIN_ORCH_MAX_SUBTASKS    — positive integer
  *   HUGIN_ORCH_MAX_TOKENS      — positive integer (completion-token cap)
+ *   HUGIN_ORCH_ADAPTIVE_VERIFY — "on" | "true" → adaptiveVerify = true (V5)
  *
  * Pure function — no side-effects, no I/O.
  */
@@ -147,7 +152,30 @@ export function loadOrchestratorConfig(
     );
   }
 
+  if (env.HUGIN_ORCH_ADAPTIVE_VERIFY) {
+    const v = env.HUGIN_ORCH_ADAPTIVE_VERIFY.trim().toLowerCase();
+    if (v === "on" || v === "true") {
+      cfg.adaptiveVerify = true;
+    }
+  }
+
   return cfg;
+}
+
+/**
+ * Verdict-store master switch (V4, HUGIN_ORCH_VERDICT_STORE). Default "on" —
+ * everything (recording + confidence lookups) is gated behind this single
+ * flag; only the literal value "off" (case-insensitive, trimmed) disables it.
+ *
+ * This is intentionally NOT part of OrchestratorConfig: it governs whether
+ * the store/ledger clients are constructed and wired into deps at all
+ * (an executor/dispatcher concern), not the pure engine's own gate logic
+ * (that's `adaptiveVerify` above).
+ */
+export function isVerdictStoreEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.HUGIN_ORCH_VERDICT_STORE;
+  if (!raw) return true;
+  return raw.trim().toLowerCase() !== "off";
 }
 
 /**

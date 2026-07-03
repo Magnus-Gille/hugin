@@ -3,6 +3,7 @@ import {
   PROVIDER_CONFIG,
   getProviderConfig,
   resolveProviderBaseUrl,
+  resolveGatewayRootUrl,
   isSovereignGatewayHost,
 } from "../../src/orchestrator/provider-config.js";
 
@@ -140,6 +141,53 @@ describe("resolveProviderBaseUrl", () => {
       const result = resolveProviderBaseUrl(homeserver(), { HOMESERVER_GATEWAY_URL: url });
       expect(result.ok, url).toBe(true);
     }
+  });
+});
+
+describe("resolveGatewayRootUrl (V7 — ledger client, no /v1 append)", () => {
+  it("returns the gateway ROOT with no /v1 suffix", () => {
+    const result = resolveGatewayRootUrl({ HOMESERVER_GATEWAY_URL: "http://100.76.72.59:8080" });
+    expect(result).toEqual({ ok: true, baseUrl: "http://100.76.72.59:8080" });
+  });
+
+  it("strips a trailing slash from the gateway root", () => {
+    const result = resolveGatewayRootUrl({ HOMESERVER_GATEWAY_URL: "http://192.168.1.20:8080/" });
+    expect(result).toEqual({ ok: true, baseUrl: "http://192.168.1.20:8080" });
+  });
+
+  it("fails with a 'not set' reason when the env var is unset", () => {
+    const result = resolveGatewayRootUrl({});
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("HOMESERVER_GATEWAY_URL is not set");
+  });
+
+  it("rejects a public host — sovereignty must not hinge on a typo'd env var", () => {
+    const result = resolveGatewayRootUrl({ HOMESERVER_GATEWAY_URL: "https://example.com" });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects URLs with credentials, query, fragment, or a path", () => {
+    for (const url of [
+      "http://user:pw@100.76.72.59:8080",
+      "http://100.76.72.59:8080?x=1",
+      "http://100.76.72.59:8080#frag",
+      "http://100.76.72.59:8080/api",
+    ]) {
+      const result = resolveGatewayRootUrl({ HOMESERVER_GATEWAY_URL: url });
+      expect(result.ok, url).toBe(false);
+    }
+  });
+
+  it("rejects non-http(s) schemes and unparseable URLs", () => {
+    for (const url of ["ftp://100.76.72.59:8080", "not a url"]) {
+      const result = resolveGatewayRootUrl({ HOMESERVER_GATEWAY_URL: url });
+      expect(result.ok, url).toBe(false);
+    }
+  });
+
+  it("accepts a tailnet host", () => {
+    const result = resolveGatewayRootUrl({ HOMESERVER_GATEWAY_URL: "http://m5.tail1234.ts.net:8080" });
+    expect(result.ok).toBe(true);
   });
 });
 

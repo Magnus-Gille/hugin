@@ -2,10 +2,61 @@ import { z } from "zod";
 
 export type OrchestratorRole = "planner" | "worker" | "verifier" | "synthesizer";
 
+/**
+ * Task-type taxonomy (verdict layer, V1 — docs/orchestrator-verdict-layer.md).
+ *
+ * Adopted VERBATIM from the M5 gateway's `/ledger` taxonomy so Hugin's own
+ * cloud-worker verdict store shares the same `(taskType × modelId)` row shape
+ * from day one — a merge, not a migration, when the two stores converge later
+ * (D5's "converge to a single KB later").
+ */
+export const TASK_TYPES = [
+  "classify",
+  "code-edit",
+  "code-implement",
+  "code-review",
+  "data-transform",
+  "extract",
+  "gap-check",
+  "other",
+  "plan-decompose",
+  "qa-factual",
+  "reason-hard",
+  "reason-math",
+  "regex",
+  "research-plan",
+  "rewrite",
+  "source-distill",
+  "sql",
+  "summarize",
+  "synthesis",
+  "translate",
+  "unit-test-gen",
+] as const;
+
+export type TaskType = (typeof TASK_TYPES)[number];
+
+const TASK_TYPE_SET: ReadonlySet<string> = new Set(TASK_TYPES);
+
+/** Fallback task type for a missing/unrecognized planner-emitted value. */
+const DEFAULT_TASK_TYPE: TaskType = "other";
+
+function normalizeTaskType(raw: string | undefined): TaskType {
+  if (raw && TASK_TYPE_SET.has(raw)) return raw as TaskType;
+  return DEFAULT_TASK_TYPE;
+}
+
 export interface SubTask {
   id: string;
   prompt: string;
   rationale?: string;
+  /**
+   * Planner-emitted task-type label (V2), always normalized to a member of
+   * TASK_TYPES by parsePlan — never left undefined, never an unrecognized
+   * string. Defaults to "other" when the planner omits it or emits an
+   * unknown value.
+   */
+  taskType: TaskType;
 }
 
 export interface OrchestrationPlan {
@@ -21,6 +72,10 @@ const SubTaskSchema = z.object({
   id: z.string(),
   prompt: z.string(),
   rationale: z.string().optional(),
+  // Intentionally z.string() (not z.enum(TASK_TYPES)): an unrecognized value
+  // must normalize to "other" for THAT subtask, not fail validation for the
+  // whole plan.
+  taskType: z.string().optional(),
 });
 
 const PlanSchema = z.object({
@@ -45,7 +100,7 @@ export function parsePlan(
 ): OrchestrationPlan {
   const fallback: OrchestrationPlan = {
     strategy: "single",
-    subtasks: [{ id: "1", prompt: opts.fallbackPrompt }],
+    subtasks: [{ id: "1", prompt: opts.fallbackPrompt, taskType: DEFAULT_TASK_TYPE }],
   };
 
   if (!raw || !raw.trim()) return fallback;
@@ -91,8 +146,15 @@ export function parsePlan(
 
   // Cap to maxSubtasks (keep first N). If the cap reduces the list to empty
   // (e.g. maxSubtasks < 1), fall back to the single-worker plan.
-  const subtasks = validated.data.subtasks.slice(0, opts.maxSubtasks);
-  if (subtasks.length === 0) return fallback;
+  const capped = validated.data.subtasks.slice(0, opts.maxSubtasks);
+  if (capped.length === 0) return fallback;
+
+  const subtasks: SubTask[] = capped.map((s) => ({
+    id: s.id,
+    prompt: s.prompt,
+    rationale: s.rationale,
+    taskType: normalizeTaskType(s.taskType),
+  }));
 
   return { strategy: "fanout", subtasks };
 }

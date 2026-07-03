@@ -9,6 +9,8 @@ import {
 } from "../../src/orchestrator/engine.js";
 import type { ModelInvoker } from "../../src/orchestrator/model-invoker.js";
 import type { WorkerResult } from "../../src/orchestrator/worker-executor.js";
+import type { VerdictStoreLike } from "../../src/orchestrator/verdict-store.js";
+import type { LedgerClientLike } from "../../src/orchestrator/ledger-client.js";
 
 // ---------------------------------------------------------------------------
 // Mock invoker helpers
@@ -346,5 +348,321 @@ describe("runOrchestratorTask", () => {
 
     expect(result.exitCode).toBe(0);
     expect(plannerPrompt).toContain("PRIVATE_REF_CONTENT");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Verdict layer (V3/V4/V5/V8): outcomes, recording, adaptive confidence
+// ---------------------------------------------------------------------------
+
+function makeWorkerResult(overrides: Partial<WorkerResult> = {}): WorkerResult {
+  return {
+    ok: true,
+    output: "worker output",
+    provider: "openrouter",
+    model: "deepseek/deepseek-v4-flash",
+    inputTokens: 10,
+    outputTokens: 10,
+    costUsd: 0.0001,
+    latencyMs: 42,
+    ...overrides,
+  };
+}
+
+function makeVerdictStoreMock(): VerdictStoreLike & {
+  record: ReturnType<typeof vi.fn>;
+  loadRecommendations: ReturnType<typeof vi.fn>;
+} {
+  return {
+    record: vi.fn(async () => {}),
+    loadRecommendations: vi.fn(async () => new Map()),
+  };
+}
+
+function makeLedgerClientMock(): LedgerClientLike & { getLedger: ReturnType<typeof vi.fn> } {
+  return {
+    getLedger: vi.fn(async () => null),
+  };
+}
+
+/** A single-subtask plan with an explicit taskType, so verdict keys are predictable. */
+function singleSubtaskPlan(taskType: string): string {
+  return JSON.stringify({
+    subtasks: [{ id: "1", prompt: "Do it", taskType }],
+  });
+}
+
+describe("runOrchestratorTask — summary worker lines gain model + verdict marker (V8)", () => {
+  it("includes the worker's model in each subtask outcome line", async () => {
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        return makeWorkerResult({ output: "result", model: "deepseek/deepseek-v4-flash" });
+      }),
+    };
+
+    const result = await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, { invoker });
+
+    expect(result.output).toContain("deepseek/deepseek-v4-flash");
+  });
+
+  it("marks a subtask outcome with an explicit failed verdict with a ✗ marker", async () => {
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        if (role === "verifier") return makeWorkerResult({ output: "FAIL - wrong" });
+        return makeWorkerResult({ output: "result" });
+      }),
+    };
+    const config: OrchestratorConfig = { ...DEFAULT_ORCHESTRATOR_CONFIG, verifyWorkers: true };
+
+    const result = await runOrchestratorTask(defaultInput, config, { invoker });
+
+    expect(result.output).toContain("✗");
+  });
+
+  it("does not show the verdict marker for a subtask that passed verification", async () => {
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        if (role === "verifier") return makeWorkerResult({ output: "PASS" });
+        return makeWorkerResult({ output: "result" });
+      }),
+    };
+    const config: OrchestratorConfig = { ...DEFAULT_ORCHESTRATOR_CONFIG, verifyWorkers: true };
+
+    const result = await runOrchestratorTask(defaultInput, config, { invoker });
+
+    expect(result.output).not.toContain("✗");
+  });
+});
+
+describe("runOrchestratorTask — outcomes field (V8)", () => {
+  it("carries the engine's outcomes through on a successful run", async () => {
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") {
+          return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        }
+        return makeWorkerResult({ output: "Great result" });
+      }),
+    };
+
+    const result = await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, {
+      invoker,
+    });
+
+    expect(result.outcomes).toHaveLength(1);
+    expect(result.outcomes[0].subtask.taskType).toBe("summarize");
+    expect(result.outcomes[0].result.ok).toBe(true);
+  });
+
+  it("outcomes is an empty array when the sensitivity guard rejects the task", async () => {
+    const invoker: ModelInvoker = { invoke: vi.fn() };
+    const result = await runOrchestratorTask(
+      { ...defaultInput, sensitivity: "private" },
+      DEFAULT_ORCHESTRATOR_CONFIG,
+      { invoker },
+    );
+    expect(result.outcomes).toEqual([]);
+  });
+
+  it("outcomes is an empty array on timeout", async () => {
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async () => new Promise(() => {})),
+    };
+    const result = await runOrchestratorTask(
+      { ...defaultInput, timeoutMs: 30 },
+      DEFAULT_ORCHESTRATOR_CONFIG,
+      { invoker },
+    );
+    expect(result.outcomes).toEqual([]);
+  });
+});
+
+describe("runOrchestratorTask — verdict recording (V3/V4)", () => {
+  it("records a 'pass' event for a successful, unverified subtask", async () => {
+    const verdictStore = makeVerdictStoreMock();
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        return makeWorkerResult({ output: "result", model: "deepseek/deepseek-v4-flash", latencyMs: 77 });
+      }),
+    };
+
+    await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, {
+      invoker,
+      verdictStore,
+    });
+
+    expect(verdictStore.record).toHaveBeenCalledTimes(1);
+    expect(verdictStore.record).toHaveBeenCalledWith(
+      "deepseek/deepseek-v4-flash",
+      "summarize",
+      "pass",
+      77,
+    );
+  });
+
+  it("records an 'error' event for a failed (infra) worker outcome", async () => {
+    const verdictStore = makeVerdictStoreMock();
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("code-review") });
+        return {
+          ok: false,
+          output: "",
+          provider: "openrouter",
+          model: "deepseek/deepseek-v4-flash",
+          inputTokens: null,
+          outputTokens: null,
+          costUsd: null,
+          latencyMs: 30,
+          error: "boom",
+        };
+      }),
+    };
+
+    await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, {
+      invoker,
+      verdictStore,
+    });
+
+    expect(verdictStore.record).toHaveBeenCalledWith(
+      "deepseek/deepseek-v4-flash",
+      "code-review",
+      "error",
+      30,
+    );
+  });
+
+  it("records a 'fail' event when the verifier gives an explicit failed verdict", async () => {
+    const verdictStore = makeVerdictStoreMock();
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("qa-factual") });
+        if (role === "verifier") return makeWorkerResult({ output: "FAIL - wrong answer" });
+        return makeWorkerResult({ output: "result", latencyMs: 60 });
+      }),
+    };
+    const config: OrchestratorConfig = { ...DEFAULT_ORCHESTRATOR_CONFIG, verifyWorkers: true };
+
+    await runOrchestratorTask(defaultInput, config, { invoker, verdictStore });
+
+    expect(verdictStore.record).toHaveBeenCalledWith(
+      "deepseek/deepseek-v4-flash",
+      "qa-factual",
+      "fail",
+      60,
+    );
+  });
+
+  it("does not attempt to record when deps.verdictStore is absent", async () => {
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("other") });
+        return makeWorkerResult({ output: "result" });
+      }),
+    };
+    // Should simply not throw / not attempt anything verdict-store related.
+    const result = await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, { invoker });
+    expect(result.exitCode).toBe(0);
+  });
+});
+
+describe("runOrchestratorTask — adaptive confidence source selection (V5)", () => {
+  it("consults the verdict store (not the ledger) when the worker provider is NOT homeserver", async () => {
+    const verdictStore = makeVerdictStoreMock();
+    const ledgerClient = makeLedgerClientMock();
+    verdictStore.loadRecommendations.mockResolvedValue(
+      new Map([["deepseek/deepseek-v4-flash|summarize", "delegate-local"]]),
+    );
+
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        return makeWorkerResult({ output: "result" });
+      }),
+    };
+    const config: OrchestratorConfig = { ...DEFAULT_ORCHESTRATOR_CONFIG, adaptiveVerify: true };
+
+    await runOrchestratorTask(defaultInput, config, { invoker, verdictStore, ledgerClient });
+
+    expect(verdictStore.loadRecommendations).toHaveBeenCalledTimes(1);
+    expect(ledgerClient.getLedger).not.toHaveBeenCalled();
+    // recommendation was delegate-local → verifier is skipped (trusted).
+    expect(invoker.invoke).not.toHaveBeenCalledWith(
+      "verifier",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("consults the ledger (not the verdict store) when the worker provider is homeserver", async () => {
+    const verdictStore = makeVerdictStoreMock();
+    const ledgerClient = makeLedgerClientMock();
+    ledgerClient.getLedger.mockResolvedValue({
+      report: [
+        {
+          taskType: "summarize",
+          modelId: "qwen3-30b-instruct",
+          verdict: "viable",
+          attempts: 10,
+          passes: 9,
+          fails: 1,
+          errors: 0,
+          successRate: 0.9,
+          frozen: false,
+          recommendation: "delegate-local",
+        },
+      ],
+    });
+
+    const homeserverConfig: OrchestratorConfig = {
+      ...DEFAULT_ORCHESTRATOR_CONFIG,
+      adaptiveVerify: true,
+      roles: {
+        ...DEFAULT_ORCHESTRATOR_CONFIG.roles,
+        worker: { provider: "homeserver", model: "qwen3-30b-instruct" },
+      },
+    };
+
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        return makeWorkerResult({ output: "result", provider: "homeserver", model: "qwen3-30b-instruct" });
+      }),
+    };
+
+    await runOrchestratorTask(defaultInput, homeserverConfig, {
+      invoker,
+      verdictStore,
+      ledgerClient,
+    });
+
+    expect(ledgerClient.getLedger).toHaveBeenCalledTimes(1);
+    expect(verdictStore.loadRecommendations).not.toHaveBeenCalled();
+  });
+
+  it("does not consult the store/ledger for confidence when adaptiveVerify is off (recording still happens)", async () => {
+    const verdictStore = makeVerdictStoreMock();
+    const ledgerClient = makeLedgerClientMock();
+
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        return makeWorkerResult({ output: "result" });
+      }),
+    };
+
+    await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, {
+      invoker,
+      verdictStore,
+      ledgerClient,
+    });
+
+    expect(verdictStore.loadRecommendations).not.toHaveBeenCalled();
+    expect(ledgerClient.getLedger).not.toHaveBeenCalled();
+    expect(verdictStore.record).toHaveBeenCalledTimes(1);
   });
 });
