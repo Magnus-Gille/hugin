@@ -2,6 +2,7 @@ import {
   DEFAULT_ORCHESTRATOR_CONFIG,
   type OrchestratorConfig,
 } from "./engine.js";
+import { CLAUDE_BASELINE_MODEL_ID, getModelPrice } from "../model-pricing.js";
 
 /**
  * Parse a role model specifier from an environment variable or task field.
@@ -176,6 +177,42 @@ export function isVerdictStoreEnabled(env: NodeJS.ProcessEnv): boolean {
   const raw = env.HUGIN_ORCH_VERDICT_STORE;
   if (!raw) return true;
   return raw.trim().toLowerCase() !== "off";
+}
+
+/**
+ * Savings-tracker master switch (PR3, S5, HUGIN_ORCH_SAVINGS). Default "on" —
+ * both recording (savings-store.ts) and per-task surfacing (the structured
+ * result's `savings` field) are gated behind this single flag; only the
+ * literal value "off" (case-insensitive, trimmed) disables it. Mirrors
+ * isVerdictStoreEnabled's precedent exactly.
+ */
+export function isSavingsEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.HUGIN_ORCH_SAVINGS;
+  if (!raw) return true;
+  return raw.trim().toLowerCase() !== "off";
+}
+
+/**
+ * Resolve the savings-tracker's counterfactual baseline model id (PR3, S5,
+ * HUGIN_SAVINGS_BASELINE_MODEL). Defaults to CLAUDE_BASELINE_MODEL_ID. The
+ * resolved id MUST exist in MODEL_PRICING — if a configured override isn't
+ * priced, savings are disabled for the run (returns `null`) rather than
+ * silently guessing at a price; the caller should log this ONCE via `onLog`,
+ * not per model call.
+ */
+export function resolveSavingsBaselineModel(
+  env: NodeJS.ProcessEnv,
+  onLog?: (line: string) => void,
+): string | null {
+  const raw = env.HUGIN_SAVINGS_BASELINE_MODEL?.trim();
+  const candidate = raw && raw.length > 0 ? raw : CLAUDE_BASELINE_MODEL_ID;
+  if (!getModelPrice(candidate)) {
+    onLog?.(
+      `[orchestrator] savings baseline model "${candidate}" is not in MODEL_PRICING — savings disabled for this run`,
+    );
+    return null;
+  }
+  return candidate;
 }
 
 /**

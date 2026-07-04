@@ -84,14 +84,45 @@ export interface SubtaskOutcome {
   verdict?: { ok: boolean; notes?: string };
 }
 
+/**
+ * A per-call ledger entry (savings tracker S1, docs/orchestrator-savings-tracker.md)
+ * recorded for EVERY model invocation the engine makes — planner, each
+ * worker, each verifier, and the synthesizer — regardless of success. This is
+ * pure bookkeeping of data the engine already holds (WorkerResult), pushed at
+ * every existing `allCosts.push(...)` site. Savings are computed downstream
+ * PER CALL from this ledger, never from `totalCostUsd` (which is
+ * all-or-nothing-null — see sumCosts below).
+ */
+export interface ModelCallRecord {
+  role: OrchestratorRole;
+  provider: string;
+  model: string;
+  ok: boolean;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  latencyMs: number;
+}
+
 export interface OrchestrationResult {
   ok: boolean;
   finalOutput: string;
   plan: OrchestrationPlan;
   outcomes: SubtaskOutcome[];
-  /** Sum of known costUsd across ALL invocations; null only if NO call had a known cost. */
+  /**
+   * Sum across ALL invocations; null when there are no calls or ANY
+   * invocation has unknown cost (all-or-nothing — see sumCosts). Savings are
+   * therefore computed per call from `modelCalls`, never from this total.
+   */
   totalCostUsd: number | null;
   totalLatencyMs: number;
+  /**
+   * Per-call ledger (savings tracker S1) — one entry per model invocation
+   * (planner/worker/verifier/synthesizer), in the order calls were made.
+   * Populated even on the early "all workers failed" return (whatever calls
+   * were made up to that point are still recorded).
+   */
+  modelCalls: ModelCallRecord[];
   /**
    * Non-fatal warnings surfaced to the caller (issue #112) — e.g. a planner,
    * worker, or synthesizer response that hit the completion-token cap
@@ -99,6 +130,20 @@ export interface OrchestrationResult {
    */
   warnings: string[];
   error?: string;
+}
+
+/** Build a ModelCallRecord from a role and the WorkerResult it produced. */
+function toModelCallRecord(role: OrchestratorRole, result: WorkerResult): ModelCallRecord {
+  return {
+    role,
+    provider: result.provider,
+    model: result.model,
+    ok: result.ok,
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    costUsd: result.costUsd,
+    latencyMs: result.latencyMs,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +297,7 @@ export async function runOrchestration(
   const cfg: OrchestratorConfig = { ...DEFAULT_ORCHESTRATOR_CONFIG, ...config };
   const signal = opts?.signal;
   const allCosts: (number | null)[] = [];
+  const modelCalls: ModelCallRecord[] = [];
   const warnings: string[] = [];
   let totalLatencyMs = 0;
 
@@ -260,6 +306,7 @@ export async function runOrchestration(
   // -------------------------------------------------------------------------
   const planResp = await invoker.invoke("planner", buildPlannerPrompt(taskPrompt), { signal });
   allCosts.push(planResp.costUsd ?? null);
+  modelCalls.push(toModelCallRecord("planner", planResp));
   totalLatencyMs += planResp.latencyMs;
   if (planResp.ok && planResp.truncated) {
     warnings.push(
@@ -283,6 +330,7 @@ export async function runOrchestration(
         signal,
       });
       allCosts.push(result.costUsd ?? null);
+      modelCalls.push(toModelCallRecord("worker", result));
       totalLatencyMs += result.latencyMs;
       if (result.ok && result.truncated) {
         warnings.push(
@@ -312,6 +360,7 @@ export async function runOrchestration(
       { signal },
     );
     allCosts.push(verifyResp.costUsd ?? null);
+    modelCalls.push(toModelCallRecord("verifier", verifyResp));
     totalLatencyMs += verifyResp.latencyMs;
     if (verifyResp.ok && verifyResp.truncated) {
       warnings.push(
@@ -358,6 +407,7 @@ export async function runOrchestration(
       outcomes,
       totalCostUsd: sumCosts(allCosts),
       totalLatencyMs,
+      modelCalls,
       warnings,
       error: `All workers failed: ${errors}`,
     };
@@ -397,6 +447,7 @@ export async function runOrchestration(
       { signal },
     );
     allCosts.push(synthResp.costUsd ?? null);
+    modelCalls.push(toModelCallRecord("synthesizer", synthResp));
     totalLatencyMs += synthResp.latencyMs;
     if (synthResp.ok && synthResp.truncated) {
       warnings.push(
@@ -424,6 +475,7 @@ export async function runOrchestration(
     outcomes,
     totalCostUsd: sumCosts(allCosts),
     totalLatencyMs,
+    modelCalls,
     warnings,
   };
 }

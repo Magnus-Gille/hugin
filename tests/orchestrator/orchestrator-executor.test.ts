@@ -11,6 +11,7 @@ import type { ModelInvoker } from "../../src/orchestrator/model-invoker.js";
 import type { WorkerResult } from "../../src/orchestrator/worker-executor.js";
 import type { VerdictStoreLike } from "../../src/orchestrator/verdict-store.js";
 import type { LedgerClientLike } from "../../src/orchestrator/ledger-client.js";
+import type { SavingsStoreLike } from "../../src/orchestrator/savings-store.js";
 
 // ---------------------------------------------------------------------------
 // Mock invoker helpers
@@ -964,4 +965,138 @@ describe("runOrchestratorTask — confidence-source load is bounded by a deadlin
       vi.useRealTimers();
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// Savings tracker (PR3, docs/orchestrator-savings-tracker.md S1-S5)
+// ---------------------------------------------------------------------------
+
+function makeSavingsStoreMock(): SavingsStoreLike & { record: ReturnType<typeof vi.fn> } {
+  return { record: vi.fn(async () => {}) };
+}
+
+describe("runOrchestratorTask — savings computation (S4)", () => {
+  it("computes savings on a successful run and includes it in the result", async () => {
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        return makeWorkerResult({ output: "result" });
+      }),
+    };
+
+    const result = await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, { invoker });
+
+    expect(result.savings).not.toBeNull();
+    expect(result.savings!.baselineModelId).toBeTruthy();
+    expect(result.output).toContain("Savings vs");
+  });
+
+  it("does not compute savings when HUGIN_ORCH_SAVINGS=off", async () => {
+    vi.stubEnv("HUGIN_ORCH_SAVINGS", "off");
+    try {
+      const invoker: ModelInvoker = {
+        invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+          if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+          return makeWorkerResult({ output: "result" });
+        }),
+      };
+
+      const result = await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, { invoker });
+
+      expect(result.savings).toBeNull();
+      expect(result.output).not.toContain("Savings vs");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("savings is null (not computed) when the sensitivity guard rejects the task", async () => {
+    const invoker: ModelInvoker = { invoke: vi.fn() };
+    const result = await runOrchestratorTask(
+      { ...defaultInput, sensitivity: "private" },
+      DEFAULT_ORCHESTRATOR_CONFIG,
+      { invoker },
+    );
+    expect(result.savings).toBeNull();
+  });
+
+  it("savings is null on timeout", async () => {
+    const invoker: ModelInvoker = { invoke: vi.fn(async () => new Promise(() => {})) };
+    const result = await runOrchestratorTask(
+      { ...defaultInput, timeoutMs: 30 },
+      DEFAULT_ORCHESTRATOR_CONFIG,
+      { invoker },
+    );
+    expect(result.savings).toBeNull();
+  });
+
+  it("disables savings for the run and logs once when HUGIN_SAVINGS_BASELINE_MODEL is not in MODEL_PRICING", async () => {
+    vi.stubEnv("HUGIN_SAVINGS_BASELINE_MODEL", "not-a-real-model");
+    try {
+      const logLines: string[] = [];
+      const invoker: ModelInvoker = {
+        invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+          if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+          return makeWorkerResult({ output: "result" });
+        }),
+      };
+
+      const result = await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, {
+        invoker,
+        onLog: (line) => logLines.push(line),
+      });
+
+      expect(result.savings).toBeNull();
+      expect(logLines.some((l) => l.includes("not-a-real-model"))).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("runOrchestratorTask — savings recording is fire-and-forget (S3/S4)", () => {
+  it("records the computed savings via deps.savingsStore.record when present", async () => {
+    const savingsStore = makeSavingsStoreMock();
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        return makeWorkerResult({ output: "result" });
+      }),
+    };
+
+    await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, { invoker, savingsStore });
+
+    expect(savingsStore.record).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not attempt to record when deps.savingsStore is absent", async () => {
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        return makeWorkerResult({ output: "result" });
+      }),
+    };
+
+    const result = await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, { invoker });
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("a never-resolving savingsStore.record does not block runOrchestratorTask's return", async () => {
+    const savingsStore: SavingsStoreLike = {
+      record: vi.fn(() => new Promise<void>(() => { /* never resolves */ })),
+    };
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        return makeWorkerResult({ output: "result" });
+      }),
+    };
+
+    const result = await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, {
+      invoker,
+      savingsStore,
+    });
+
+    expect(result.exitCode).toBe(0);
+  }, 2000);
 });

@@ -977,3 +977,28 @@ describe("DEFAULT_MAX_OUTPUT_CHARS", () => {
     expect(DEFAULT_MAX_OUTPUT_CHARS).toBe(50_000);
   });
 });
+
+describe("DirectModelExecutor — provider token-count sanitation (review fix)", () => {
+  it("drops fractional/negative usage counts to null instead of trusting them", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({
+        model: "some/model",
+        choices: [{ message: { content: "hi" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1234.5, completion_tokens: -3 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )));
+
+    const result = await new DirectModelExecutor().run({
+      provider: "openrouter",
+      model: "some/model",
+      prompt: "hi",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.inputTokens).toBeNull();
+    expect(result.outputTokens).toBeNull();
+  });
+});

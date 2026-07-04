@@ -144,10 +144,16 @@ export type ArtifactDeliveryStructured = z.infer<typeof artifactDeliverySchema>;
 // Optional per-worker outcome record (verdict layer V8, issue #137 follow-up —
 // docs/orchestrator-verdict-layer.md). Additive + optional, same non-breaking
 // rationale as artifactDelivery/skillRoute above: old Zod readers strip it.
-// This is the raw material for a future savings tracker (PR3) and closes the
-// "rich per-worker data computed then discarded" gap in the orchestrator
-// runtime. `verdictOk` is `null` when the subtask was never verified (or the
-// verifier call itself failed — V3), distinct from an explicit pass/fail.
+// This is the raw material for the savings tracker (PR3, docs/orchestrator-
+// savings-tracker.md S4) and closes the "rich per-worker data computed then
+// discarded" gap in the orchestrator runtime. `verdictOk` is `null` when the
+// subtask was never verified (or the verifier call itself failed — V3),
+// distinct from an explicit pass/fail. `inputTokens`/`outputTokens` (PR3 S4)
+// are additive + optional/nullable on top of the V8 shape — they close the
+// gap that motivated the savings tracker's per-call ledger (engine.ts
+// ModelCallRecord) and make outcomes self-sufficient for offline analysis;
+// `null`/absent when the underlying WorkerResult didn't report token counts
+// (e.g. a failed call).
 export const orchestratorOutcomeSchema = z.object({
   subtaskId: z.string().min(1),
   taskType: z.string().min(1),
@@ -157,8 +163,30 @@ export const orchestratorOutcomeSchema = z.object({
   verdictOk: z.boolean().nullable(),
   costUsd: z.number().nonnegative().nullable(),
   latencyMs: z.number().int().nonnegative(),
+  inputTokens: z.number().int().nonnegative().nullable().optional(),
+  outputTokens: z.number().int().nonnegative().nullable().optional(),
 });
 export type OrchestratorOutcomeRecord = z.infer<typeof orchestratorOutcomeSchema>;
+
+// Optional per-task savings summary (PR3, S4 — docs/orchestrator-savings-
+// tracker.md). Additive + optional, same non-breaking rationale as
+// artifactDelivery/orchestratorOutcomes above: old Zod readers strip it. This
+// is the per-task view of savings vs the all-Claude baseline, computed by
+// src/orchestrator/savings.ts#computeSavings from the engine's per-call
+// ledger — NEVER from totalCostUsd (all-or-nothing-null). The aggregate
+// (cross-task) counters live separately in the tasks/_savings Munin doc
+// (src/orchestrator/savings-store.ts); this field carries only the single
+// run's numbers, mirroring the per-task/aggregate split used by the verdict
+// layer (orchestratorOutcomes vs tasks/_verdicts).
+export const savingsSummarySchema = z.object({
+  baselineModelId: z.string().min(1),
+  coveredCalls: z.number().int().nonnegative(),
+  uncoveredCalls: z.number().int().nonnegative(),
+  actualCostUsd: z.number().nonnegative(),
+  baselineCostUsd: z.number().nonnegative(),
+  savedUsd: z.number(),
+});
+export type SavingsSummaryRecord = z.infer<typeof savingsSummarySchema>;
 
 export const structuredTaskResultSchema = z.object({
   schemaVersion: z.literal(1),
@@ -193,6 +221,7 @@ export const structuredTaskResultSchema = z.object({
   sensitivity: taskExecutionSensitivitySchema.optional(),
   artifactDelivery: artifactDeliverySchema.optional(),
   orchestratorOutcomes: z.array(orchestratorOutcomeSchema).optional(),
+  savings: savingsSummarySchema.optional(),
 });
 export type StructuredTaskResult = z.infer<typeof structuredTaskResultSchema>;
 
