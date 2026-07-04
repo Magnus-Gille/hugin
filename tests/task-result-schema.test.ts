@@ -201,4 +201,131 @@ describe("structured task result schema", () => {
 
     expect(result.orchestratorOutcomes).toBeUndefined();
   });
+
+  it("orchestratorOutcomes rows accept optional inputTokens/outputTokens (savings tracker S4)", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "20260704-orch-tokens",
+      taskNamespace: "tasks/20260704-orch-tokens",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "orchestrator",
+      executor: "orchestrator",
+      resultSource: "orchestrator",
+      exitCode: 0,
+      completedAt: "2026-07-04T10:00:02Z",
+      bodyKind: "response",
+      bodyText: "Final synthesized answer",
+      orchestratorOutcomes: [
+        {
+          subtaskId: "1",
+          taskType: "summarize",
+          provider: "openrouter",
+          model: "deepseek/deepseek-v4-flash",
+          ok: true,
+          verdictOk: true,
+          costUsd: 0.002,
+          latencyMs: 800,
+          inputTokens: 1000,
+          outputTokens: 500,
+        },
+        {
+          subtaskId: "2",
+          taskType: "other",
+          provider: "openrouter",
+          model: "deepseek/deepseek-v4-flash",
+          ok: false,
+          verdictOk: null,
+          costUsd: null,
+          latencyMs: 50,
+          inputTokens: null,
+          outputTokens: null,
+        },
+      ],
+    });
+
+    expect(result.orchestratorOutcomes?.[0].inputTokens).toBe(1000);
+    expect(result.orchestratorOutcomes?.[0].outputTokens).toBe(500);
+    expect(result.orchestratorOutcomes?.[1].inputTokens).toBeNull();
+  });
+
+  it("orchestratorOutcomes rows still accept omitted inputTokens/outputTokens (backward compatible)", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "20260704-orch-no-tokens",
+      taskNamespace: "tasks/20260704-orch-no-tokens",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "orchestrator",
+      executor: "orchestrator",
+      resultSource: "orchestrator",
+      exitCode: 0,
+      completedAt: "2026-07-04T10:00:02Z",
+      bodyKind: "response",
+      bodyText: "answer",
+      orchestratorOutcomes: [
+        {
+          subtaskId: "1",
+          taskType: "summarize",
+          provider: "openrouter",
+          model: "deepseek/deepseek-v4-flash",
+          ok: true,
+          verdictOk: true,
+          costUsd: 0.002,
+          latencyMs: 800,
+        },
+      ],
+    });
+
+    expect(result.orchestratorOutcomes?.[0].inputTokens).toBeUndefined();
+  });
+});
+
+describe("structured task result schema — savings (PR3, S4)", () => {
+  it("accepts an optional savings object", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "20260704-savings",
+      taskNamespace: "tasks/20260704-savings",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "orchestrator",
+      executor: "orchestrator",
+      resultSource: "orchestrator",
+      exitCode: 0,
+      completedAt: "2026-07-04T10:00:02Z",
+      bodyKind: "response",
+      bodyText: "answer",
+      savings: {
+        baselineModelId: "claude-sonnet-4-6",
+        coveredCalls: 3,
+        uncoveredCalls: 1,
+        actualCostUsd: 0.05,
+        baselineCostUsd: 2.5,
+        savedUsd: 2.45,
+      },
+    });
+
+    expect(result.savings?.baselineModelId).toBe("claude-sonnet-4-6");
+    expect(result.savings?.savedUsd).toBeCloseTo(2.45, 6);
+  });
+
+  it("omits savings when not computed (additive/optional)", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "20260704-no-savings",
+      taskNamespace: "tasks/20260704-no-savings",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "claude",
+      executor: "agent-sdk",
+      resultSource: "agent-sdk",
+      exitCode: 0,
+      completedAt: "2026-07-04T10:00:02Z",
+      bodyKind: "response",
+      bodyText: "answer",
+    });
+
+    expect(result.savings).toBeUndefined();
+  });
 });

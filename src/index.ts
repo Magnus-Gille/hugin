@@ -131,13 +131,19 @@ import { IdempotencyIndex } from "./broker/idempotency.js";
 import { BrokerReconciler } from "./broker/reconciliation.js";
 import { OrchWorker } from "./broker/orch-worker.js";
 import { OpenRouterClient } from "./openrouter-client.js";
-import { effectiveOrchestratorConfig, isVerdictStoreEnabled } from "./orchestrator/config.js";
+import {
+  effectiveOrchestratorConfig,
+  isVerdictStoreEnabled,
+  isSavingsEnabled,
+} from "./orchestrator/config.js";
 import { isSovereignGatewayHost } from "./orchestrator/provider-config.js";
 import { createModelInvoker } from "./orchestrator/model-invoker.js";
 import { runOrchestratorTask } from "./orchestrator/orchestrator-executor.js";
 import { VerdictStore } from "./orchestrator/verdict-store.js";
 import { LedgerClient } from "./orchestrator/ledger-client.js";
+import { SavingsStore } from "./orchestrator/savings-store.js";
 import type { SubtaskOutcome } from "./orchestrator/engine.js";
+import type { SavingsSummary } from "./orchestrator/savings.js";
 
 export type ExfilPolicy = "off" | "warn" | "flag" | "redact";
 
@@ -552,6 +558,16 @@ const orchVerdictStore = verdictLayerEnabled
   ? new VerdictStore(orchVerdictMunin, (line) => console.log(`[verdict-store] ${line}`))
   : undefined;
 const orchLedgerClient = verdictLayerEnabled ? new LedgerClient({ env: process.env }) : undefined;
+
+// Savings tracker (PR3, docs/orchestrator-savings-tracker.md S3/S5). Gated on
+// HUGIN_ORCH_SAVINGS (default "on"). Shares the SAME dedicated background
+// Munin client as the verdict store above (orchVerdictMunin) — both are
+// low-stakes background writers; the point of that client is isolation from
+// the task path, not one-client-per-store.
+const savingsLayerEnabled = isSavingsEnabled(process.env);
+const orchSavingsStore = savingsLayerEnabled
+  ? new SavingsStore(orchVerdictMunin, (line) => console.log(`[savings-store] ${line}`))
+  : undefined;
 
 // --- Task parsing ---
 
@@ -3974,6 +3990,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // Verdict layer (V8): per-worker outcomes from the orchestrator engine,
     // carried into the structured result below. Empty for every other runtime.
     let orchOutcomes: SubtaskOutcome[] = [];
+    // Savings tracker (PR3, S4): per-task savings summary from the orchestrator
+    // engine, carried into the structured result below. Null for every other
+    // runtime and whenever savings weren't computed for this run.
+    let orchSavings: SavingsSummary | null = null;
     let ollamaJournalExtras: Record<string, unknown> = {};
     let effectiveExecutor = executorLabel;
     let fallbackTriggered = false;
@@ -4248,6 +4268,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         signal: orchAbort.signal,
         verdictStore: orchVerdictStore,
         ledgerClient: orchLedgerClient,
+        savingsStore: orchSavingsStore,
       },
     );
     orchLogStream.end();
@@ -4257,6 +4278,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     resultText = orchResult.resultText;
     costUsd = orchResult.costUsd;
     orchOutcomes = orchResult.outcomes;
+    orchSavings = orchResult.savings;
     } else {
       const spawnResult = await spawnRuntime(task, { taskNs, muninClient: munin });
       exitCode = spawnResult.exitCode;
@@ -4735,7 +4757,38 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             verdictOk: o.verdict !== undefined ? o.verdict.ok : null,
             costUsd: o.result.costUsd,
             latencyMs: o.result.latencyMs,
+            // Savings tracker (PR3, S4): thread the per-call token counts
+            // already present on WorkerResult through into the structured
+            // result. Coerced to the schema's nonnegative-integer contract —
+            // a non-integer provider value must degrade to null, not fail
+            // the whole result-structured write after a successful run.
+            inputTokens:
+              Number.isInteger(o.result.inputTokens) && (o.result.inputTokens as number) >= 0
+                ? o.result.inputTokens
+                : null,
+            outputTokens:
+              Number.isInteger(o.result.outputTokens) && (o.result.outputTokens as number) >= 0
+                ? o.result.outputTokens
+                : null,
           }))
+        : undefined;
+
+    // Savings tracker (PR3, S4): per-task savings summary, additive/optional —
+    // undefined for every non-orchestrator runtime and whenever savings
+    // weren't computed for this run (HUGIN_ORCH_SAVINGS=off, an unpriced
+    // baseline, or a rejected/aborted/timed-out run). Only the per-task fields
+    // per the ADR's S4 shape — byModel/inputTokens/outputTokens are aggregate-
+    // only (see savings-store.ts's tasks/_savings doc).
+    const savingsResult =
+      isOrchestrator && orchSavings
+        ? {
+            baselineModelId: orchSavings.baselineModelId,
+            coveredCalls: orchSavings.coveredCalls,
+            uncoveredCalls: orchSavings.uncoveredCalls,
+            actualCostUsd: orchSavings.actualCostUsd,
+            baselineCostUsd: orchSavings.baselineCostUsd,
+            savedUsd: orchSavings.savedUsd,
+          }
         : undefined;
 
     // Carry the terminal delivery marker (issue #68) into the persistent tag
@@ -4884,6 +4937,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
                 }
               : undefined,
             orchestratorOutcomes,
+            savings: savingsResult,
           }),
           taskClassification,
         ),

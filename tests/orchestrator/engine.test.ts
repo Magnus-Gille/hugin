@@ -579,6 +579,88 @@ describe("runOrchestration — verified-fail outputs excluded from synthesis (V6
   });
 });
 
+describe("runOrchestration — modelCalls ledger (savings tracker S1)", () => {
+  it("fanout run records planner + N workers + synth", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1", 0.002), ok("W2", 0.003), ok("W3", 0.004)]],
+      ["synthesizer", [ok("Final", 0.005)]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+
+    const result = await runOrchestration("Do a complex task", invoker, { maxSubtasks: 12 });
+
+    expect(result.modelCalls).toHaveLength(5); // planner + 3 workers + synth
+    const roles = result.modelCalls.map((c) => c.role);
+    expect(roles[0]).toBe("planner");
+    expect(roles[roles.length - 1]).toBe("synthesizer");
+    expect(roles.filter((r) => r === "worker")).toHaveLength(3);
+    expect(result.modelCalls.every((c) => c.ok === true)).toBe(true);
+    expect(result.modelCalls[0]).toMatchObject({
+      role: "planner",
+      provider: "openrouter",
+      model: "m",
+      inputTokens: 10,
+      outputTokens: 10,
+      costUsd: 0.01,
+      latencyMs: 5,
+    });
+  });
+
+  it("verify-enabled run records verifier calls in modelCalls", async () => {
+    const PLAN_2 = JSON.stringify({
+      subtasks: [
+        { id: "1", prompt: "Step 1" },
+        { id: "2", prompt: "Step 2" },
+      ],
+    });
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(PLAN_2, 0.01)]],
+      ["worker", [ok("W1", 0.002), ok("W2", 0.003)]],
+      ["verifier", [ok("PASS", 0.001), ok("PASS", 0.001)]],
+      ["synthesizer", [ok("Final", 0.002)]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+
+    const result = await runOrchestration("Verify task", invoker, { verifyWorkers: true });
+
+    const verifierCalls = result.modelCalls.filter((c) => c.role === "verifier");
+    expect(verifierCalls).toHaveLength(2);
+    expect(verifierCalls.every((c) => c.ok === true)).toBe(true);
+  });
+
+  it("failed calls are recorded with ok:false and null tokens/cost", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [fail("err1"), fail("err2"), fail("err3")]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+
+    const result = await runOrchestration("Doomed task", invoker);
+
+    expect(result.ok).toBe(false);
+    const workerCalls = result.modelCalls.filter((c) => c.role === "worker");
+    expect(workerCalls).toHaveLength(3);
+    expect(workerCalls.every((c) => c.ok === false)).toBe(true);
+    expect(workerCalls.every((c) => c.inputTokens === null && c.outputTokens === null && c.costUsd === null)).toBe(
+      true,
+    );
+  });
+
+  it("the early-return 'all workers failed' path still returns the modelCalls recorded so far (planner + workers, no synth)", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [fail("err1"), fail("err2"), fail("err3")]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+
+    const result = await runOrchestration("Doomed task", invoker);
+
+    expect(result.modelCalls).toHaveLength(4); // planner + 3 failed workers
+    expect(result.modelCalls.some((c) => c.role === "synthesizer")).toBe(false);
+  });
+});
+
 describe("runOrchestration — concurrency cap", () => {
   it("6 subtasks with maxConcurrency:2 — no more than 2 in-flight simultaneously", async () => {
     const PLAN_6 = JSON.stringify({

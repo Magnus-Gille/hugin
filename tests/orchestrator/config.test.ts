@@ -1,10 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   loadOrchestratorConfig,
   applyTaskModel,
   isVerdictStoreEnabled,
+  isSavingsEnabled,
+  resolveSavingsBaselineModel,
 } from "../../src/orchestrator/config.js";
 import { DEFAULT_ORCHESTRATOR_CONFIG } from "../../src/orchestrator/engine.js";
+import { CLAUDE_BASELINE_MODEL_ID } from "../../src/model-pricing.js";
 
 describe("loadOrchestratorConfig", () => {
   it("returns defaults when env is empty", () => {
@@ -249,5 +252,53 @@ describe("isVerdictStoreEnabled (V4)", () => {
   it("stays enabled for any other value", () => {
     expect(isVerdictStoreEnabled({ HUGIN_ORCH_VERDICT_STORE: "on" })).toBe(true);
     expect(isVerdictStoreEnabled({ HUGIN_ORCH_VERDICT_STORE: "banana" })).toBe(true);
+  });
+});
+
+describe("isSavingsEnabled (savings tracker S5)", () => {
+  it("defaults to enabled (on) when HUGIN_ORCH_SAVINGS is unset", () => {
+    expect(isSavingsEnabled({})).toBe(true);
+  });
+
+  it("disables when HUGIN_ORCH_SAVINGS=off", () => {
+    expect(isSavingsEnabled({ HUGIN_ORCH_SAVINGS: "off" })).toBe(false);
+  });
+
+  it("is case-insensitive and trims whitespace", () => {
+    expect(isSavingsEnabled({ HUGIN_ORCH_SAVINGS: " OFF " })).toBe(false);
+  });
+
+  it("stays enabled for any other value", () => {
+    expect(isSavingsEnabled({ HUGIN_ORCH_SAVINGS: "on" })).toBe(true);
+    expect(isSavingsEnabled({ HUGIN_ORCH_SAVINGS: "banana" })).toBe(true);
+  });
+});
+
+describe("resolveSavingsBaselineModel (savings tracker S5)", () => {
+  it("defaults to CLAUDE_BASELINE_MODEL_ID when HUGIN_SAVINGS_BASELINE_MODEL is unset", () => {
+    expect(resolveSavingsBaselineModel({})).toBe(CLAUDE_BASELINE_MODEL_ID);
+  });
+
+  it("uses HUGIN_SAVINGS_BASELINE_MODEL when it is a valid MODEL_PRICING entry", () => {
+    expect(
+      resolveSavingsBaselineModel({ HUGIN_SAVINGS_BASELINE_MODEL: "claude-haiku-4-5" }),
+    ).toBe("claude-haiku-4-5");
+  });
+
+  it("returns null (disabled) and logs once when the configured baseline model is not in MODEL_PRICING", () => {
+    const onLog = vi.fn();
+    const result = resolveSavingsBaselineModel(
+      { HUGIN_SAVINGS_BASELINE_MODEL: "not-a-real-model" },
+      onLog,
+    );
+    expect(result).toBeNull();
+    expect(onLog).toHaveBeenCalledTimes(1);
+    expect(onLog.mock.calls[0][0]).toContain("not-a-real-model");
+  });
+
+  it("trims whitespace and falls back to the default when only whitespace is given", () => {
+    expect(resolveSavingsBaselineModel({ HUGIN_SAVINGS_BASELINE_MODEL: "   " })).toBe(
+      CLAUDE_BASELINE_MODEL_ID,
+    );
   });
 });
