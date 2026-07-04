@@ -4788,6 +4788,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             actualCostUsd: orchSavings.actualCostUsd,
             baselineCostUsd: orchSavings.baselineCostUsd,
             savedUsd: orchSavings.savedUsd,
+            // Quality-adjusted series (issue #144): the verdict-joined
+            // headline any decision-making consumer must read (see
+            // src/orchestrator/README.md); savedUsd above is raw-only.
+            qaBaselineCreditUsd: orchSavings.qaBaselineCreditUsd,
+            qualityAdjustedSavedUsd: orchSavings.qualityAdjustedSavedUsd,
+            byOutcome: orchSavings.byOutcome,
           }
         : undefined;
 

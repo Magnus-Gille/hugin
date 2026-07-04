@@ -14,7 +14,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { SavingsSummary } from "./savings.js";
+import type { SavingsSummary, SavingsVerdictOutcome } from "./savings.js";
 
 export const SAVINGS_NAMESPACE = "tasks/_savings";
 export const SAVINGS_KEY = "report";
@@ -42,6 +42,16 @@ export interface SavingsTotals {
   outputTokens: number;
   actualCostUsd: number;
   baselineCostUsd: number;
+  /**
+   * Quality-adjusted baseline credit (issue #144) — the portion of
+   * baselineCostUsd that was actually EARNED (verdict-joined; see
+   * savings.ts#qaCreditForCall). The lifetime quality-adjusted savings are
+   * derived at read time as `qaBaselineCreditUsd − actualCostUsd`, mirroring
+   * the raw series' `baselineCostUsd − actualCostUsd`. Sanitize-defaults to 0
+   * when absent from a pre-#144 doc (schemaVersion stays 1 — same additive
+   * precedent as the verdict store's unverifiedPasses).
+   */
+  qaBaselineCreditUsd: number;
 }
 
 export interface SavingsModelBucket {
@@ -52,10 +62,23 @@ export interface SavingsModelBucket {
   baselineCostUsd: number;
 }
 
+/** Per-verdict-outcome aggregate bucket (issue #144), keyed by SavingsVerdictOutcome. */
+export interface SavingsOutcomeBucket {
+  calls: number;
+  actualCostUsd: number;
+  baselineCostUsd: number;
+  qaBaselineCreditUsd: number;
+}
+
 export interface SavingsDoc {
   schemaVersion: 1;
   totals: SavingsTotals;
   byModel: Record<string, SavingsModelBucket>;
+  /**
+   * Covered subtask-attributed calls grouped by verdict outcome (issue #144).
+   * Sanitize-defaults to {} when absent from a pre-#144 doc.
+   */
+  byOutcome: Record<string, SavingsOutcomeBucket>;
   /**
    * Nonce of the last applied run — makes the CAS retry idempotent: a write
    * that commits server-side but throws client-side (lost response) is
@@ -78,6 +101,7 @@ const EMPTY_TOTALS: SavingsTotals = {
   outputTokens: 0,
   actualCostUsd: 0,
   baselineCostUsd: 0,
+  qaBaselineCreditUsd: 0,
 };
 
 const EMPTY_MODEL_BUCKET: SavingsModelBucket = {
@@ -88,7 +112,7 @@ const EMPTY_MODEL_BUCKET: SavingsModelBucket = {
   baselineCostUsd: 0,
 };
 
-const EMPTY_DOC: SavingsDoc = { schemaVersion: 1, totals: EMPTY_TOTALS, byModel: {} };
+const EMPTY_DOC: SavingsDoc = { schemaVersion: 1, totals: EMPTY_TOTALS, byModel: {}, byOutcome: {} };
 
 function isFiniteNonNegativeInt(value: unknown): value is number {
   return (
@@ -113,6 +137,11 @@ function isFiniteNonNegativeNumber(value: unknown): value is number {
 function sanitizeTotals(raw: unknown): SavingsTotals {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ...EMPTY_TOTALS };
   const r = raw as Record<string, unknown>;
+  // qaBaselineCreditUsd (issue #144) is the newest field: MISSING defaults to
+  // 0 so a pre-#144 doc is never reset; a PRESENT-but-invalid value still
+  // drops the totals like any other field (verdict-store unverifiedPasses
+  // precedent).
+  const qaCreditRaw = r.qaBaselineCreditUsd === undefined ? 0 : r.qaBaselineCreditUsd;
   if (
     !isFiniteNonNegativeInt(r.runs) ||
     !isFiniteNonNegativeInt(r.coveredCalls) ||
@@ -120,7 +149,8 @@ function sanitizeTotals(raw: unknown): SavingsTotals {
     !isFiniteNonNegativeInt(r.inputTokens) ||
     !isFiniteNonNegativeInt(r.outputTokens) ||
     !isFiniteNonNegativeNumber(r.actualCostUsd) ||
-    !isFiniteNonNegativeNumber(r.baselineCostUsd)
+    !isFiniteNonNegativeNumber(r.baselineCostUsd) ||
+    !isFiniteNonNegativeNumber(qaCreditRaw)
   ) {
     return { ...EMPTY_TOTALS };
   }
@@ -132,6 +162,7 @@ function sanitizeTotals(raw: unknown): SavingsTotals {
     outputTokens: r.outputTokens as number,
     actualCostUsd: r.actualCostUsd as number,
     baselineCostUsd: r.baselineCostUsd as number,
+    qaBaselineCreditUsd: qaCreditRaw as number,
   };
 }
 
@@ -157,6 +188,26 @@ function sanitizeModelBucket(raw: unknown): SavingsModelBucket | null {
   };
 }
 
+/** Sanitize one persisted byOutcome row (issue #144); malformed rows are dropped individually. */
+function sanitizeOutcomeBucket(raw: unknown): SavingsOutcomeBucket | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (
+    !isFiniteNonNegativeInt(r.calls) ||
+    !isFiniteNonNegativeNumber(r.actualCostUsd) ||
+    !isFiniteNonNegativeNumber(r.baselineCostUsd) ||
+    !isFiniteNonNegativeNumber(r.qaBaselineCreditUsd)
+  ) {
+    return null;
+  }
+  return {
+    calls: r.calls as number,
+    actualCostUsd: r.actualCostUsd as number,
+    baselineCostUsd: r.baselineCostUsd as number,
+    qaBaselineCreditUsd: r.qaBaselineCreditUsd as number,
+  };
+}
+
 /**
  * Write-path validation: the same predicates the read path enforces, applied
  * to an incoming SavingsSummary BEFORE it is merged (a fractional token count
@@ -170,7 +221,13 @@ function isValidSummary(summary: SavingsSummary): boolean {
     !isFiniteNonNegativeInt(summary.inputTokens) ||
     !isFiniteNonNegativeInt(summary.outputTokens) ||
     !isFiniteNonNegativeNumber(summary.actualCostUsd) ||
-    !isFiniteNonNegativeNumber(summary.baselineCostUsd)
+    !isFiniteNonNegativeNumber(summary.baselineCostUsd) ||
+    // Quality-adjusted fields (issue #144): the credit is a nonnegative sum
+    // by construction; the derived savedUsd may legitimately be NEGATIVE (a
+    // losing run is valid data) but must be a finite number.
+    !isFiniteNonNegativeNumber(summary.qaBaselineCreditUsd) ||
+    typeof summary.qualityAdjustedSavedUsd !== "number" ||
+    !Number.isFinite(summary.qualityAdjustedSavedUsd)
   ) {
     return false;
   }
@@ -185,6 +242,16 @@ function isValidSummary(summary: SavingsSummary): boolean {
       return false;
     }
   }
+  for (const bucket of Object.values(summary.byOutcome)) {
+    if (
+      !isFiniteNonNegativeInt(bucket.calls) ||
+      !isFiniteNonNegativeNumber(bucket.actualCostUsd) ||
+      !isFiniteNonNegativeNumber(bucket.baselineCostUsd) ||
+      !isFiniteNonNegativeNumber(bucket.qaBaselineCreditUsd)
+    ) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -195,13 +262,21 @@ interface ParsedSavingsDoc {
 }
 
 function parseSavingsDoc(raw: string | undefined | null): ParsedSavingsDoc {
-  const empty: ParsedSavingsDoc = { doc: { ...EMPTY_DOC, byModel: {} }, readOnly: false };
+  const empty: ParsedSavingsDoc = {
+    doc: { ...EMPTY_DOC, byModel: {}, byOutcome: {} },
+    readOnly: false,
+  };
   if (!raw) return empty;
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return empty;
 
-    const parsedObj = parsed as { schemaVersion?: unknown; totals?: unknown; byModel?: unknown };
+    const parsedObj = parsed as {
+      schemaVersion?: unknown;
+      totals?: unknown;
+      byModel?: unknown;
+      byOutcome?: unknown;
+    };
     if (parsedObj.schemaVersion !== undefined && parsedObj.schemaVersion !== 1) {
       // Unknown schema version — don't touch it — read-only for this run.
       return { doc: empty.doc, readOnly: true };
@@ -220,14 +295,23 @@ function parseSavingsDoc(raw: string | undefined | null): ParsedSavingsDoc {
         // else: malformed row — drop silently, don't corrupt the aggregate.
       }
     }
-    return { doc: { schemaVersion: 1, totals, byModel, lastRunNonce }, readOnly: false };
+    // byOutcome (issue #144): missing on a pre-#144 doc → {}, malformed rows
+    // dropped individually, same as byModel.
+    const byOutcome: Record<string, SavingsOutcomeBucket> = {};
+    if (parsedObj.byOutcome && typeof parsedObj.byOutcome === "object" && !Array.isArray(parsedObj.byOutcome)) {
+      for (const [key, value] of Object.entries(parsedObj.byOutcome as Record<string, unknown>)) {
+        const sanitized = sanitizeOutcomeBucket(value);
+        if (sanitized) byOutcome[key] = sanitized;
+      }
+    }
+    return { doc: { schemaVersion: 1, totals, byModel, byOutcome, lastRunNonce }, readOnly: false };
   } catch {
     // fall through — malformed doc, start fresh
   }
   return empty;
 }
 
-/** Merge one run's SavingsSummary into the doc's totals + byModel buckets. */
+/** Merge one run's SavingsSummary into the doc's totals + byModel/byOutcome buckets. */
 function applySavingsRun(doc: SavingsDoc, summary: SavingsSummary): void {
   doc.totals = {
     runs: doc.totals.runs + 1,
@@ -237,6 +321,7 @@ function applySavingsRun(doc: SavingsDoc, summary: SavingsSummary): void {
     outputTokens: doc.totals.outputTokens + summary.outputTokens,
     actualCostUsd: doc.totals.actualCostUsd + summary.actualCostUsd,
     baselineCostUsd: doc.totals.baselineCostUsd + summary.baselineCostUsd,
+    qaBaselineCreditUsd: doc.totals.qaBaselineCreditUsd + summary.qaBaselineCreditUsd,
   };
 
   const byModel = { ...doc.byModel };
@@ -251,6 +336,26 @@ function applySavingsRun(doc: SavingsDoc, summary: SavingsSummary): void {
     };
   }
   doc.byModel = byModel;
+
+  const byOutcome = { ...doc.byOutcome };
+  for (const [key, bucket] of Object.entries(summary.byOutcome) as [
+    SavingsVerdictOutcome,
+    NonNullable<SavingsSummary["byOutcome"][SavingsVerdictOutcome]>,
+  ][]) {
+    const existing = byOutcome[key] ?? {
+      calls: 0,
+      actualCostUsd: 0,
+      baselineCostUsd: 0,
+      qaBaselineCreditUsd: 0,
+    };
+    byOutcome[key] = {
+      calls: existing.calls + bucket.calls,
+      actualCostUsd: existing.actualCostUsd + bucket.actualCostUsd,
+      baselineCostUsd: existing.baselineCostUsd + bucket.baselineCostUsd,
+      qaBaselineCreditUsd: existing.qaBaselineCreditUsd + bucket.qaBaselineCreditUsd,
+    };
+  }
+  doc.byOutcome = byOutcome;
 }
 
 export class SavingsStore implements SavingsStoreLike {

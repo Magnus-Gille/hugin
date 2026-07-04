@@ -102,6 +102,15 @@ export interface ModelCallRecord {
   outputTokens: number | null;
   costUsd: number | null;
   latencyMs: number;
+  /**
+   * Subtask this call was spent ON (issue #144) — set for worker and verifier
+   * calls (and any future escalation/retry call, which MUST carry the id of
+   * the local attempt that caused it); absent for planner/synthesizer calls,
+   * which belong to the run as a whole. This is what lets the savings tracker
+   * attribute verification/escalation cost BACK to the local attempt instead
+   * of booking it as independent frontier spend.
+   */
+  subtaskId?: string;
 }
 
 export interface OrchestrationResult {
@@ -133,7 +142,11 @@ export interface OrchestrationResult {
 }
 
 /** Build a ModelCallRecord from a role and the WorkerResult it produced. */
-function toModelCallRecord(role: OrchestratorRole, result: WorkerResult): ModelCallRecord {
+function toModelCallRecord(
+  role: OrchestratorRole,
+  result: WorkerResult,
+  subtaskId?: string,
+): ModelCallRecord {
   return {
     role,
     provider: result.provider,
@@ -143,6 +156,7 @@ function toModelCallRecord(role: OrchestratorRole, result: WorkerResult): ModelC
     outputTokens: result.outputTokens,
     costUsd: result.costUsd,
     latencyMs: result.latencyMs,
+    ...(subtaskId !== undefined ? { subtaskId } : {}),
   };
 }
 
@@ -330,7 +344,7 @@ export async function runOrchestration(
         signal,
       });
       allCosts.push(result.costUsd ?? null);
-      modelCalls.push(toModelCallRecord("worker", result));
+      modelCalls.push(toModelCallRecord("worker", result, subtask.id));
       totalLatencyMs += result.latencyMs;
       if (result.ok && result.truncated) {
         warnings.push(
@@ -360,7 +374,7 @@ export async function runOrchestration(
       { signal },
     );
     allCosts.push(verifyResp.costUsd ?? null);
-    modelCalls.push(toModelCallRecord("verifier", verifyResp));
+    modelCalls.push(toModelCallRecord("verifier", verifyResp, outcome.subtask.id));
     totalLatencyMs += verifyResp.latencyMs;
     if (verifyResp.ok && verifyResp.truncated) {
       warnings.push(

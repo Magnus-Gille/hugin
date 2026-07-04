@@ -122,6 +122,115 @@ describe("computeSavings — S2 semantics", () => {
   });
 });
 
+describe("computeSavings — quality-adjusted savings (issue #144)", () => {
+  it("acceptance: local is cheaper but FAILS verification → quality-adjusted savings is ~zero or negative", () => {
+    // Raw savings would book this as a big win: deepseek did 1M+1M tokens for
+    // $0.27 vs $18.00 on the Claude baseline. But the verifier failed the
+    // output — the work still has to be done at the frontier, so no baseline
+    // cost was actually avoided. Quality-adjusted, the run LOST $0.27.
+    const calls = [call({ subtaskId: "s1" })];
+    const result = computeSavings(calls, CLAUDE_BASELINE_MODEL_ID, { s1: "fail" });
+    expect(result).not.toBeNull();
+    // Raw series is unchanged (still reported for comparability)…
+    expect(result!.savedUsd).toBeCloseTo(18.0 - 0.27, 6);
+    // …but the headline quality-adjusted number must not reward cheap-but-wrong.
+    expect(result!.qualityAdjustedSavedUsd).toBeLessThanOrEqual(0);
+    expect(result!.qualityAdjustedSavedUsd).toBeCloseTo(-0.27, 6);
+  });
+
+  it("failed verification: the verifier's cost is ALSO attributed to the local attempt", () => {
+    // Worker s1 fails verification. The verifier call (frontier-priced) that
+    // caught it was spend caused by the local attempt — it must book as part
+    // of the loss, not as neutral independent frontier spend.
+    const calls = [
+      call({ subtaskId: "s1" }), // $0.27 actual
+      call({
+        role: "verifier",
+        model: "claude-sonnet-4-6",
+        subtaskId: "s1",
+        inputTokens: 100_000,
+        outputTokens: 10_000,
+        costUsd: null, // estimated: 0.1*3.00 + 0.01*15.00 = 0.45
+      }),
+    ];
+    const result = computeSavings(calls, CLAUDE_BASELINE_MODEL_ID, { s1: "fail" });
+    expect(result!.qualityAdjustedSavedUsd).toBeCloseTo(-(0.27 + 0.45), 6);
+    expect(result!.byOutcome.fail!.calls).toBe(2);
+    expect(result!.byOutcome.fail!.qaBaselineCreditUsd).toBe(0);
+  });
+
+  it("verified pass: worker earns full baseline credit, verifier cost still counts as overhead", () => {
+    const calls = [
+      call({ subtaskId: "s1" }), // worker: baseline 18.00, actual 0.27
+      call({
+        role: "verifier",
+        model: "claude-sonnet-4-6",
+        subtaskId: "s1",
+        inputTokens: 100_000,
+        outputTokens: 10_000,
+        costUsd: null, // 0.45 actual — zero credit (counterfactual doesn't verify)
+      }),
+    ];
+    const result = computeSavings(calls, CLAUDE_BASELINE_MODEL_ID, { s1: "pass" });
+    // QA = (18.00 credit − 0.27) + (0 credit − 0.45)
+    expect(result!.qualityAdjustedSavedUsd).toBeCloseTo(18.0 - 0.27 - 0.45, 6);
+    // Raw counts the verifier at baseline == actual, so raw > QA by baseline_v (0.45).
+    expect(result!.savedUsd).toBeCloseTo(18.0 - 0.27, 6);
+    expect(result!.byOutcome.pass!.calls).toBe(2);
+    expect(result!.byOutcome.pass!.qaBaselineCreditUsd).toBeCloseTo(18.0, 6);
+  });
+
+  it("unverified (unknown) subtask keeps baseline credit but is surfaced in byOutcome", () => {
+    const calls = [call({ subtaskId: "s1" })];
+    const result = computeSavings(calls, CLAUDE_BASELINE_MODEL_ID, { s1: "unknown" });
+    expect(result!.qualityAdjustedSavedUsd).toBeCloseTo(18.0 - 0.27, 6);
+    expect(result!.byOutcome.unknown!.calls).toBe(1);
+    expect(result!.byOutcome.unknown!.qaBaselineCreditUsd).toBeCloseTo(18.0, 6);
+  });
+
+  it("a subtask missing from the verdict map — or no map at all — counts as unknown", () => {
+    const withEmptyMap = computeSavings([call({ subtaskId: "s1" })], CLAUDE_BASELINE_MODEL_ID, {});
+    const withNoMap = computeSavings([call({ subtaskId: "s1" })], CLAUDE_BASELINE_MODEL_ID);
+    for (const result of [withEmptyMap, withNoMap]) {
+      expect(result!.byOutcome.unknown!.calls).toBe(1);
+      expect(result!.qualityAdjustedSavedUsd).toBeCloseTo(18.0 - 0.27, 6);
+    }
+  });
+
+  it("escalated subtask earns zero credit — its local spend books as a loss", () => {
+    const calls = [call({ subtaskId: "s1" })];
+    const result = computeSavings(calls, CLAUDE_BASELINE_MODEL_ID, { s1: "escalated" });
+    expect(result!.qualityAdjustedSavedUsd).toBeCloseTo(-0.27, 6);
+    expect(result!.byOutcome.escalated!.qaBaselineCreditUsd).toBe(0);
+  });
+
+  it("a covered call that itself failed (ok:false) earns zero credit even without a verdict", () => {
+    const calls = [call({ subtaskId: "s1", ok: false })]; // tokens+cost known, call failed
+    const result = computeSavings(calls, CLAUDE_BASELINE_MODEL_ID, { s1: "error" });
+    expect(result!.qualityAdjustedSavedUsd).toBeCloseTo(-0.27, 6);
+    expect(result!.byOutcome.error!.calls).toBe(1);
+  });
+
+  it("run-level calls (planner/synthesizer, no subtaskId) keep raw treatment and stay out of byOutcome", () => {
+    const calls = [
+      call({ role: "planner", model: "claude-sonnet-4-6", costUsd: null }), // baseline == actual
+      call({ subtaskId: "s1" }),
+    ];
+    const result = computeSavings(calls, CLAUDE_BASELINE_MODEL_ID, { s1: "pass" });
+    // Planner contributes 0 net to both series (sonnet vs sonnet baseline).
+    expect(result!.qualityAdjustedSavedUsd).toBeCloseTo(18.0 - 0.27, 6);
+    expect(result!.byOutcome.pass!.calls).toBe(1); // planner not bucketed
+    expect(Object.keys(result!.byOutcome)).toEqual(["pass"]);
+  });
+
+  it("all-pass unverified run: quality-adjusted equals raw (no verifier calls, no failures)", () => {
+    const calls = [call({ subtaskId: "s1" }), call({ subtaskId: "s2" })];
+    const result = computeSavings(calls, CLAUDE_BASELINE_MODEL_ID, { s1: "pass", s2: "pass" });
+    expect(result!.qualityAdjustedSavedUsd).toBeCloseTo(result!.savedUsd, 9);
+    expect(result!.qaBaselineCreditUsd).toBeCloseTo(result!.baselineCostUsd, 9);
+  });
+});
+
 describe("computeSavings — token integrity (review fix)", () => {
   it("classifies calls with fractional token counts as uncovered", () => {
     const result = computeSavings(
