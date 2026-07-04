@@ -132,6 +132,32 @@ describe("checkoutTaskBranch", () => {
     expect(spawnCalls).toHaveLength(0);
   });
 
+  it("canonicalizes workingDir: rejects a ../ path that string-matches but escapes the reposRoot (#139)", async () => {
+    // A raw `startsWith` guard would pass this (it string-prefixes the isolated
+    // root), but the OS resolves the cwd to the production checkout under
+    // /home/magnus/repos — exactly the re-pointing #139 must prevent. All spawn
+    // behaviors default to exitCode 0, so a bypass would proceed to "created".
+    const result = await checkoutTaskBranch(
+      "/home/magnus/hugin-workspace/../repos/grimnir",
+      "task-escape",
+      { reposRoot: "/home/magnus/hugin-workspace" },
+    );
+    expect(result.action).toBe("skipped");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("canonicalizes workingDir: rejects a sibling dir that shares the root's string prefix (#139)", async () => {
+    // /home/magnus/hugin-workspace-evil string-prefixes "hugin-workspace" but is
+    // not under "hugin-workspace/". The path.sep-anchored guard must reject it.
+    const result = await checkoutTaskBranch(
+      "/home/magnus/hugin-workspace-evil/grimnir",
+      "task-sibling",
+      { reposRoot: "/home/magnus/hugin-workspace" },
+    );
+    expect(result.action).toBe("skipped");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
   it("tolerates a trailing slash on the configured reposRoot (#139)", async () => {
     spawnBehaviors = [
       { exitCode: 0 },

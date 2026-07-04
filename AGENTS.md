@@ -62,7 +62,7 @@ Content format:
 ```
 
 **Context resolution:** `Context:` takes priority over `Working dir:` for determining the working directory. Supported aliases:
-- `repo:<name>` → `/home/magnus/repos/<name>`
+- `repo:<name>` → `<HUGIN_REPOS_ROOT>/<name>` (default `/home/magnus/repos/<name>`; see `HUGIN_REPOS_ROOT` in the env table — point it at an isolated tree to keep tasks off production checkouts, #139)
 - `scratch` → `/home/magnus/scratch` (non-code tasks)
 - `files` → `/home/magnus/mimir`
 - Raw absolute paths are passed through unchanged
@@ -172,6 +172,7 @@ MUNIN_API_KEY=<same key Munin uses>
 | `HUGIN_POLL_INTERVAL_MS` | `30000` | Poll frequency (ms) |
 | `HUGIN_DEFAULT_TIMEOUT_MS` | `300000` | Default task timeout (ms) |
 | `HUGIN_WORKSPACE` | `/home/magnus/workspace` | Default working directory |
+| `HUGIN_REPOS_ROOT` | `/home/magnus/repos` | Root under which `repo:<name>` context aliases resolve and task branches are cut (issue #139). Point it at an isolated tree (e.g. `/home/magnus/hugin-workspace`) that is disjoint from the production deploy checkouts under `/home/magnus/repos`, so a hugin task can never re-point a production checkout onto its task branch. Only directories under this root (canonicalized, so `..` traversal cannot escape it) are treated as managed/branchable by `checkoutTaskBranch`. Default preserves the historical hardcoded behavior. Trailing slashes are normalized. |
 | `HUGIN_MAX_OUTPUT_CHARS` | `50000` | Max output chars to capture |
 | `HUGIN_ALLOWED_SUBMITTERS` | `Codex,Codex-desktop,ratatoskr,Codex-web,Codex-mobile,claude-code,claude-desktop,claude-web,claude-mobile,hugin` | Comma-separated list of allowed `Submitted by:` values. Includes both current Codex-facing names and legacy `claude-*` names during the transition. Set to `*` to allow all. |
 | `OLLAMA_PI_URL` | `http://127.0.0.1:11434` | Ollama endpoint on Pi (local) |

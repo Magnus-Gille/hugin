@@ -467,8 +467,14 @@ export async function checkoutTaskBranch(
   taskId: string,
   options: TaskBranchOptions = {},
 ): Promise<TaskBranchResult> {
-  const reposRoot = normalizeRoot(options.reposRoot ?? DEFAULT_REPOS_ROOT);
-  if (!workingDir.startsWith(`${reposRoot}/`)) {
+  // Canonicalize both sides before the prefix check: a raw `startsWith` guard
+  // can be bypassed with `..` segments that string-match the isolated root but
+  // resolve (via the OS `cwd`) onto a production checkout — the exact
+  // re-pointing #139 exists to prevent. `path.sep`-anchoring also stops a
+  // sibling dir that merely shares the root's string prefix (e.g.
+  // `<root>-evil`).
+  const reposRoot = path.resolve(normalizeRoot(options.reposRoot ?? DEFAULT_REPOS_ROOT));
+  if (!path.resolve(workingDir).startsWith(`${reposRoot}${path.sep}`)) {
     return { action: "skipped" };
   }
 
