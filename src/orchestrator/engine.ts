@@ -109,7 +109,11 @@ export interface OrchestrationResult {
   finalOutput: string;
   plan: OrchestrationPlan;
   outcomes: SubtaskOutcome[];
-  /** Sum of known costUsd across ALL invocations; null only if NO call had a known cost. */
+  /**
+   * Sum across ALL invocations; null when there are no calls or ANY
+   * invocation has unknown cost (all-or-nothing — see sumCosts). Savings are
+   * therefore computed per call from `modelCalls`, never from this total.
+   */
   totalCostUsd: number | null;
   totalLatencyMs: number;
   /**

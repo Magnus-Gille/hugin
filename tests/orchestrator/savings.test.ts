@@ -121,3 +121,18 @@ describe("computeSavings — S2 semantics", () => {
     expect(result!.savedUsd).toBeGreaterThan(0);
   });
 });
+
+describe("computeSavings — token integrity (review fix)", () => {
+  it("classifies calls with fractional token counts as uncovered", () => {
+    const result = computeSavings(
+      [
+        { role: "worker", provider: "homeserver", model: "qwen3-30b-instruct",
+          ok: true, inputTokens: 100.5, outputTokens: 50, costUsd: 0, latencyMs: 10 },
+      ],
+      "claude-sonnet-4-6",
+    );
+    expect(result).not.toBeNull();
+    expect(result!.coveredCalls).toBe(0);
+    expect(result!.uncoveredCalls).toBe(1);
+  });
+});

@@ -13,6 +13,7 @@
  * acceptable, corrupting the doc or failing the task is not.
  */
 
+import { randomUUID } from "node:crypto";
 import type { SavingsSummary } from "./savings.js";
 
 export const SAVINGS_NAMESPACE = "tasks/_savings";
@@ -55,6 +56,13 @@ export interface SavingsDoc {
   schemaVersion: 1;
   totals: SavingsTotals;
   byModel: Record<string, SavingsModelBucket>;
+  /**
+   * Nonce of the last applied run — makes the CAS retry idempotent: a write
+   * that commits server-side but throws client-side (lost response) is
+   * detected on the retry's re-read and not applied twice (monetary counters
+   * must not double-count).
+   */
+  lastRunNonce?: string;
 }
 
 export interface SavingsStoreLike {
@@ -149,6 +157,37 @@ function sanitizeModelBucket(raw: unknown): SavingsModelBucket | null {
   };
 }
 
+/**
+ * Write-path validation: the same predicates the read path enforces, applied
+ * to an incoming SavingsSummary BEFORE it is merged (a fractional token count
+ * from a misbehaving provider must be rejected here, not persisted and then
+ * wiped by the next read's sanitizer).
+ */
+function isValidSummary(summary: SavingsSummary): boolean {
+  if (
+    !isFiniteNonNegativeInt(summary.coveredCalls) ||
+    !isFiniteNonNegativeInt(summary.uncoveredCalls) ||
+    !isFiniteNonNegativeInt(summary.inputTokens) ||
+    !isFiniteNonNegativeInt(summary.outputTokens) ||
+    !isFiniteNonNegativeNumber(summary.actualCostUsd) ||
+    !isFiniteNonNegativeNumber(summary.baselineCostUsd)
+  ) {
+    return false;
+  }
+  for (const bucket of Object.values(summary.byModel)) {
+    if (
+      !isFiniteNonNegativeInt(bucket.calls) ||
+      !isFiniteNonNegativeInt(bucket.inputTokens) ||
+      !isFiniteNonNegativeInt(bucket.outputTokens) ||
+      !isFiniteNonNegativeNumber(bucket.actualCostUsd) ||
+      !isFiniteNonNegativeNumber(bucket.baselineCostUsd)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 interface ParsedSavingsDoc {
   doc: SavingsDoc;
   /** Unrecognized schemaVersion — treat the store as read-only for this call. */
@@ -168,6 +207,10 @@ function parseSavingsDoc(raw: string | undefined | null): ParsedSavingsDoc {
       return { doc: empty.doc, readOnly: true };
     }
 
+    const lastRunNonce =
+      typeof (parsedObj as { lastRunNonce?: unknown }).lastRunNonce === "string"
+        ? ((parsedObj as { lastRunNonce?: string }).lastRunNonce as string)
+        : undefined;
     const totals = sanitizeTotals(parsedObj.totals);
     const byModel: Record<string, SavingsModelBucket> = {};
     if (parsedObj.byModel && typeof parsedObj.byModel === "object" && !Array.isArray(parsedObj.byModel)) {
@@ -177,7 +220,7 @@ function parseSavingsDoc(raw: string | undefined | null): ParsedSavingsDoc {
         // else: malformed row — drop silently, don't corrupt the aggregate.
       }
     }
-    return { doc: { schemaVersion: 1, totals, byModel }, readOnly: false };
+    return { doc: { schemaVersion: 1, totals, byModel, lastRunNonce }, readOnly: false };
   } catch {
     // fall through — malformed doc, start fresh
   }
@@ -222,8 +265,18 @@ export class SavingsStore implements SavingsStoreLike {
    * dropped so a savings-store outage can never fail a task.
    */
   async record(summary: SavingsSummary): Promise<void> {
+    // The WRITE path enforces the same invariants the read path does: an
+    // out-of-range summary must never be merged, or the next read's
+    // sanitizer would classify the persisted totals as malformed and
+    // silently reset the lifetime aggregate.
+    if (!isValidSummary(summary)) {
+      this.onLog?.(
+        "savings-store: skipping a run with an out-of-range SavingsSummary (would corrupt the aggregate)",
+      );
+      return;
+    }
     try {
-      await this.attemptRecord(summary);
+      await this.attemptRecord(summary, randomUUID());
     } catch (err) {
       this.onLog?.(
         `savings-store: failed to record a run's savings: ${
@@ -233,7 +286,7 @@ export class SavingsStore implements SavingsStoreLike {
     }
   }
 
-  private async attemptRecord(summary: SavingsSummary): Promise<void> {
+  private async attemptRecord(summary: SavingsSummary, runNonce: string): Promise<void> {
     let lastErr: unknown;
     // read -> modify -> write(expected_updated_at); on ANY throw, re-read and
     // retry once, then give up (caller logs and drops).
@@ -248,7 +301,13 @@ export class SavingsStore implements SavingsStoreLike {
           return;
         }
         const doc = parsed.doc;
+        if (doc.lastRunNonce === runNonce) {
+          // The previous attempt's write committed but its response was lost
+          // — the run is already in the aggregate; do not double-count.
+          return;
+        }
         applySavingsRun(doc, summary);
+        doc.lastRunNonce = runNonce;
         await this.client.write(
           SAVINGS_NAMESPACE,
           SAVINGS_KEY,

@@ -4778,10 +4778,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             latencyMs: o.result.latencyMs,
             // Savings tracker (PR3, S4): thread the per-call token counts
             // already present on WorkerResult through into the structured
-            // result, closing the gap that motivated the savings tracker's
-            // per-call ledger (engine.ts ModelCallRecord).
-            inputTokens: o.result.inputTokens,
-            outputTokens: o.result.outputTokens,
+            // result. Coerced to the schema's nonnegative-integer contract —
+            // a non-integer provider value must degrade to null, not fail
+            // the whole result-structured write after a successful run.
+            inputTokens:
+              Number.isInteger(o.result.inputTokens) && (o.result.inputTokens as number) >= 0
+                ? o.result.inputTokens
+                : null,
+            outputTokens:
+              Number.isInteger(o.result.outputTokens) && (o.result.outputTokens as number) >= 0
+                ? o.result.outputTokens
+                : null,
           }))
         : undefined;
 

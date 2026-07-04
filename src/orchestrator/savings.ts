@@ -83,21 +83,30 @@ export function computeSavings(
   for (const call of calls) {
     // Guard against `undefined` as well as `null`: some WorkerResult call
     // sites (and older/partial test doubles) omit these fields entirely
-    // rather than setting them to null. Treat anything that isn't a real
-    // number as uncovered — never guess.
-    if (typeof call.inputTokens !== "number" || typeof call.outputTokens !== "number") {
+    // rather than setting them to null. Token counts must be nonnegative
+    // INTEGERS (the store and structured-result schema both require it) —
+    // anything else is uncovered, never guessed.
+    const inTok = call.inputTokens;
+    const outTok = call.outputTokens;
+    if (
+      typeof inTok !== "number" ||
+      !Number.isInteger(inTok) ||
+      inTok < 0 ||
+      typeof outTok !== "number" ||
+      !Number.isInteger(outTok) ||
+      outTok < 0
+    ) {
       uncoveredCalls++;
       continue;
     }
 
-    const actual =
-      call.costUsd ?? estimateCostUsd(call.model, call.inputTokens, call.outputTokens);
+    const actual = call.costUsd ?? estimateCostUsd(call.model, inTok, outTok);
     if (actual === null) {
       uncoveredCalls++;
       continue;
     }
 
-    const baseline = estimateCostUsd(baselineModelId, call.inputTokens, call.outputTokens);
+    const baseline = estimateCostUsd(baselineModelId, inTok, outTok);
     if (baseline === null) {
       // Shouldn't happen (baseline price was checked above), but stay honest
       // rather than silently trusting an unpriced baseline.
@@ -106,8 +115,8 @@ export function computeSavings(
     }
 
     coveredCalls++;
-    inputTokens += call.inputTokens;
-    outputTokens += call.outputTokens;
+    inputTokens += inTok;
+    outputTokens += outTok;
     actualCostUsd += actual;
     baselineCostUsd += baseline;
 

@@ -226,3 +226,61 @@ describe("SavingsStore — unknown schemaVersion → read-only", () => {
     expect(logs.some((l) => l.toLowerCase().includes("schema"))).toBe(true);
   });
 });
+
+describe("SavingsStore — write-path validation (review fix)", () => {
+  it("skips a summary with fractional token counts instead of poisoning the doc", async () => {
+    const client = makeClient();
+    const logs: string[] = [];
+    const store = new SavingsStore(client as unknown as SavingsStoreClient, (l) => logs.push(l));
+    await store.record(makeSummary()); // healthy baseline run
+    const healthy = client.getDoc()!.content;
+
+    await store.record(makeSummary({ inputTokens: 1000.5 }));
+    expect(client.getDoc()!.content).toBe(healthy); // nothing merged
+    expect(logs.some((l) => l.includes("out-of-range"))).toBe(true);
+
+    // a later healthy run still accumulates on top of the preserved doc
+    await store.record(makeSummary());
+    const totals = JSON.parse(client.getDoc()!.content).totals;
+    expect(totals.runs).toBe(2);
+  });
+
+  it("skips NaN/negative cost and malformed byModel buckets", async () => {
+    const client = makeClient();
+    const store = new SavingsStore(client as unknown as SavingsStoreClient);
+    await store.record(makeSummary({ actualCostUsd: Number.NaN }));
+    await store.record(makeSummary({ baselineCostUsd: -1 }));
+    await store.record(
+      makeSummary({
+        byModel: {
+          x: { calls: 0.5, inputTokens: 0, outputTokens: 0, actualCostUsd: 0, baselineCostUsd: 0 },
+        },
+      }),
+    );
+    expect(client.getDoc()).toBeNull(); // no write ever happened
+  });
+});
+
+describe("SavingsStore — idempotent CAS retry (review fix)", () => {
+  it("does not double-count when a committed write throws before returning", async () => {
+    const client = makeClient();
+    // First write commits server-side, then the response is 'lost'.
+    let failedOnce = false;
+    const origWrite = client.write.getMockImplementation()!;
+    client.write.mockImplementation(async (...args: Parameters<typeof origWrite>) => {
+      const result = await origWrite(...args);
+      if (!failedOnce) {
+        failedOnce = true;
+        throw new Error("socket reset after commit");
+      }
+      return result;
+    });
+
+    const store = new SavingsStore(client as unknown as SavingsStoreClient);
+    await store.record(makeSummary());
+
+    const totals = JSON.parse(client.getDoc()!.content).totals;
+    expect(totals.runs).toBe(1); // applied exactly once, not twice
+    expect(totals.coveredCalls).toBe(2);
+  });
+});

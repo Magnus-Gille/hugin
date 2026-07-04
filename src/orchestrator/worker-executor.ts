@@ -508,6 +508,16 @@ function buildPiArgs(
   return flags;
 }
 
+/**
+ * Provider-reported token counts are only trusted as nonnegative integers;
+ * anything else (fractional estimates, negatives, NaN, non-numbers) → null.
+ */
+function sanitizeTokenCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
 function buildHeaders(provider: string, apiKey: string): Record<string, string> {
   const h: Record<string, string> = {
     authorization: `Bearer ${apiKey}`,
@@ -558,10 +568,12 @@ function extractChatCompletion(raw: unknown): ExtractedCompletion | ExtractedErr
   }
 
   const usage = r["usage"] as Record<string, unknown> | undefined;
-  const inputTokens =
-    typeof usage?.["prompt_tokens"] === "number" ? usage["prompt_tokens"] : null;
-  const outputTokens =
-    typeof usage?.["completion_tokens"] === "number" ? usage["completion_tokens"] : null;
+  // Provider JSON is untrusted: token counts must be nonnegative integers or
+  // they are dropped (a fractional count from a proxy that estimates usage
+  // would otherwise poison the savings store and fail the structured-result
+  // schema's .int() constraint downstream).
+  const inputTokens = sanitizeTokenCount(usage?.["prompt_tokens"]);
+  const outputTokens = sanitizeTokenCount(usage?.["completion_tokens"]);
 
   const finishReason =
     typeof choiceObj["finish_reason"] === "string"
@@ -653,11 +665,10 @@ function parsePiJsonLines(raw: string): PiParsedOutput {
     // --- Top-level usage (legacy, separate "usage" event) ---
     const usage = o["usage"] as Record<string, unknown> | undefined;
     if (usage) {
-      if (typeof usage["input_tokens"] === "number") inputTokens = usage["input_tokens"];
-      if (typeof usage["output_tokens"] === "number") outputTokens = usage["output_tokens"];
-      if (typeof usage["prompt_tokens"] === "number") inputTokens = usage["prompt_tokens"];
-      if (typeof usage["completion_tokens"] === "number")
-        outputTokens = usage["completion_tokens"];
+      inputTokens = sanitizeTokenCount(usage["input_tokens"]) ?? inputTokens;
+      outputTokens = sanitizeTokenCount(usage["output_tokens"]) ?? outputTokens;
+      inputTokens = sanitizeTokenCount(usage["prompt_tokens"]) ?? inputTokens;
+      outputTokens = sanitizeTokenCount(usage["completion_tokens"]) ?? outputTokens;
     }
   }
 
