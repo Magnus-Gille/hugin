@@ -124,8 +124,8 @@ export function computeSavings(
     const bucket = byModel[key] ?? { ...EMPTY_BUCKET };
     byModel[key] = {
       calls: bucket.calls + 1,
-      inputTokens: bucket.inputTokens + call.inputTokens,
-      outputTokens: bucket.outputTokens + call.outputTokens,
+      inputTokens: bucket.inputTokens + inTok,
+      outputTokens: bucket.outputTokens + outTok,
       actualCostUsd: bucket.actualCostUsd + actual,
       baselineCostUsd: bucket.baselineCostUsd + baseline,
     };
