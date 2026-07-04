@@ -12,7 +12,9 @@ import { assertProvidersAllowSensitivity } from "./sensitivity-guard.js";
 import type { Sensitivity } from "../sensitivity.js";
 import type { VerdictStoreLike, VerdictEvent, VerdictBatchEvent } from "./verdict-store.js";
 import type { LedgerClientLike } from "./ledger-client.js";
-import { parseIntEnv } from "./config.js";
+import type { SavingsStoreLike } from "./savings-store.js";
+import { computeSavings, type SavingsSummary } from "./savings.js";
+import { parseIntEnv, isSavingsEnabled, resolveSavingsBaselineModel } from "./config.js";
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -44,6 +46,16 @@ export interface OrchestratorExecResult {
    * `orchestratorOutcomes` field.
    */
   outcomes: SubtaskOutcome[];
+  /**
+   * Savings vs the configured baseline model (PR3, S4 —
+   * docs/orchestrator-savings-tracker.md), computed from the engine's
+   * modelCalls ledger. `null` when never computed: HUGIN_ORCH_SAVINGS=off,
+   * the configured baseline model isn't in MODEL_PRICING, or the run never
+   * reached a completed OrchestrationResult (sensitivity guard rejection,
+   * pre-execution abort, or timeout). Consumed by src/index.ts to populate
+   * the structured result's `savings` field.
+   */
+  savings: SavingsSummary | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +66,7 @@ function buildSummary(
   prompt: string,
   result: OrchestrationResult,
   maxOutputChars: number,
+  savings: SavingsSummary | null,
 ): string {
   const lines: string[] = [];
 
@@ -62,6 +75,12 @@ function buildSummary(
   lines.push(`- **Strategy:** ${result.plan.strategy}`);
   lines.push(`- **Subtasks:** ${result.outcomes.length}`);
   lines.push(`- **Total cost:** ${result.totalCostUsd !== null ? `$${result.totalCostUsd.toFixed(6)}` : "unknown"}`);
+  if (savings) {
+    // Savings tracker (PR3, S4) — one line, only when actually computed.
+    lines.push(
+      `- **Savings vs ${savings.baselineModelId}:** $${savings.savedUsd.toFixed(4)} (actual $${savings.actualCostUsd.toFixed(4)}, ${savings.coveredCalls} covered / ${savings.uncoveredCalls} uncovered calls)`,
+    );
+  }
   lines.push(`- **Total latency:** ${result.totalLatencyMs}ms`);
   lines.push(`- **Outcome:** ${result.ok ? "ok" : `failed${result.error ? ` — ${result.error}` : ""}`}`);
   lines.push(``);
@@ -138,6 +157,14 @@ export async function runOrchestratorTask(
      * own `/ledger` recommendation rather than Hugin's own store (D5).
      */
     ledgerClient?: LedgerClientLike;
+    /**
+     * Savings tracker (PR3, S3/S4 — docs/orchestrator-savings-tracker.md):
+     * when present AND savings were computed for this run (HUGIN_ORCH_SAVINGS
+     * is not "off" and the baseline model is priced), the run's SavingsSummary
+     * is recorded here, detached (fire-and-forget), alongside verdict
+     * recording.
+     */
+    savingsStore?: SavingsStoreLike;
   },
 ): Promise<OrchestratorExecResult> {
   const { onLog } = deps;
@@ -152,6 +179,7 @@ export async function runOrchestratorTask(
       resultText: null,
       costUsd: null,
       outcomes: [],
+      savings: null,
     };
   }
 
@@ -159,7 +187,14 @@ export async function runOrchestratorTask(
   if (deps.signal?.aborted) {
     const reason = "aborted before execution started";
     onLog?.(`[orchestrator] ${reason}`);
-    return { exitCode: 1, output: reason, resultText: null, costUsd: null, outcomes: [] };
+    return {
+      exitCode: 1,
+      output: reason,
+      resultText: null,
+      costUsd: null,
+      outcomes: [],
+      savings: null,
+    };
   }
 
   onLog?.(`[orchestrator] starting (strategy will be determined by planner)`);
@@ -219,7 +254,14 @@ export async function runOrchestratorTask(
   if (deps.signal?.aborted) {
     const reason = "aborted after execution completed";
     onLog?.(`[orchestrator] ${reason}`);
-    return { exitCode: 1, output: reason, resultText: null, costUsd: null, outcomes: [] };
+    return {
+      exitCode: 1,
+      output: reason,
+      resultText: null,
+      costUsd: null,
+      outcomes: [],
+      savings: null,
+    };
   }
 
   // --- 5. Timeout path ---
@@ -231,6 +273,7 @@ export async function runOrchestratorTask(
       resultText: null,
       costUsd: null,
       outcomes: [],
+      savings: null,
     };
   }
 
@@ -243,6 +286,23 @@ export async function runOrchestratorTask(
   // trailing .catch() here is defense in depth against a rogue
   // VerdictStoreLike implementation (e.g. in tests) throwing synchronously.
   void recordVerdictEvents(deps.verdictStore, result.outcomes, onLog).catch(() => {});
+
+  // --- 6b. Savings computation + recording (PR3, S2-S4) — computed from the
+  // engine's per-call ledger, never from totalCostUsd (all-or-nothing-null).
+  // Gated on HUGIN_ORCH_SAVINGS (default on); the configured baseline model
+  // must be priced in MODEL_PRICING or savings are disabled for this run
+  // (logged once via onLog, never per call). Recording is detached
+  // fire-and-forget, same contract as verdict recording above.
+  let savings: SavingsSummary | null = null;
+  if (isSavingsEnabled(process.env)) {
+    const baselineModelId = resolveSavingsBaselineModel(process.env, onLog);
+    if (baselineModelId) {
+      savings = computeSavings(result.modelCalls, baselineModelId);
+    }
+  }
+  if (deps.savingsStore && savings) {
+    void deps.savingsStore.record(savings).catch(() => {});
+  }
 
   onLog?.(`[orchestrator] planner ok — strategy=${result.plan.strategy} subtasks=${result.outcomes.length}`);
 
@@ -264,11 +324,11 @@ export async function runOrchestratorTask(
   onLog?.(`[orchestrator] ${result.ok ? "done" : "failed"} — total_cost=${result.totalCostUsd !== null ? `$${result.totalCostUsd.toFixed(6)}` : "unknown"} latency=${result.totalLatencyMs}ms`);
 
   const exitCode = result.ok ? 0 : 1;
-  const output = buildSummary(input.prompt, result, input.maxOutputChars);
+  const output = buildSummary(input.prompt, result, input.maxOutputChars, savings);
   const resultText = result.finalOutput || null;
   const costUsd = result.totalCostUsd;
 
-  return { exitCode, output, resultText, costUsd, outcomes: result.outcomes };
+  return { exitCode, output, resultText, costUsd, outcomes: result.outcomes, savings };
 }
 
 // ---------------------------------------------------------------------------
