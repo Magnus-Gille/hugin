@@ -5,28 +5,7 @@ import { describe, it, expect } from "vitest";
 
 // --- resolveContext unit tests ---
 
-import * as path from "node:path";
-
-function resolveContext(raw: string): string {
-  const trimmed = raw.trim();
-  if (trimmed.startsWith("repo:")) {
-    const name = trimmed.slice(5);
-    const resolved = path.resolve(`/home/magnus/repos/${name}`);
-    if (!resolved.startsWith("/home/magnus/repos/")) {
-      return "/home/magnus/workspace";
-    }
-    return resolved;
-  }
-  switch (trimmed) {
-    case "scratch": return "/home/magnus/scratch";
-    case "files": return "/home/magnus/mimir";
-    default: {
-      if (trimmed.startsWith("/home/magnus/")) return trimmed;
-      if (trimmed.startsWith("/")) return "/home/magnus/workspace";
-      return "/home/magnus/workspace";
-    }
-  }
-}
+import { resolveContext } from "../src/task-helpers.js";
 
 type RuntimeCapability = "tools" | "code" | "structured-output";
 
@@ -168,6 +147,56 @@ describe("resolveContext", () => {
 
   it("should reject relative paths as fallback", () => {
     expect(resolveContext("foo")).toBe("/home/magnus/workspace");
+    expect(resolveContext("relative/path")).toBe("/home/magnus/workspace");
+  });
+});
+
+describe("resolveContext with configurable roots (#139)", () => {
+  const roots = {
+    reposRoot: "/home/magnus/hugin-workspace",
+    workspace: "/home/magnus/hugin-workspace/_default",
+  };
+
+  it("resolves repo: aliases under the configured repos root", () => {
+    expect(resolveContext("repo:heimdall", roots)).toBe(
+      "/home/magnus/hugin-workspace/heimdall",
+    );
+    expect(resolveContext("repo:grimnir", roots)).toBe(
+      "/home/magnus/hugin-workspace/grimnir",
+    );
+  });
+
+  it("never resolves a repo: alias into the production repos root", () => {
+    // The whole point of #139: with an isolated root configured, a task can
+    // never re-point a production checkout under /home/magnus/repos.
+    expect(resolveContext("repo:grimnir", roots)).not.toContain(
+      "/home/magnus/repos",
+    );
+  });
+
+  it("tolerates a trailing slash on the configured repos root", () => {
+    expect(
+      resolveContext("repo:heimdall", { reposRoot: "/home/magnus/hugin-workspace/" }),
+    ).toBe("/home/magnus/hugin-workspace/heimdall");
+  });
+
+  it("rejects traversal relative to the configured repos root", () => {
+    expect(resolveContext("repo:../../etc", roots)).toBe(
+      "/home/magnus/hugin-workspace/_default",
+    );
+  });
+
+  it("uses the configured workspace as the fallback", () => {
+    expect(resolveContext("relative/path", roots)).toBe(
+      "/home/magnus/hugin-workspace/_default",
+    );
+    expect(resolveContext("/tmp/evil", roots)).toBe(
+      "/home/magnus/hugin-workspace/_default",
+    );
+  });
+
+  it("preserves default behavior when no roots are supplied", () => {
+    expect(resolveContext("repo:heimdall")).toBe("/home/magnus/repos/heimdall");
     expect(resolveContext("relative/path")).toBe("/home/magnus/workspace");
   });
 });

@@ -1,5 +1,73 @@
 import { spawn } from "node:child_process";
+import * as path from "node:path";
 import type { MuninEntry, MuninQueryResult, MuninReadResult } from "./munin-client.js";
+
+/**
+ * Task-workspace roots (issue #139).
+ *
+ * `reposRoot` is the directory under which `repo:<name>` aliases resolve and
+ * which {@link checkoutTaskBranch} treats as "managed" (safe to branch). It is
+ * configurable so a deployment can point task execution at an ISOLATED tree
+ * (e.g. `/home/magnus/hugin-workspace`) that is disjoint from the production
+ * deploy checkouts under `/home/magnus/repos` — a hugin task can then never
+ * re-point a production checkout onto its task branch (grimnir#44 / grimnir#33).
+ *
+ * Defaults preserve the historical hardcoded behavior.
+ */
+export const DEFAULT_REPOS_ROOT = "/home/magnus/repos";
+export const DEFAULT_WORKSPACE = "/home/magnus/workspace";
+
+export interface WorkspaceRoots {
+  /** Root for `repo:<name>` resolution. Defaults to {@link DEFAULT_REPOS_ROOT}. */
+  reposRoot?: string;
+  /** Fallback working dir for unresolvable contexts. Defaults to {@link DEFAULT_WORKSPACE}. */
+  workspace?: string;
+}
+
+/** Strip any trailing slashes so `${root}/` composition is unambiguous. */
+export function normalizeRoot(root: string): string {
+  return root.replace(/\/+$/, "");
+}
+
+/**
+ * Resolve a task `Context:` value to an absolute working directory.
+ *
+ * - `repo:<name>` → `<reposRoot>/<name>` (traversal outside `reposRoot` is
+ *   rejected to the workspace fallback).
+ * - `scratch` / `files` → fixed non-code locations.
+ * - An absolute path under `/home/magnus/` passes through; anything else
+ *   (relative paths, absolute paths elsewhere) falls back to `workspace`.
+ *
+ * `reposRoot`/`workspace` are configurable per #139; omitting them preserves
+ * the original hardcoded `/home/magnus/repos` + `/home/magnus/workspace`.
+ */
+export function resolveContext(raw: string, roots: WorkspaceRoots = {}): string {
+  const reposRoot = normalizeRoot(roots.reposRoot ?? DEFAULT_REPOS_ROOT);
+  const workspace = roots.workspace ?? DEFAULT_WORKSPACE;
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("repo:")) {
+    const name = trimmed.slice(5);
+    const resolved = path.resolve(`${reposRoot}/${name}`);
+    // Guard against traversal (e.g. repo:../../tmp) escaping the repos root.
+    if (!resolved.startsWith(`${reposRoot}/`)) {
+      return workspace;
+    }
+    return resolved;
+  }
+  switch (trimmed) {
+    case "scratch": return "/home/magnus/scratch";
+    case "files": return "/home/magnus/mimir";
+    default: {
+      // Only allow absolute paths under /home/magnus/; reject others
+      if (trimmed.startsWith("/home/magnus/")) return trimmed;
+      if (trimmed.startsWith("/")) {
+        console.warn(`Context path outside /home/magnus/ rejected: ${trimmed}`);
+        return workspace;
+      }
+      return workspace;
+    }
+  }
+}
 
 export function getFoundBatchEntry(
   entry: MuninReadResult | undefined
@@ -331,6 +399,13 @@ export function decideStartupRecovery(
 export interface TaskBranchOptions {
   /** Backoff in ms before each retry attempt after the first. Defaults to [500, 2000]. */
   fetchRetryDelaysMs?: number[];
+  /**
+   * Managed-checkout root (issue #139). Only working dirs under this root are
+   * treated as branchable repos; anything else is `skipped`. Defaults to
+   * {@link DEFAULT_REPOS_ROOT}. Point it at an isolated task tree so a task
+   * can never branch a production checkout.
+   */
+  reposRoot?: string;
 }
 
 export interface TaskBranchResult {
@@ -380,8 +455,9 @@ async function runGitFetch(
  * Pre-task: fetch origin and checkout a fresh branch `hugin/<taskId>` from
  * `origin/main`. Replaces the old `syncRepoBeforeTask` fast-forward approach.
  *
- * - Returns `skipped` for non-managed directories (outside /home/magnus/repos/,
- *   not a git repo, no remote). Task proceeds normally.
+ * - Returns `skipped` for non-managed directories (outside `reposRoot`
+ *   (default /home/magnus/repos/), not a git repo, no remote). Task proceeds
+ *   normally.
  * - Returns `fetch-failed` on network errors. Task proceeds without branching
  *   (degraded mode, logged as warning).
  * - Returns `created` on success with `branchName` set.
@@ -391,7 +467,14 @@ export async function checkoutTaskBranch(
   taskId: string,
   options: TaskBranchOptions = {},
 ): Promise<TaskBranchResult> {
-  if (!workingDir.startsWith("/home/magnus/repos/")) {
+  // Canonicalize both sides before the prefix check: a raw `startsWith` guard
+  // can be bypassed with `..` segments that string-match the isolated root but
+  // resolve (via the OS `cwd`) onto a production checkout — the exact
+  // re-pointing #139 exists to prevent. `path.sep`-anchoring also stops a
+  // sibling dir that merely shares the root's string prefix (e.g.
+  // `<root>-evil`).
+  const reposRoot = path.resolve(normalizeRoot(options.reposRoot ?? DEFAULT_REPOS_ROOT));
+  if (!path.resolve(workingDir).startsWith(`${reposRoot}${path.sep}`)) {
     return { action: "skipped" };
   }
 
