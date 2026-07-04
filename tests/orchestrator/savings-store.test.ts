@@ -38,6 +38,8 @@ function makeSummary(overrides: Partial<SavingsSummary> = {}): SavingsSummary {
     actualCostUsd: 0.54,
     baselineCostUsd: 36.0,
     savedUsd: 35.46,
+    qaBaselineCreditUsd: 18.0,
+    qualityAdjustedSavedUsd: 18.0 - 0.54,
     byModel: {
       "openrouter|deepseek/deepseek-v4-flash": {
         calls: 2,
@@ -46,6 +48,10 @@ function makeSummary(overrides: Partial<SavingsSummary> = {}): SavingsSummary {
         actualCostUsd: 0.54,
         baselineCostUsd: 36.0,
       },
+    },
+    byOutcome: {
+      pass: { calls: 1, actualCostUsd: 0.27, baselineCostUsd: 18.0, qaBaselineCreditUsd: 18.0 },
+      fail: { calls: 1, actualCostUsd: 0.27, baselineCostUsd: 18.0, qaBaselineCreditUsd: 0 },
     },
     ...overrides,
   };
@@ -206,6 +212,102 @@ describe("SavingsStore — row sanitation", () => {
     const written = JSON.parse(client.getDoc()!.content);
     expect(written.totals.actualCostUsd).toBeCloseTo(0.123456, 6);
     expect(written.totals.baselineCostUsd).toBeCloseTo(12.345678, 6);
+  });
+});
+
+describe("SavingsStore — quality-adjusted counters (issue #144)", () => {
+  it("persists qaBaselineCreditUsd in totals and byOutcome buckets on first write", async () => {
+    const client = makeClient();
+    const store = new SavingsStore(client as SavingsStoreClient);
+
+    await store.record(makeSummary());
+
+    const doc = JSON.parse(client.getDoc()!.content);
+    expect(doc.totals.qaBaselineCreditUsd).toBeCloseTo(18.0, 6);
+    expect(doc.byOutcome.pass.calls).toBe(1);
+    expect(doc.byOutcome.pass.qaBaselineCreditUsd).toBeCloseTo(18.0, 6);
+    expect(doc.byOutcome.fail.qaBaselineCreditUsd).toBe(0);
+    // Lifetime quality-adjusted savings derive at read time:
+    // qaBaselineCreditUsd − actualCostUsd (here 18.0 − 0.54).
+    expect(doc.totals.qaBaselineCreditUsd - doc.totals.actualCostUsd).toBeCloseTo(17.46, 6);
+  });
+
+  it("accumulates byOutcome buckets across runs", async () => {
+    const client = makeClient();
+    const store = new SavingsStore(client as SavingsStoreClient);
+
+    await store.record(makeSummary());
+    await store.record(makeSummary());
+
+    const doc = JSON.parse(client.getDoc()!.content);
+    expect(doc.totals.qaBaselineCreditUsd).toBeCloseTo(36.0, 6);
+    expect(doc.byOutcome.pass.calls).toBe(2);
+    expect(doc.byOutcome.fail.calls).toBe(2);
+    expect(doc.byOutcome.fail.actualCostUsd).toBeCloseTo(0.54, 6);
+  });
+
+  it("a pre-#144 doc (no qa fields) is NOT reset — totals preserved, qa counters default to 0", async () => {
+    const oldDoc = {
+      schemaVersion: 1,
+      totals: { runs: 5, coveredCalls: 10, uncoveredCalls: 2, inputTokens: 100, outputTokens: 100, actualCostUsd: 1.0, baselineCostUsd: 50.0 },
+      byModel: {},
+    };
+    const client = makeClient({ content: JSON.stringify(oldDoc), updated_at: "v1" });
+    const store = new SavingsStore(client as SavingsStoreClient);
+
+    await store.record(makeSummary());
+
+    const doc = JSON.parse(client.getDoc()!.content);
+    expect(doc.totals.runs).toBe(6); // preserved 5 + this run — never reset
+    expect(doc.totals.baselineCostUsd).toBeCloseTo(86.0, 6);
+    expect(doc.totals.qaBaselineCreditUsd).toBeCloseTo(18.0, 6); // 0 default + this run
+    expect(doc.byOutcome.pass.calls).toBe(1);
+  });
+
+  it("drops a malformed byOutcome row but keeps valid ones", async () => {
+    const doc = {
+      schemaVersion: 1,
+      totals: { runs: 1, coveredCalls: 1, uncoveredCalls: 0, inputTokens: 1, outputTokens: 1, actualCostUsd: 0.1, baselineCostUsd: 1, qaBaselineCreditUsd: 1 },
+      byModel: {},
+      byOutcome: {
+        pass: { calls: 1, actualCostUsd: 0.1, baselineCostUsd: 1, qaBaselineCreditUsd: 1 },
+        fail: { calls: "corrupt", actualCostUsd: 0.1, baselineCostUsd: 1, qaBaselineCreditUsd: 0 },
+      },
+    };
+    const client = makeClient({ content: JSON.stringify(doc), updated_at: "v1" });
+    const store = new SavingsStore(client as SavingsStoreClient);
+
+    await store.record(makeSummary({ byOutcome: {} }));
+
+    const written = JSON.parse(client.getDoc()!.content);
+    expect(written.byOutcome.pass).toBeDefined();
+    expect(written.byOutcome.fail).toBeUndefined();
+  });
+
+  it("write-path validation rejects a summary with negative qaBaselineCreditUsd or non-finite qualityAdjustedSavedUsd", async () => {
+    const client = makeClient();
+    const store = new SavingsStore(client as unknown as SavingsStoreClient);
+    await store.record(makeSummary({ qaBaselineCreditUsd: -1 }));
+    await store.record(makeSummary({ qualityAdjustedSavedUsd: Number.NaN }));
+    await store.record(
+      makeSummary({
+        byOutcome: { pass: { calls: 0.5, actualCostUsd: 0, baselineCostUsd: 0, qaBaselineCreditUsd: 0 } },
+      }),
+    );
+    expect(client.getDoc()).toBeNull(); // no write ever happened
+  });
+
+  it("accepts a NEGATIVE qualityAdjustedSavedUsd (a losing run is valid data, not corruption)", async () => {
+    const client = makeClient();
+    const store = new SavingsStore(client as SavingsStoreClient);
+
+    await store.record(
+      makeSummary({ qaBaselineCreditUsd: 0, qualityAdjustedSavedUsd: -0.54 }),
+    );
+
+    const doc = JSON.parse(client.getDoc()!.content);
+    expect(doc.totals.runs).toBe(1);
+    expect(doc.totals.qaBaselineCreditUsd).toBe(0);
   });
 });
 

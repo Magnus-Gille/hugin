@@ -1054,6 +1054,103 @@ describe("runOrchestratorTask — savings computation (S4)", () => {
   });
 });
 
+describe("runOrchestratorTask — quality-adjusted savings join (issue #144)", () => {
+  it("joins verdict outcomes into savings: a failed-verification subtask yields non-positive quality-adjusted savings", async () => {
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        if (role === "verifier") return makeWorkerResult({ output: "FAIL — wrong answer" });
+        return makeWorkerResult({ output: "cheap but wrong" });
+      }),
+    };
+
+    const result = await runOrchestratorTask(
+      defaultInput,
+      { ...DEFAULT_ORCHESTRATOR_CONFIG, verifyWorkers: true },
+      { invoker },
+    );
+
+    expect(result.savings).not.toBeNull();
+    // Raw savings still positive (deepseek vs claude baseline on the worker call)…
+    expect(result.savings!.savedUsd).toBeGreaterThan(0);
+    // …but the quality-adjusted headline must not reward cheap-but-wrong: the
+    // worker's spend AND the verifier's spend book as loss, offset only by
+    // the planner's run-level margin.
+    expect(result.savings!.qualityAdjustedSavedUsd).toBeLessThan(result.savings!.savedUsd);
+    expect(result.savings!.qualityAdjustedSavedUsd).toBeLessThanOrEqual(0);
+    expect(result.savings!.byOutcome.fail?.calls).toBe(2); // worker + verifier
+    // Both series surface in the human-readable summary.
+    expect(result.output).toContain("Savings vs");
+    expect(result.output).toContain("Quality-adjusted savings");
+  });
+
+  it("a verified-pass run keeps positive quality-adjusted savings and buckets it under pass", async () => {
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        if (role === "verifier") return makeWorkerResult({ output: "PASS" });
+        return makeWorkerResult({ output: "good result" });
+      }),
+    };
+
+    const result = await runOrchestratorTask(
+      defaultInput,
+      { ...DEFAULT_ORCHESTRATOR_CONFIG, verifyWorkers: true },
+      { invoker },
+    );
+
+    expect(result.savings!.qualityAdjustedSavedUsd).toBeGreaterThan(0);
+    expect(result.savings!.byOutcome.pass?.calls).toBe(2); // worker + verifier
+  });
+
+  it("duplicate planner-emitted subtask ids do not collapse verdicts in the savings join (Codex review)", async () => {
+    // Planner emits TWO subtasks with the SAME id; the first passes
+    // verification, the second fails. Without id dedup at plan-parse time the
+    // verdict map would collapse to the last outcome (fail) — or worse,
+    // credit the failed work — so byOutcome must show one pass and one fail.
+    const dupPlan = JSON.stringify({
+      subtasks: [
+        { id: "step", prompt: "Do A", taskType: "summarize" },
+        { id: "step", prompt: "Do B", taskType: "summarize" },
+      ],
+    });
+    let verifierCallCount = 0;
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: dupPlan });
+        if (role === "verifier") {
+          verifierCallCount++;
+          return makeWorkerResult({ output: verifierCallCount === 1 ? "PASS" : "FAIL — wrong" });
+        }
+        return makeWorkerResult({ output: "worker result" });
+      }),
+    };
+
+    const result = await runOrchestratorTask(
+      defaultInput,
+      { ...DEFAULT_ORCHESTRATOR_CONFIG, verifyWorkers: true },
+      { invoker },
+    );
+
+    expect(result.savings!.byOutcome.pass?.calls).toBe(2); // worker + verifier of subtask 1
+    expect(result.savings!.byOutcome.fail?.calls).toBe(2); // worker + verifier of subtask 2
+  });
+
+  it("an unverified run buckets worker calls under unknown (never a fake pass)", async () => {
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: singleSubtaskPlan("summarize") });
+        return makeWorkerResult({ output: "result" });
+      }),
+    };
+
+    const result = await runOrchestratorTask(defaultInput, DEFAULT_ORCHESTRATOR_CONFIG, { invoker });
+
+    expect(result.savings!.byOutcome.unknown?.calls).toBe(1);
+    expect(result.savings!.byOutcome.pass).toBeUndefined();
+  });
+});
+
 describe("runOrchestratorTask — savings recording is fire-and-forget (S3/S4)", () => {
   it("records the computed savings via deps.savingsStore.record when present", async () => {
     const savingsStore = makeSavingsStoreMock();

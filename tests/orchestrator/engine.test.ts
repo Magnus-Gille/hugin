@@ -629,6 +629,34 @@ describe("runOrchestration — modelCalls ledger (savings tracker S1)", () => {
     expect(verifierCalls.every((c) => c.ok === true)).toBe(true);
   });
 
+  it("worker and verifier calls carry the subtaskId they were spent on; planner/synth do not (issue #144)", async () => {
+    const PLAN_2 = JSON.stringify({
+      subtasks: [
+        { id: "sub-a", prompt: "Step A" },
+        { id: "sub-b", prompt: "Step B" },
+      ],
+    });
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(PLAN_2, 0.01)]],
+      ["worker", [ok("W1", 0.002), ok("W2", 0.003)]],
+      ["verifier", [ok("PASS", 0.001), ok("FAIL", 0.001)]],
+      ["synthesizer", [ok("Final", 0.002)]],
+    ]);
+    const invoker = buildMockInvoker(responses);
+
+    const result = await runOrchestration("Attribute costs", invoker, { verifyWorkers: true });
+
+    const workerIds = result.modelCalls.filter((c) => c.role === "worker").map((c) => c.subtaskId);
+    expect(workerIds.sort()).toEqual(["sub-a", "sub-b"]);
+    const verifierIds = result.modelCalls
+      .filter((c) => c.role === "verifier")
+      .map((c) => c.subtaskId);
+    expect(verifierIds.sort()).toEqual(["sub-a", "sub-b"]);
+    for (const call of result.modelCalls.filter((c) => c.role === "planner" || c.role === "synthesizer")) {
+      expect(call.subtaskId).toBeUndefined();
+    }
+  });
+
   it("failed calls are recorded with ok:false and null tokens/cost", async () => {
     const responses = new Map<OrchestratorRole, WorkerResult[]>([
       ["planner", [ok(VALID_PLAN_3, 0.01)]],

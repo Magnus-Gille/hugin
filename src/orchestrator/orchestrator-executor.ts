@@ -13,7 +13,11 @@ import type { Sensitivity } from "../sensitivity.js";
 import type { VerdictStoreLike, VerdictEvent, VerdictBatchEvent } from "./verdict-store.js";
 import type { LedgerClientLike } from "./ledger-client.js";
 import type { SavingsStoreLike } from "./savings-store.js";
-import { computeSavings, type SavingsSummary } from "./savings.js";
+import {
+  computeSavings,
+  type SavingsSummary,
+  type SavingsVerdictOutcome,
+} from "./savings.js";
 import { parseIntEnv, isSavingsEnabled, resolveSavingsBaselineModel } from "./config.js";
 
 // ---------------------------------------------------------------------------
@@ -79,6 +83,15 @@ function buildSummary(
     // Savings tracker (PR3, S4) — one line, only when actually computed.
     lines.push(
       `- **Savings vs ${savings.baselineModelId}:** $${savings.savedUsd.toFixed(4)} (actual $${savings.actualCostUsd.toFixed(4)}, ${savings.coveredCalls} covered / ${savings.uncoveredCalls} uncovered calls)`,
+    );
+    // Quality-adjusted headline (issue #144): the verdict-joined series —
+    // failed/escalated subtask spend books at full cost with no baseline
+    // credit, and verification cost is attributed to the local attempt.
+    const outcomeCounts = Object.entries(savings.byOutcome)
+      .map(([outcome, bucket]) => `${outcome}: ${bucket.calls}`)
+      .join(", ");
+    lines.push(
+      `- **Quality-adjusted savings:** $${savings.qualityAdjustedSavedUsd.toFixed(4)}${outcomeCounts ? ` (calls by verdict — ${outcomeCounts})` : ""}`,
     );
   }
   lines.push(`- **Total latency:** ${result.totalLatencyMs}ms`);
@@ -297,7 +310,16 @@ export async function runOrchestratorTask(
   if (isSavingsEnabled(process.env)) {
     const baselineModelId = resolveSavingsBaselineModel(process.env, onLog);
     if (baselineModelId) {
-      savings = computeSavings(result.modelCalls, baselineModelId);
+      // Quality-adjusted join (issue #144): verification runs INSIDE
+      // runOrchestration (before it returns), so every subtask's verdict is
+      // already final here — a single write-time join, no two-phase write.
+      // An adaptive-verify skip is semantically "unknown" (never verified
+      // this run), not "pending".
+      savings = computeSavings(
+        result.modelCalls,
+        baselineModelId,
+        buildVerdictOutcomeMap(result.outcomes),
+      );
     }
   }
   if (deps.savingsStore && savings) {
@@ -465,6 +487,25 @@ function classifyVerdictEvent(outcome: SubtaskOutcome): VerdictEvent {
   if (outcome.verdict?.ok === true) return "pass";
   if (outcome.verdict?.ok === false) return "fail";
   return "unverified";
+}
+
+/**
+ * Map a run's subtask outcomes to the savings tracker's verdict-outcome join
+ * key (issue #144), keyed by subtask id. Same classification as
+ * classifyVerdictEvent, viewed from the savings side: the verdict layer's
+ * "unverified" is savings' "unknown". "escalated" cannot be produced yet —
+ * the engine has no escalation path; when it grows one, the escalating
+ * outcome must map here so the escalation cost lands on the causing attempt.
+ */
+export function buildVerdictOutcomeMap(
+  outcomes: SubtaskOutcome[],
+): Record<string, SavingsVerdictOutcome> {
+  const map: Record<string, SavingsVerdictOutcome> = {};
+  for (const outcome of outcomes) {
+    const event = classifyVerdictEvent(outcome);
+    map[outcome.subtask.id] = event === "unverified" ? "unknown" : event;
+  }
+  return map;
 }
 
 /**

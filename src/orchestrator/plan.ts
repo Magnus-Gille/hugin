@@ -150,17 +150,30 @@ export function parsePlan(
   const capped = validated.data.subtasks.slice(0, opts.maxSubtasks);
   if (capped.length === 0) return fallback;
 
-  const subtasks: SubTask[] = capped.map((s, index) => ({
+  const seenIds = new Set<string>();
+  const subtasks: SubTask[] = capped.map((s, index) => {
     // Fix #7: a planner-emitted empty/whitespace id would otherwise pass
     // SubTaskSchema (z.string(), no minLength) but violate
     // orchestratorOutcomeSchema's subtaskId.min(1) at structured-result write
     // time — AFTER a successful (and possibly expensive) run. Normalize here,
     // at plan-parse time, using the subtask's position in the CAPPED list.
-    id: s.id.trim() ? s.id : `subtask-${index + 1}`,
-    prompt: s.prompt,
-    rationale: s.rationale,
-    taskType: normalizeTaskType(s.taskType),
-  }));
+    let id = s.id.trim() ? s.id : `subtask-${index + 1}`;
+    // Issue #144 (Codex review): ids must also be UNIQUE — the savings
+    // tracker joins worker/verifier costs to verdict outcomes keyed by
+    // subtask id, so a planner-emitted duplicate would collapse two
+    // subtasks' verdicts into whichever was recorded last. Keep the first
+    // occurrence's id; suffix later duplicates deterministically (the loop
+    // grows the id each round, so it always terminates and cannot collide
+    // with an already-assigned id).
+    while (seenIds.has(id)) id = `${id}-${index + 1}`;
+    seenIds.add(id);
+    return {
+      id,
+      prompt: s.prompt,
+      rationale: s.rationale,
+      taskType: normalizeTaskType(s.taskType),
+    };
+  });
 
   return { strategy: "fanout", subtasks };
 }

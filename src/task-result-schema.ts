@@ -178,6 +178,18 @@ export type OrchestratorOutcomeRecord = z.infer<typeof orchestratorOutcomeSchema
 // (src/orchestrator/savings-store.ts); this field carries only the single
 // run's numbers, mirroring the per-task/aggregate split used by the verdict
 // layer (orchestratorOutcomes vs tasks/_verdicts).
+// Per-verdict-outcome bucket (issue #144) — covered subtask-attributed calls
+// (worker + verifier) grouped by the subtask's verdict outcome. Keys are
+// SavingsVerdictOutcome values ("pass" | "fail" | "unknown" | "error" |
+// "escalated"); kept as a plain string record so an outcome added later
+// doesn't break old readers.
+export const savingsOutcomeBucketSchema = z.object({
+  calls: z.number().int().nonnegative(),
+  actualCostUsd: z.number().nonnegative(),
+  baselineCostUsd: z.number().nonnegative(),
+  qaBaselineCreditUsd: z.number().nonnegative(),
+});
+
 export const savingsSummarySchema = z.object({
   baselineModelId: z.string().min(1),
   coveredCalls: z.number().int().nonnegative(),
@@ -185,6 +197,14 @@ export const savingsSummarySchema = z.object({
   actualCostUsd: z.number().nonnegative(),
   baselineCostUsd: z.number().nonnegative(),
   savedUsd: z.number(),
+  // Quality-adjusted series (issue #144) — additive + optional so results
+  // written before the join still parse. `qualityAdjustedSavedUsd` is the
+  // headline number decisions must read (can be negative — a cheap-but-wrong
+  // run is a loss, not a saving); `savedUsd` above is the RAW series, kept
+  // for comparability only.
+  qaBaselineCreditUsd: z.number().nonnegative().optional(),
+  qualityAdjustedSavedUsd: z.number().optional(),
+  byOutcome: z.record(z.string(), savingsOutcomeBucketSchema).optional(),
 });
 export type SavingsSummaryRecord = z.infer<typeof savingsSummarySchema>;
 
