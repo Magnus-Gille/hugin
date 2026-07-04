@@ -53,15 +53,20 @@ counted, never guessed.
 **Per task** — the structured result's optional `savings` field
 (`src/task-result-schema.ts#savingsSummarySchema`):
 
+Worked example — planner + two workers (one passes, one fails verification) +
+two verifiers, all covered. Totals reconcile: `actualCostUsd` = pass bucket 0.72
+\+ fail bucket 0.72 + planner 0.45 = 1.89; `qaBaselineCreditUsd` = pass 18.00 +
+fail 0 + planner 0.45 = 18.45; headline = 18.45 − 1.89 = 16.56.
+
 ```json
 {
   "baselineModelId": "claude-sonnet-4-6",
-  "coveredCalls": 4, "uncoveredCalls": 0,
-  "actualCostUsd": 0.72, "baselineCostUsd": 36.45, "savedUsd": 35.73,
-  "qaBaselineCreditUsd": 18.45, "qualityAdjustedSavedUsd": 17.73,
+  "coveredCalls": 5, "uncoveredCalls": 0,
+  "actualCostUsd": 1.89, "baselineCostUsd": 37.35, "savedUsd": 35.46,
+  "qaBaselineCreditUsd": 18.45, "qualityAdjustedSavedUsd": 16.56,
   "byOutcome": {
-    "pass":  { "calls": 2, "actualCostUsd": 0.72, "baselineCostUsd": 18.45, "qaBaselineCreditUsd": 18.0 },
-    "fail":  { "calls": 2, "actualCostUsd": 0.30, "baselineCostUsd": 18.0,  "qaBaselineCreditUsd": 0 }
+    "pass": { "calls": 2, "actualCostUsd": 0.72, "baselineCostUsd": 18.45, "qaBaselineCreditUsd": 18.0 },
+    "fail": { "calls": 2, "actualCostUsd": 0.72, "baselineCostUsd": 18.45, "qaBaselineCreditUsd": 0 }
   }
 }
 ```

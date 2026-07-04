@@ -1103,6 +1103,39 @@ describe("runOrchestratorTask — quality-adjusted savings join (issue #144)", (
     expect(result.savings!.byOutcome.pass?.calls).toBe(2); // worker + verifier
   });
 
+  it("duplicate planner-emitted subtask ids do not collapse verdicts in the savings join (Codex review)", async () => {
+    // Planner emits TWO subtasks with the SAME id; the first passes
+    // verification, the second fails. Without id dedup at plan-parse time the
+    // verdict map would collapse to the last outcome (fail) — or worse,
+    // credit the failed work — so byOutcome must show one pass and one fail.
+    const dupPlan = JSON.stringify({
+      subtasks: [
+        { id: "step", prompt: "Do A", taskType: "summarize" },
+        { id: "step", prompt: "Do B", taskType: "summarize" },
+      ],
+    });
+    let verifierCallCount = 0;
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: string): Promise<WorkerResult> => {
+        if (role === "planner") return makeWorkerResult({ output: dupPlan });
+        if (role === "verifier") {
+          verifierCallCount++;
+          return makeWorkerResult({ output: verifierCallCount === 1 ? "PASS" : "FAIL — wrong" });
+        }
+        return makeWorkerResult({ output: "worker result" });
+      }),
+    };
+
+    const result = await runOrchestratorTask(
+      defaultInput,
+      { ...DEFAULT_ORCHESTRATOR_CONFIG, verifyWorkers: true },
+      { invoker },
+    );
+
+    expect(result.savings!.byOutcome.pass?.calls).toBe(2); // worker + verifier of subtask 1
+    expect(result.savings!.byOutcome.fail?.calls).toBe(2); // worker + verifier of subtask 2
+  });
+
   it("an unverified run buckets worker calls under unknown (never a fake pass)", async () => {
     const invoker: ModelInvoker = {
       invoke: vi.fn(async (role: string): Promise<WorkerResult> => {

@@ -146,6 +146,33 @@ describe("parsePlan — subtask id normalization (Fix #7)", () => {
     expect(plan.subtasks[1].id).toBe("subtask-2");
   });
 
+  it("dedupes duplicate planner-emitted ids so per-subtask joins can't collapse (issue #144, Codex review)", () => {
+    const raw = JSON.stringify({
+      subtasks: [
+        { id: "step", prompt: "Step 1" },
+        { id: "step", prompt: "Step 2" },
+        { id: "step", prompt: "Step 3" },
+      ],
+    });
+    const plan = parsePlan(raw, { maxSubtasks: 10, fallbackPrompt: FALLBACK_PROMPT });
+    const ids = plan.subtasks.map((s) => s.id);
+    expect(new Set(ids).size).toBe(3); // all unique
+    expect(ids[0]).toBe("step"); // first occurrence keeps its id
+  });
+
+  it("a dedupe suffix never collides with a LATER planner-emitted id", () => {
+    const raw = JSON.stringify({
+      subtasks: [
+        { id: "a", prompt: "Step 1" },
+        { id: "a", prompt: "Step 2" }, // deduped — must not collide with "a-2" below
+        { id: "a-2", prompt: "Step 3" },
+      ],
+    });
+    const plan = parsePlan(raw, { maxSubtasks: 10, fallbackPrompt: FALLBACK_PROMPT });
+    const ids = plan.subtasks.map((s) => s.id);
+    expect(new Set(ids).size).toBe(3);
+  });
+
   it("never produces an empty-string subtask id (structured-result schema requires min length 1)", () => {
     const raw = JSON.stringify({
       subtasks: [{ id: "", prompt: "Step 1" }, { id: "", prompt: "Step 2" }],
