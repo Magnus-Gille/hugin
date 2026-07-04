@@ -16,7 +16,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveContext, normalizeRoot, DEFAULT_REPOS_ROOT } from "./task-helpers.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig } from "./sdk-executor.js";
 import { classifyClaudeFailure } from "./failure-classification.js";
 import {
@@ -259,6 +259,11 @@ const config = {
   pollIntervalMs: parseInt(process.env.HUGIN_POLL_INTERVAL_MS || "30000"),
   defaultTimeoutMs: parseInt(process.env.HUGIN_DEFAULT_TIMEOUT_MS || "300000"),
   workspace: process.env.HUGIN_WORKSPACE || "/home/magnus/workspace",
+  // Root under which `repo:<name>` aliases resolve and task branches are cut
+  // (#139). Point this at an isolated tree to keep hugin tasks off the
+  // production deploy checkouts under /home/magnus/repos. Default preserves
+  // the historical hardcoded behavior.
+  reposRoot: normalizeRoot(process.env.HUGIN_REPOS_ROOT || DEFAULT_REPOS_ROOT),
   maxOutputChars: parseInt(process.env.HUGIN_MAX_OUTPUT_CHARS || "50000"),
   allowedSubmitters: (process.env.HUGIN_ALLOWED_SUBMITTERS || "Codex,Codex-desktop,ratatoskr,Codex-web,Codex-mobile,claude-code,claude-desktop,claude-web,claude-mobile,hugin")
     .split(",")
@@ -637,32 +642,6 @@ function parsePipelineSideEffectsField(content: string): PipelineSideEffectId[] 
     .map((parsed) => parsed.data);
 }
 
-function resolveContext(raw: string): string {
-  const trimmed = raw.trim();
-  if (trimmed.startsWith("repo:")) {
-    const name = trimmed.slice(5);
-    const resolved = path.resolve(`/home/magnus/repos/${name}`);
-    // Guard against traversal (e.g. repo:../../tmp)
-    if (!resolved.startsWith("/home/magnus/repos/")) {
-      return "/home/magnus/workspace";
-    }
-    return resolved;
-  }
-  switch (trimmed) {
-    case "scratch": return "/home/magnus/scratch";
-    case "files": return "/home/magnus/mimir";
-    default: {
-      // Only allow absolute paths under /home/magnus/; reject others
-      if (trimmed.startsWith("/home/magnus/")) return trimmed;
-      if (trimmed.startsWith("/")) {
-        console.warn(`Context path outside /home/magnus/ rejected: ${trimmed}`);
-        return "/home/magnus/workspace";
-      }
-      return "/home/magnus/workspace";
-    }
-  }
-}
-
 function parseTask(content: string): TaskConfig | null {
   const declaredRuntimeRaw = parseDeclaredRuntime(content);
   const isAutoRoute = declaredRuntimeRaw === "auto";
@@ -756,7 +735,7 @@ function parseTask(content: string): TaskConfig | null {
 
   // Resolution priority: Context > Working dir > config.workspace
   const resolvedDir = contextRaw
-    ? resolveContext(contextRaw)
+    ? resolveContext(contextRaw, { reposRoot: config.reposRoot, workspace: config.workspace })
     : workingDir || config.workspace;
 
   // Runtime-owned artefact delivery manifest (issue #68). Parsed unconditionally
@@ -3930,7 +3909,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     }
 
     // Pre-task: checkout a fresh hugin/<taskId> branch from origin/main (#47)
-    const branchResult = await checkoutTaskBranch(task.workingDir, taskId);
+    const branchResult = await checkoutTaskBranch(task.workingDir, taskId, {
+      reposRoot: config.reposRoot,
+    });
     if (branchResult.action === "fetch-failed") {
       console.warn(`Pre-task branch checkout failed for ${taskNs} (non-fatal, proceeding without branch): ${branchResult.error}`);
     } else if (branchResult.action === "created") {

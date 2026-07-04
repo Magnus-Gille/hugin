@@ -103,6 +103,50 @@ describe("checkoutTaskBranch", () => {
     expect(checkoutCall.args).toEqual(["checkout", "-b", "hugin/task-123", "origin/main"]);
   });
 
+  it("honors a configured reposRoot: treats it as managed (#139)", async () => {
+    spawnBehaviors = [
+      { exitCode: 0 }, // git rev-parse --git-dir
+      { exitCode: 0 }, // git remote get-url origin
+      { exitCode: 0 }, // git fetch origin
+      { exitCode: 0 }, // git checkout -b hugin/task-iso origin/main
+    ];
+    const result = await checkoutTaskBranch(
+      "/home/magnus/hugin-workspace/grimnir",
+      "task-iso",
+      { fetchRetryDelaysMs: [0, 0], reposRoot: "/home/magnus/hugin-workspace" },
+    );
+    expect(result.action).toBe("created");
+    expect(result.branchName).toBe("hugin/task-iso");
+    expect(spawnCalls).toHaveLength(4);
+  });
+
+  it("honors a configured reposRoot: skips the old default location (#139)", async () => {
+    // With an isolated root configured, a production checkout under the old
+    // default is no longer managed — the task can't branch/re-point it.
+    const result = await checkoutTaskBranch(
+      "/home/magnus/repos/grimnir",
+      "task-prod",
+      { reposRoot: "/home/magnus/hugin-workspace" },
+    );
+    expect(result.action).toBe("skipped");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("tolerates a trailing slash on the configured reposRoot (#139)", async () => {
+    spawnBehaviors = [
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 0 },
+    ];
+    const result = await checkoutTaskBranch(
+      "/home/magnus/hugin-workspace/heimdall",
+      "task-slash",
+      { fetchRetryDelaysMs: [0, 0], reposRoot: "/home/magnus/hugin-workspace/" },
+    );
+    expect(result.action).toBe("created");
+  });
+
   it("retries fetch and bypasses system SSH config on retry", async () => {
     spawnBehaviors = [
       { exitCode: 0 },   // git rev-parse --git-dir
