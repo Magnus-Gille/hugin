@@ -1,8 +1,9 @@
 # Hugin — Status
 
 **Last session:** 2026-07-08 (#149 permission profiles — PR #150 deployed to huginmunin; deploy metadata repaired)
-**Branch:** main; service active/healthy on huginmunin. Verified runtime/deploy-hardening state
-`370a667`; exact latest deployment marker is `/home/magnus/repos/hugin/.deployed-commit`.
+**Branch:** main; service active/healthy on huginmunin. Production runtime includes PR #150 and
+the later #152 homeserver delegate-field fix; exact latest deployment marker is
+`/home/magnus/repos/hugin/.deployed-commit`.
 
 ## Latest — Claude SDK task permission profiles (#149, 2026-07-08)
 
@@ -12,13 +13,15 @@ Validation: `npm test -- tests/sdk-executor.test.ts tests/dispatcher.test.ts`, `
 
 PR #150 merged as `ca2ebb9` after green GitHub checks, then deployed to huginmunin on 2026-07-08
 via the delegated-worker path plus Grimnir's registry-aware selective deploy for the final marker
-repair. Verified production state before this status-only record is main at `370a667` (runtime code
-from PR #150 plus deploy-script hardening); later status-only commits do not change runtime behavior.
+repair. During final marker repair, Hugin `main` advanced to `922aa5c` (#152, homeserver delegate
+field forwarding); it was verified with `npm test -- tests/homeserver-executor.test.ts`,
+`npm run build`, deployed, and stamped so the remote checkout, runtime artifacts, and Grimnir marker
+agree.
 
 Production evidence:
 
-- Remote `/home/magnus/repos/hugin` is on `main` at `370a6676a102afdeed2312a140395d281088ade8`.
-- `.deployed-commit` is present and matches the same commit after `grimnir/scripts/deploy.sh hugin`.
+- Remote `/home/magnus/repos/hugin` is on `main`, and `.deployed-commit` matches the deployed
+  checkout after `grimnir/scripts/deploy.sh hugin`.
 - `hugin.service` is active/enabled under the user manager and `/health` returns `status:"ok"`,
   `polling:true`, and `queue_depth:0`.
 - Live permission-probe logs showed the intended effective modes before Claude quota stopped
@@ -36,9 +39,6 @@ Residual caveats:
   validated initialization/permission mode but not successful post-initialization Claude execution.
 - The existing non-fatal deploy warning remains: `~/repos/claude-config` is missing on the Pi, so
   the claude-config bootstrap step warns during deploy.
-- Local checkout note: unrelated dirty changes exist in `src/homeserver-executor.ts` and
-  `tests/homeserver-executor.test.ts`; they were not part of #150 and were not deployed by the final
-  Grimnir selective deploy.
 
 ## Session 9 (2026-07-03) — Homeserver (M5) wired as sovereign orchestrator provider + go-live (#137)
 
