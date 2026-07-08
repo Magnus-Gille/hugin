@@ -1,7 +1,7 @@
 # Hugin — Status
 
-**Last session:** 2026-07-08 (Codex) — OpenCode harness runtime deployed + live-validated
-**Branch:** main at `68dcc97`; production deployed on huginmunin.
+**Last session:** 2026-07-08 (Codex) — OpenCode runtime deployed, live-validated, timer scope reconciled
+**Branch:** `main`; production deployed marker is `68dcc97f4bf035b14237dfdf763987ff8cbc659d`.
 
 ## Latest — OpenCode harness adapter spike (2026-07-08)
 
@@ -30,14 +30,18 @@ directory after execution.
   `m5/qwen3-coder-next-80b`, agent `build`, permission profile `trusted-code`, 7 tool calls,
   changed `/home/magnus/scratch/20260708-123853-opencode-live/math.js`, ran `npm test`, and
   produced `ok`.
-- **Unit metadata repair:** after deploy, the declared `hugin-daily-analysis.timer` was not present
-  in the user manager even though the unit files existed in `systemd/`. Installed/enabled it manually;
-  it is now `enabled`/`active`, next run `2026-07-09 07:01:11 CEST`.
+- **Unit metadata reconciliation:** the earlier suspected deploy miss was a scope-check error, not a
+  deploy-script failure. Grimnir's registry declares `hugin-daily-analysis.timer` without
+  `scope:"user"`, so it defaults to the system manager; the companion service itself runs as
+  `User=magnus`. The selective deploy had already installed and enabled the system timer under
+  `/etc/systemd/system` at 14:36. The later manual user-manager "repair" created a duplicate user
+  timer at 14:42; that duplicate has been removed. Current live state: system timer `active` /
+  `enabled`, user timer `inactive` / `not-found`, next system run `2026-07-09 07:02:47 CEST`.
 
 ### Pending / next
 
-- Investigate why the selective Grimnir deploy did not install `hugin-daily-analysis.timer` before
-  manual repair, despite `services.json` declaring it and the unit files being present.
+- No deploy-script fix is required for `hugin-daily-analysis.timer`; keep checking the scope from
+  `services.json` before interpreting a missing unit in one systemd manager as drift.
 - Keep Claude as fallback until OpenCode has production traces plus Verdandi/audit identity coverage.
 
 ## Previous — Claude SDK task permission profiles (#149, 2026-07-08)
