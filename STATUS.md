@@ -1,13 +1,16 @@
 # Hugin — Status
 
-**Last session:** 2026-07-08 (#149 permission profiles — Claude SDK no longer defaults every task to full bypass; PR pending on `codex/task-permission-profiles`)
-**Branch:** `codex/task-permission-profiles` from main; local build + full suite green (1429 tests).
+**Last session:** 2026-07-08 (#149 permission profiles — Claude SDK no longer defaults every task to full bypass; PR #150 merged)
+**Branch:** main; local build + full suite green (1429 tests).
 
 ## Latest — Claude SDK task permission profiles (#149, 2026-07-08)
 
 Implemented a cheapest-first least-privilege gate for `Runtime: claude`: tasks now default to `Permission profile: read-only`, which runs Claude Code in `dontAsk` mode with only read-only local tools and read-only Munin MCP tools pre-approved. The historical full-bypass lane is preserved only when the task explicitly declares both `Capabilities: code` and `Permission profile: trusted-code`; malformed or non-code trusted-code requests downgrade to read-only.
 
 Validation: `npm test -- tests/sdk-executor.test.ts tests/dispatcher.test.ts`, `npm run build`, and full `npm test` passed locally. M5 advisory review accepted in part: added the `Capabilities: code` guard and removed `TodoWrite` from the read-only tool allowlist; rejected the blanket recommendation to remove bypass entirely because #149 explicitly keeps full bypass for trusted code tasks.
+
+PR #150 merged as `ca2ebb9` after green GitHub checks. Deploy to huginmunin remains the next
+operational step.
 
 ## Session 9 (2026-07-03) — Homeserver (M5) wired as sovereign orchestrator provider + go-live (#137)
 
