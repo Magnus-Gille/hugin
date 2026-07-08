@@ -1,11 +1,12 @@
 # Hugin — Status
 
-**Last session:** 2026-07-08 (Codex) — OpenCode harness adapter spike
-**Branch:** codex/opencode-harness-adapter; production still runs `main` on huginmunin.
+**Last session:** 2026-07-08 (Codex) — OpenCode harness adapter merged
+**Branch:** main at `8d3423e`; production deploy/validation still pending on huginmunin.
 
 ## Latest — OpenCode harness adapter spike (2026-07-08)
 
-Added an explicit `Runtime: opencode` lane for the Grimnir agent-harness decoupling track. The lane
+PR #155 merged to `main` as `8d3423e`. It added an explicit `Runtime: opencode` lane for the
+Grimnir agent-harness decoupling track. The lane
 uses a temporary OpenCode config pointed at the M5/OpenAI-compatible gateway, runs
 `opencode run --format json`, captures normalized tool/test/diff events, and removes the temp config
 directory after execution.
@@ -22,8 +23,8 @@ directory after execution.
 
 ### Pending / next
 
-- PR/review/merge the branch.
-- After merge/deploy, submit a small live `Runtime: opencode` fixture task on huginmunin using M5.
+- Deploy latest `hugin` from `main` on huginmunin.
+- Submit a small live `Runtime: opencode` fixture task on huginmunin using M5 and record the result.
 - Keep Claude as fallback until OpenCode has production traces plus Verdandi/audit identity coverage.
 
 ## Previous — Claude SDK task permission profiles (#149, 2026-07-08)
