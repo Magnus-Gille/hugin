@@ -6,8 +6,52 @@ import { query, type Query } from "@anthropic-ai/claude-agent-sdk";
 type HttpMcpServer = { type: "http"; url: string; headers?: Record<string, string> };
 type StdioMcpServer = { type: "stdio"; command: string; args: string[]; env: Record<string, string> };
 type McpServerEntry = HttpMcpServer | StdioMcpServer;
+type ClaudePermissionMode = "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk";
 
 const FRICTION_MCP_DIST_PATH = fileURLToPath(new URL("./friction-mcp.js", import.meta.url));
+
+export type TaskPermissionProfile = "read-only" | "trusted-code";
+
+export interface ClaudePermissionOptions {
+  permissionMode: ClaudePermissionMode;
+  allowDangerouslySkipPermissions?: boolean;
+  allowedTools?: string[];
+}
+
+const READ_ONLY_ALLOWED_TOOLS = [
+  "Read",
+  "LS",
+  "Glob",
+  "Grep",
+  "mcp__munin-memory__memory_orient",
+  "mcp__munin-memory__memory_resume",
+  "mcp__munin-memory__memory_read",
+  "mcp__munin-memory__memory_read_batch",
+  "mcp__munin-memory__memory_get",
+  "mcp__munin-memory__memory_query",
+  "mcp__munin-memory__memory_list",
+  "mcp__munin-memory__memory_history",
+  "mcp__munin-memory__memory_handoff",
+  "mcp__munin-memory__memory_commitments",
+  "mcp__munin-memory__memory_patterns",
+  "mcp__munin-memory__memory_status",
+] as const;
+
+export function buildClaudePermissionOptions(
+  profile: TaskPermissionProfile = "read-only",
+): ClaudePermissionOptions {
+  if (profile === "trusted-code") {
+    return {
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+    };
+  }
+
+  return {
+    permissionMode: "dontAsk",
+    allowedTools: [...READ_ONLY_ALLOWED_TOOLS],
+  };
+}
 
 // --- Types ---
 
@@ -19,6 +63,7 @@ export interface SdkTaskConfig {
   muninApiKey: string;
   maxOutputChars: number;
   model?: string;
+  permissionProfile?: TaskPermissionProfile;
   /**
    * Stable mcp-session-id forwarded to the Agent SDK's Munin MCP client so all
    * MCP calls during this task share one session. Enables Munin's outcome-aware
@@ -86,6 +131,7 @@ export async function executeSdkTask(
       `Runtime: claude (agent-sdk)`,
       `Working dir: ${task.workingDir}`,
       `Timeout: ${task.timeoutMs}`,
+      `Permission profile: ${task.permissionProfile ?? "read-only"}`,
       `Started: ${startedAt}`,
       "===\n",
     ].join("\n"),
@@ -162,6 +208,8 @@ export async function executeSdkTask(
   let stderrBuf = "";
 
   try {
+    const permissionOptions = buildClaudePermissionOptions(task.permissionProfile);
+
     // Build MCP servers config so task-spawned agents get Munin access
     const mcpServers: Record<string, McpServerEntry> = {};
     if (task.muninUrl && task.muninApiKey) {
@@ -223,8 +271,7 @@ export async function executeSdkTask(
       options: {
         cwd: task.workingDir,
         abortController,
-        permissionMode: "bypassPermissions",
-        allowDangerouslySkipPermissions: true,
+        ...permissionOptions,
         persistSession: false,
         ...(task.model ? { model: task.model } : {}),
         ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),

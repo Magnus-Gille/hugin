@@ -8,7 +8,12 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   query: vi.fn(),
 }));
 
-import { executeSdkTask, formatChildStderr, type SdkTaskConfig } from "../src/sdk-executor.js";
+import {
+  buildClaudePermissionOptions,
+  executeSdkTask,
+  formatChildStderr,
+  type SdkTaskConfig,
+} from "../src/sdk-executor.js";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 const mockedQuery = vi.mocked(query);
@@ -134,6 +139,26 @@ afterEach(() => {
 });
 
 describe("SDK executor", () => {
+  it("builds read-only Claude permission options by default", () => {
+    const options = buildClaudePermissionOptions();
+
+    expect(options.permissionMode).toBe("dontAsk");
+    expect(options.allowDangerouslySkipPermissions).toBeUndefined();
+    expect(options.allowedTools).toContain("Read");
+    expect(options.allowedTools).toContain("mcp__munin-memory__memory_query");
+    expect(options.allowedTools).not.toContain("Bash");
+    expect(options.allowedTools).not.toContain("Edit");
+    expect(options.allowedTools).not.toContain("TodoWrite");
+    expect(options.allowedTools).not.toContain("WebFetch");
+  });
+
+  it("builds bypass Claude permission options only for trusted-code", () => {
+    expect(buildClaudePermissionOptions("trusted-code")).toEqual({
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+    });
+  });
+
   it("should return structured result on success", async () => {
     const messages = [
       createMockAssistantMessage("Here is the result of your task."),
@@ -185,7 +210,7 @@ describe("SDK executor", () => {
     expect(result.output).toContain("SDK Error: SDK internal crash");
   });
 
-  it("should call query with correct options", async () => {
+  it("should call query with read-only permissions by default", async () => {
     const messages = [createMockResultSuccess("Done")];
     mockedQuery.mockReturnValue(createMockQuery(messages) as ReturnType<typeof query>);
 
@@ -198,6 +223,31 @@ describe("SDK executor", () => {
       prompt: "Do the thing",
       options: expect.objectContaining({
         cwd: taskConfig.workingDir,
+        permissionMode: "dontAsk",
+        allowedTools: expect.arrayContaining(["Read", "Grep"]),
+        persistSession: false,
+      }),
+    });
+    const call = mockedQuery.mock.calls[0]?.[0] as {
+      options?: { allowDangerouslySkipPermissions?: boolean; allowedTools?: string[] };
+    };
+    expect(call.options?.allowDangerouslySkipPermissions).toBeUndefined();
+    expect(call.options?.allowedTools).not.toContain("Bash");
+  });
+
+  it("should call query with bypass permissions for trusted-code tasks", async () => {
+    const messages = [createMockResultSuccess("Done")];
+    mockedQuery.mockReturnValue(createMockQuery(messages) as ReturnType<typeof query>);
+
+    await executeSdkTask(
+      makeTaskConfig({ permissionProfile: "trusted-code" }),
+      "test-task-trusted-code",
+      tmpLogDir,
+    );
+
+    expect(mockedQuery).toHaveBeenCalledWith({
+      prompt: "Test prompt",
+      options: expect.objectContaining({
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         persistSession: false,
