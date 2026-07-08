@@ -163,7 +163,30 @@ describe("executeHomeserverTask — delegate path", () => {
     );
 
     const result = await executeHomeserverTask(
-      makeTaskConfig({ path: "delegate", taskType: "extract", frontierModelId: "anthropic/claude-opus-4-5" }),
+      makeTaskConfig({
+        path: "delegate",
+        taskType: "extract",
+        systemPrompt: "Return only the extracted year.",
+        maxTokens: 128,
+        modelId: "qwen3-coder",
+        frontierModelId: "anthropic/claude-opus-4-5",
+        verifier: { type: "numeric", expected: 1998 },
+        responseFormat: {
+          type: "json_schema",
+          json_schema: {
+            name: "year_result",
+            schema: {
+              type: "object",
+              properties: { year: { type: "number" } },
+              required: ["year"],
+              additionalProperties: false,
+            },
+            strict: true,
+          },
+        },
+        delegatorModelId: "anthropic/claude-sonnet-4-5",
+        premiumBaselineModelId: "anthropic/claude-opus-4-5",
+      }),
       "delegate-ok",
       tmpLogDir,
     );
@@ -186,9 +209,41 @@ describe("executeHomeserverTask — delegate path", () => {
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.taskType).toBe("extract");
     expect(typeof body.prompt).toBe("string");
-    // The gateway /delegate handler ignores these fields, so the executor must not send them.
-    expect(body.modelId).toBeUndefined();
-    expect(body.frontierModelId).toBeUndefined();
+    expect(body.systemPrompt).toBe("Return only the extracted year.");
+    expect(body.maxTokens).toBe(128);
+    expect(body.modelId).toBe("qwen3-coder");
+    expect(body.frontierModelId).toBe("anthropic/claude-opus-4-5");
+    expect(body.verifier).toEqual({ type: "numeric", expected: 1998 });
+    expect(body.responseFormat).toEqual({
+      type: "json_schema",
+      json_schema: {
+        name: "year_result",
+        schema: {
+          type: "object",
+          properties: { year: { type: "number" } },
+          required: ["year"],
+          additionalProperties: false,
+        },
+        strict: true,
+      },
+    });
+    expect(body.delegatorModelId).toBe("anthropic/claude-sonnet-4-5");
+    expect(body.premiumBaselineModelId).toBe("anthropic/claude-opus-4-5");
+  });
+
+  it("omits optional /delegate fields that are not present", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({ delegated: true, outcome: "unverified", output: "1998" }),
+    );
+
+    await executeHomeserverTask(makeTaskConfig({ path: "delegate", taskType: "extract" }), "delegate-min", tmpLogDir);
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body).toEqual({
+      prompt: expect.any(String),
+      taskType: "extract",
+    });
   });
 
   it("maps outcome 'fail'/'error' to a non-zero exit code, but 'unverified' to 0", async () => {

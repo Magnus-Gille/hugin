@@ -26,18 +26,45 @@ import * as path from "node:path";
 
 export type HomeserverPath = "chat" | "delegate";
 
+export type HomeserverResponseFormat =
+  | { type: "text" }
+  | { type: "json_object" }
+  | {
+      type: "json_schema";
+      json_schema: {
+        name: string;
+        schema: Record<string, unknown>;
+        strict?: boolean;
+      };
+    };
+
+export type HomeserverVerifierSpec = Record<string, unknown>;
+
 export interface HomeserverTaskConfig {
   prompt: string;
   gatewayBaseUrl: string; // e.g. http://127.0.0.1:8080
   apiKey: string; // Bearer token (may be "" on a keyless loopback gateway)
   path: HomeserverPath;
-  /** Required for "chat" (the model to serve). Ignored on "delegate" (the gateway/ledger selects). */
+  /** Required for "chat" (the model to serve). Prefer modelId for "delegate" pinning. */
   model?: string;
   /** Forwarded to /delegate as the ledger bucket. */
   taskType?: string;
-  /** Reserved for forward-compat: the gateway /delegate HTTP endpoint does not yet accept a
-   *  frontier model, so this is currently NOT sent. Re-wire once the gateway exposes escalation. */
+  /** Forwarded to /delegate when present. */
+  systemPrompt?: string;
+  /** Forwarded to /delegate when present. */
+  maxTokens?: number;
+  /** Forwarded to /delegate to pin the local model when present. */
+  modelId?: string;
+  /** Forwarded to /delegate to request a frontier fallback arm when present. */
   frontierModelId?: string;
+  /** Forwarded to /delegate so the gateway can record pass/fail ledger evidence. */
+  verifier?: HomeserverVerifierSpec;
+  /** Forwarded to /delegate for grammar-constrained JSON/text decoding. */
+  responseFormat?: HomeserverResponseFormat;
+  /** Forwarded to /delegate for provenance/accounting when the cloud brain is known. */
+  delegatorModelId?: string;
+  /** Forwarded to /delegate for savings/baseline accounting when present. */
+  premiumBaselineModelId?: string;
   timeoutMs: number;
   maxOutputChars: number;
   injectedContext?: string;
@@ -240,11 +267,18 @@ export async function executeHomeserverTask(
     const body: Record<string, unknown> =
       task.path === "delegate"
         ? {
-            // The gateway /delegate HTTP handler only accepts prompt + taskType
-            // (+ systemPrompt/maxTokens). It does NOT accept modelId or frontierModelId
-            // today, so we don't send them — see gateway-api-contract.md.
             prompt: userMessage,
             ...(task.taskType ? { taskType: task.taskType } : {}),
+            ...(task.systemPrompt !== undefined ? { systemPrompt: task.systemPrompt } : {}),
+            ...(task.maxTokens !== undefined ? { maxTokens: task.maxTokens } : {}),
+            ...(task.modelId !== undefined ? { modelId: task.modelId } : {}),
+            ...(task.frontierModelId !== undefined ? { frontierModelId: task.frontierModelId } : {}),
+            ...(task.verifier !== undefined ? { verifier: task.verifier } : {}),
+            ...(task.responseFormat !== undefined ? { responseFormat: task.responseFormat } : {}),
+            ...(task.delegatorModelId !== undefined ? { delegatorModelId: task.delegatorModelId } : {}),
+            ...(task.premiumBaselineModelId !== undefined
+              ? { premiumBaselineModelId: task.premiumBaselineModelId }
+              : {}),
           }
         : {
             model: task.model,
