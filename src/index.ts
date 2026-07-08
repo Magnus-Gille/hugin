@@ -26,6 +26,11 @@ import {
   type AuthAlarmState,
 } from "./auth-alarm.js";
 import { executeOllamaTask } from "./ollama-executor.js";
+import {
+  executeOpencodeTask,
+  loadOpencodeGatewayConfig,
+  type OpencodeExecutorResult,
+} from "./opencode-executor.js";
 import { configureHosts, resolveOllamaHost, getHostStatus, probeAllHosts, warmModel, getLoadedModels } from "./ollama-hosts.js";
 import { resolveContextRefs } from "./context-loader.js";
 import { parseExternalPolicy, type ExternalPolicy } from "./provenance.js";
@@ -109,6 +114,7 @@ import {
 import { routeTask, type RouterDecision } from "./router.js";
 import {
   buildRuntimeCandidates,
+  isAutoRoutableDispatcherRuntime,
   isLegacyDispatcherRuntime,
   parseActiveSubscriptions,
   type RuntimeCapability,
@@ -439,6 +445,7 @@ let currentTaskConfig: TaskConfig | null = null;
 let currentChild: ChildProcess | null = null;
 let currentSdkAbort: AbortController | null = null;
 let currentOllamaAbort: AbortController | null = null;
+let currentOpencodeAbort: AbortController | null = null;
 let currentOrchestratorAbort: AbortController | null = null;
 // Runtime-owned artefact delivery (issue #68). Aborted by operator cancel /
 // shutdown so a hung `ssh`/`rsync` cannot wedge the single dispatcher slot.
@@ -573,7 +580,7 @@ const orchSavingsStore = savingsLayerEnabled
 
 interface TaskConfig {
   prompt: string;
-  runtime: "claude" | "codex" | "ollama" | "orchestrator";
+  runtime: "claude" | "codex" | "ollama" | "opencode" | "orchestrator";
   workingDir: string;
   context?: string;
   timeoutMs: number;
@@ -616,7 +623,7 @@ interface TaskConfig {
 type DeclaredRuntime = TaskConfig["runtime"] | "pipeline" | "auto";
 
 function parseDeclaredRuntime(content: string): DeclaredRuntime | undefined {
-  return content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|pipeline|auto|orchestrator)/i)?.[1]?.toLowerCase() as
+  return content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|opencode|pipeline|auto|orchestrator)/i)?.[1]?.toLowerCase() as
     | DeclaredRuntime
     | undefined;
 }
@@ -666,6 +673,7 @@ function parseTask(content: string): TaskConfig | null {
       | "claude"
       | "codex"
       | "ollama"
+      | "opencode"
       | "orchestrator"
       | undefined;
   const workingDir = content.match(
@@ -1808,6 +1816,9 @@ function requestCancellationForCurrentTask(request: CancellationRequest): void {
   }
   if (currentOllamaAbort && !currentOllamaAbort.signal.aborted) {
     currentOllamaAbort.abort(request.reason);
+  }
+  if (currentOpencodeAbort && !currentOpencodeAbort.signal.aborted) {
+    currentOpencodeAbort.abort(request.reason);
   }
   if (currentOrchestratorAbort && !currentOrchestratorAbort.signal.aborted) {
     currentOrchestratorAbort.abort(request.reason);
@@ -3707,13 +3718,13 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           availableRuntimes: candidates,
         });
         // Auto-router is contractually required to exclude autoEligible:false
-        // runtimes (openrouter, pi-harness). Verify rather than cast — if this
+        // runtimes (opencode, openrouter, pi-harness). Verify rather than cast — if this
         // ever fires, the contract was violated upstream and the dispatcher
         // cannot execute the selection.
         const selectedRuntime = decision.selectedRuntime.dispatcherRuntime;
-        if (!isLegacyDispatcherRuntime(selectedRuntime)) {
+        if (!isAutoRoutableDispatcherRuntime(selectedRuntime)) {
           throw new Error(
-            `Auto-router selected non-legacy runtime "${selectedRuntime}" — ` +
+            `Auto-router selected non-auto-routable runtime "${selectedRuntime}" — ` +
               `autoEligible filter contract violated. selected_id=${decision.selectedRuntime.id}`,
           );
         }
@@ -3976,8 +3987,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
     const isOllama = task.runtime === "ollama";
     const isClaude = task.runtime === "claude";
+    const isOpencode = task.runtime === "opencode";
     const isOrchestrator = task.runtime === "orchestrator";
-    const executorLabel = isOllama ? "ollama" : isClaude ? "agent-sdk" : isOrchestrator ? "orchestrator" : "spawn";
+    const executorLabel = isOllama
+      ? "ollama"
+      : isClaude
+        ? "agent-sdk"
+        : isOpencode
+          ? "opencode"
+          : isOrchestrator
+            ? "orchestrator"
+            : "spawn";
 
     // Capture quota before task execution (skip for ollama — it's Claude-specific)
     const quotaBefore = isOllama ? { q5: null, q7: null } : await fetchQuota();
@@ -4003,6 +4023,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // runtime and whenever savings weren't computed for this run.
     let orchSavings: SavingsSummary | null = null;
     let ollamaJournalExtras: Record<string, unknown> = {};
+    let opencodeJournalExtras: Record<string, unknown> = {};
+    let opencodeResult: OpencodeExecutorResult | null = null;
     let effectiveExecutor = executorLabel;
     let fallbackTriggered = false;
     let fallbackReason: string | null = null;
@@ -4235,6 +4257,67 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     logFile = sdkResult.logFile;
     resultText = sdkResult.resultText;
     costUsd = sdkResult.costUsd;
+    } else if (isOpencode) {
+    console.log(`Using OpenCode executor for task ${taskNs}`);
+    const opencodeGateway = loadOpencodeGatewayConfig(process.env);
+    if (!opencodeGateway) {
+      exitCode = 1;
+      output =
+        "Runtime opencode is not configured: set HOMESERVER_GATEWAY_URL + HOMESERVER_GATEWAY_API_KEY " +
+        "or HUGIN_OPENCODE_BASE_URL + HUGIN_OPENCODE_API_KEY";
+      logFile = path.join(LOG_DIR, `${taskId}.log`);
+      fs.writeFileSync(
+        logFile,
+        [
+          "=== Hugin Task Log (opencode) ===",
+          `Task: ${taskNs}`,
+          output,
+          "",
+        ].join("\n"),
+      );
+      opencodeJournalExtras = {
+        runtime_requested: "opencode",
+        runtime_effective: "none",
+        opencode_configured: false,
+      };
+    } else {
+      const opencodeAbort = new AbortController();
+      currentOpencodeAbort = opencodeAbort;
+      opencodeResult = await executeOpencodeTask(
+        {
+          prompt: task.prompt,
+          workingDir: task.workingDir,
+          timeoutMs: task.timeoutMs,
+          maxOutputChars: config.maxOutputChars,
+          gatewayBaseUrl: opencodeGateway.gatewayBaseUrl,
+          apiKey: opencodeGateway.apiKey,
+          providerId: opencodeGateway.providerId,
+          model: task.model || opencodeGateway.defaultModel,
+          permissionProfile: task.permissionProfile || "read-only",
+          opencodeCommand: opencodeGateway.opencodeCommand,
+        },
+        taskId,
+        LOG_DIR,
+        { abortController: opencodeAbort },
+      );
+      exitCode = opencodeResult.exitCode;
+      output = opencodeResult.output;
+      logFile = opencodeResult.logFile;
+      resultText = opencodeResult.resultText;
+      currentOpencodeAbort = null;
+      opencodeJournalExtras = {
+        runtime_requested: "opencode",
+        runtime_effective: "opencode",
+        opencode_configured: true,
+        model_effective: opencodeResult.model,
+        opencode_agent: opencodeResult.agent,
+        permission_profile: opencodeResult.permissionProfile,
+        tool_calls: opencodeResult.toolCalls.length,
+        changed_files: opencodeResult.changedFiles,
+        test_commands: opencodeResult.testCommands,
+        config_dir_removed: opencodeResult.configDirRemoved,
+      };
+    }
     } else if (isOrchestrator) {
     // --- Orchestrator execution path ---
     console.log(`Using orchestrator executor for task ${taskNs}`);
@@ -4314,6 +4397,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     stopLeaseRenewal();
     currentSdkAbort = null;
     currentOllamaAbort = null;
+    currentOpencodeAbort = null;
     currentOrchestratorAbort = null;
 
     const durationMs = Date.now() - startMs;
@@ -4415,12 +4499,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let rawBodyText: string;
     let structuredBodyKind: TaskExecutionBodyKind;
 
-    if ((isClaude || isOllama || isOrchestrator) && resultText) {
-      resultSource = effectiveExecutor;
+    if ((isClaude || isOllama || isOrchestrator || isOpencode) && resultText) {
+      resultSource = isOpencode ? "opencode-json" : effectiveExecutor;
       rawBodyText = resultText;
       structuredBodyKind = "response";
       resultBody = `### Response\n\n${resultText}`;
-    } else if (!isClaude && !isOllama && !isOrchestrator) {
+    } else if (!isClaude && !isOllama && !isOrchestrator && !isOpencode) {
       const hookResult = readHookResult(taskId);
       if (hookResult) {
         resultSource = "hook";
@@ -4736,9 +4820,18 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
                 : undefined,
           }
         : task.model
+          ? isOpencode && opencodeResult
+            ? {
+                requestedModel: task.model,
+                effectiveModel: opencodeResult.model,
+              }
+            : {
+                requestedModel: task.model,
+                effectiveModel: task.model,
+              }
+          : isOpencode && opencodeResult
           ? {
-              requestedModel: task.model,
-              effectiveModel: task.model,
+              effectiveModel: opencodeResult.model,
             }
           : undefined;
 
@@ -5031,6 +5124,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       cancellation_source: cancellation?.sourceNamespace || null,
       // Ollama-specific fields (null/absent for non-ollama tasks)
       ...ollamaJournalExtras,
+      ...opencodeJournalExtras,
     });
 
     currentTask = null;
@@ -5041,6 +5135,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     stopCancellationWatch();
     currentSdkAbort = null;
     currentOllamaAbort = null;
+    currentOpencodeAbort = null;
     currentOrchestratorAbort = null;
     currentCancellation = null;
     currentTask = null;
@@ -5267,6 +5362,11 @@ async function shutdown(signal: string): Promise<void> {
   if (currentOllamaAbort) {
     console.log("Aborting running ollama task...");
     currentOllamaAbort.abort();
+  }
+
+  if (currentOpencodeAbort) {
+    console.log("Aborting running OpenCode task...");
+    currentOpencodeAbort.abort();
   }
 
   if (currentChild && !currentChild.killed) {

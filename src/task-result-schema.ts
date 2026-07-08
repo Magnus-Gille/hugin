@@ -30,6 +30,7 @@ export const dispatcherRuntimeSchema = z.enum([
   "claude",
   "codex",
   "ollama",
+  "opencode",
   "auto",
   "orchestrator",
 ]);

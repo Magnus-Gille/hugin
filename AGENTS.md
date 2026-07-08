@@ -40,7 +40,7 @@ Content format:
 ```markdown
 ## Task: <title>
 
-- **Runtime:** claude | codex | ollama
+- **Runtime:** claude | codex | ollama | opencode
 - **Context:** repo:heimdall
 - **Working dir:** /home/magnus/workspace
 - **Timeout:** 300000
@@ -79,6 +79,8 @@ Content format:
 - `Context-budget:` — max characters for injected context (default 8000). Truncated from end if exceeded.
 
 **Type tags:** Tags matching `type:*` (e.g., `type:research`, `type:email`) are carried forward through the task lifecycle (pending → running → completed/failed).
+
+**OpenCode harness runtime:** `Runtime: opencode` is an explicit M5-backed coding harness lane. It uses a temp OpenCode config, streams `opencode run --format json`, records tool/test/diff events, and removes the temp config after each run. It is explicit-only and capped at `internal` sensitivity for now. `Permission profile: read-only` denies edit/bash through the OpenCode `plan` agent; `Capabilities: code` + `Permission profile: trusted-code` uses the `build` agent with edit/bash allowed.
 
 **Artefact delivery (`### Artifacts` manifest, issue #68):** A task may declare an `### Artifacts` section so **Hugin (not the agent)** owns and verifies delivery of the deliverables; the agent only writes to the declared local staging paths and makes no delivery claims.
 

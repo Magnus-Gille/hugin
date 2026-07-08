@@ -12,12 +12,13 @@ type TaskPermissionProfile = "read-only" | "trusted-code";
 
 function parseTask(content: string, workspace = "/home/magnus/workspace") {
   const declaredRuntimeRaw =
-    content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|auto)/i)?.[1]?.toLowerCase();
+    content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|opencode|auto)/i)?.[1]?.toLowerCase();
   const isAutoRoute = declaredRuntimeRaw === "auto";
   const runtime = (isAutoRoute ? undefined : declaredRuntimeRaw) as
       | "claude"
       | "codex"
       | "ollama"
+      | "opencode"
       | undefined;
   const workingDir = content.match(
     /\*\*Working dir:\*\*\s*(.+)/i
@@ -248,6 +249,26 @@ Also add tests.`;
     expect(task).not.toBeNull();
     expect(task!.prompt).toContain("Read the file src/index.ts");
     expect(task!.prompt).toContain("Also add tests.");
+  });
+
+  it("should parse Runtime: opencode as an explicit harness runtime", () => {
+    const content = `## Task: OpenCode task
+
+- **Runtime:** opencode
+- **Capabilities:** code
+- **Permission profile:** trusted-code
+- **Model:** qwen3-coder-next-80b
+
+### Prompt
+Fix the failing test and run npm test.`;
+
+    const task = parseTask(content);
+    expect(task).not.toBeNull();
+    expect(task!.runtime).toBe("opencode");
+    expect(task!.autoRouted).toBeUndefined();
+    expect(task!.capabilities).toEqual(["code"]);
+    expect(task!.permissionProfile).toBe("trusted-code");
+    expect(task!.model).toBe("qwen3-coder-next-80b");
   });
 
   it("should handle missing optional fields", () => {

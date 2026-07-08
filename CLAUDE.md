@@ -41,7 +41,7 @@ Content format:
 ```markdown
 ## Task: <title>
 
-- **Runtime:** claude | codex | ollama | pipeline | auto | orchestrator
+- **Runtime:** claude | codex | ollama | opencode | pipeline | auto | orchestrator
 - **Context:** repo:heimdall
 - **Working dir:** /home/magnus/workspace
 - **Timeout:** 300000
@@ -96,6 +96,16 @@ only read-only local tools plus read-only Munin MCP tools pre-approved.
 enough to allow filesystem edits, shell commands, and outbound tool use. It
 preserves the historical full-bypass Claude Code lane for explicitly trusted
 code tasks.
+
+**OpenCode harness runtime:** `Runtime: opencode` is an explicit, M5-backed
+coding harness lane. It writes a temporary OpenCode config pointing at the
+OpenAI-compatible M5 gateway, runs `opencode run --format json`, captures
+normalized tool/test/diff events, and removes the temp config directory after
+the run. It is explicit-only (`opencode-m5`, not auto-routed) and capped at
+`internal` sensitivity until the harness/audit path has production evidence.
+`Permission profile: read-only` maps to the OpenCode `plan` agent with
+`edit`/`bash` denied; `Capabilities: code` + `Permission profile: trusted-code`
+maps to the `build` agent with `edit`/`bash` allowed.
 
 **Pipeline tasks:** Use `Runtime: pipeline` with a `### Pipeline` section instead of `### Prompt`. Pipeline phases use runtime IDs (`claude-sdk`, `codex-spawn`, `ollama-pi`, `ollama-laptop`, `ollama-orin`, or `auto`) which differ from standalone runtime names. Per-phase `Capabilities:` is supported.
 
@@ -338,8 +348,13 @@ claude mcp add-json hugin '{"command":"node","args":["/Users/magnus/repos/hugin/
 | `ARXIV_STORAGE_PATH` | — | Directory where arxiv-mcp-server caches downloaded papers. Forwarded into the arxiv MCP subprocess environment. |
 | `HUGIN_ACTIVE_SUBSCRIPTIONS` | (all active) | Comma-separated runtime IDs of subscriptions you actually pay for (e.g. `claude-sdk`). Subscription-cost runtimes are auto-eligible only if listed here; unset = all active subscription runtimes are eligible. Vendor-neutral — Claude today, Berget Code / ChatGPT later. |
 | `BERGET_API_KEY` | — | API key for the Berget.ai EU-sovereign provider (OpenAI-compatible, base URL `https://api.berget.ai/v1`). Required for any orchestrator role bound to the `berget` provider. One of the two recognized sovereign providers for `Sensitivity: private` orchestrator tasks (the other is `homeserver`). |
-| `HOMESERVER_GATEWAY_URL` | — | Root URL of the M5 local-inference gateway (e.g. `http://100.76.72.59:8080`, no `/v1` — no path/credentials/query at all). Enables the orchestrator's `homeserver` provider (base URL resolved + validated at request time, `/v1` appended) and the standalone (not-yet-dispatcher-wired) `homeserver-executor.ts`. The host MUST be loopback/private-LAN/tailnet (`100.64/10`, `.ts.net`, `.local`, single-label); a public host is rejected before any model call and is never egress-allowlisted — sovereignty must not hinge on a typo'd env var. A sovereign host is auto-added to the egress allowlist. |
+| `HOMESERVER_GATEWAY_URL` | — | Root URL of the M5 local-inference gateway (e.g. `http://100.76.72.59:8080`, no `/v1` — no path/credentials/query at all). Enables the orchestrator's `homeserver` provider (base URL resolved + validated at request time, `/v1` appended), the standalone `homeserver-executor.ts`, and the default `Runtime: opencode` M5 provider config (OpenCode appends/uses `/v1`). The host MUST be loopback/private-LAN/tailnet (`100.64/10`, `.ts.net`, `.local`, single-label); a public host is rejected before any model call and is never egress-allowlisted — sovereignty must not hinge on a typo'd env var. A sovereign host is auto-added to the egress allowlist. |
 | `HOMESERVER_GATEWAY_API_KEY` | — | Bearer token for the M5 gateway. Required for any orchestrator role bound to `homeserver` (the orchestrator path has no keyless-loopback carve-out — over the tailnet a key is always required). |
+| `HUGIN_OPENCODE_BASE_URL` | `HOMESERVER_GATEWAY_URL` | Optional override for the OpenCode runtime's OpenAI-compatible base URL. May be a gateway root URL or `/v1`; Hugin normalizes it to `/v1` and rejects public hosts or extra paths. A keyless non-loopback URL is refused. |
+| `HUGIN_OPENCODE_API_KEY` | `HOMESERVER_GATEWAY_API_KEY` | Optional override for the OpenCode runtime provider API key. Passed to the child process as `HUGIN_OPENCODE_PROVIDER_API_KEY`; never written into the temp config. |
+| `HUGIN_OPENCODE_PROVIDER` | `m5` | Provider id written into the temp OpenCode config and used in `--model <provider>/<model>`. |
+| `HUGIN_OPENCODE_MODEL` | `qwen3-coder-next-80b` | Default model for `Runtime: opencode` tasks without a `Model:` field. |
+| `HUGIN_OPENCODE_CMD` | `opencode` | OpenCode executable path. Override on the Pi if the binary is not on the service PATH. |
 | `HUGIN_ORCH_PLANNER_MODEL` | (see `DEFAULT_ORCHESTRATOR_CONFIG`) | Override the planner role model. Format: `provider\|model` (e.g. `openrouter\|anthropic/claude-3.5-sonnet`). Omit the `provider\|` prefix to keep the role's default provider. |
 | `HUGIN_ORCH_WORKER_MODEL` | (see `DEFAULT_ORCHESTRATOR_CONFIG`) | Override the worker role model. Default: DeepSeek Flash via OpenRouter. |
 | `HUGIN_ORCH_VERIFIER_MODEL` | (see `DEFAULT_ORCHESTRATOR_CONFIG`) | Override the verifier role model. Verifier pass only runs when `HUGIN_ORCH_VERIFY=on`. |

@@ -139,6 +139,30 @@ describe("structured task result schema", () => {
     expect(result.approval?.status).toBe("approved");
   });
 
+  it("accepts opencode harness task results", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "20260708-opencode",
+      taskNamespace: "tasks/20260708-opencode",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "opencode",
+      executor: "opencode",
+      resultSource: "opencode-json",
+      exitCode: 0,
+      completedAt: "2026-07-08T12:00:00Z",
+      bodyKind: "response",
+      bodyText: "Fixed math.js and tests pass.",
+      runtimeMetadata: {
+        requestedModel: "qwen3-coder-next-80b",
+        effectiveModel: "m5/qwen3-coder-next-80b",
+      },
+    });
+
+    expect(result.runtime).toBe("opencode");
+    expect(result.runtimeMetadata?.effectiveModel).toBe("m5/qwen3-coder-next-80b");
+  });
+
   it("accepts orchestratorOutcomes (verdict layer V8) with a mix of ok/verdict states", () => {
     const result = buildStructuredTaskResult({
       schemaVersion: 1,

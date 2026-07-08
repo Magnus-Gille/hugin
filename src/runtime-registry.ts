@@ -1,11 +1,10 @@
 import type { OllamaHost } from "./ollama-hosts.js";
 import type { Sensitivity } from "./sensitivity.js";
 
-// Legacy dispatcher runtimes — the three the in-process executor knows how to
-// run today (src/index.ts spawn/SDK paths). The dispatcher's TaskConfig.runtime
-// is constrained to this narrow set; orchestrator runtimes never flow through
-// the legacy dispatcher.
-export type LegacyDispatcherRuntime = "claude" | "codex" | "ollama";
+// Direct dispatcher runtimes that src/index.ts can execute in-process.
+// Orchestrator runtimes never flow through this path.
+export type LegacyDispatcherRuntime = "claude" | "codex" | "ollama" | "opencode";
+export type AutoRoutableDispatcherRuntime = "claude" | "codex" | "ollama";
 
 // Wider union covering every runtime the registry can describe, including
 // orchestrator-only runtimes that are reachable via the broker (Step 4) but
@@ -21,12 +20,23 @@ const LEGACY_DISPATCHER_RUNTIMES: ReadonlySet<DispatcherRuntime> = new Set([
   "claude",
   "codex",
   "ollama",
+  "opencode",
+]);
+const AUTO_ROUTABLE_DISPATCHER_RUNTIMES: ReadonlySet<DispatcherRuntime> = new Set([
+  "claude",
+  "codex",
+  "ollama",
 ]);
 
 export function isLegacyDispatcherRuntime(
   runtime: DispatcherRuntime,
 ): runtime is LegacyDispatcherRuntime {
   return LEGACY_DISPATCHER_RUNTIMES.has(runtime);
+}
+export function isAutoRoutableDispatcherRuntime(
+  runtime: DispatcherRuntime,
+): runtime is AutoRoutableDispatcherRuntime {
+  return AUTO_ROUTABLE_DISPATCHER_RUNTIMES.has(runtime);
 }
 export type RuntimeCapability = "tools" | "code" | "structured-output";
 export type TrustTier = "trusted" | "semi-trusted";
@@ -37,6 +47,7 @@ export type Provider =
   | "anthropic"
   | "openai-spawn"
   | "ollama-local"
+  | "opencode"
   | "openrouter"
   | "pi-harness"
   | "berget";
@@ -147,6 +158,21 @@ export const RUNTIME_REGISTRY: readonly RuntimeDefinition[] = [
     zdrRequired: false,
     autoEligible: true,
     family: "one-shot",
+  },
+  {
+    id: "opencode-m5",
+    dispatcherRuntime: "opencode",
+    trustTier: "semi-trusted",
+    costModel: "free",
+    modelSize: "large",
+    capabilities: ["tools", "code"],
+    provider: "opencode",
+    egress: "local",
+    zdrRequired: false,
+    autoEligible: false,
+    family: "harness",
+    defaultModel: "qwen3-coder-next-80b",
+    harnessCmd: "opencode",
   },
   {
     id: "openrouter",

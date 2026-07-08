@@ -16,7 +16,6 @@ import { routeTask } from "./router.js";
 import {
   buildRuntimeCandidates,
   getRegistryEntryById,
-  isLegacyDispatcherRuntime,
   type RuntimeCapability,
 } from "./runtime-registry.js";
 import {
@@ -32,6 +31,14 @@ import {
 } from "./sensitivity.js";
 import { MAX_DEPENDENCIES } from "./task-graph.js";
 import type { OllamaHost } from "./ollama-hosts.js";
+
+type PipelineDispatcherRuntime = PipelinePhaseIR["dispatcherRuntime"];
+
+function isPipelineDispatcherRuntime(
+  runtime: string,
+): runtime is PipelineDispatcherRuntime {
+  return runtime === "claude" || runtime === "codex" || runtime === "ollama";
+}
 
 interface ParsedPipelinePhase {
   name: string;
@@ -520,13 +527,13 @@ export function compilePipelineTask(
     });
 
     // Pipeline phases are constrained to PipelineRuntimeId (claude-sdk/
-    // codex-spawn/ollama-pi/ollama-laptop), all of which carry legacy
-    // dispatcher runtimes. Orchestrator runtimes (openrouter, pi-harness) are
-    // not pipeline-eligible. Verify rather than cast.
+    // codex-spawn/ollama-pi/ollama-laptop/ollama-orin), all of which carry the
+    // original pipeline dispatcher runtimes. Harness runtimes such as OpenCode
+    // are explicit task-level lanes for now, not pipeline phases.
     const phaseDispatcherRuntime = runtime.dispatcherRuntime;
-    if (!isLegacyDispatcherRuntime(phaseDispatcherRuntime)) {
+    if (!isPipelineDispatcherRuntime(phaseDispatcherRuntime)) {
       throw new Error(
-        `Pipeline runtime "${resolvedRuntimeId}" resolved to non-legacy dispatcher runtime ` +
+        `Pipeline runtime "${resolvedRuntimeId}" resolved to non-pipeline dispatcher runtime ` +
           `"${phaseDispatcherRuntime}" — orchestrator runtimes are not pipeline-eligible. ` +
           `Phase "${phase.name}".`,
       );

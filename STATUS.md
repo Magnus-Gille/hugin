@@ -1,11 +1,37 @@
 # Hugin — Status
 
-**Last session:** 2026-07-08 (#149 permission profiles — PR #150 deployed to huginmunin; deploy metadata repaired)
-**Branch:** main; service active/healthy on huginmunin. Production runtime includes PR #150 and
-the later #152 homeserver delegate-field fix; exact latest deployment marker is
+**Last session:** 2026-07-08 (Codex) — OpenCode harness adapter spike
+**Branch:** codex/opencode-harness-adapter; production still runs `main` on huginmunin.
+
+## Latest — OpenCode harness adapter spike (2026-07-08)
+
+Added an explicit `Runtime: opencode` lane for the Grimnir agent-harness decoupling track. The lane
+uses a temporary OpenCode config pointed at the M5/OpenAI-compatible gateway, runs
+`opencode run --format json`, captures normalized tool/test/diff events, and removes the temp config
+directory after execution.
+
+- **Runtime shape:** registry entry `opencode-m5`, explicit-only (`autoEligible:false`), harness
+  family, local egress, capped at `internal` sensitivity for now.
+- **Permissions:** `read-only` maps to OpenCode `plan` with `edit`/`bash` denied; `Capabilities:
+  code` + `Permission profile: trusted-code` maps to `build` with `edit`/`bash` allowed.
+- **Config:** defaults to `HOMESERVER_GATEWAY_URL` + `HOMESERVER_GATEWAY_API_KEY`, with
+  `HUGIN_OPENCODE_*` overrides for base URL, key, provider id, default model, and executable path.
+- **Tests:** focused executor tests use a fake `opencode` binary to prove temp config/env/cleanup and
+  JSONL event normalization without spending M5 tokens. Local `npm run build`, focused runtime tests,
+  `npm test`, and `git diff --check` passed. M5 advisory review reported no blocking issues.
+
+### Pending / next
+
+- PR/review/merge the branch.
+- After merge/deploy, submit a small live `Runtime: opencode` fixture task on huginmunin using M5.
+- Keep Claude as fallback until OpenCode has production traces plus Verdandi/audit identity coverage.
+
+## Previous — Claude SDK task permission profiles (#149, 2026-07-08)
+
+**Production state before this branch:** service active/healthy on huginmunin. Production runtime
+includes PR #150 and the later #152 homeserver delegate-field fix; exact latest deployment marker is
 `/home/magnus/repos/hugin/.deployed-commit`.
 
-## Latest — Claude SDK task permission profiles (#149, 2026-07-08)
 
 Implemented a cheapest-first least-privilege gate for `Runtime: claude`: tasks now default to `Permission profile: read-only`, which runs Claude Code in `dontAsk` mode with only read-only local tools and read-only Munin MCP tools pre-approved. The historical full-bypass lane is preserved only when the task explicitly declares both `Capabilities: code` and `Permission profile: trusted-code`; malformed or non-code trusted-code requests downgrade to read-only.
 
