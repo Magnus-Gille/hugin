@@ -1,7 +1,7 @@
 # Hugin — Status
 
-**Last session:** 2026-07-08 (Codex) — OpenCode harness adapter merged
-**Branch:** main at `8d3423e`; production deploy/validation still pending on huginmunin.
+**Last session:** 2026-07-08 (Codex) — OpenCode harness runtime deployed + live-validated
+**Branch:** main at `68dcc97`; production deployed on huginmunin.
 
 ## Latest — OpenCode harness adapter spike (2026-07-08)
 
@@ -20,11 +20,24 @@ directory after execution.
 - **Tests:** focused executor tests use a fake `opencode` binary to prove temp config/env/cleanup and
   JSONL event normalization without spending M5 tokens. Local `npm run build`, focused runtime tests,
   `npm test`, and `git diff --check` passed. M5 advisory review reported no blocking issues.
+- **Production deploy:** Grimnir registry deploy completed for `hugin`; remote
+  `/home/magnus/repos/hugin/.deployed-commit` is `68dcc97f4bf035b14237dfdf763987ff8cbc659d`,
+  `hugin.service` is active, and `/health` reports `polling:true`, `queue_depth:0`, and M5
+  gateway host `100.76.72.59` in the egress allowlist.
+- **Live validation:** installed `opencode-ai@1.3.3` into `/home/magnus/.npm-global/bin` on
+  huginmunin, restarted Hugin, then submitted `tasks/20260708-123853-opencode-live`.
+  Result: completed in 64s, executor `opencode`, source `opencode-json`, model
+  `m5/qwen3-coder-next-80b`, agent `build`, permission profile `trusted-code`, 7 tool calls,
+  changed `/home/magnus/scratch/20260708-123853-opencode-live/math.js`, ran `npm test`, and
+  produced `ok`.
+- **Unit metadata repair:** after deploy, the declared `hugin-daily-analysis.timer` was not present
+  in the user manager even though the unit files existed in `systemd/`. Installed/enabled it manually;
+  it is now `enabled`/`active`, next run `2026-07-09 07:01:11 CEST`.
 
 ### Pending / next
 
-- Deploy latest `hugin` from `main` on huginmunin.
-- Submit a small live `Runtime: opencode` fixture task on huginmunin using M5 and record the result.
+- Investigate why the selective Grimnir deploy did not install `hugin-daily-analysis.timer` before
+  manual repair, despite `services.json` declaring it and the unit files being present.
 - Keep Claude as fallback until OpenCode has production traces plus Verdandi/audit identity coverage.
 
 ## Previous — Claude SDK task permission profiles (#149, 2026-07-08)
