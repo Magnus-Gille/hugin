@@ -153,6 +153,90 @@ describe("createModelInvoker", () => {
     expect(capturedRequests[1].model).toBe("synth-model");
   });
 
+  it("passes homeserver worker metadata to /delegate and uses planner model as delegator fallback", async () => {
+    const homeserverRoles: Record<OrchestratorRole, RoleBinding> = {
+      ...roles,
+      planner: { provider: "openrouter", model: "anthropic/claude-sonnet-4.6" },
+      worker: { provider: "homeserver", model: "mellum" },
+    };
+    const capturedRequests: WorkerRequest[] = [];
+    const factoryCalls: Array<{ provider: string; role: OrchestratorRole | undefined }> = [];
+    const mockExecutor: WorkerExecutor = {
+      run: vi.fn(async (req: WorkerRequest) => {
+        capturedRequests.push(req);
+        return makeResult("out");
+      }),
+    };
+
+    const invoker = createModelInvoker(
+      homeserverRoles,
+      { timeoutMs: 5000, maxTokens: 2048 },
+      (provider, opts) => {
+        factoryCalls.push({ provider, role: opts?.role });
+        return mockExecutor;
+      },
+    );
+
+    await invoker.invoke("worker", "leaf task", { taskType: "summarize" });
+
+    expect(factoryCalls[0]).toEqual({ provider: "homeserver", role: "worker" });
+    expect(capturedRequests[0]).toMatchObject({
+      provider: "homeserver",
+      model: "mellum",
+      prompt: "leaf task",
+      taskType: "summarize",
+      delegatorModelId: "anthropic/claude-sonnet-4.6",
+      maxTokens: 2048,
+    });
+  });
+
+  it("lets an explicit homeserver worker delegator model override the planner fallback", async () => {
+    const homeserverRoles: Record<OrchestratorRole, RoleBinding> = {
+      ...roles,
+      planner: { provider: "openrouter", model: "anthropic/claude-sonnet-4.6" },
+      worker: { provider: "homeserver", model: "mellum", delegatorModelId: "openai/gpt-5.5" },
+    };
+    const capturedRequests: WorkerRequest[] = [];
+    const mockExecutor: WorkerExecutor = {
+      run: vi.fn(async (req: WorkerRequest) => {
+        capturedRequests.push(req);
+        return makeResult("out");
+      }),
+    };
+
+    const invoker = createModelInvoker(homeserverRoles, { timeoutMs: 5000 }, () => mockExecutor);
+    await invoker.invoke("worker", "leaf task", {
+      taskType: "summarize",
+      delegatorModelId: "anthropic/claude-opus-4.5",
+    });
+
+    expect(capturedRequests[0].delegatorModelId).toBe("anthropic/claude-opus-4.5");
+  });
+
+  it("does not attach worker-only delegate metadata to planner calls", async () => {
+    const capturedRequests: WorkerRequest[] = [];
+    const mockExecutor: WorkerExecutor = {
+      run: vi.fn(async (req: WorkerRequest) => {
+        capturedRequests.push(req);
+        return makeResult("out");
+      }),
+    };
+
+    const invoker = createModelInvoker(
+      roles,
+      { timeoutMs: 5000 },
+      () => mockExecutor,
+    );
+
+    await invoker.invoke("planner", "plan", {
+      taskType: "summarize",
+      delegatorModelId: "anthropic/claude-opus-4.5",
+    });
+
+    expect(capturedRequests[0].taskType).toBeUndefined();
+    expect(capturedRequests[0].delegatorModelId).toBeUndefined();
+  });
+
   it("returns executor result unchanged (propagates failures)", async () => {
     const failResult: WorkerResult = {
       ok: false,

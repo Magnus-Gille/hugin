@@ -146,6 +146,20 @@ describe("loadOrchestratorConfig", () => {
     expect(cfg.adaptiveVerify).toBe(false);
   });
 
+  it("attaches HUGIN_ORCH_DELEGATOR_MODEL_ID to the worker binding for M5 /delegate attribution", () => {
+    const cfg = loadOrchestratorConfig({
+      HUGIN_ORCH_DELEGATOR_MODEL_ID: " anthropic/claude-opus-4.5 ",
+    });
+    expect(cfg.roles.worker.delegatorModelId).toBe("anthropic/claude-opus-4.5");
+  });
+
+  it("accepts HUGIN_ORCH_DELEGATOR_MODEL as a compatibility alias", () => {
+    const cfg = loadOrchestratorConfig({
+      HUGIN_ORCH_DELEGATOR_MODEL: "openai/gpt-5.5",
+    });
+    expect(cfg.roles.worker.delegatorModelId).toBe("openai/gpt-5.5");
+  });
+
   it("applies multiple overrides simultaneously", () => {
     const cfg = loadOrchestratorConfig({
       HUGIN_ORCH_PLANNER_MODEL: "berget|llama-3.1-8b",
@@ -197,6 +211,23 @@ describe("applyTaskModel (Fix #6)", () => {
     const cfg = applyTaskModel(DEFAULT_ORCHESTRATOR_CONFIG, " homeserver | qwen3-30b-instruct ");
     expect(cfg.roles.worker.provider).toBe("homeserver");
     expect(cfg.roles.worker.model).toBe("qwen3-30b-instruct");
+  });
+
+  it("preserves the worker delegatorModelId when a task overrides the worker model", () => {
+    const base = {
+      ...DEFAULT_ORCHESTRATOR_CONFIG,
+      roles: {
+        ...DEFAULT_ORCHESTRATOR_CONFIG.roles,
+        worker: {
+          ...DEFAULT_ORCHESTRATOR_CONFIG.roles.worker,
+          delegatorModelId: "anthropic/claude-opus-4.5",
+        },
+      },
+    };
+    const cfg = applyTaskModel(base, "homeserver|mellum");
+    expect(cfg.roles.worker.provider).toBe("homeserver");
+    expect(cfg.roles.worker.model).toBe("mellum");
+    expect(cfg.roles.worker.delegatorModelId).toBe("anthropic/claude-opus-4.5");
   });
 
   it("overrides worker model, preserving the existing worker provider", () => {

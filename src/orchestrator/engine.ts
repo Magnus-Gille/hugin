@@ -342,6 +342,7 @@ export async function runOrchestration(
     async (subtask): Promise<SubtaskOutcome> => {
       const result = await invoker.invoke("worker", buildWorkerPrompt(taskPrompt, subtask), {
         signal,
+        taskType: subtask.taskType,
       });
       allCosts.push(result.costUsd ?? null);
       modelCalls.push(toModelCallRecord("worker", result, subtask.id));

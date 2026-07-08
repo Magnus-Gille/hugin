@@ -73,6 +73,7 @@ vi.mock("node:child_process", () => ({
 const {
   createWorkerExecutor,
   DirectModelExecutor,
+  HomeserverDelegateWorkerExecutor,
   PiHarnessExecutor,
   DEFAULT_MAX_OUTPUT_CHARS,
   DEFAULT_MAX_TOKENS,
@@ -97,6 +98,13 @@ function errorResponse(status: number, body = "bad request"): Response {
   return new Response(body, { status });
 }
 
+function delegateResponse(obj: unknown, status = 200): Response {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 beforeEach(() => {
   spawnCalls.length = 0;
   spawnBehaviors = [];
@@ -106,6 +114,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 // ---------------------------------------------------------------------------
@@ -128,6 +138,12 @@ describe("createWorkerExecutor", () => {
 
   it("returns DirectModelExecutor for homeserver", () => {
     expect(createWorkerExecutor("homeserver")).toBeInstanceOf(DirectModelExecutor);
+  });
+
+  it("returns HomeserverDelegateWorkerExecutor for homeserver worker role", () => {
+    expect(createWorkerExecutor("homeserver", { role: "worker" })).toBeInstanceOf(
+      HomeserverDelegateWorkerExecutor,
+    );
   });
 
   it("returns DirectModelExecutor for unknown provider (handled as error in run)", () => {
@@ -393,6 +409,126 @@ describe("DirectModelExecutor — homeserver provider (env-resolved base URL)", 
 
     expect(result.ok).toBe(true);
     expect(result.costUsd).toBe(0);
+  });
+});
+
+describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
+  it("posts /delegate with task type, local model, token cap, and delegator model id", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+
+    let capturedUrl = "";
+    let capturedInit: RequestInit | undefined;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url: string, init: RequestInit) => {
+      capturedUrl = url;
+      capturedInit = init;
+      return delegateResponse({
+        delegated: true,
+        escalate: false,
+        outcome: "unverified",
+        output: "local leaf output",
+        ledgerId: "ledger-1",
+        metrics: { promptTokens: 30, completionTokens: 7, latencyMs: 123 },
+      });
+    }));
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver",
+      model: "mellum",
+      prompt: "summarize this",
+      taskType: "summarize",
+      delegatorModelId: "anthropic/claude-sonnet-4.6",
+      timeoutMs: 5000,
+      maxTokens: 123,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toBe("local leaf output");
+    expect(result.provider).toBe("homeserver");
+    expect(result.model).toBe("mellum");
+    expect(result.inputTokens).toBe(30);
+    expect(result.outputTokens).toBe(7);
+    expect(result.costUsd).toBe(0);
+
+    expect(capturedUrl).toBe("http://100.76.72.59:8080/delegate");
+    const headers = capturedInit?.headers as Record<string, string>;
+    expect(headers["authorization"]).toBe("Bearer hs-test-key");
+    expect(headers["http-referer"]).toBeUndefined();
+    expect(headers["x-title"]).toBeUndefined();
+
+    const body = JSON.parse(capturedInit?.body as string);
+    expect(body).toMatchObject({
+      prompt: "summarize this",
+      taskType: "summarize",
+      modelId: "mellum",
+      maxTokens: 123,
+      delegatorModelId: "anthropic/claude-sonnet-4.6",
+    });
+    expect(body.verifier).toBeUndefined();
+    expect(body.responseFormat).toBeUndefined();
+  });
+
+  it("forwards verifier and responseFormat when the caller has deterministic specs", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+
+    let capturedBody: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string);
+      return delegateResponse({ delegated: true, outcome: "pass", output: "{\"ok\":true}" });
+    }));
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver",
+      model: "mellum",
+      prompt: "return json",
+      taskType: "extract",
+      timeoutMs: 5000,
+      verifier: { type: "jsonValid" },
+      responseFormat: { type: "json_object" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(capturedBody.verifier).toEqual({ type: "jsonValid" });
+    expect(capturedBody.responseFormat).toEqual({ type: "json_object" });
+  });
+
+  it("maps fail/error DelegationOutcome values to ok=false", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(delegateResponse({ delegated: true, outcome: "fail", output: "nope" })),
+    );
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver",
+      model: "mellum",
+      prompt: "hi",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.output).toBe("nope");
+    expect(result.error).toBe("Delegation outcome: fail");
+  });
+
+  it("uses the gateway root URL and fails before network when HOMESERVER_GATEWAY_URL is unset", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", undefined);
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver",
+      model: "mellum",
+      prompt: "hi",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("HOMESERVER_GATEWAY_URL");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

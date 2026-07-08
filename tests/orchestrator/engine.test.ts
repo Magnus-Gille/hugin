@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import type { ModelInvoker } from "../../src/orchestrator/model-invoker.js";
+import type { ModelInvoker, ModelInvokeOptions } from "../../src/orchestrator/model-invoker.js";
 import type { OrchestratorRole } from "../../src/orchestrator/plan.js";
 import type { WorkerResult } from "../../src/orchestrator/worker-executor.js";
 import { runOrchestration } from "../../src/orchestrator/engine.js";
@@ -32,12 +32,12 @@ const VALID_PLAN_3 = JSON.stringify({
 /** Build a mock invoker from a map of role → ordered responses. */
 function buildMockInvoker(
   responses: Map<OrchestratorRole, WorkerResult[]>,
-  onInvoke?: (role: OrchestratorRole, prompt: string) => void,
+  onInvoke?: (role: OrchestratorRole, prompt: string, opts?: ModelInvokeOptions) => void,
 ): ModelInvoker {
   const counters = new Map<OrchestratorRole, number>();
   return {
-    invoke: vi.fn(async (role: OrchestratorRole, prompt: string) => {
-      onInvoke?.(role, prompt);
+    invoke: vi.fn(async (role: OrchestratorRole, prompt: string, opts?: ModelInvokeOptions) => {
+      onInvoke?.(role, prompt, opts);
       const queue = responses.get(role) ?? [];
       const idx = counters.get(role) ?? 0;
       counters.set(role, idx + 1);
@@ -63,6 +63,28 @@ describe("runOrchestration — happy fanout", () => {
     expect(result.outcomes).toHaveLength(3);
     // totalCostUsd = planner(0.01) + workers(0.002+0.003+0.004) + synth(0.005) = 0.024
     expect(result.totalCostUsd).toBeCloseTo(0.024, 6);
+  });
+
+  it("passes planner taskType through to each worker invocation", async () => {
+    const plan = JSON.stringify({
+      subtasks: [
+        { id: "a", prompt: "Summarize the notes", taskType: "summarize" },
+        { id: "b", prompt: "Compute the answer", taskType: "reason-math" },
+      ],
+    });
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(plan, 0.01)]],
+      ["worker", [ok("W1"), ok("W2")]],
+      ["synthesizer", [ok("Final")]],
+    ]);
+    const workerTaskTypes: Array<string | undefined> = [];
+    const invoker = buildMockInvoker(responses, (role, _prompt, opts) => {
+      if (role === "worker") workerTaskTypes.push(opts?.taskType);
+    });
+
+    await runOrchestration("Do a complex task", invoker, { maxSubtasks: 12 });
+
+    expect(workerTaskTypes).toEqual(["summarize", "reason-math"]);
   });
 });
 
