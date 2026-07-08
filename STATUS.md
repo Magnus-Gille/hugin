@@ -1,7 +1,8 @@
 # Hugin — Status
 
-**Last session:** 2026-07-08 (#149 permission profiles — PR #150 deployed to huginmunin)
-**Branch:** main; deployed commit `218058c` on huginmunin; service active/healthy.
+**Last session:** 2026-07-08 (#149 permission profiles — PR #150 deployed to huginmunin; deploy metadata repaired)
+**Branch:** main; service active/healthy on huginmunin. Verified runtime/deploy-hardening state
+`370a667`; exact latest deployment marker is `/home/magnus/repos/hugin/.deployed-commit`.
 
 ## Latest — Claude SDK task permission profiles (#149, 2026-07-08)
 
@@ -11,11 +12,12 @@ Validation: `npm test -- tests/sdk-executor.test.ts tests/dispatcher.test.ts`, `
 
 PR #150 merged as `ca2ebb9` after green GitHub checks, then deployed to huginmunin on 2026-07-08
 via the delegated-worker path plus Grimnir's registry-aware selective deploy for the final marker
-repair.
+repair. Verified production state before this status-only record is main at `370a667` (runtime code
+from PR #150 plus deploy-script hardening); later status-only commits do not change runtime behavior.
 
 Production evidence:
 
-- Remote `/home/magnus/repos/hugin` is on `main` at `218058cb8fc0128d6c3beaf3bb7636b876ac641d`.
+- Remote `/home/magnus/repos/hugin` is on `main` at `370a6676a102afdeed2312a140395d281088ade8`.
 - `.deployed-commit` is present and matches the same commit after `grimnir/scripts/deploy.sh hugin`.
 - `hugin.service` is active/enabled under the user manager and `/health` returns `status:"ok"`,
   `polling:true`, and `queue_depth:0`.
@@ -24,6 +26,9 @@ Production evidence:
   malformed `trusted-code` without `Capabilities: code` -> read-only / `dontAsk`; explicit
   `Capabilities: code` + `Permission profile: trusted-code` -> `permissionMode:"bypassPermissions"`.
 - Grimnir registry validation after marker repair reported **7 ok, 0 issues, 0 warnings**.
+- Follow-up deploy hardening landed: Hugin `scripts/deploy-pi.sh` and Grimnir `scripts/deploy.sh`
+  now exclude both Git directories and Git worktree `.git` files from rsync, preventing a detached
+  worktree deploy from corrupting the remote checkout metadata.
 
 Residual caveats:
 
