@@ -1,7 +1,7 @@
 # Hugin — Status
 
-**Last session:** 2026-07-08 (#149 permission profiles — Claude SDK no longer defaults every task to full bypass; PR #150 merged)
-**Branch:** main; local build + full suite green (1429 tests).
+**Last session:** 2026-07-08 (#149 permission profiles — PR #150 deployed to huginmunin)
+**Branch:** main; deployed commit `218058c` on huginmunin; service active/healthy.
 
 ## Latest — Claude SDK task permission profiles (#149, 2026-07-08)
 
@@ -9,8 +9,31 @@ Implemented a cheapest-first least-privilege gate for `Runtime: claude`: tasks n
 
 Validation: `npm test -- tests/sdk-executor.test.ts tests/dispatcher.test.ts`, `npm run build`, and full `npm test` passed locally. M5 advisory review accepted in part: added the `Capabilities: code` guard and removed `TodoWrite` from the read-only tool allowlist; rejected the blanket recommendation to remove bypass entirely because #149 explicitly keeps full bypass for trusted code tasks.
 
-PR #150 merged as `ca2ebb9` after green GitHub checks. Deploy to huginmunin remains the next
-operational step.
+PR #150 merged as `ca2ebb9` after green GitHub checks, then deployed to huginmunin on 2026-07-08
+via the delegated-worker path plus Grimnir's registry-aware selective deploy for the final marker
+repair.
+
+Production evidence:
+
+- Remote `/home/magnus/repos/hugin` is on `main` at `218058cb8fc0128d6c3beaf3bb7636b876ac641d`.
+- `.deployed-commit` is present and matches the same commit after `grimnir/scripts/deploy.sh hugin`.
+- `hugin.service` is active/enabled under the user manager and `/health` returns `status:"ok"`,
+  `polling:true`, and `queue_depth:0`.
+- Live permission-probe logs showed the intended effective modes before Claude quota stopped
+  execution: default profile -> `Permission profile: read-only` / `permissionMode:"dontAsk"`;
+  malformed `trusted-code` without `Capabilities: code` -> read-only / `dontAsk`; explicit
+  `Capabilities: code` + `Permission profile: trusted-code` -> `permissionMode:"bypassPermissions"`.
+- Grimnir registry validation after marker repair reported **7 ok, 0 issues, 0 warnings**.
+
+Residual caveats:
+
+- Claude on the Pi is quota-blocked until **2026-07-09 21:00 Europe/Stockholm**, so the probes
+  validated initialization/permission mode but not successful post-initialization Claude execution.
+- The existing non-fatal deploy warning remains: `~/repos/claude-config` is missing on the Pi, so
+  the claude-config bootstrap step warns during deploy.
+- Local checkout note: unrelated dirty changes exist in `src/homeserver-executor.ts` and
+  `tests/homeserver-executor.test.ts`; they were not part of #150 and were not deployed by the final
+  Grimnir selective deploy.
 
 ## Session 9 (2026-07-03) — Homeserver (M5) wired as sovereign orchestrator provider + go-live (#137)
 
