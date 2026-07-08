@@ -23,6 +23,7 @@ npm run build
 echo "==> Syncing to $REMOTE:$REMOTE_DIR..."
 rsync -av --delete \
   --exclude='node_modules/' \
+  --exclude='.git' \
   --exclude='.git/' \
   --exclude='.env' \
   --exclude='tests/' \
