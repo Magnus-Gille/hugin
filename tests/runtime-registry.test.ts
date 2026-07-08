@@ -6,6 +6,8 @@ import {
   getAliasMap,
   getRegistryEntryById,
   getRuntimeMaxSensitivity,
+  isAutoRoutableDispatcherRuntime,
+  isLegacyDispatcherRuntime,
   parseActiveSubscriptions,
   resolveAlias,
 } from "../src/runtime-registry.js";
@@ -19,6 +21,7 @@ describe("RUNTIME_REGISTRY", () => {
     expect(ids).toContain("ollama-pi");
     expect(ids).toContain("ollama-laptop");
     expect(ids).toContain("ollama-orin");
+    expect(ids).toContain("opencode-m5");
     expect(ids).toContain("openrouter");
     expect(ids).toContain("pi-harness");
   });
@@ -209,6 +212,26 @@ describe("orchestrator v1 policy fields", () => {
     expect(entry!.harnessFlags).toEqual(["--no-session", "--provider", "openrouter"]);
     expect(entry!.zdrRequired).toBe(true);
     expect(entry!.autoEligible).toBe(false);
+  });
+
+  it("opencode-m5 is a local explicit-only harness runtime", () => {
+    const entry = getRegistryEntryById("opencode-m5");
+    expect(entry).toBeDefined();
+    expect(entry!.dispatcherRuntime).toBe("opencode");
+    expect(entry!.provider).toBe("opencode");
+    expect(entry!.egress).toBe("local");
+    expect(entry!.family).toBe("harness");
+    expect(entry!.harnessCmd).toBe("opencode");
+    expect(entry!.autoEligible).toBe(false);
+    expect(entry!.capabilities).toEqual(["tools", "code"]);
+  });
+
+  it("opencode is executable but excluded from the auto-routable dispatcher subset", () => {
+    expect(isLegacyDispatcherRuntime("opencode")).toBe(true);
+    expect(isAutoRoutableDispatcherRuntime("opencode")).toBe(false);
+    expect(isAutoRoutableDispatcherRuntime("claude")).toBe(true);
+    expect(isAutoRoutableDispatcherRuntime("codex")).toBe(true);
+    expect(isAutoRoutableDispatcherRuntime("ollama")).toBe(true);
   });
 
   it("existing one-shot runtimes are auto-eligible by default (except ollama-pi)", () => {

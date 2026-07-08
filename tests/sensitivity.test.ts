@@ -319,6 +319,7 @@ describe("sensitivity helpers", () => {
   it("treats cloud runtimes as internal-only and ollama as private-safe", () => {
     expect(getDispatcherRuntimeMaxSensitivity("claude")).toBe("internal");
     expect(getDispatcherRuntimeMaxSensitivity("codex")).toBe("internal");
+    expect(getDispatcherRuntimeMaxSensitivity("opencode")).toBe("internal");
     expect(getDispatcherRuntimeMaxSensitivity("ollama")).toBe("private");
   });
 
