@@ -1,7 +1,48 @@
 # Hugin — Status
 
-**Last session:** 2026-07-08 (Codex) — OpenCode runtime deployed, live-validated, timer scope reconciled
-**Branch:** `main`; production deployed marker is `68dcc97f4bf035b14237dfdf763987ff8cbc659d`.
+**Last session:** 2026-07-08 (Codex) — #154 homeserver worker `/delegate` lane merged and deployed
+**Branch:** `main`; production remote `/home/magnus/repos/hugin` is `main@c30b76f`.
+
+## Latest — M5 `/delegate` orchestrator worker lane (#154, 2026-07-08)
+
+PR [#156](https://github.com/Magnus-Gille/hugin/pull/156) merged to `main` as
+`c30b76f`. It routes orchestrator `homeserver` **worker** leaves through the M5
+gateway `/delegate` endpoint while preserving raw homeserver chat for direct executor
+calls and non-worker roles.
+
+- **Code shape:** `createWorkerExecutor("homeserver", { role: "worker" })` now returns
+  `HomeserverDelegateWorkerExecutor`; plain `createWorkerExecutor("homeserver")` remains
+  `DirectModelExecutor` and still posts to `/v1/chat/completions`.
+- **Attribution plumbing:** planner-emitted `subtask.taskType` is forwarded to worker
+  invocations; `/delegate` receives `taskType`, `modelId`, `maxTokens`, optional
+  `verifier`/`responseFormat`, optional `premiumBaselineModelId`, and `delegatorModelId`.
+  `HUGIN_ORCH_DELEGATOR_MODEL_ID` configures the actual outer/cloud conductor; fallback
+  for homeserver worker leaves is the planner role model. Compatibility alias:
+  `HUGIN_ORCH_DELEGATOR_MODEL`.
+- **Validation:** focused orchestrator tests passed (`208` tests), full suite passed
+  (`89` files / `1456` tests), `npm run build` passed, GitHub CI `build-test` passed.
+  Live M5 dogfood exercised the new executor against `/delegate` with model `mellum`,
+  taskType `qa-factual`, verifier `answerIs`, and delegatorModelId `openai/gpt-5.5`;
+  it returned exactly `HUGIN154_OK`, token counts, and `costUsd:0`. M5
+  `qwen3-coder-next-80b` also reviewed the bounded diff; reported findings were checked
+  and did not require code changes beyond already-added docs clarity.
+- **Production deploy:** `./scripts/deploy-pi.sh` deployed `main@c30b76f` to
+  huginmunin, rebuilt locally, synced the Pi checkout, restarted `hugin.service`, and
+  health verified over Pi loopback (`status:"ok"`, `polling:true`, queue depth `0`).
+  User service is `active` and `enabled`.
+- **Cron:** deploy reinstalled the daily CLI-update cron; remote crontab includes
+  `0 4 * * * /home/magnus/repos/hugin/scripts/update-cli.sh 2>&1 | logger -t hugin-update`.
+
+### Pending / next
+
+- The deploy warning remains non-fatal: `~/repos/claude-config` is still missing on the Pi,
+  so the claude-config bootstrap step warns during deploy.
+- Direct laptop curl to `100.97.117.37:3032` failed because this service advertises/binds
+  health on `127.0.0.1`; verify health with `ssh huginmunin.local 'curl -fsS
+  http://127.0.0.1:3032/health'`.
+- If a future task needs raw `/v1/chat/completions` specifically for orchestrator worker
+  leaves, add an explicit worker path/provider switch; today `homeserver` worker means
+  ledgered `/delegate` by design.
 
 ## Latest — OpenCode harness adapter spike (2026-07-08)
 
