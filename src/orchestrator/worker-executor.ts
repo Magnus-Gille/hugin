@@ -15,9 +15,18 @@
  */
 
 import { spawn } from "node:child_process";
+import type {
+  HomeserverResponseFormat,
+  HomeserverVerifierSpec,
+} from "../homeserver-executor.js";
 import { estimateCostUsd } from "../model-pricing.js";
 import { getRegistryEntryById } from "../runtime-registry.js";
-import { getProviderConfig, resolveProviderBaseUrl } from "./provider-config.js";
+import {
+  getProviderConfig,
+  resolveGatewayRootUrl,
+  resolveProviderBaseUrl,
+} from "./provider-config.js";
+import type { OrchestratorRole } from "./plan.js";
 
 /** Default maximum output characters when not specified in the request. */
 export const DEFAULT_MAX_OUTPUT_CHARS = 50_000;
@@ -32,7 +41,7 @@ export const DEFAULT_MAX_OUTPUT_CHARS = 50_000;
 export const DEFAULT_MAX_TOKENS = 4096;
 
 export interface WorkerRequest {
-  /** Provider id: "openrouter" | "berget" | "pi-harness" */
+  /** Provider id: "openrouter" | "berget" | "pi-harness" | "homeserver" */
   provider: string;
   /** Resolved model id. */
   model: string;
@@ -49,6 +58,16 @@ export interface WorkerRequest {
    * short-circuits without spending. Combined with the per-call timeout.
    */
   signal?: AbortSignal;
+  /** M5 /delegate ledger bucket. Passed only by orchestrator worker leaves. */
+  taskType?: string;
+  /** Deterministic verifier spec for M5 /delegate when the caller has one. */
+  verifier?: HomeserverVerifierSpec;
+  /** Grammar/format contract for M5 /delegate when the caller has one. */
+  responseFormat?: HomeserverResponseFormat;
+  /** Cloud/conductor model responsible for the leaf, for M5 savings attribution. */
+  delegatorModelId?: string;
+  /** Optional counterfactual savings baseline forwarded to M5 /delegate. */
+  premiumBaselineModelId?: string;
 }
 
 export interface WorkerResult {
@@ -78,11 +97,18 @@ export interface WorkerExecutor {
 /**
  * Factory: returns the appropriate executor for the given provider id.
  *   - "pi-harness" → PiHarnessExecutor
+ *   - "homeserver" worker role → HomeserverDelegateWorkerExecutor
  *   - everything else → DirectModelExecutor
  */
-export function createWorkerExecutor(provider: string): WorkerExecutor {
+export function createWorkerExecutor(
+  provider: string,
+  opts?: { role?: OrchestratorRole },
+): WorkerExecutor {
   if (provider === "pi-harness") {
     return new PiHarnessExecutor();
+  }
+  if (provider === "homeserver" && opts?.role === "worker") {
+    return new HomeserverDelegateWorkerExecutor();
   }
   return new DirectModelExecutor();
 }
@@ -319,6 +345,214 @@ export class DirectModelExecutor implements WorkerExecutor {
 }
 
 // ---------------------------------------------------------------------------
+// HomeserverDelegateWorkerExecutor — M5 gateway /delegate
+// ---------------------------------------------------------------------------
+
+/**
+ * Executes an orchestrator worker leaf through the M5 `/delegate` endpoint.
+ *
+ * Raw homeserver chat remains available through DirectModelExecutor: the
+ * factory only selects this adapter for provider="homeserver" and role="worker".
+ * This path is what lets M5's ledger see taskType/delegatorModelId and attribute
+ * local-offload savings.
+ */
+export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
+  async run(req: WorkerRequest): Promise<WorkerResult> {
+    const start = Date.now();
+    const maxOutput = req.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
+
+    if (req.signal?.aborted) {
+      return {
+        ok: false,
+        output: "",
+        provider: req.provider,
+        model: req.model,
+        inputTokens: null,
+        outputTokens: null,
+        costUsd: null,
+        latencyMs: Date.now() - start,
+        error: "Request aborted before it started",
+      };
+    }
+
+    const resolved = resolveGatewayRootUrl(process.env, "HOMESERVER_GATEWAY_URL");
+    if (!resolved.ok) {
+      return {
+        ok: false,
+        output: "",
+        provider: req.provider,
+        model: req.model,
+        inputTokens: null,
+        outputTokens: null,
+        costUsd: null,
+        latencyMs: Date.now() - start,
+        error: resolved.reason,
+      };
+    }
+
+    const apiKey = process.env.HOMESERVER_GATEWAY_API_KEY;
+    if (!apiKey) {
+      return {
+        ok: false,
+        output: "",
+        provider: req.provider,
+        model: req.model,
+        inputTokens: null,
+        outputTokens: null,
+        costUsd: null,
+        latencyMs: Date.now() - start,
+        error: "Missing API key: environment variable HOMESERVER_GATEWAY_API_KEY is not set",
+      };
+    }
+
+    const body: Record<string, unknown> = {
+      prompt: req.prompt,
+      modelId: req.model,
+      maxTokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
+      ...(req.taskType !== undefined ? { taskType: req.taskType } : {}),
+      ...(req.systemPrompt !== undefined ? { systemPrompt: req.systemPrompt } : {}),
+      ...(req.verifier !== undefined ? { verifier: req.verifier } : {}),
+      ...(req.responseFormat !== undefined ? { responseFormat: req.responseFormat } : {}),
+      ...(req.delegatorModelId !== undefined ? { delegatorModelId: req.delegatorModelId } : {}),
+      ...(req.premiumBaselineModelId !== undefined
+        ? { premiumBaselineModelId: req.premiumBaselineModelId }
+        : {}),
+    };
+
+    const controller = new AbortController();
+    let abortReason: "timeout" | "external" | null = null;
+    const abortWith = (reason: "timeout" | "external") => {
+      if (abortReason === null) abortReason = reason;
+      controller.abort();
+    };
+    const timer = setTimeout(() => abortWith("timeout"), req.timeoutMs);
+    const onExternalAbort = () => abortWith("external");
+    req.signal?.addEventListener("abort", onExternalAbort, { once: true });
+
+    try {
+      let response: Response;
+      try {
+        response = await fetch(`${resolved.baseUrl}/delegate`, {
+          method: "POST",
+          headers: buildHeaders(req.provider, apiKey),
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } catch (fetchErr) {
+        const errMsg = !isAbortError(fetchErr)
+          ? `Network error: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`
+          : abortReason === "timeout"
+            ? `Request timed out after ${req.timeoutMs}ms`
+            : "Request aborted";
+        return {
+          ok: false,
+          output: "",
+          provider: req.provider,
+          model: req.model,
+          inputTokens: null,
+          outputTokens: null,
+          costUsd: null,
+          latencyMs: Date.now() - start,
+          error: errMsg,
+        };
+      }
+
+      if (!response.ok) {
+        let responseBody: string | undefined;
+        try {
+          responseBody = await response.text();
+        } catch {
+          // ignore
+        }
+        return {
+          ok: false,
+          output: "",
+          provider: req.provider,
+          model: req.model,
+          inputTokens: null,
+          outputTokens: null,
+          costUsd: null,
+          latencyMs: Date.now() - start,
+          error: `HTTP ${response.status}${responseBody ? `: ${responseBody.slice(0, 200)}` : ""}`,
+        };
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = await response.json();
+      } catch (parseErr) {
+        if (isAbortError(parseErr)) {
+          return {
+            ok: false,
+            output: "",
+            provider: req.provider,
+            model: req.model,
+            inputTokens: null,
+            outputTokens: null,
+            costUsd: null,
+            latencyMs: Date.now() - start,
+            error: abortReason === "timeout"
+              ? `Response body stalled and timed out after ${req.timeoutMs}ms`
+              : "Request aborted while reading the response body",
+          };
+        }
+        return {
+          ok: false,
+          output: "",
+          provider: req.provider,
+          model: req.model,
+          inputTokens: null,
+          outputTokens: null,
+          costUsd: null,
+          latencyMs: Date.now() - start,
+          error: `Response was not valid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+        };
+      }
+
+      const outcome = extractDelegationOutcome(parsed);
+      if (!outcome.ok) {
+        return {
+          ok: false,
+          output: "",
+          provider: req.provider,
+          model: req.model,
+          inputTokens: null,
+          outputTokens: null,
+          costUsd: null,
+          latencyMs: Date.now() - start,
+          error: outcome.error,
+        };
+      }
+
+      const inputTokens = sanitizeTokenCount(outcome.metrics?.promptTokens);
+      const outputTokens = sanitizeTokenCount(outcome.metrics?.completionTokens);
+      const costUsd =
+        inputTokens !== null && outputTokens !== null
+          ? estimateCostUsd(req.model, inputTokens, outputTokens)
+          : null;
+      const output = (outcome.output ?? outcome.frontierOutput ?? "").slice(0, maxOutput);
+      const outcomeStatus = typeof outcome.outcome === "string" ? outcome.outcome : null;
+      const failed = outcomeStatus === "fail" || outcomeStatus === "error";
+
+      return {
+        ok: !failed,
+        output,
+        provider: req.provider,
+        model: req.model,
+        inputTokens,
+        outputTokens,
+        costUsd,
+        latencyMs: Date.now() - start,
+        ...(failed ? { error: `Delegation outcome: ${outcomeStatus}` } : {}),
+      };
+    } finally {
+      clearTimeout(timer);
+      req.signal?.removeEventListener("abort", onExternalAbort);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // PiHarnessExecutor — spawn the `pi` CLI
 // ---------------------------------------------------------------------------
 
@@ -543,6 +777,18 @@ interface ExtractedError {
   error: string;
 }
 
+interface DelegationOutcome {
+  delegated?: boolean;
+  escalate?: boolean;
+  outcome?: string;
+  score?: number | null;
+  output?: string;
+  decisionReason?: string;
+  ledgerId?: string;
+  metrics?: { promptTokens?: unknown; completionTokens?: unknown; latencyMs?: unknown };
+  frontierOutput?: string;
+}
+
 function extractChatCompletion(raw: unknown): ExtractedCompletion | ExtractedError {
   if (!raw || typeof raw !== "object") {
     return { ok: false, error: "Response was not an object" };
@@ -581,6 +827,26 @@ function extractChatCompletion(raw: unknown): ExtractedCompletion | ExtractedErr
       : null;
 
   return { ok: true, content, inputTokens, outputTokens, finishReason };
+}
+
+function extractDelegationOutcome(raw: unknown): ({ ok: true } & DelegationOutcome) | ExtractedError {
+  if (!raw || typeof raw !== "object") {
+    return { ok: false, error: "Response was not an object" };
+  }
+  const r = raw as DelegationOutcome;
+  if (r.output !== undefined && typeof r.output !== "string") {
+    return { ok: false, error: "Response output was not a string" };
+  }
+  if (r.frontierOutput !== undefined && typeof r.frontierOutput !== "string") {
+    return { ok: false, error: "Response frontierOutput was not a string" };
+  }
+  if (r.outcome !== undefined && typeof r.outcome !== "string") {
+    return { ok: false, error: "Response outcome was not a string" };
+  }
+  if (r.metrics !== undefined && (!r.metrics || typeof r.metrics !== "object")) {
+    return { ok: false, error: "Response metrics was not an object" };
+  }
+  return { ok: true, ...r };
 }
 
 interface PiParsedOutput {

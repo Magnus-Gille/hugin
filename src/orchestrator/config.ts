@@ -63,6 +63,7 @@ export function parseIntEnv(raw: string | undefined, fallback: number): number {
  *   HUGIN_ORCH_MAX_SUBTASKS    — positive integer
  *   HUGIN_ORCH_MAX_TOKENS      — positive integer (completion-token cap)
  *   HUGIN_ORCH_ADAPTIVE_VERIFY — "on" | "true" → adaptiveVerify = true (V5)
+ *   HUGIN_ORCH_DELEGATOR_MODEL_ID — cloud/conductor model id for M5 /delegate savings attribution
  *
  * Pure function — no side-effects, no I/O.
  */
@@ -158,6 +159,15 @@ export function loadOrchestratorConfig(
     if (v === "on" || v === "true") {
       cfg.adaptiveVerify = true;
     }
+  }
+
+  const delegatorModelId =
+    env.HUGIN_ORCH_DELEGATOR_MODEL_ID?.trim() || env.HUGIN_ORCH_DELEGATOR_MODEL?.trim();
+  if (delegatorModelId) {
+    cfg.roles = {
+      ...cfg.roles,
+      worker: { ...cfg.roles.worker, delegatorModelId },
+    };
   }
 
   return cfg;

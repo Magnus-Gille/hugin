@@ -124,6 +124,11 @@ derived recommendation is `explore`/`escalate-frontier` or `unknown`; skip (trus
 `delegate-local`. `HUGIN_ORCH_VERIFY=on` retains its meaning: verify everything
 (overrides adaptive). Confidence source: the Munin verdict store for cloud providers;
 **the gateway ledger for `homeserver`-bound workers** (D5: local lane reads `/ledger`).
+As of #154, orchestrator worker leaves bound to `homeserver` also execute through the
+gateway's `/delegate` endpoint, forwarding planner `taskType` plus `delegatorModelId`
+when known so the M5 ledger/dashboard can attribute offload savings to the responsible
+cloud/conductor model. Direct homeserver chat remains the raw `/v1/chat/completions`
+path for non-worker calls and explicit direct executor use.
 Escalation (re-running a failed subtask on a stronger tier) is OUT of this PR —
 follow-up issue; the gate here decides verify-vs-trust only.
 
