@@ -57,6 +57,7 @@ Content format:
 - **Context-budget:** 8000
 - **Sensitivity:** internal
 - **Capabilities:** tools, code, structured-output
+- **Permission profile:** read-only | trusted-code
 - **Group:** batch-20260323
 - **Sequence:** 1
 
@@ -86,6 +87,15 @@ Content format:
 **Sensitivity:** Optional `Sensitivity: public | internal | private` field. If omitted, Hugin infers sensitivity from the prompt (keyword detection), context path, and any context-refs. Cloud runtimes (claude, codex) are capped at `internal`; local runtimes (ollama) allow `private`. Tasks that exceed their runtime's sensitivity ceiling are rejected.
 
 **Auto-routing:** Use `Runtime: auto` to let Hugin select the runtime. The router filters by trust tier (sensitivity ceiling), availability (ollama host probes), and capabilities, then ranks by cost (free > subscription), trust (trusted > semi-trusted), and model size. Optional `Capabilities: tools, code, structured-output` narrows candidates. Explicit runtimes remain the default — `auto` is opt-in. Routing decisions are logged and included in structured results.
+
+**Claude SDK permission profiles:** `Runtime: claude` defaults to
+`Permission profile: read-only`, which runs Claude Code in `dontAsk` mode with
+only read-only local tools plus read-only Munin MCP tools pre-approved.
+`Permission profile: trusted-code` takes effect only when the task also declares
+`Capabilities: code`; use that pair only when the prompt/context is trusted
+enough to allow filesystem edits, shell commands, and outbound tool use. It
+preserves the historical full-bypass Claude Code lane for explicitly trusted
+code tasks.
 
 **Pipeline tasks:** Use `Runtime: pipeline` with a `### Pipeline` section instead of `### Prompt`. Pipeline phases use runtime IDs (`claude-sdk`, `codex-spawn`, `ollama-pi`, `ollama-laptop`, `ollama-orin`, or `auto`) which differ from standalone runtime names. Per-phase `Capabilities:` is supported.
 

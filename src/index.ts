@@ -17,7 +17,7 @@ import {
   type MuninReadResult,
 } from "./munin-client.js";
 import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveContext, normalizeRoot, DEFAULT_REPOS_ROOT } from "./task-helpers.js";
-import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig } from "./sdk-executor.js";
+import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
 import { classifyClaudeFailure } from "./failure-classification.js";
 import {
   decideAuthAlarm,
@@ -595,6 +595,7 @@ interface TaskConfig {
   contextResolution?: Awaited<ReturnType<typeof resolveContextRefs>>;
   pipeline?: TaskExecutionPipelineContext;
   capabilities?: RuntimeCapability[];
+  permissionProfile?: TaskPermissionProfile;
   autoRouted?: boolean;
   routingDecision?: RouterDecision;
   // Local-skill lane audit record (issue #84). Set when HUGIN_SKILL_LANE=on and
@@ -742,6 +743,9 @@ function parseTask(content: string): TaskConfig | null {
   const capabilitiesRaw = content.match(
     /\*\*Capabilities:\*\*\s*(.+)/i
   )?.[1]?.trim();
+  const permissionProfileRaw = content.match(
+    /\*\*Permission profile:\*\*\s*(.+)/i
+  )?.[1]?.trim()?.toLowerCase();
 
   // Extract prompt from ### Prompt section
   const promptMatch = content.match(/###\s*Prompt\s*\n([\s\S]+)$/i);
@@ -796,6 +800,10 @@ function parseTask(content: string): TaskConfig | null {
       ? sensitivitySchema.parse(declaredSensitivityRaw)
       : undefined,
     capabilities: validCapabilities.length > 0 ? validCapabilities : undefined,
+    permissionProfile:
+      permissionProfileRaw === "trusted-code" && validCapabilities.includes("code")
+        ? "trusted-code"
+        : "read-only",
     autoRouted: isAutoRoute || undefined,
     artifactManifest: artifactManifestResult.manifest ?? undefined,
     artifactManifestError: artifactManifestResult.error ?? undefined,
@@ -4038,6 +4046,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             muninApiKey: config.muninApiKey,
             maxOutputChars: config.maxOutputChars,
             muninSessionId: munin.getSessionId(),
+            permissionProfile: task.permissionProfile,
           },
           taskId,
           LOG_DIR,
@@ -4098,6 +4107,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             muninApiKey: config.muninApiKey,
             maxOutputChars: config.maxOutputChars,
             muninSessionId: munin.getSessionId(),
+            permissionProfile: task.permissionProfile,
           },
           taskId,
           LOG_DIR,
@@ -4190,6 +4200,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         maxOutputChars: config.maxOutputChars,
         model: task.model,
         muninSessionId: munin.getSessionId(),
+        permissionProfile: task.permissionProfile,
       },
       taskId,
       LOG_DIR,

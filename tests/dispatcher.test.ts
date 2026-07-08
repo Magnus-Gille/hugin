@@ -8,6 +8,7 @@ import { describe, it, expect } from "vitest";
 import { resolveContext } from "../src/task-helpers.js";
 
 type RuntimeCapability = "tools" | "code" | "structured-output";
+type TaskPermissionProfile = "read-only" | "trusted-code";
 
 function parseTask(content: string, workspace = "/home/magnus/workspace") {
   const declaredRuntimeRaw =
@@ -65,6 +66,9 @@ function parseTask(content: string, workspace = "/home/magnus/workspace") {
   const capabilitiesRaw = content.match(
     /\*\*Capabilities:\*\*\s*(.+)/i
   )?.[1]?.trim();
+  const permissionProfileRaw = content.match(
+    /\*\*Permission profile:\*\*\s*(.+)/i
+  )?.[1]?.trim()?.toLowerCase();
 
   const promptMatch = content.match(/###\s*Prompt\s*\n([\s\S]+)$/i);
   const prompt = promptMatch?.[1]?.trim();
@@ -106,6 +110,10 @@ function parseTask(content: string, workspace = "/home/magnus/workspace") {
       : undefined,
     contextBudget: contextBudgetStr ? parseInt(contextBudgetStr) : undefined,
     capabilities: validCapabilities.length > 0 ? validCapabilities : undefined,
+    permissionProfile:
+      permissionProfileRaw === "trusted-code" && validCapabilities.includes("code")
+        ? "trusted-code" as TaskPermissionProfile
+        : "read-only" as TaskPermissionProfile,
     autoRouted: isAutoRoute || undefined,
   };
 }
@@ -839,6 +847,47 @@ Do it`;
     const task = parseTask(content);
     expect(task!.autoRouted).toBeUndefined();
     expect(task!.capabilities).toEqual(["tools"]);
+  });
+
+  it("should default Claude permission profile to read-only", () => {
+    const content = `## Task: Default permissions
+
+- **Runtime:** claude
+
+### Prompt
+Summarize the queue`;
+
+    const task = parseTask(content);
+    expect(task!.permissionProfile).toBe("read-only");
+  });
+
+  it("should parse explicit trusted-code permission profile", () => {
+    const content = `## Task: Trusted code
+
+- **Runtime:** claude
+- **Capabilities:** code
+- **Permission profile:** trusted-code
+
+### Prompt
+Implement a focused code change`;
+
+    const task = parseTask(content);
+    expect(task!.capabilities).toEqual(["code"]);
+    expect(task!.permissionProfile).toBe("trusted-code");
+  });
+
+  it("should downgrade trusted-code profile without code capability to read-only", () => {
+    const content = `## Task: Untrusted non-code
+
+- **Runtime:** claude
+- **Permission profile:** trusted-code
+
+### Prompt
+Summarize untrusted input`;
+
+    const task = parseTask(content);
+    expect(task!.capabilities).toBeUndefined();
+    expect(task!.permissionProfile).toBe("read-only");
   });
 
   it("should parse auto task with all fields", () => {
