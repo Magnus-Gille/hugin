@@ -764,6 +764,43 @@ describe("HomeserverDelegateWorkerExecutor — busy backpressure retry (issue #1
     }
   });
 
+  it("a stalled busy-response body does not eat the per-attempt timeout before retrying (Codex review)", async () => {
+    stubGateway();
+    vi.useFakeTimers();
+    try {
+      // 503 with Retry-After headers flushed but a body that NEVER closes: the
+      // diagnostic body read must be bounded — the retry wait has to start
+      // promptly, not after the (huge) per-attempt timeout aborts the read.
+      const stalledBody = new ReadableStream<Uint8Array>({ start() {} });
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(stalledBody, { status: 503, headers: { "retry-after": "5" } }),
+        )
+        .mockResolvedValueOnce(okDelegate());
+      vi.stubGlobal("fetch", fetchMock);
+
+      const pending = new HomeserverDelegateWorkerExecutor().run({
+        provider: "homeserver",
+        model: "mellum",
+        prompt: "hi",
+        timeoutMs: 120_000, // per-attempt timeout must NOT gate the retry timing
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Bounded body read (≤2s) + Retry-After (5s) — the retry must fire well
+      // within 10s, nowhere near the 120s per-attempt timeout.
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = await pending;
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result.ok).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does NOT retry non-backpressure HTTP errors (401 stays terminal)", async () => {
     stubGateway();
     const fetchMock = vi.fn().mockResolvedValue(errorResponse(401, "Unauthorized"));

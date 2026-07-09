@@ -216,7 +216,10 @@ describe("runOrchestration — partial failure", () => {
     const failedOutcome = result.outcomes.find((o) => !o.result.ok);
     expect(failedOutcome).toBeDefined();
     expect(failedOutcome!.result.error).toBe("worker 2 exploded");
-    expect(result.finalOutput).toBe("Merged output");
+    // Issue #157: the synthesized answer is kept, but the final output must
+    // also carry the deterministic degraded-coverage notice (see the
+    // degraded-coverage describe block below).
+    expect(result.finalOutput).toContain("Merged output");
   });
 });
 
@@ -898,5 +901,63 @@ describe("runOrchestration — degraded coverage when workers never ran (issue #
     ]);
     const result = await runOrchestration("task", buildMockInvoker(responses));
     expect(result.warnings.filter((w) => w.toLowerCase().includes("coverage"))).toEqual([]);
+    expect(result.finalOutput).toBe("Final");
+  });
+
+  // Codex review of #157: the degraded-coverage signal must live in the final
+  // output ITSELF on every path — not only in warnings/synth prompt. The
+  // synth-skip (single survivor) and synth-failure fallback paths bypass the
+  // synthesizer prompt entirely, and structured-result consumers read
+  // finalOutput as resultText.
+  it("synthesis skipped (single survivor): finalOutput carries a deterministic degraded-coverage notice", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      [
+        "worker",
+        [
+          ok("Only survivor", 0.002),
+          fail("HTTP 503 server_busy retryAfterS=5"),
+          fail("HTTP 503 server_busy retryAfterS=5"),
+        ],
+      ],
+      // no synthesizer response queued — the single-survivor path must not call it
+    ]);
+    const result = await runOrchestration("task", buildMockInvoker(responses));
+
+    expect(result.ok).toBe(true);
+    expect(result.finalOutput).toContain("Only survivor");
+    expect(result.finalOutput.toLowerCase()).toContain("degraded");
+    expect(result.finalOutput).toContain("[2]");
+    expect(result.finalOutput).toContain("[3]");
+    expect(result.finalOutput).toContain("HTTP 503 server_busy retryAfterS=5");
+  });
+
+  it("synthesizer-failure fallback: the concatenated output carries the degraded-coverage notice", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), fail("HTTP 503 server_busy"), ok("W3")]],
+      ["synthesizer", [fail("synthesizer model error")]],
+    ]);
+    const result = await runOrchestration("task", buildMockInvoker(responses));
+
+    expect(result.ok).toBe(true);
+    expect(result.finalOutput).toContain("W1");
+    expect(result.finalOutput).toContain("W3");
+    expect(result.finalOutput.toLowerCase()).toContain("degraded");
+    expect(result.finalOutput).toContain("[2]");
+  });
+
+  it("successful synthesis with failures: the notice is appended deterministically too", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), fail("HTTP 503 server_busy"), ok("W3")]],
+      ["synthesizer", [ok("Merged")]],
+    ]);
+    const result = await runOrchestration("task", buildMockInvoker(responses));
+
+    expect(result.ok).toBe(true);
+    expect(result.finalOutput).toContain("Merged");
+    expect(result.finalOutput.toLowerCase()).toContain("degraded");
+    expect(result.finalOutput).toContain("[2]");
   });
 });

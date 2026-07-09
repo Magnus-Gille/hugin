@@ -517,6 +517,20 @@ export async function runOrchestration(
     }
   }
 
+  // Deterministic degraded-coverage notice (issue #157, Codex review): the
+  // final output ITSELF must state missing coverage on EVERY path — the
+  // synth-skip (single survivor) and synthesizer-failure fallback paths never
+  // see the degraded synthesizer prompt, and even a successful synthesis is
+  // only *instructed* to mention it. Consumers read finalOutput as the
+  // answer (resultText), so the guarantee has to live here, not only in
+  // warnings.
+  if (failedOutcomes.length > 0) {
+    const missing = failedOutcomes
+      .map((o) => `[${o.subtask.id}] ${o.result.error ?? "unknown error"}`)
+      .join("; ");
+    finalOutput = `${finalOutput}\n\n---\nNote — degraded coverage: ${failedOutcomes.length} of ${outcomes.length} planned subtasks never produced output and are not covered above: ${missing}`;
+  }
+
   return {
     ok: true,
     finalOutput,

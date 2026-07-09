@@ -125,6 +125,45 @@ function busyErrorCode(status: number, bodyText: string | undefined): string {
 }
 
 /**
+ * Cap on the busy-response diagnostic body read (Codex review of #157). The
+ * body only refines the error code — a gateway/proxy that flushes 503/429
+ * headers but stalls the body must NOT hold the retry loop until the
+ * per-attempt timeout aborts the read; the Retry-After wait has to start
+ * promptly. On timeout the stalled stream is cancelled and the status-derived
+ * code is used instead.
+ */
+const BUSY_BODY_READ_TIMEOUT_MS = 2_000;
+
+/** Bounded, best-effort read of a busy response's diagnostic body. */
+async function readBusyBodyBounded(
+  response: Response,
+  timeoutMs = BUSY_BODY_READ_TIMEOUT_MS,
+): Promise<string | undefined> {
+  const textPromise = response.text();
+  // The race below may abandon textPromise (timeout path); a late rejection
+  // from the cancelled stream must not surface as an unhandled rejection.
+  textPromise.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      textPromise,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      }),
+    ]);
+    if (result === undefined) {
+      // Timed out — cancel the stalled stream so it doesn't hold the socket.
+      response.body?.cancel().catch(() => {});
+    }
+    return result;
+  } catch {
+    return undefined; // failed/aborted body read — the status code suffices
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
  * Abortable sleep: resolves "slept" after `ms`, or "aborted" as soon as the
  * signal fires (a queued worker must not hold its slot once cancelled).
  */
@@ -588,12 +627,9 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
         // serial GPU), 429 = quota. Queue signals, not task failures.
         if (response.status === 503 || response.status === 429) {
           const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
-          let bodyText: string | undefined;
-          try {
-            bodyText = await response.text();
-          } catch {
-            // ignore — the status + header are enough
-          }
+          // Bounded diagnostic read (Codex review): a stalled busy body must
+          // not delay the retry wait until the per-attempt timeout.
+          const bodyText = await readBusyBodyBounded(response);
           return {
             kind: "busy",
             status: response.status,
