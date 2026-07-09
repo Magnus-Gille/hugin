@@ -23,6 +23,15 @@ export interface OrchestratorConfig {
   roles: Record<OrchestratorRole, RoleBinding>;
   /** Max concurrent worker invocations. */
   maxConcurrency: number;
+  /**
+   * Max concurrent worker invocations when the worker role is bound to the
+   * `homeserver` provider (issue #157). The M5 gateway runs ONE serial GPU
+   * with owner-preempts-guest admission — fanning out at the cloud
+   * concurrency slams it into `503 server_busy` for every worker beyond the
+   * admitted ones. Applied as `min(maxConcurrency, homeserverMaxConcurrency)`
+   * so it can only tighten, never widen, the cloud cap.
+   */
+  homeserverMaxConcurrency: number;
   /** Run a verifier on each successful worker result. */
   verifyWorkers: boolean;
   /** Timeout per model call in ms. */
@@ -52,6 +61,7 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
     synthesizer: { provider: "openrouter", model: "anthropic/claude-sonnet-4.6" },
   },
   maxConcurrency: 4,
+  homeserverMaxConcurrency: 2,
   verifyWorkers: false,
   perCallTimeoutMs: 120_000,
   maxSubtasks: 12,
@@ -336,9 +346,16 @@ export async function runOrchestration(
   // -------------------------------------------------------------------------
   // 2. Fan-out workers
   // -------------------------------------------------------------------------
+  // Homeserver-bound workers get a tighter fanout cap (issue #157): the M5's
+  // serial GPU admits ~1-2 concurrent requests and 503s the rest, so queueing
+  // here beats slamming the gateway and burning the busy-retry budget.
+  const workerConcurrency =
+    cfg.roles.worker.provider === "homeserver"
+      ? Math.min(cfg.maxConcurrency, cfg.homeserverMaxConcurrency)
+      : cfg.maxConcurrency;
   const outcomes: SubtaskOutcome[] = await mapWithConcurrency(
     plan.subtasks,
-    cfg.maxConcurrency,
+    workerConcurrency,
     async (subtask): Promise<SubtaskOutcome> => {
       const result = await invoker.invoke("worker", buildWorkerPrompt(taskPrompt, subtask), {
         signal,
@@ -428,6 +445,20 @@ export async function runOrchestration(
     };
   }
 
+  // Degraded coverage (issue #157): some planned workers never produced
+  // output (e.g. the M5 gateway kept answering 503 server_busy until the
+  // busy-retry budget ran out). Surface exactly which subtasks are missing
+  // and why — the run must never read as full fanout coverage.
+  const failedOutcomes = outcomes.filter((o) => !o.result.ok);
+  if (failedOutcomes.length > 0) {
+    const details = failedOutcomes
+      .map((o) => `[${o.subtask.id}] ${o.result.error ?? "unknown error"}`)
+      .join("; ");
+    warnings.push(
+      `coverage is degraded: ${failedOutcomes.length} of ${outcomes.length} planned workers never produced output — ${details}`,
+    );
+  }
+
   // V6: exclude outcomes with an EXPLICIT failed verdict from synthesis. An
   // absent verdict (never verified, or verifier call failed → V3) still
   // counts as a plain pass and stays in.
@@ -458,7 +489,10 @@ export async function runOrchestration(
   } else {
     const synthResp = await invoker.invoke(
       "synthesizer",
-      buildSynthesizerPrompt(taskPrompt, synthInputOutcomes),
+      // failedOutcomes (issue #157): the synthesizer is told which planned
+      // subtasks never ran so the final answer states its degraded coverage
+      // instead of implying the fanout fully succeeded.
+      buildSynthesizerPrompt(taskPrompt, synthInputOutcomes, failedOutcomes),
       { signal },
     );
     allCosts.push(synthResp.costUsd ?? null);
@@ -481,6 +515,20 @@ export async function runOrchestration(
     } else {
       finalOutput = synthResp.output;
     }
+  }
+
+  // Deterministic degraded-coverage notice (issue #157, Codex review): the
+  // final output ITSELF must state missing coverage on EVERY path — the
+  // synth-skip (single survivor) and synthesizer-failure fallback paths never
+  // see the degraded synthesizer prompt, and even a successful synthesis is
+  // only *instructed* to mention it. Consumers read finalOutput as the
+  // answer (resultText), so the guarantee has to live here, not only in
+  // warnings.
+  if (failedOutcomes.length > 0) {
+    const missing = failedOutcomes
+      .map((o) => `[${o.subtask.id}] ${o.result.error ?? "unknown error"}`)
+      .join("; ");
+    finalOutput = `${finalOutput}\n\n---\nNote — degraded coverage: ${failedOutcomes.length} of ${outcomes.length} planned subtasks never produced output and are not covered above: ${missing}`;
   }
 
   return {

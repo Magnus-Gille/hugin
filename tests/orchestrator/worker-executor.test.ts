@@ -532,6 +532,293 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
   });
 });
 
+describe("HomeserverDelegateWorkerExecutor — busy backpressure retry (issue #157)", () => {
+  function busyResponse(status: 429 | 503, retryAfterS?: number): Response {
+    const code = status === 429 ? "rate_limit_exceeded" : "server_busy";
+    return new Response(
+      JSON.stringify({ error: { message: "busy", type: "server_error", code, param: null } }),
+      {
+        status,
+        headers:
+          retryAfterS !== undefined ? { "retry-after": String(retryAfterS) } : {},
+      },
+    );
+  }
+
+  const okDelegate = () =>
+    delegateResponse({
+      delegated: true,
+      outcome: "unverified",
+      output: "queued but eventually ran",
+      metrics: { promptTokens: 10, completionTokens: 5, latencyMs: 50 },
+    });
+
+  function stubGateway() {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+  }
+
+  it("waits Retry-After seconds on a 503 server_busy, then retries and succeeds", async () => {
+    stubGateway();
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(busyResponse(503, 5))
+        .mockResolvedValueOnce(okDelegate());
+      vi.stubGlobal("fetch", fetchMock);
+
+      const pending = new HomeserverDelegateWorkerExecutor().run({
+        provider: "homeserver",
+        model: "qwen3-coder-next-80b",
+        prompt: "do the work",
+        timeoutMs: 60_000,
+      });
+
+      // First attempt settles; the executor must now be waiting, not failing.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Just before Retry-After elapses: still waiting in line.
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Retry-After elapses → second attempt fires and succeeds.
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await pending;
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result.ok).toBe(true);
+      expect(result.output).toBe("queued but eventually ran");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats 429 as the same retryable backpressure signal", async () => {
+    stubGateway();
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(busyResponse(429, 2))
+        .mockResolvedValueOnce(okDelegate());
+      vi.stubGlobal("fetch", fetchMock);
+
+      const pending = new HomeserverDelegateWorkerExecutor().run({
+        provider: "homeserver",
+        model: "mellum",
+        prompt: "hi",
+        timeoutMs: 60_000,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(2_000);
+      const result = await pending;
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result.ok).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses exponential backoff when the gateway sends no Retry-After", async () => {
+    stubGateway();
+    vi.stubEnv("HOMESERVER_BUSY_RETRY_BASE_DELAY_MS", "1000");
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(busyResponse(503))
+        .mockResolvedValueOnce(busyResponse(503))
+        .mockResolvedValueOnce(okDelegate());
+      vi.stubGlobal("fetch", fetchMock);
+
+      const pending = new HomeserverDelegateWorkerExecutor().run({
+        provider: "homeserver",
+        model: "mellum",
+        prompt: "hi",
+        timeoutMs: 60_000,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      // First backoff: base * 2^0 = 1000ms.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      // Second backoff: base * 2^1 = 2000ms.
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await pending;
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(result.ok).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces the exact gateway reason when retries are disabled (acceptance: HTTP 503 server_busy retryAfterS=5)", async () => {
+    stubGateway();
+    vi.stubEnv("HOMESERVER_BUSY_MAX_RETRIES", "0");
+    const fetchMock = vi.fn().mockResolvedValue(busyResponse(503, 5));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver",
+      model: "qwen3-coder-next-80b",
+      prompt: "hi",
+      timeoutMs: 5_000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/HTTP 503 server_busy retryAfterS=5/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the 429 reason distinctly when retries exhaust", async () => {
+    stubGateway();
+    vi.stubEnv("HOMESERVER_BUSY_MAX_RETRIES", "0");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(busyResponse(429, 1)));
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver",
+      model: "mellum",
+      prompt: "hi",
+      timeoutMs: 5_000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/HTTP 429 rate_limit_exceeded retryAfterS=1/);
+  });
+
+  it("stops retrying after HOMESERVER_BUSY_MAX_RETRIES attempts", async () => {
+    stubGateway();
+    vi.stubEnv("HOMESERVER_BUSY_MAX_RETRIES", "2");
+    // Retry-After: 0 → the waits are immediate, no fake timers needed.
+    const fetchMock = vi.fn().mockResolvedValue(busyResponse(503, 0));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver",
+      model: "mellum",
+      prompt: "hi",
+      timeoutMs: 5_000,
+    });
+
+    expect(result.ok).toBe(false);
+    // 1 initial attempt + 2 retries.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.error).toMatch(/HTTP 503 server_busy/);
+    expect(result.error).toMatch(/3 attempts/);
+  });
+
+  it("gives up without waiting when Retry-After exceeds the remaining retry budget", async () => {
+    stubGateway();
+    vi.stubEnv("HOMESERVER_BUSY_RETRY_BUDGET_MS", "3000");
+    const fetchMock = vi.fn().mockResolvedValue(busyResponse(503, 60));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const start = Date.now();
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver",
+      model: "mellum",
+      prompt: "hi",
+      timeoutMs: 5_000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/HTTP 503 server_busy retryAfterS=60/);
+    expect(result.error).toMatch(/budget/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Must not have actually slept the 60s Retry-After.
+    expect(Date.now() - start).toBeLessThan(2_000);
+  });
+
+  it("an external abort during the busy wait cancels promptly", async () => {
+    stubGateway();
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn().mockResolvedValue(busyResponse(503, 60));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const controller = new AbortController();
+      const pending = new HomeserverDelegateWorkerExecutor().run({
+        provider: "homeserver",
+        model: "mellum",
+        prompt: "hi",
+        timeoutMs: 5_000,
+        signal: controller.signal,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      controller.abort();
+      const result = await pending;
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/abort/i);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a stalled busy-response body does not eat the per-attempt timeout before retrying (Codex review)", async () => {
+    stubGateway();
+    vi.useFakeTimers();
+    try {
+      // 503 with Retry-After headers flushed but a body that NEVER closes: the
+      // diagnostic body read must be bounded — the retry wait has to start
+      // promptly, not after the (huge) per-attempt timeout aborts the read.
+      const stalledBody = new ReadableStream<Uint8Array>({ start() {} });
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(stalledBody, { status: 503, headers: { "retry-after": "5" } }),
+        )
+        .mockResolvedValueOnce(okDelegate());
+      vi.stubGlobal("fetch", fetchMock);
+
+      const pending = new HomeserverDelegateWorkerExecutor().run({
+        provider: "homeserver",
+        model: "mellum",
+        prompt: "hi",
+        timeoutMs: 120_000, // per-attempt timeout must NOT gate the retry timing
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Bounded body read (≤2s) + Retry-After (5s) — the retry must fire well
+      // within 10s, nowhere near the 120s per-attempt timeout.
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = await pending;
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result.ok).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does NOT retry non-backpressure HTTP errors (401 stays terminal)", async () => {
+    stubGateway();
+    const fetchMock = vi.fn().mockResolvedValue(errorResponse(401, "Unauthorized"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver",
+      model: "mellum",
+      prompt: "hi",
+      timeoutMs: 5_000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/401/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("DirectModelExecutor — max_tokens (issue #112)", () => {
   it("defaults max_tokens to DEFAULT_MAX_TOKENS (4096) when req.maxTokens is unset", async () => {
     vi.stubEnv("OPENROUTER_API_KEY", "test-key");

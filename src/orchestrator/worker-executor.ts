@@ -40,6 +40,151 @@ export const DEFAULT_MAX_OUTPUT_CHARS = 50_000;
  */
 export const DEFAULT_MAX_TOKENS = 4096;
 
+// ---------------------------------------------------------------------------
+// Homeserver busy-backpressure retry policy (issue #157)
+// ---------------------------------------------------------------------------
+//
+// The M5 gateway has ONE serial GPU: owner-preempts-guest admission answers a
+// concurrent /delegate with `503 server_busy` + `Retry-After`, and quota
+// pressure answers with `429`. Those are queue signals, not task failures —
+// the 2026-07-08 cassette-ai fanout lost 3 of 5 workers by treating them as
+// terminal. The delegate executor now waits in line: it retries 503/429 with
+// bounded attempts, honoring Retry-After (exponential backoff when absent),
+// under a total wall-clock budget. The caller's AbortSignal (the task-level
+// timeout) still cancels the wait at any moment.
+
+/** Default number of busy RETRIES after the first attempt (0 disables retrying). */
+export const DEFAULT_BUSY_MAX_RETRIES = 6;
+/** Default total wall-clock budget for busy waiting + retrying, per worker call. */
+export const DEFAULT_BUSY_RETRY_BUDGET_MS = 240_000;
+/** Default base delay for exponential backoff when the gateway sends no Retry-After. */
+export const DEFAULT_BUSY_RETRY_BASE_DELAY_MS = 1_000;
+/** Cap any single busy wait (Retry-After or backoff step) to this. */
+const MAX_BUSY_WAIT_MS = 30_000;
+
+interface BusyRetryPolicy {
+  maxRetries: number;
+  budgetMs: number;
+  baseDelayMs: number;
+}
+
+/**
+ * Parse a nonnegative integer env var; anything else (absent, empty, junk,
+ * negative, fractional) returns the fallback. Unlike orchestrator config's
+ * parseIntEnv, zero IS valid here — `HOMESERVER_BUSY_MAX_RETRIES=0` is the
+ * documented way to disable busy retrying entirely.
+ */
+function parseNonNegativeIntEnv(raw: string | undefined, fallback: number): number {
+  if (!raw || raw.trim() === "") return fallback;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return fallback;
+  const n = Number(trimmed);
+  return Number.isSafeInteger(n) ? n : fallback;
+}
+
+function loadBusyRetryPolicy(env: NodeJS.ProcessEnv = process.env): BusyRetryPolicy {
+  return {
+    maxRetries: parseNonNegativeIntEnv(env.HOMESERVER_BUSY_MAX_RETRIES, DEFAULT_BUSY_MAX_RETRIES),
+    budgetMs: parseNonNegativeIntEnv(
+      env.HOMESERVER_BUSY_RETRY_BUDGET_MS,
+      DEFAULT_BUSY_RETRY_BUDGET_MS,
+    ),
+    baseDelayMs: parseNonNegativeIntEnv(
+      env.HOMESERVER_BUSY_RETRY_BASE_DELAY_MS,
+      DEFAULT_BUSY_RETRY_BASE_DELAY_MS,
+    ),
+  };
+}
+
+/** Retry-After is either delta-seconds or an HTTP-date (RFC 9110). */
+function parseRetryAfterMs(headerValue: string | null): number | null {
+  if (!headerValue) return null;
+  const seconds = Number(headerValue);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  const timestamp = Date.parse(headerValue);
+  if (!Number.isNaN(timestamp)) return Math.max(0, timestamp - Date.now());
+  return null;
+}
+
+/**
+ * Extract the gateway's error code from an OpenAI-shaped error body
+ * (`{"error":{"code":"server_busy",...}}`), falling back to the canonical
+ * code for the status when the body is absent or unparseable.
+ */
+function busyErrorCode(status: number, bodyText: string | undefined): string {
+  if (bodyText) {
+    try {
+      const parsed = JSON.parse(bodyText) as { error?: { code?: unknown } };
+      const code = parsed?.error?.code;
+      if (typeof code === "string" && code.length > 0) return code;
+    } catch {
+      // fall through to the status-derived label
+    }
+  }
+  return status === 429 ? "rate_limit_exceeded" : "server_busy";
+}
+
+/**
+ * Cap on the busy-response diagnostic body read (Codex review of #157). The
+ * body only refines the error code — a gateway/proxy that flushes 503/429
+ * headers but stalls the body must NOT hold the retry loop until the
+ * per-attempt timeout aborts the read; the Retry-After wait has to start
+ * promptly. On timeout the stalled stream is cancelled and the status-derived
+ * code is used instead.
+ */
+const BUSY_BODY_READ_TIMEOUT_MS = 2_000;
+
+/** Bounded, best-effort read of a busy response's diagnostic body. */
+async function readBusyBodyBounded(
+  response: Response,
+  timeoutMs = BUSY_BODY_READ_TIMEOUT_MS,
+): Promise<string | undefined> {
+  const textPromise = response.text();
+  // The race below may abandon textPromise (timeout path); a late rejection
+  // from the cancelled stream must not surface as an unhandled rejection.
+  textPromise.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      textPromise,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      }),
+    ]);
+    if (result === undefined) {
+      // Timed out — cancel the stalled stream so it doesn't hold the socket.
+      response.body?.cancel().catch(() => {});
+    }
+    return result;
+  } catch {
+    return undefined; // failed/aborted body read — the status code suffices
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * Abortable sleep: resolves "slept" after `ms`, or "aborted" as soon as the
+ * signal fires (a queued worker must not hold its slot once cancelled).
+ */
+function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<"slept" | "aborted"> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve("aborted");
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve("aborted");
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve("slept");
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export interface WorkerRequest {
   /** Provider id: "openrouter" | "berget" | "pi-harness" | "homeserver" */
   provider: string;
@@ -419,135 +564,193 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
         : {}),
     };
 
-    const controller = new AbortController();
-    let abortReason: "timeout" | "external" | null = null;
-    const abortWith = (reason: "timeout" | "external") => {
-      if (abortReason === null) abortReason = reason;
-      controller.abort();
-    };
-    const timer = setTimeout(() => abortWith("timeout"), req.timeoutMs);
-    const onExternalAbort = () => abortWith("external");
-    req.signal?.addEventListener("abort", onExternalAbort, { once: true });
+    const failResult = (error: string): WorkerResult => ({
+      ok: false,
+      output: "",
+      provider: req.provider,
+      model: req.model,
+      inputTokens: null,
+      outputTokens: null,
+      costUsd: null,
+      latencyMs: Date.now() - start,
+      error,
+    });
 
-    try {
-      let response: Response;
-      try {
-        response = await fetch(`${resolved.baseUrl}/delegate`, {
-          method: "POST",
-          headers: buildHeaders(req.provider, apiKey),
-          body: JSON.stringify(body),
-          signal: controller.signal,
-        });
-      } catch (fetchErr) {
-        const errMsg = !isAbortError(fetchErr)
-          ? `Network error: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`
-          : abortReason === "timeout"
-            ? `Request timed out after ${req.timeoutMs}ms`
-            : "Request aborted";
-        return {
-          ok: false,
-          output: "",
-          provider: req.provider,
-          model: req.model,
-          inputTokens: null,
-          outputTokens: null,
-          costUsd: null,
-          latencyMs: Date.now() - start,
-          error: errMsg,
+    /**
+     * One HTTP attempt against /delegate. A 503/429 backpressure answer is NOT
+     * a terminal result (issue #157) — it bubbles to the retry loop below as
+     * "busy"; everything else (success or a genuine error) is "done".
+     */
+    type AttemptOutcome =
+      | { kind: "done"; result: WorkerResult }
+      | {
+          kind: "busy";
+          status: number;
+          code: string;
+          retryAfterMs: number | null;
+          retryAfterS: number | null;
         };
-      }
 
-      if (!response.ok) {
-        let responseBody: string | undefined;
+    const attemptOnce = async (): Promise<AttemptOutcome> => {
+      const controller = new AbortController();
+      let abortReason: "timeout" | "external" | null = null;
+      const abortWith = (reason: "timeout" | "external") => {
+        if (abortReason === null) abortReason = reason;
+        controller.abort();
+      };
+      // The per-attempt timeout is per HTTP attempt — time spent waiting in
+      // the busy queue between attempts is bounded separately by the busy
+      // retry budget and the caller's task-level AbortSignal.
+      const timer = setTimeout(() => abortWith("timeout"), req.timeoutMs);
+      const onExternalAbort = () => abortWith("external");
+      req.signal?.addEventListener("abort", onExternalAbort, { once: true });
+
+      try {
+        let response: Response;
         try {
-          responseBody = await response.text();
-        } catch {
-          // ignore
+          response = await fetch(`${resolved.baseUrl}/delegate`, {
+            method: "POST",
+            headers: buildHeaders(req.provider, apiKey),
+            body: JSON.stringify(body),
+            signal: controller.signal,
+          });
+        } catch (fetchErr) {
+          const errMsg = !isAbortError(fetchErr)
+            ? `Network error: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`
+            : abortReason === "timeout"
+              ? `Request timed out after ${req.timeoutMs}ms`
+              : "Request aborted";
+          return { kind: "done", result: failResult(errMsg) };
         }
-        return {
-          ok: false,
-          output: "",
-          provider: req.provider,
-          model: req.model,
-          inputTokens: null,
-          outputTokens: null,
-          costUsd: null,
-          latencyMs: Date.now() - start,
-          error: `HTTP ${response.status}${responseBody ? `: ${responseBody.slice(0, 200)}` : ""}`,
-        };
-      }
 
-      let parsed: unknown;
-      try {
-        parsed = await response.json();
-      } catch (parseErr) {
-        if (isAbortError(parseErr)) {
+        // Busy backpressure (issue #157): 503 = admission (owner preempted the
+        // serial GPU), 429 = quota. Queue signals, not task failures.
+        if (response.status === 503 || response.status === 429) {
+          const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+          // Bounded diagnostic read (Codex review): a stalled busy body must
+          // not delay the retry wait until the per-attempt timeout.
+          const bodyText = await readBusyBodyBounded(response);
           return {
-            ok: false,
-            output: "",
-            provider: req.provider,
-            model: req.model,
-            inputTokens: null,
-            outputTokens: null,
-            costUsd: null,
-            latencyMs: Date.now() - start,
-            error: abortReason === "timeout"
-              ? `Response body stalled and timed out after ${req.timeoutMs}ms`
-              : "Request aborted while reading the response body",
+            kind: "busy",
+            status: response.status,
+            code: busyErrorCode(response.status, bodyText),
+            retryAfterMs,
+            retryAfterS: retryAfterMs !== null ? Math.round(retryAfterMs / 1000) : null,
           };
         }
+
+        if (!response.ok) {
+          let responseBody: string | undefined;
+          try {
+            responseBody = await response.text();
+          } catch {
+            // ignore
+          }
+          return {
+            kind: "done",
+            result: failResult(
+              `HTTP ${response.status}${responseBody ? `: ${responseBody.slice(0, 200)}` : ""}`,
+            ),
+          };
+        }
+
+        let parsed: unknown;
+        try {
+          parsed = await response.json();
+        } catch (parseErr) {
+          if (isAbortError(parseErr)) {
+            return {
+              kind: "done",
+              result: failResult(
+                abortReason === "timeout"
+                  ? `Response body stalled and timed out after ${req.timeoutMs}ms`
+                  : "Request aborted while reading the response body",
+              ),
+            };
+          }
+          return {
+            kind: "done",
+            result: failResult(
+              `Response was not valid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+            ),
+          };
+        }
+
+        const outcome = extractDelegationOutcome(parsed);
+        if (!outcome.ok) {
+          return { kind: "done", result: failResult(outcome.error) };
+        }
+
+        const inputTokens = sanitizeTokenCount(outcome.metrics?.promptTokens);
+        const outputTokens = sanitizeTokenCount(outcome.metrics?.completionTokens);
+        const costUsd =
+          inputTokens !== null && outputTokens !== null
+            ? estimateCostUsd(req.model, inputTokens, outputTokens)
+            : null;
+        const output = (outcome.output ?? outcome.frontierOutput ?? "").slice(0, maxOutput);
+        const outcomeStatus = typeof outcome.outcome === "string" ? outcome.outcome : null;
+        const failed = outcomeStatus === "fail" || outcomeStatus === "error";
+
         return {
-          ok: false,
-          output: "",
-          provider: req.provider,
-          model: req.model,
-          inputTokens: null,
-          outputTokens: null,
-          costUsd: null,
-          latencyMs: Date.now() - start,
-          error: `Response was not valid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+          kind: "done",
+          result: {
+            ok: !failed,
+            output,
+            provider: req.provider,
+            model: req.model,
+            inputTokens,
+            outputTokens,
+            costUsd,
+            latencyMs: Date.now() - start,
+            ...(failed ? { error: `Delegation outcome: ${outcomeStatus}` } : {}),
+          },
         };
+      } finally {
+        clearTimeout(timer);
+        req.signal?.removeEventListener("abort", onExternalAbort);
+      }
+    };
+
+    // --- Busy retry loop (issue #157): wait in line instead of failing ---
+    const policy = loadBusyRetryPolicy();
+    const queueStart = Date.now();
+    let attempt = 0;
+
+    while (true) {
+      const outcome = await attemptOnce();
+      if (outcome.kind === "done") return outcome.result;
+
+      // Exact gateway reason, preserved verbatim into any terminal error so a
+      // failed fanout leaf names WHY it never ran (acceptance criterion).
+      const busyLabel = `HTTP ${outcome.status} ${outcome.code}${
+        outcome.retryAfterS !== null ? ` retryAfterS=${outcome.retryAfterS}` : ""
+      }`;
+      const attemptsMade = attempt + 1;
+      const plural = attemptsMade === 1 ? "" : "s";
+
+      if (attempt >= policy.maxRetries) {
+        return failResult(
+          `${busyLabel} — gave up after ${attemptsMade} attempt${plural} over ${Math.round(
+            (Date.now() - queueStart) / 1000,
+          )}s waiting for the gateway`,
+        );
       }
 
-      const outcome = extractDelegationOutcome(parsed);
-      if (!outcome.ok) {
-        return {
-          ok: false,
-          output: "",
-          provider: req.provider,
-          model: req.model,
-          inputTokens: null,
-          outputTokens: null,
-          costUsd: null,
-          latencyMs: Date.now() - start,
-          error: outcome.error,
-        };
+      const waitMs = Math.min(
+        outcome.retryAfterMs ?? policy.baseDelayMs * 2 ** attempt,
+        MAX_BUSY_WAIT_MS,
+      );
+      if (Date.now() + waitMs - queueStart > policy.budgetMs) {
+        return failResult(
+          `${busyLabel} — busy-retry budget of ${policy.budgetMs}ms exhausted after ${attemptsMade} attempt${plural}`,
+        );
       }
 
-      const inputTokens = sanitizeTokenCount(outcome.metrics?.promptTokens);
-      const outputTokens = sanitizeTokenCount(outcome.metrics?.completionTokens);
-      const costUsd =
-        inputTokens !== null && outputTokens !== null
-          ? estimateCostUsd(req.model, inputTokens, outputTokens)
-          : null;
-      const output = (outcome.output ?? outcome.frontierOutput ?? "").slice(0, maxOutput);
-      const outcomeStatus = typeof outcome.outcome === "string" ? outcome.outcome : null;
-      const failed = outcomeStatus === "fail" || outcomeStatus === "error";
-
-      return {
-        ok: !failed,
-        output,
-        provider: req.provider,
-        model: req.model,
-        inputTokens,
-        outputTokens,
-        costUsd,
-        latencyMs: Date.now() - start,
-        ...(failed ? { error: `Delegation outcome: ${outcomeStatus}` } : {}),
-      };
-    } finally {
-      clearTimeout(timer);
-      req.signal?.removeEventListener("abort", onExternalAbort);
+      const slept = await sleepWithAbort(waitMs, req.signal);
+      if (slept === "aborted") {
+        return failResult(`${busyLabel} — request aborted while waiting for a free gateway slot`);
+      }
+      attempt++;
     }
   }
 }

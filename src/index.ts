@@ -4874,6 +4874,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
               Number.isInteger(o.result.outputTokens) && (o.result.outputTokens as number) >= 0
                 ? o.result.outputTokens
                 : null,
+            // Per-worker failure detail (issue #157): preserve the worker's
+            // exact error (e.g. `HTTP 503 server_busy retryAfterS=5`) so a
+            // failed fanout leaf is diagnosable from the structured result.
+            ...(o.result.error ? { error: o.result.error } : {}),
           }))
         : undefined;
 

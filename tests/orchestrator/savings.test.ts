@@ -123,6 +123,27 @@ describe("computeSavings — S2 semantics", () => {
 });
 
 describe("computeSavings — quality-adjusted savings (issue #144)", () => {
+  it("acceptance (issue #157): a busy-rejected worker (503 server_busy) earns no savings credit", () => {
+    // A worker the M5 gateway rejected with 503 server_busy never ran: the
+    // call failed (ok:false), reported no tokens, and produced no output. It
+    // must be uncovered — and must NOT book any verified savings.
+    const calls = [
+      call({
+        subtaskId: "s1",
+        ok: false,
+        inputTokens: null,
+        outputTokens: null,
+        costUsd: null,
+      }),
+    ];
+    const result = computeSavings(calls, CLAUDE_BASELINE_MODEL_ID, { s1: "error" });
+    expect(result!.coveredCalls).toBe(0);
+    expect(result!.uncoveredCalls).toBe(1);
+    expect(result!.savedUsd).toBe(0);
+    expect(result!.qualityAdjustedSavedUsd).toBe(0);
+    expect(result!.qaBaselineCreditUsd).toBe(0);
+  });
+
   it("acceptance: local is cheaper but FAILS verification → quality-adjusted savings is ~zero or negative", () => {
     // Raw savings would book this as a big win: deepseek did 1M+1M tokens for
     // $0.27 vs $18.00 on the Claude baseline. But the verifier failed the

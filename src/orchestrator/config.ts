@@ -58,6 +58,10 @@ export function parseIntEnv(raw: string | undefined, fallback: number): number {
  *   HUGIN_ORCH_VERIFIER_MODEL  — `provider|model` for the verifier role
  *   HUGIN_ORCH_SYNTH_MODEL     — `provider|model` for the synthesizer role
  *   HUGIN_ORCH_MAX_CONCURRENCY — positive integer
+ *   HUGIN_ORCH_HOMESERVER_MAX_CONCURRENCY — positive integer (issue #157):
+ *     fanout cap for homeserver-bound workers, applied as
+ *     min(maxConcurrency, homeserverMaxConcurrency); default 2 (the M5's
+ *     serial GPU 503s concurrent /delegate calls beyond the admitted ones)
  *   HUGIN_ORCH_VERIFY          — "on" | "true" → verifyWorkers = true
  *   HUGIN_ORCH_PER_CALL_TIMEOUT_MS — positive integer (ms)
  *   HUGIN_ORCH_MAX_SUBTASKS    — positive integer
@@ -123,6 +127,13 @@ export function loadOrchestratorConfig(
     cfg.maxConcurrency = parseIntEnv(
       env.HUGIN_ORCH_MAX_CONCURRENCY,
       DEFAULT_ORCHESTRATOR_CONFIG.maxConcurrency,
+    );
+  }
+
+  if (env.HUGIN_ORCH_HOMESERVER_MAX_CONCURRENCY) {
+    cfg.homeserverMaxConcurrency = parseIntEnv(
+      env.HUGIN_ORCH_HOMESERVER_MAX_CONCURRENCY,
+      DEFAULT_ORCHESTRATOR_CONFIG.homeserverMaxConcurrency,
     );
   }
 

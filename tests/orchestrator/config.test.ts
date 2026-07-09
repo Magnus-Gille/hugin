@@ -56,6 +56,19 @@ describe("loadOrchestratorConfig", () => {
     expect(cfg.maxConcurrency).toBe(DEFAULT_ORCHESTRATOR_CONFIG.maxConcurrency);
   });
 
+  it("overrides homeserverMaxConcurrency (issue #157)", () => {
+    const cfg = loadOrchestratorConfig({ HUGIN_ORCH_HOMESERVER_MAX_CONCURRENCY: "1" });
+    expect(cfg.homeserverMaxConcurrency).toBe(1);
+  });
+
+  it("homeserverMaxConcurrency defaults to 2 and ignores bad values (issue #157)", () => {
+    expect(loadOrchestratorConfig({}).homeserverMaxConcurrency).toBe(2);
+    const cfg = loadOrchestratorConfig({ HUGIN_ORCH_HOMESERVER_MAX_CONCURRENCY: "zero" });
+    expect(cfg.homeserverMaxConcurrency).toBe(
+      DEFAULT_ORCHESTRATOR_CONFIG.homeserverMaxConcurrency,
+    );
+  });
+
   it('enables verifyWorkers when HUGIN_ORCH_VERIFY=on', () => {
     const cfg = loadOrchestratorConfig({ HUGIN_ORCH_VERIFY: "on" });
     expect(cfg.verifyWorkers).toBe(true);

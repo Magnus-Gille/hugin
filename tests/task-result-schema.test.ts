@@ -303,6 +303,49 @@ describe("structured task result schema", () => {
 
     expect(result.orchestratorOutcomes?.[0].inputTokens).toBeUndefined();
   });
+
+  it("orchestratorOutcomes rows accept an optional per-worker error (issue #157)", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "20260709-orch-busy",
+      taskNamespace: "tasks/20260709-orch-busy",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "orchestrator",
+      executor: "orchestrator",
+      resultSource: "orchestrator",
+      exitCode: 0,
+      completedAt: "2026-07-09T10:00:02Z",
+      bodyKind: "response",
+      bodyText: "answer",
+      orchestratorOutcomes: [
+        {
+          subtaskId: "1",
+          taskType: "summarize",
+          provider: "homeserver",
+          model: "qwen3-coder-next-80b",
+          ok: false,
+          verdictOk: null,
+          costUsd: null,
+          latencyMs: 40,
+          error: "HTTP 503 server_busy retryAfterS=5 — gave up after 6 attempts",
+        },
+        {
+          subtaskId: "2",
+          taskType: "summarize",
+          provider: "homeserver",
+          model: "qwen3-coder-next-80b",
+          ok: true,
+          verdictOk: null,
+          costUsd: 0,
+          latencyMs: 86_705,
+        },
+      ],
+    });
+
+    expect(result.orchestratorOutcomes?.[0].error).toContain("HTTP 503 server_busy");
+    expect(result.orchestratorOutcomes?.[1].error).toBeUndefined();
+  });
 });
 
 describe("structured task result schema — savings (PR3, S4)", () => {
