@@ -166,6 +166,13 @@ export const orchestratorOutcomeSchema = z.object({
   latencyMs: z.number().int().nonnegative(),
   inputTokens: z.number().int().nonnegative().nullable().optional(),
   outputTokens: z.number().int().nonnegative().nullable().optional(),
+  // Per-worker failure detail (issue #157) — additive + optional, same
+  // non-breaking rationale as the token fields above. Carries the worker's
+  // exact error verbatim (e.g. `HTTP 503 server_busy retryAfterS=5 — gave up
+  // after 6 attempts`) so a failed fanout leaf is diagnosable from the
+  // structured result instead of reading as mysterious agent flakiness.
+  // Absent for successful workers.
+  error: z.string().min(1).optional(),
 });
 export type OrchestratorOutcomeRecord = z.infer<typeof orchestratorOutcomeSchema>;
 

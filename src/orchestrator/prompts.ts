@@ -60,21 +60,41 @@ FAIL - output is missing key details about X.`;
 
 /**
  * Build the prompt for the synthesizer role merging worker outputs.
+ *
+ * `failedOutcomes` (issue #157): planned subtasks whose worker never produced
+ * output (e.g. rejected by a busy gateway until the retry budget ran out).
+ * When present, the synthesizer is explicitly told coverage is degraded and
+ * instructed to say so — the final answer must never imply full fanout
+ * coverage when workers never ran.
  */
 export function buildSynthesizerPrompt(
   taskPrompt: string,
   successfulOutcomes: SubtaskOutcome[],
+  failedOutcomes: SubtaskOutcome[] = [],
 ): string {
   const parts = successfulOutcomes.map(
     (o) => `### Subtask ${o.subtask.id}\n${o.result.output}`,
   );
+
+  const degradedSection =
+    failedOutcomes.length > 0
+      ? `\n\nIMPORTANT — degraded coverage: the following planned subtasks never produced output and are NOT included above:
+${failedOutcomes
+  .map(
+    (o) =>
+      `- Subtask ${o.subtask.id}: ${o.subtask.prompt}${o.result.error ? ` (failed: ${o.result.error})` : ""}`,
+  )
+  .join("\n")}
+Your answer MUST explicitly state that these parts of the task were not completed. Do not present the result as complete coverage of the overall task.`
+      : "";
+
   return `You are synthesizing the results of parallel subtasks into one coherent final answer.
 
 Overall task:
 ${taskPrompt}
 
 Subtask results:
-${parts.join("\n\n")}
+${parts.join("\n\n")}${degradedSection}
 
 Merge these into a single, coherent, well-structured response that fully answers the overall task. Do not merely concatenate — synthesize.`;
 }

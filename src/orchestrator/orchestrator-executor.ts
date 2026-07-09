@@ -333,7 +333,11 @@ export async function runOrchestratorTask(
       outcome.result.costUsd !== null && outcome.result.costUsd !== undefined
         ? ` ($${outcome.result.costUsd.toFixed(6)})`
         : "";
-    const status = outcome.result.ok ? "ok" : "failed";
+    // Surface the worker's exact failure reason in the task log (issue #157)
+    // — a busy-gateway rejection must read as what it is, not agent flakiness.
+    const status = outcome.result.ok
+      ? "ok"
+      : `failed${outcome.result.error ? `: ${outcome.result.error}` : ""}`;
     onLog?.(
       `[orchestrator] worker ${i + 1}/${result.outcomes.length} ${status}${costStr} — [${outcome.subtask.id}]`,
     );

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import type { ModelInvoker, ModelInvokeOptions } from "../../src/orchestrator/model-invoker.js";
 import type { OrchestratorRole } from "../../src/orchestrator/plan.js";
 import type { WorkerResult } from "../../src/orchestrator/worker-executor.js";
-import { runOrchestration } from "../../src/orchestrator/engine.js";
+import { runOrchestration, DEFAULT_ORCHESTRATOR_CONFIG } from "../../src/orchestrator/engine.js";
 
 function ok(output: string, costUsd: number | null = 0.001): WorkerResult {
   return {
@@ -752,5 +752,151 @@ describe("runOrchestration — concurrency cap", () => {
 
     expect(maxInFlight).toBeLessThanOrEqual(2);
     expect(maxInFlight).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Homeserver-specific fanout cap (issue #157)
+// ---------------------------------------------------------------------------
+
+describe("runOrchestration — homeserver fanout concurrency cap (issue #157)", () => {
+  const PLAN_5 = JSON.stringify({
+    subtasks: Array.from({ length: 5 }, (_, i) => ({ id: String(i + 1), prompt: `Step ${i + 1}` })),
+  });
+
+  function buildInFlightTracker(workerCount: number) {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(PLAN_5, 0.01)]],
+      ["worker", Array.from({ length: workerCount }, (_, i) => ok(`W${i + 1}`, 0.001))],
+      ["synthesizer", [ok("Final", 0.002)]],
+    ]);
+    const counters = new Map<OrchestratorRole, number>();
+    const invoker: ModelInvoker = {
+      invoke: vi.fn(async (role: OrchestratorRole) => {
+        const queue = responses.get(role) ?? [];
+        const idx = counters.get(role) ?? 0;
+        counters.set(role, idx + 1);
+        if (role === "worker") {
+          inFlight++;
+          if (inFlight > maxInFlight) maxInFlight = inFlight;
+          await new Promise<void>((res) => setImmediate(res));
+          inFlight--;
+        }
+        return queue[idx] ?? fail("no result");
+      }),
+    };
+    return { invoker, getMaxInFlight: () => maxInFlight };
+  }
+
+  it("caps homeserver-bound workers at homeserverMaxConcurrency even when maxConcurrency is higher", async () => {
+    const { invoker, getMaxInFlight } = buildInFlightTracker(5);
+
+    await runOrchestration("M5 fanout", invoker, {
+      roles: {
+        ...DEFAULT_ORCHESTRATOR_CONFIG.roles,
+        worker: { provider: "homeserver", model: "qwen3-coder-next-80b" },
+      },
+      maxConcurrency: 4,
+      homeserverMaxConcurrency: 2,
+      maxSubtasks: 6,
+    });
+
+    expect(getMaxInFlight()).toBeLessThanOrEqual(2);
+    expect(getMaxInFlight()).toBeGreaterThanOrEqual(1);
+  });
+
+  it("homeserverMaxConcurrency defaults to 2", () => {
+    expect(DEFAULT_ORCHESTRATOR_CONFIG.homeserverMaxConcurrency).toBe(2);
+  });
+
+  it("supports fully serial homeserver fanout (homeserverMaxConcurrency: 1)", async () => {
+    const { invoker, getMaxInFlight } = buildInFlightTracker(5);
+
+    await runOrchestration("M5 serial fanout", invoker, {
+      roles: {
+        ...DEFAULT_ORCHESTRATOR_CONFIG.roles,
+        worker: { provider: "homeserver", model: "mellum" },
+      },
+      maxConcurrency: 4,
+      homeserverMaxConcurrency: 1,
+      maxSubtasks: 6,
+    });
+
+    expect(getMaxInFlight()).toBe(1);
+  });
+
+  it("does not throttle cloud-bound workers below maxConcurrency", async () => {
+    const { invoker, getMaxInFlight } = buildInFlightTracker(5);
+
+    await runOrchestration("cloud fanout", invoker, {
+      roles: {
+        ...DEFAULT_ORCHESTRATOR_CONFIG.roles,
+        worker: { provider: "openrouter", model: "deepseek/deepseek-v4-flash" },
+      },
+      maxConcurrency: 4,
+      homeserverMaxConcurrency: 1,
+      maxSubtasks: 6,
+    });
+
+    expect(getMaxInFlight()).toBeGreaterThan(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Degraded-coverage surfacing (issue #157)
+// ---------------------------------------------------------------------------
+
+describe("runOrchestration — degraded coverage when workers never ran (issue #157)", () => {
+  it("a partial failure pushes a warning naming the failed subtask and its exact error", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      [
+        "worker",
+        [
+          ok("W1", 0.002),
+          fail("HTTP 503 server_busy retryAfterS=5 — gave up after 6 attempts"),
+          ok("W3", 0.004),
+        ],
+      ],
+      ["synthesizer", [ok("Merged", 0.005)]],
+    ]);
+    const result = await runOrchestration("task", buildMockInvoker(responses));
+
+    expect(result.ok).toBe(true);
+    const coverageWarnings = result.warnings.filter((w) =>
+      w.toLowerCase().includes("coverage"),
+    );
+    expect(coverageWarnings.length).toBe(1);
+    expect(coverageWarnings[0]).toContain("[2]");
+    expect(coverageWarnings[0]).toContain("HTTP 503 server_busy retryAfterS=5");
+  });
+
+  it("the synthesizer prompt is told which planned subtasks never ran", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1", 0.002), fail("HTTP 503 server_busy"), ok("W3", 0.004)]],
+      ["synthesizer", [ok("Merged", 0.005)]],
+    ]);
+    let synthPrompt = "";
+    const invoker = buildMockInvoker(responses, (role, prompt) => {
+      if (role === "synthesizer") synthPrompt = prompt;
+    });
+
+    await runOrchestration("task", invoker);
+
+    expect(synthPrompt.toLowerCase()).toContain("degraded");
+    expect(synthPrompt).toContain("Subtask 2");
+  });
+
+  it("no degraded-coverage warning when every worker ran", async () => {
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(VALID_PLAN_3, 0.01)]],
+      ["worker", [ok("W1"), ok("W2"), ok("W3")]],
+      ["synthesizer", [ok("Final")]],
+    ]);
+    const result = await runOrchestration("task", buildMockInvoker(responses));
+    expect(result.warnings.filter((w) => w.toLowerCase().includes("coverage"))).toEqual([]);
   });
 });
