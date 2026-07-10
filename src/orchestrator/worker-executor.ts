@@ -213,6 +213,10 @@ export interface WorkerRequest {
   delegatorModelId?: string;
   /** Optional counterfactual savings baseline forwarded to M5 /delegate. */
   premiumBaselineModelId?: string;
+  /** Explicit homeserver gateway node pin (issue #160). */
+  nodeId?: string;
+  /** Model to use for the one bounded M5 fallback after an Orin failure. */
+  fallbackModel?: string;
 }
 
 export interface WorkerResult {
@@ -233,6 +237,14 @@ export interface WorkerResult {
   truncated?: boolean;
   /** Set when ok=false. Never throws out of run(). */
   error?: string;
+  /** Hugin's initial node decision, when this was an explicitly routed call. */
+  selectedNode?: string;
+  /** Node that actually produced the result ("m5" denotes the default gateway model). */
+  effectiveNode?: string;
+  /** True when one Orin failure was deliberately re-routed. */
+  fallbackTriggered?: boolean;
+  /** Status-derived Orin fallback signal, never request content. */
+  fallbackReason?: string;
 }
 
 export interface WorkerExecutor {
@@ -353,6 +365,7 @@ export class DirectModelExecutor implements WorkerExecutor {
       // auto-sets max_tokens=32768 which exceeds many small models' context windows).
       // Configurable per role/task (issue #112); DEFAULT_MAX_TOKENS is a safe floor.
       max_tokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
+      ...(req.nodeId !== undefined ? { node: req.nodeId } : {}),
     };
 
     // Combine the per-call timeout with the caller's cancellation signal
@@ -481,6 +494,13 @@ export class DirectModelExecutor implements WorkerExecutor {
         costUsd,
         latencyMs: Date.now() - start,
         truncated: finishReason === "length",
+        ...(req.nodeId
+          ? {
+              selectedNode: req.nodeId,
+              effectiveNode: req.nodeId,
+              fallbackTriggered: false,
+            }
+          : {}),
       };
     } finally {
       clearTimeout(timer);
@@ -550,10 +570,11 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
       };
     }
 
-    const body: Record<string, unknown> = {
+    const delegateBody = (model: string, nodeId?: string): Record<string, unknown> => ({
       prompt: req.prompt,
-      modelId: req.model,
+      modelId: model,
       maxTokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
+      ...(nodeId !== undefined ? { nodeId } : {}),
       ...(req.taskType !== undefined ? { taskType: req.taskType } : {}),
       ...(req.systemPrompt !== undefined ? { systemPrompt: req.systemPrompt } : {}),
       ...(req.verifier !== undefined ? { verifier: req.verifier } : {}),
@@ -562,13 +583,13 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
       ...(req.premiumBaselineModelId !== undefined
         ? { premiumBaselineModelId: req.premiumBaselineModelId }
         : {}),
-    };
+    });
 
-    const failResult = (error: string): WorkerResult => ({
+    const failResult = (error: string, model = req.model): WorkerResult => ({
       ok: false,
       output: "",
       provider: req.provider,
-      model: req.model,
+      model,
       inputTokens: null,
       outputTokens: null,
       costUsd: null,
@@ -577,9 +598,9 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
     });
 
     /**
-     * One HTTP attempt against /delegate. A 503/429 backpressure answer is NOT
-     * a terminal result (issue #157) — it bubbles to the retry loop below as
-     * "busy"; everything else (success or a genuine error) is "done".
+     * One HTTP attempt against /delegate. Normal 503/429 answers bubble to
+     * the busy retry loop. An explicitly pinned Orin response of 502/503/504
+     * instead bubbles to the one-shot macro fallback below (issue #160).
      */
     type AttemptOutcome =
       | { kind: "done"; result: WorkerResult }
@@ -589,9 +610,15 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
           code: string;
           retryAfterMs: number | null;
           retryAfterS: number | null;
+        }
+      | {
+          kind: "orin-unavailable";
+          status: 502 | 503 | 504;
+          retryAfterMs: number | null;
+          retryAfterS: number | null;
         };
 
-    const attemptOnce = async (): Promise<AttemptOutcome> => {
+    const attemptOnce = async (model: string, nodeId?: string): Promise<AttemptOutcome> => {
       const controller = new AbortController();
       let abortReason: "timeout" | "external" | null = null;
       const abortWith = (reason: "timeout" | "external") => {
@@ -611,7 +638,7 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
           response = await fetch(`${resolved.baseUrl}/delegate`, {
             method: "POST",
             headers: buildHeaders(req.provider, apiKey),
-            body: JSON.stringify(body),
+            body: JSON.stringify(delegateBody(model, nodeId)),
             signal: controller.signal,
           });
         } catch (fetchErr) {
@@ -620,7 +647,23 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
             : abortReason === "timeout"
               ? `Request timed out after ${req.timeoutMs}ms`
               : "Request aborted";
-          return { kind: "done", result: failResult(errMsg) };
+          return { kind: "done", result: failResult(errMsg, model) };
+        }
+
+        if (
+          nodeId === "orin" &&
+          (response.status === 502 || response.status === 503 || response.status === 504)
+        ) {
+          const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+          // The response body contains no trusted routing signal and may
+          // stall, so cancel it rather than delaying the bounded fallback.
+          response.body?.cancel().catch(() => {});
+          return {
+            kind: "orin-unavailable",
+            status: response.status,
+            retryAfterMs,
+            retryAfterS: retryAfterMs !== null ? Math.round(retryAfterMs / 1000) : null,
+          };
         }
 
         // Busy backpressure (issue #157): 503 = admission (owner preempted the
@@ -650,6 +693,7 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
             kind: "done",
             result: failResult(
               `HTTP ${response.status}${responseBody ? `: ${responseBody.slice(0, 200)}` : ""}`,
+              model,
             ),
           };
         }
@@ -665,6 +709,7 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
                 abortReason === "timeout"
                   ? `Response body stalled and timed out after ${req.timeoutMs}ms`
                   : "Request aborted while reading the response body",
+                model,
               ),
             };
           }
@@ -672,20 +717,21 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
             kind: "done",
             result: failResult(
               `Response was not valid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+              model,
             ),
           };
         }
 
         const outcome = extractDelegationOutcome(parsed);
         if (!outcome.ok) {
-          return { kind: "done", result: failResult(outcome.error) };
+          return { kind: "done", result: failResult(outcome.error, model) };
         }
 
         const inputTokens = sanitizeTokenCount(outcome.metrics?.promptTokens);
         const outputTokens = sanitizeTokenCount(outcome.metrics?.completionTokens);
         const costUsd =
           inputTokens !== null && outputTokens !== null
-            ? estimateCostUsd(req.model, inputTokens, outputTokens)
+            ? estimateCostUsd(model, inputTokens, outputTokens)
             : null;
         const output = (outcome.output ?? outcome.frontierOutput ?? "").slice(0, maxOutput);
         const outcomeStatus = typeof outcome.outcome === "string" ? outcome.outcome : null;
@@ -697,7 +743,7 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
             ok: !failed,
             output,
             provider: req.provider,
-            model: req.model,
+            model,
             inputTokens,
             outputTokens,
             costUsd,
@@ -712,46 +758,115 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
     };
 
     // --- Busy retry loop (issue #157): wait in line instead of failing ---
-    const policy = loadBusyRetryPolicy();
-    const queueStart = Date.now();
-    let attempt = 0;
+    const runWithBusyRetry = async (
+      model: string,
+      nodeId: string | undefined,
+      firstOutcome?: AttemptOutcome,
+    ): Promise<WorkerResult> => {
+      const policy = loadBusyRetryPolicy();
+      const queueStart = Date.now();
+      let attempt = 0;
+      let nextOutcome = firstOutcome;
 
-    while (true) {
-      const outcome = await attemptOnce();
-      if (outcome.kind === "done") return outcome.result;
+      while (true) {
+        const outcome = nextOutcome ?? (await attemptOnce(model, nodeId));
+        nextOutcome = undefined;
+        // An Orin-unavailable signal is handled by the outer route path and
+        // never joins this loop (which is intentionally for generic M5 busy).
+        if (outcome.kind === "orin-unavailable") {
+          return failResult(`HTTP ${outcome.status}`, model);
+        }
+        if (outcome.kind === "done") return outcome.result;
 
-      // Exact gateway reason, preserved verbatim into any terminal error so a
-      // failed fanout leaf names WHY it never ran (acceptance criterion).
-      const busyLabel = `HTTP ${outcome.status} ${outcome.code}${
-        outcome.retryAfterS !== null ? ` retryAfterS=${outcome.retryAfterS}` : ""
-      }`;
-      const attemptsMade = attempt + 1;
-      const plural = attemptsMade === 1 ? "" : "s";
+        // Exact gateway reason, preserved verbatim into any terminal error so a
+        // failed fanout leaf names WHY it never ran (acceptance criterion).
+        const busyLabel = `HTTP ${outcome.status} ${outcome.code}${
+          outcome.retryAfterS !== null ? ` retryAfterS=${outcome.retryAfterS}` : ""
+        }`;
+        const attemptsMade = attempt + 1;
+        const plural = attemptsMade === 1 ? "" : "s";
 
-      if (attempt >= policy.maxRetries) {
-        return failResult(
-          `${busyLabel} — gave up after ${attemptsMade} attempt${plural} over ${Math.round(
-            (Date.now() - queueStart) / 1000,
-          )}s waiting for the gateway`,
+        if (attempt >= policy.maxRetries) {
+          return failResult(
+            `${busyLabel} — gave up after ${attemptsMade} attempt${plural} over ${Math.round(
+              (Date.now() - queueStart) / 1000,
+            )}s waiting for the gateway`,
+            model,
+          );
+        }
+
+        const waitMs = Math.min(
+          outcome.retryAfterMs ?? policy.baseDelayMs * 2 ** attempt,
+          MAX_BUSY_WAIT_MS,
+        );
+        if (Date.now() + waitMs - queueStart > policy.budgetMs) {
+          return failResult(
+            `${busyLabel} — busy-retry budget of ${policy.budgetMs}ms exhausted after ${attemptsMade} attempt${plural}`,
+            model,
+          );
+        }
+
+        const slept = await sleepWithAbort(waitMs, req.signal);
+        if (slept === "aborted") {
+          return failResult(`${busyLabel} — request aborted while waiting for a free gateway slot`, model);
+        }
+        attempt++;
+      }
+    };
+
+    const withRouteMetadata = (
+      result: WorkerResult,
+      effectiveNode: string,
+      fallbackTriggered: boolean,
+      fallbackReason?: string,
+    ): WorkerResult =>
+      req.nodeId
+        ? {
+            ...result,
+            selectedNode: req.nodeId,
+            effectiveNode,
+            fallbackTriggered,
+            ...(fallbackReason ? { fallbackReason } : {}),
+          }
+        : result;
+
+    if (req.nodeId === "orin") {
+      const firstOutcome = await attemptOnce(req.model, req.nodeId);
+      if (firstOutcome.kind !== "orin-unavailable") {
+        return withRouteMetadata(
+          await runWithBusyRetry(req.model, req.nodeId, firstOutcome),
+          "orin",
+          false,
         );
       }
 
-      const waitMs = Math.min(
-        outcome.retryAfterMs ?? policy.baseDelayMs * 2 ** attempt,
-        MAX_BUSY_WAIT_MS,
+      const fallbackReason = `HTTP ${firstOutcome.status}`;
+      // Retry-After applies to a retry of the congested Orin node, not the
+      // M5 re-route. Still respect it when there is enough call budget left;
+      // otherwise re-route immediately rather than turning a bounded fallback
+      // into a timeout.
+      const waitMs = Math.min(firstOutcome.retryAfterMs ?? 0, MAX_BUSY_WAIT_MS);
+      const elapsedMs = Date.now() - start;
+      if (waitMs > 0 && elapsedMs + waitMs < req.timeoutMs) {
+        const slept = await sleepWithAbort(waitMs, req.signal);
+        if (slept === "aborted") {
+          return withRouteMetadata(
+            failResult(`${fallbackReason} — request aborted before M5 fallback`, req.fallbackModel ?? req.model),
+            "m5",
+            true,
+            fallbackReason,
+          );
+        }
+      }
+      return withRouteMetadata(
+        await runWithBusyRetry(req.fallbackModel ?? req.model, undefined),
+        "m5",
+        true,
+        fallbackReason,
       );
-      if (Date.now() + waitMs - queueStart > policy.budgetMs) {
-        return failResult(
-          `${busyLabel} — busy-retry budget of ${policy.budgetMs}ms exhausted after ${attemptsMade} attempt${plural}`,
-        );
-      }
-
-      const slept = await sleepWithAbort(waitMs, req.signal);
-      if (slept === "aborted") {
-        return failResult(`${busyLabel} — request aborted while waiting for a free gateway slot`);
-      }
-      attempt++;
     }
+
+    return runWithBusyRetry(req.model, req.nodeId);
   }
 }
 

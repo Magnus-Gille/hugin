@@ -6,6 +6,7 @@ import {
   type SubTask,
 } from "./plan.js";
 import type { WorkerResult } from "./worker-executor.js";
+import type { OrinWorkerRoute } from "./orin-macro-route.js";
 import {
   buildPlannerPrompt,
   buildWorkerPrompt,
@@ -286,6 +287,8 @@ export interface RunOrchestrationOpts {
   signal?: AbortSignal;
   /** Adaptive verify gate lookup (V5) — see ConfidenceFn. */
   confidence?: ConfidenceFn;
+  /** Hugin's already-gated, per-subtask macro route selector (issue #160). */
+  workerRoute?: (taskType: string) => OrinWorkerRoute | null;
 }
 
 /**
@@ -360,6 +363,7 @@ export async function runOrchestration(
       const result = await invoker.invoke("worker", buildWorkerPrompt(taskPrompt, subtask), {
         signal,
         taskType: subtask.taskType,
+        workerRoute: opts?.workerRoute?.(subtask.taskType) ?? undefined,
       });
       allCosts.push(result.costUsd ?? null);
       modelCalls.push(toModelCallRecord("worker", result, subtask.id));

@@ -1,7 +1,27 @@
 # Hugin — Status
 
-**Last session:** 2026-07-08 (Codex) — #154 homeserver worker `/delegate` lane merged and deployed
-**Branch:** `main`; production remote `/home/magnus/repos/hugin` is `main@c30b76f`.
+**Last session:** 2026-07-10 (Codex) — #160 Orin macro route implemented and verified locally
+**Branch:** `codex/160-orin-macro-route`; production remains `/home/magnus/repos/hugin` at `main@c30b76f`.
+
+## Latest — Reviewed Orin macro route (#160, 2026-07-10)
+
+Implemented a narrow Hugin-owned macro route for the M5 gateway's deployed Orin node.
+
+- Only `homeserver` orchestrator worker leaves with planner task types `classify` or `extract`
+  route explicitly to `nodeId:"orin"` and `qwen2.5-coder:3b`. `private`, broad, and
+  unclassified leaves retain their configured worker route.
+- Owner/evidenced leaves use `/delegate` with the explicit node and task type; raw
+  OpenAI-compatible homeserver chat now also forwards `node:"orin"` for non-verified callers.
+- A gateway `502`, `503`, or `504` triggers exactly one bounded re-route to the configured
+  M5 worker model. The selected/effective node and fallback reason are present in worker logs
+  and `result-structured.orchestratorOutcomes`; request content is never logged as routing data.
+- Validation: focused route/executor/engine tests (`125` tests), `npm run build`,
+  `git diff --check`, and the full suite (`90` files / `1507` tests) all pass. The first full
+  run was sandbox-blocked only for loopback-binding HTTP tests; the permitted rerun was green.
+
+**Next:** review, commit, and deploy the branch; then run a real public/internal classify or
+extract task against the Pi to confirm the M5 ledger reports `node_id='orin'` and capture
+verifier-backed evidence before broadening the lane.
 
 ## Latest — M5 `/delegate` orchestrator worker lane (#154, 2026-07-08)
 

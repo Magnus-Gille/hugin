@@ -86,6 +86,34 @@ describe("runOrchestration — happy fanout", () => {
 
     expect(workerTaskTypes).toEqual(["summarize", "reason-math"]);
   });
+
+  it("forwards a macro route only to the reviewed worker task type", async () => {
+    const plan = JSON.stringify({
+      subtasks: [
+        { id: "a", prompt: "Classify", taskType: "classify" },
+        { id: "b", prompt: "Broad work", taskType: "other" },
+      ],
+    });
+    const responses = new Map<OrchestratorRole, WorkerResult[]>([
+      ["planner", [ok(plan)]],
+      ["worker", [ok("classification"), ok("broad")]],
+      ["synthesizer", [ok("Final")]],
+    ]);
+    const routes: Array<ModelInvokeOptions["workerRoute"]> = [];
+    const invoker = buildMockInvoker(responses, (role, _prompt, opts) => {
+      if (role === "worker") routes.push(opts?.workerRoute);
+    });
+
+    await runOrchestration("task", invoker, undefined, {
+      workerRoute: (taskType) =>
+        taskType === "classify" ? { nodeId: "orin", modelId: "qwen2.5-coder:3b" } : null,
+    });
+
+    expect(routes).toEqual([
+      { nodeId: "orin", modelId: "qwen2.5-coder:3b" },
+      undefined,
+    ]);
+  });
 });
 
 describe("runOrchestration — truncation warnings (issue #112)", () => {

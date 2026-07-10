@@ -190,6 +190,34 @@ describe("createModelInvoker", () => {
     });
   });
 
+  it("pins an eligible worker leaf to Orin while retaining the configured M5 model as its fallback", async () => {
+    const homeserverRoles: Record<OrchestratorRole, RoleBinding> = {
+      ...roles,
+      worker: { provider: "homeserver", model: "qwen3-30b-instruct" },
+    };
+    const capturedRequests: WorkerRequest[] = [];
+    const mockExecutor: WorkerExecutor = {
+      run: vi.fn(async (req: WorkerRequest) => {
+        capturedRequests.push(req);
+        return makeResult("out");
+      }),
+    };
+
+    const invoker = createModelInvoker(homeserverRoles, { timeoutMs: 5000 }, () => mockExecutor);
+    await invoker.invoke("worker", "classify this", {
+      taskType: "classify",
+      workerRoute: { nodeId: "orin", modelId: "qwen2.5-coder:3b" },
+    });
+
+    expect(capturedRequests[0]).toMatchObject({
+      provider: "homeserver",
+      model: "qwen2.5-coder:3b",
+      nodeId: "orin",
+      fallbackModel: "qwen3-30b-instruct",
+      taskType: "classify",
+    });
+  });
+
   it("lets an explicit homeserver worker delegator model override the planner fallback", async () => {
     const homeserverRoles: Record<OrchestratorRole, RoleBinding> = {
       ...roles,
