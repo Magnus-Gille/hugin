@@ -5,6 +5,7 @@ import type {
 } from "../homeserver-executor.js";
 import type { WorkerExecutor, WorkerResult } from "./worker-executor.js";
 import { createWorkerExecutor } from "./worker-executor.js";
+import type { OrinWorkerRoute } from "./orin-macro-route.js";
 
 export interface RoleBinding {
   provider: string;
@@ -32,6 +33,8 @@ export interface ModelInvokeOptions {
   responseFormat?: HomeserverResponseFormat;
   delegatorModelId?: string;
   premiumBaselineModelId?: string;
+  /** Explicit Hugin macro route for a reviewed homeserver worker leaf. */
+  workerRoute?: OrinWorkerRoute;
 }
 
 export interface ModelInvoker {
@@ -64,6 +67,11 @@ export function createModelInvoker(
     ): Promise<WorkerResult> {
       const binding = roles[role];
       const executor = factory(binding.provider, { role });
+      // Only a homeserver worker can use a gateway node pin. Keeping the
+      // guard here makes a malformed caller unable to attach node routing to
+      // planner/verifier/synthesizer or to a cloud provider.
+      const workerRoute =
+        role === "worker" && binding.provider === "homeserver" ? opts?.workerRoute : undefined;
       const delegateMetadata =
         role === "worker" && binding.provider === "homeserver"
           ? {
@@ -73,11 +81,17 @@ export function createModelInvoker(
               delegatorModelId:
                 opts?.delegatorModelId ?? binding.delegatorModelId ?? roles.planner.model,
               premiumBaselineModelId: opts?.premiumBaselineModelId,
+              ...(workerRoute
+                ? {
+                    nodeId: workerRoute.nodeId,
+                    fallbackModel: binding.model,
+                  }
+                : {}),
             }
           : {};
       return executor.run({
         provider: binding.provider,
-        model: binding.model,
+        model: workerRoute?.modelId ?? binding.model,
         prompt,
         systemPrompt: opts?.systemPrompt,
         timeoutMs: defaults.timeoutMs,

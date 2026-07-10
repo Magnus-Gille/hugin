@@ -4985,6 +4985,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
               Number.isInteger(o.result.outputTokens) && (o.result.outputTokens as number) >= 0
                 ? o.result.outputTokens
                 : null,
+            ...(o.result.selectedNode ? { selectedNode: o.result.selectedNode } : {}),
+            ...(o.result.effectiveNode ? { effectiveNode: o.result.effectiveNode } : {}),
+            ...(o.result.fallbackTriggered !== undefined
+              ? { fallbackTriggered: o.result.fallbackTriggered }
+              : {}),
+            ...(o.result.fallbackReason ? { fallbackReason: o.result.fallbackReason } : {}),
             // Per-worker failure detail (issue #157): preserve the worker's
             // exact error (e.g. `HTTP 503 server_busy retryAfterS=5`) so a
             // failed fanout leaf is diagnosable from the structured result.

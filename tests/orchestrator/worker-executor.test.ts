@@ -317,6 +317,31 @@ describe("DirectModelExecutor — homeserver provider (env-resolved base URL)", 
     expect(capturedUrl).toBe("http://gateway:8080/v1/chat/completions");
   });
 
+  it("forwards an explicit Orin node pin on the non-verified chat path", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+    let capturedBody: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string);
+      return successResponse("orin answer");
+    }));
+
+    const result = await new DirectModelExecutor().run({
+      provider: "homeserver",
+      model: "qwen2.5-coder:3b",
+      nodeId: "orin",
+      prompt: "classify this",
+      timeoutMs: 5_000,
+    });
+
+    expect(capturedBody).toMatchObject({ model: "qwen2.5-coder:3b", node: "orin" });
+    expect(result).toMatchObject({
+      selectedNode: "orin",
+      effectiveNode: "orin",
+      fallbackTriggered: false,
+    });
+  });
+
   it("returns ok=false with a distinct error when HOMESERVER_GATEWAY_URL is unset", async () => {
     // Explicitly delete — the ambient shell may export this var (it's the one
     // operators set), and unstubAllEnvs only reverts stubs.
@@ -466,6 +491,123 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
     });
     expect(body.verifier).toBeUndefined();
     expect(body.responseFormat).toBeUndefined();
+  });
+
+  it("pins an Orin-routed owner leaf with nodeId and reports the selected node", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+    let capturedBody: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string);
+      return delegateResponse({
+        delegated: true,
+        outcome: "unverified",
+        output: "orin result",
+        metrics: { promptTokens: 3, completionTokens: 2 },
+      });
+    }));
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver",
+      model: "qwen2.5-coder:3b",
+      nodeId: "orin",
+      fallbackModel: "qwen3-30b-instruct",
+      taskType: "classify",
+      prompt: "classify this",
+      timeoutMs: 5_000,
+    });
+
+    expect(capturedBody).toMatchObject({
+      nodeId: "orin",
+      modelId: "qwen2.5-coder:3b",
+      taskType: "classify",
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      selectedNode: "orin",
+      effectiveNode: "orin",
+      fallbackTriggered: false,
+    });
+  });
+
+  it.each([502, 503, 504])("reroutes a bounded Orin %i once to M5 and keeps the fallback reason", async (status) => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+    const bodies: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+        bodies.push(JSON.parse(init.body as string));
+        if (bodies.length === 1) return errorResponse(status, "orin unavailable");
+        return delegateResponse({
+          delegated: true,
+          outcome: "unverified",
+          output: "m5 result",
+          metrics: { promptTokens: 4, completionTokens: 3 },
+        });
+      }),
+    );
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver",
+      model: "qwen2.5-coder:3b",
+      nodeId: "orin",
+      fallbackModel: "qwen3-30b-instruct",
+      taskType: "extract",
+      prompt: "extract fields",
+      timeoutMs: 5_000,
+    });
+
+    expect(bodies).toEqual([
+      expect.objectContaining({ nodeId: "orin", modelId: "qwen2.5-coder:3b" }),
+      expect.objectContaining({ modelId: "qwen3-30b-instruct" }),
+    ]);
+    expect(bodies[1].nodeId).toBeUndefined();
+    expect(result).toMatchObject({
+      ok: true,
+      model: "qwen3-30b-instruct",
+      selectedNode: "orin",
+      effectiveNode: "m5",
+      fallbackTriggered: true,
+      fallbackReason: `HTTP ${status}`,
+    });
+  });
+
+  it("honors Orin Retry-After before the bounded M5 fallback", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(new Response("orin busy", { status: 503, headers: { "retry-after": "2" } }))
+        .mockResolvedValueOnce(delegateResponse({ delegated: true, outcome: "unverified", output: "m5" }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const pending = new HomeserverDelegateWorkerExecutor().run({
+        provider: "homeserver",
+        model: "qwen2.5-coder:3b",
+        nodeId: "orin",
+        fallbackModel: "qwen3-30b-instruct",
+        taskType: "classify",
+        prompt: "classify this",
+        timeoutMs: 5_000,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toMatchObject({
+        ok: true,
+        effectiveNode: "m5",
+        fallbackReason: "HTTP 503",
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("forwards verifier and responseFormat when the caller has deterministic specs", async () => {

@@ -19,6 +19,7 @@ import {
   type SavingsVerdictOutcome,
 } from "./savings.js";
 import { parseIntEnv, isSavingsEnabled, resolveSavingsBaselineModel } from "./config.js";
+import { selectOrinMacroRoute } from "./orin-macro-route.js";
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -249,6 +250,15 @@ export async function runOrchestratorTask(
   const enginePromise = runOrchestration(enginePrompt, deps.invoker, config, {
     signal: engineAbort.signal,
     confidence: confidenceFn,
+    // Route selection happens only after the task-level sensitivity guard
+    // above. The pure engine merely forwards this bounded Hugin decision to
+    // each worker leaf; it never delegates node selection to the gateway.
+    workerRoute: (taskType) =>
+      selectOrinMacroRoute({
+        workerProvider: config.roles.worker.provider,
+        taskType,
+        sensitivity: input.sensitivity,
+      }),
   }).then((result): OrchestrationResult | "TIMEOUT" => result);
 
   // Race the engine against the timeout.
@@ -338,8 +348,15 @@ export async function runOrchestratorTask(
     const status = outcome.result.ok
       ? "ok"
       : `failed${outcome.result.error ? `: ${outcome.result.error}` : ""}`;
+    const route = outcome.result.selectedNode
+      ? ` node=${outcome.result.selectedNode}->${outcome.result.effectiveNode ?? outcome.result.selectedNode}${
+          outcome.result.fallbackTriggered
+            ? ` fallback=${outcome.result.fallbackReason ?? "gateway unavailable"}`
+            : ""
+        }`
+      : "";
     onLog?.(
-      `[orchestrator] worker ${i + 1}/${result.outcomes.length} ${status}${costStr} — [${outcome.subtask.id}]`,
+      `[orchestrator] worker ${i + 1}/${result.outcomes.length} ${status}${costStr}${route} — [${outcome.subtask.id}]`,
     );
   }
 
