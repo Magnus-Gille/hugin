@@ -5,6 +5,10 @@ import {
   pipelineSensitivitySchema,
 } from "./pipeline-ir.js";
 import { sensitivitySchema } from "./sensitivity.js";
+import {
+  SIGNING_POLICIES,
+  TASK_SIGNATURE_STATUSES,
+} from "./task-signing.js";
 
 export const taskExecutionOutcomeSchema = z.enum([
   "completed",
@@ -33,6 +37,7 @@ export const dispatcherRuntimeSchema = z.enum([
   "opencode",
   "auto",
   "orchestrator",
+  "pipeline",
 ]);
 export type DispatcherRuntime = z.infer<typeof dispatcherRuntimeSchema>;
 
@@ -216,6 +221,21 @@ export const savingsSummarySchema = z.object({
 });
 export type SavingsSummaryRecord = z.infer<typeof savingsSummarySchema>;
 
+// Submission identity is additive/optional for compatibility with historical
+// schemaVersion=1 results, but every current dispatcher writer supplies it.
+// Null is explicit: absence of cryptographic verification must never be
+// mistaken for the claimed submitter being authenticated.
+export const taskSubmissionProvenanceSchema = z.object({
+  claimedSubmitter: z.string().min(1),
+  verifiedSubmitter: z.string().min(1).nullable(),
+  policy: z.enum(SIGNING_POLICIES),
+  signatureStatus: z.enum(TASK_SIGNATURE_STATUSES),
+  keyId: z.string().min(1).nullable(),
+});
+export type TaskSubmissionProvenance = z.infer<
+  typeof taskSubmissionProvenanceSchema
+>;
+
 export const structuredTaskResultSchema = z.object({
   schemaVersion: z.literal(1),
   taskId: z.string().min(1),
@@ -250,6 +270,7 @@ export const structuredTaskResultSchema = z.object({
   artifactDelivery: artifactDeliverySchema.optional(),
   orchestratorOutcomes: z.array(orchestratorOutcomeSchema).optional(),
   savings: savingsSummarySchema.optional(),
+  provenance: taskSubmissionProvenanceSchema.optional(),
 });
 export type StructuredTaskResult = z.infer<typeof structuredTaskResultSchema>;
 

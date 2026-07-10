@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   buildCanonicalPayload,
+  buildTaskSubmissionProvenance,
   canonicalizePrompt,
   extractSignatureField,
   loadKeyStoreFromEnv,
@@ -11,6 +12,7 @@ import {
   parseSignature,
   parseSigningPolicy,
   signTask,
+  signingPolicyRejects,
   verifyTaskSignature,
   type SigningParams,
   type VerifyOptions,
@@ -221,6 +223,75 @@ describe("parseSigningPolicy", () => {
     // A typo like `requrie` must fail loud, not fall back to off.
     expect(() => parseSigningPolicy("requrie")).toThrow(/invalid HUGIN_SIGNING_POLICY/);
     expect(() => parseSigningPolicy("yolo")).toThrow(/invalid HUGIN_SIGNING_POLICY/);
+  });
+});
+
+describe("structured task submission provenance", () => {
+  it("records policy=off as explicitly unverified even when a keyId is present", () => {
+    expect(
+      buildTaskSubmissionProvenance("codex-cli", "off", {
+        status: "unverified",
+        keyId: "codex-cli",
+      }),
+    ).toEqual({
+      claimedSubmitter: "codex-cli",
+      verifiedSubmitter: null,
+      policy: "off",
+      signatureStatus: "unverified",
+      keyId: "codex-cli",
+    });
+  });
+
+  it.each([
+    ["missing", null],
+    ["invalid", "codex-cli"],
+    ["expired", "codex-cli"],
+    ["future-skew", "codex-cli"],
+    ["submitter-mismatch", "other-tenant"],
+  ] as const)(
+    "keeps claimed submitter unverified for %s",
+    (status, keyId) => {
+      const provenance = buildTaskSubmissionProvenance("codex-cli", "warn", {
+        status,
+        keyId: keyId ?? undefined,
+      });
+      expect(provenance.verifiedSubmitter).toBeNull();
+      expect(provenance.signatureStatus).toBe(status);
+      expect(provenance.keyId).toBe(keyId);
+    },
+  );
+
+  it("sets verified submitter only for a valid signature", () => {
+    expect(
+      buildTaskSubmissionProvenance("codex-cli", "require", {
+        status: "valid",
+        keyId: "codex-cli",
+      }),
+    ).toEqual({
+      claimedSubmitter: "codex-cli",
+      verifiedSubmitter: "codex-cli",
+      policy: "require",
+      signatureStatus: "valid",
+      keyId: "codex-cli",
+    });
+  });
+
+  it.each([
+    "missing",
+    "invalid",
+    "expired",
+    "future-skew",
+    "submitter-mismatch",
+    "unverifiable",
+  ] as const)("require rejects %s", (status) => {
+    expect(signingPolicyRejects("require", status)).toBe(true);
+    expect(signingPolicyRejects("warn", status)).toBe(false);
+    expect(signingPolicyRejects("off", status)).toBe(false);
+  });
+
+  it("require accepts valid and the existing internal Hugin exemption", () => {
+    expect(signingPolicyRejects("require", "valid")).toBe(false);
+    expect(signingPolicyRejects("require", "internal-exempt")).toBe(false);
   });
 });
 

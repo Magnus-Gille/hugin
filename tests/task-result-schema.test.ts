@@ -396,3 +396,50 @@ describe("structured task result schema — savings (PR3, S4)", () => {
     expect(result.savings).toBeUndefined();
   });
 });
+
+describe("structured task result schema — submission provenance (#146)", () => {
+  it("accepts honest unverifiable provenance on pipeline parents", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "20260710-pipeline",
+      taskNamespace: "tasks/20260710-pipeline",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "pipeline",
+      executor: "dispatcher",
+      resultSource: "pipeline-decomposition",
+      exitCode: 0,
+      completedAt: "2026-07-10T10:00:00Z",
+      bodyKind: "response",
+      bodyText: "compiled",
+      provenance: {
+        claimedSubmitter: "codex-cli",
+        verifiedSubmitter: null,
+        policy: "warn",
+        signatureStatus: "unverifiable",
+        keyId: "codex-cli",
+      },
+    });
+
+    expect(result.runtime).toBe("pipeline");
+    expect(result.provenance?.verifiedSubmitter).toBeNull();
+  });
+
+  it("keeps provenance optional so historical schemaVersion=1 results still parse", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "historical",
+      taskNamespace: "tasks/historical",
+      lifecycle: "failed",
+      outcome: "failed",
+      runtime: "claude",
+      executor: "dispatcher",
+      resultSource: "dispatcher",
+      exitCode: 1,
+      completedAt: "2026-07-10T10:00:00Z",
+      bodyKind: "error",
+      bodyText: "old result",
+    });
+    expect(result.provenance).toBeUndefined();
+  });
+});

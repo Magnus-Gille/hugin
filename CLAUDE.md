@@ -128,7 +128,7 @@ maps to the `build` agent with `edit`/`bash` allowed.
 
 **Results:** Written to the same namespace under two keys:
 - `result` — human-readable markdown with exit code, timestamps, duration, and response body
-- `result-structured` — machine-readable JSON (Zod-validated) with schema version, lifecycle metadata, runtime metadata (requested vs effective model/host), sensitivity audit, and structured body. Prefer this for programmatic consumption.
+- `result-structured` — machine-readable JSON (Zod-validated) with schema version, lifecycle metadata, runtime metadata (requested vs effective model/host), sensitivity audit, honest submission provenance (`claimedSubmitter`, nullable `verifiedSubmitter`, signing policy/status/keyId), and structured body. Prefer this for programmatic consumption.
 
 ## Project structure
 
@@ -315,7 +315,8 @@ claude mcp add-json hugin '{"command":"node","args":["/Users/magnus/repos/hugin/
 | `HUGIN_INJECTION_POLICY` | `warn` | Prompt-injection policy for context-refs: `off` (no scan), `warn` (prepend warning banner), `block` (quarantine high-severity refs, task continues), `fail` (reject task). See `docs/security/prompt-injection-scanner.md`. |
 | `HUGIN_EXFIL_POLICY` | `warn` | Exfiltration scanner policy for task results: `off` (no scan), `warn` (log + append security-scan section), `flag` (warn + tag result `security:exfil-suspected`), `redact` (flag + replace matches with `[redacted: <pattern>]`). See `docs/security/exfiltration-scanner.md`. |
 | `HUGIN_EXTERNAL_POLICY` | `warn` | Provenance policy for externally sourced context-refs (entries tagged `source:external` or in the `signals/` namespace): `allow` (inject with banner only), `warn` (banner + log, default), `block` (quarantine external refs, task continues), `fail` (reject task). See `docs/security/provenance-enforcement.md`. |
-| `HUGIN_SIGNING_POLICY` | `off` | Task signature verification policy: `off` (skip), `warn` (log missing/invalid, never reject), `require` (reject tasks without a valid signature). See `docs/security/task-signing.md`. |
+| `HUGIN_SIGNING_POLICY` | `off` | Task signature verification policy: `off` (do not verify; record explicitly `unverified`), `warn` (log missing/invalid, never reject), `require` (reject tasks without a valid signature). See `docs/security/task-signing.md`. |
+| `HUGIN_SIGNING_MAX_AGE_S` | `900` | Maximum accepted age of an otherwise-valid signature. `0` disables the age window; future timestamps still use the verifier's bounded skew tolerance when the window is enabled. |
 | `HUGIN_SUBMITTER_KEYS` | — | Inline JSON keystore: `{"<keyId>": "<hex-secret>"}` (64-char hex preferred; base64 accepted). |
 | `HUGIN_SUBMITTER_KEYS_FILE` | — | Path to a JSON keystore file. Takes precedence over `HUGIN_SUBMITTER_KEYS`. |
 | `HUGIN_BROKER_HOST` | `127.0.0.1` | Bind address for the orchestrator-v1 broker (`/v1/delegate/*`). Set to the Tailscale interface IP in production. |
