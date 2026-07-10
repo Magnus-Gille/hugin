@@ -12,6 +12,10 @@ import {
   buildPipelineParentSuccessTags,
   buildTerminalStatusTags,
 } from "./task-status-tags.js";
+import {
+  buildStructuredTaskResult,
+  type StructuredTaskResult,
+} from "./task-result-schema.js";
 
 export interface PipelineDispatchClient {
   readBatch(reads: MuninReadRequest[]): Promise<MuninReadResult[]>;
@@ -35,11 +39,17 @@ export interface PipelineDispatchHooks {
   ): Promise<void>;
   promoteDependents(completedTaskId: string): Promise<void>;
   refreshPipelineSummary(pipelineId: string): Promise<void>;
+  writeStructuredResult(
+    taskNs: string,
+    result: StructuredTaskResult,
+    classification?: string,
+  ): Promise<void>;
 }
 
 
 async function cancelCreatedChildren(
   client: PipelineDispatchClient,
+  hooks: PipelineDispatchHooks,
   createdDrafts: Array<{
     namespace: string;
     content: string;
@@ -64,6 +74,27 @@ async function cancelCreatedChildren(
         undefined,
         undefined,
         sensitivityToMuninClassification(draft.classification)
+      );
+      const runtime = (draft.tags.find((tag) => tag.startsWith("runtime:")) ?? "runtime:claude")
+        .replace(/^runtime:/, "") as StructuredTaskResult["runtime"];
+      await hooks.writeStructuredResult(
+        draft.namespace,
+        buildStructuredTaskResult({
+          schemaVersion: 1,
+          taskId: extractTaskId(draft.namespace),
+          taskNamespace: draft.namespace,
+          lifecycle: "cancelled",
+          outcome: "cancelled",
+          runtime,
+          executor: "dispatcher",
+          resultSource: "pipeline-decomposition-cleanup",
+          exitCode: "CANCELLED",
+          completedAt: new Date().toISOString(),
+          bodyKind: "error",
+          bodyText: "Pipeline decomposition aborted before parent commit",
+          errorMessage: "Pipeline decomposition aborted before parent commit",
+        }),
+        sensitivityToMuninClassification(draft.classification),
       );
       await client.log(
         draft.namespace,
@@ -163,7 +194,7 @@ export async function handlePipelineTask(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (createdDrafts.length > 0) {
-      await cancelCreatedChildren(client, createdDrafts);
+      await cancelCreatedChildren(client, hooks, createdDrafts);
     }
     await hooks.failTaskWithMessage(
       taskNs,
@@ -175,6 +206,41 @@ export async function handlePipelineTask(
   }
 
   if (decompositionCommitted) {
+    try {
+      const bodyText = buildPipelineDecompositionResult(pipeline);
+      await hooks.writeStructuredResult(
+        taskNs,
+        buildStructuredTaskResult({
+          schemaVersion: 1,
+          taskId: pipelineId,
+          taskNamespace: taskNs,
+          lifecycle: "completed",
+          outcome: "completed",
+          runtime: "pipeline",
+          executor: "dispatcher",
+          resultSource: "pipeline-decomposition",
+          exitCode: 0,
+          completedAt: new Date().toISOString(),
+          bodyKind: "response",
+          bodyText,
+          sensitivity: {
+            declared: pipeline.declaredSensitivity,
+            effective: pipeline.sensitivity,
+            mismatch:
+              pipeline.declaredSensitivity !== undefined &&
+              pipeline.declaredSensitivity !== pipeline.sensitivity,
+          },
+        }),
+        sensitivityToMuninClassification(pipeline.sensitivity),
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await client.log(
+        taskNs,
+        `Pipeline decomposition committed, but structured result write failed: ${message}`,
+      );
+    }
+
     try {
       await hooks.refreshPipelineSummary(pipelineId);
     } catch (err) {

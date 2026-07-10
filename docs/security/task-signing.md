@@ -80,7 +80,7 @@ Set `HUGIN_SIGNING_POLICY` on the Pi:
 
 | Policy | Effect |
 |--------|--------|
-| `off` (default) | Signatures ignored entirely. No verification, no logging. Zero-breakage default for the rollout period. |
+| `off` (default) | Signature is not verified. Results record `signatureStatus: "unverified"`, `verifiedSubmitter: null`, and any parseable claimed `keyId`; this must never be interpreted as valid identity. Zero-breakage default for the rollout period. |
 | `warn` | Verify when a signature is present; log missing / invalid / unknown-signer / submitter-mismatch / malformed. Never rejects. |
 | `require` | Reject any task that is missing a valid signature from a known signer. Pipeline parent tasks are rejected (v1 cannot bind ### Pipeline bodies yet); internally-generated children (`Submitted by: hugin`) are exempted. |
 
@@ -93,6 +93,28 @@ Rollout plan:
 2. Roll out signing helpers to every submitter
 3. Flip Pi to `warn`, watch logs for stragglers
 4. Flip to `require` once the log is clean for ≥72h
+
+## Result provenance
+
+Every current dispatcher terminal result, including pipeline parents, carries
+an additive `provenance` object in `result-structured`:
+
+```json
+{
+  "claimedSubmitter": "codex-cli",
+  "verifiedSubmitter": "codex-cli",
+  "policy": "require",
+  "signatureStatus": "valid",
+  "keyId": "codex-cli"
+}
+```
+
+`verifiedSubmitter` is non-null only after a valid HMAC check. Policy `off`, a
+missing/invalid/expired/future-skewed/mismatched signature, pipeline-v1
+limitations, and the internal-Hugin exemption all leave it null. Hugin also
+appends the same fields to the task lifecycle log as a `[provenance]` record.
+The field is optional in the schema only so historical schemaVersion 1 results
+remain readable; current dispatcher writers always populate it.
 
 ## Keys
 
@@ -147,6 +169,25 @@ Once both sides hold the secret, `hugin-sign` returns it locally and
 `sign-task.mjs --submitter claude-code --key-id claude-code` produces a
 signature the Pi verifies. The `keyId` must equal the submitter (`claude-code`)
 or be a `claude-code-<rotation>` alias.
+
+## Registering a non-Claude tenant keyId
+
+Use a tenant's own stable identity as both `Submitted by` and `keyId`; never
+reuse another tenant's signer. For example, to provision `codex-cli`:
+
+1. Generate a dedicated 32-byte secret on the tenant host and store it in that
+   tenant's credential store or environment as `HUGIN_SIGNING_SECRET`.
+2. Add the same secret under the exact `codex-cli` key in the Pi's
+   `HUGIN_SUBMITTER_KEYS` (or its keys file) and add `codex-cli` to
+   `HUGIN_ALLOWED_SUBMITTERS`.
+3. Sign with `--submitter codex-cli --key-id codex-cli`; rotation keys may use
+   `codex-cli-<rotation>` while retaining `Submitted by: codex-cli`.
+4. Validate under `warn` until both the lifecycle log and
+   `result-structured.provenance` report `verifiedSubmitter: "codex-cli"`, then
+   include that tenant in the readiness decision for `require`.
+
+Generate and transfer the shared secret through a secure channel; never print
+it into task content, logs, or repository files.
 
 ## Signing a task (submitter side)
 

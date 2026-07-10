@@ -51,10 +51,72 @@ export type VerificationStatus =
   | "expired"
   | "future-skew";
 
+/**
+ * Status recorded in task provenance. `unverified` is deliberately distinct
+ * from `valid`: policy=off means Hugin did not authenticate the signature.
+ * `internal-exempt` and `unverifiable` describe policy exceptions, not proof
+ * of the claimed identity.
+ */
+export const TASK_SIGNATURE_STATUSES = [
+  "valid",
+  "invalid",
+  "missing",
+  "unknown-signer",
+  "submitter-mismatch",
+  "malformed",
+  "unsupported-version",
+  "expired",
+  "future-skew",
+  "unverified",
+  "internal-exempt",
+  "unverifiable",
+] as const;
+export type TaskSignatureStatus = (typeof TASK_SIGNATURE_STATUSES)[number];
+
+export const SIGNING_POLICIES = ["off", "warn", "require"] as const;
+
 export interface VerificationResult {
   status: VerificationStatus;
   keyId?: string;
   reason?: string;
+}
+
+export interface TaskSubmissionProvenance {
+  claimedSubmitter: string;
+  verifiedSubmitter: string | null;
+  policy: SigningPolicy;
+  signatureStatus: TaskSignatureStatus;
+  keyId: string | null;
+}
+
+export interface TaskSignatureAssessment {
+  status: TaskSignatureStatus;
+  keyId?: string;
+  reason?: string;
+}
+
+/** Convert a signature assessment into the stable result-structured shape. */
+export function buildTaskSubmissionProvenance(
+  claimedSubmitter: string,
+  policy: SigningPolicy,
+  assessment: TaskSignatureAssessment,
+): TaskSubmissionProvenance {
+  return {
+    claimedSubmitter,
+    verifiedSubmitter:
+      assessment.status === "valid" && assessment.keyId ? claimedSubmitter : null,
+    policy,
+    signatureStatus: assessment.status,
+    keyId: assessment.keyId ?? null,
+  };
+}
+
+/** `require` accepts a valid signature plus Hugin's existing internal exemption. */
+export function signingPolicyRejects(
+  policy: SigningPolicy,
+  status: TaskSignatureStatus,
+): boolean {
+  return policy === "require" && status !== "valid" && status !== "internal-exempt";
 }
 
 export interface VerifyOptions {
@@ -341,7 +403,7 @@ export function parseNonNegativeIntEnv(raw: string | undefined, fallback: number
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
-export type SigningPolicy = "off" | "warn" | "require";
+export type SigningPolicy = (typeof SIGNING_POLICIES)[number];
 
 /**
  * Parse HUGIN_SIGNING_POLICY. Unset or blank → "off". Any other value that

@@ -121,13 +121,17 @@ import {
 } from "./runtime-registry.js";
 import {
   extractSignatureField,
+  buildTaskSubmissionProvenance,
   loadKeyStoreFromEnv,
   parseNonNegativeIntEnv,
+  parseSignature,
   parseSigningPolicy,
+  signingPolicyRejects,
   verifyTaskSignature,
   type KeyStore,
   type SigningPolicy,
-  type VerificationResult,
+  type TaskSignatureAssessment,
+  type TaskSubmissionProvenance,
 } from "./task-signing.js";
 import { consultSkillLane } from "./skill/skill-lane-dispatch.js";
 import { readBrokerEnv, startBroker, type RunningBroker } from "./broker/server.js";
@@ -480,6 +484,9 @@ let lastQueueDepth = 0;
 let lastBlockedTaskCount = 0;
 const startedAt = Date.now();
 const pipelineSummaryManager = new PipelineSummaryManager();
+// Claim-time assessment cache. It prevents a signature that was valid when a
+// long task was admitted from being re-labelled expired at terminalization.
+const taskProvenance = new Map<string, TaskSubmissionProvenance>();
 
 interface CancellationRequest {
   reason: string;
@@ -955,23 +962,32 @@ function getSecurityViolationForTask(
 }
 
 interface SigningVerdict {
-  result: VerificationResult;
+  result: TaskSignatureAssessment;
+  provenance: TaskSubmissionProvenance;
   reject: boolean;
   message: string;
 }
 
-function verifyTaskEntrySignature(
+function assessTaskEntrySignature(
   taskNs: string,
   content: string,
   parsedTask: TaskConfig | null,
   submittedBy: string,
+  isPipeline: boolean,
 ): SigningVerdict {
   const policy = config.signingPolicy;
   const signatureRaw = extractSignatureField(content);
 
   if (policy === "off") {
+    const parsedSignature = parseSignature(signatureRaw);
+    const result: TaskSignatureAssessment = {
+      status: "unverified",
+      keyId: parsedSignature?.keyId,
+      reason: "signature verification disabled by policy",
+    };
     return {
-      result: signatureRaw ? { status: "valid" } : { status: "missing" },
+      result,
+      provenance: buildTaskSubmissionProvenance(submittedBy, policy, result),
       reject: false,
       message: "",
     };
@@ -984,23 +1000,46 @@ function verifyTaskEntrySignature(
   // When pipeline-aware signing ships (see docs/security/task-signing.md),
   // this exemption becomes a proper internal signing path.
   if (submittedBy === "hugin") {
-    return { result: { status: "valid" }, reject: false, message: "" };
+    const result: TaskSignatureAssessment = {
+      status: "internal-exempt",
+      reason: "internally-generated task is exempt from signature policy",
+    };
+    return {
+      result,
+      provenance: buildTaskSubmissionProvenance(submittedBy, policy, result),
+      reject: false,
+      message: "",
+    };
   }
 
   // Pipeline parent tasks don't produce a TaskConfig here — the HMAC
   // scheme binds prompt/context-refs, which pipelines express differently
   // (### Pipeline instead of ### Prompt). Until pipeline signing lands we
   // cannot accept these under `require`; `warn` passes through.
-  if (!parsedTask) {
-    if (policy === "require") {
+  if (isPipeline || !parsedTask) {
+    const parsedSignature = parseSignature(signatureRaw);
+    const result: TaskSignatureAssessment = {
+      status: "unverifiable",
+      keyId: parsedSignature?.keyId,
+      reason: isPipeline
+        ? "pipeline tasks cannot be verified by the v1 scheme"
+        : "task fields required by the v1 scheme could not be parsed",
+    };
+    if (signingPolicyRejects(policy, result.status)) {
       return {
-        result: { status: "missing" },
+        result,
+        provenance: buildTaskSubmissionProvenance(submittedBy, policy, result),
         reject: true,
         message:
-          "Task rejected by HUGIN_SIGNING_POLICY=require: pipeline tasks cannot be verified by the v1 scheme",
+          `Task rejected by HUGIN_SIGNING_POLICY=require: ${result.reason}`,
       };
     }
-    return { result: { status: "missing" }, reject: false, message: "" };
+    return {
+      result,
+      provenance: buildTaskSubmissionProvenance(submittedBy, policy, result),
+      reject: false,
+      message: "",
+    };
   }
 
   // Use the runtime *as declared in the task body*, not the resolved
@@ -1024,7 +1063,12 @@ function verifyTaskEntrySignature(
 
   if (result.status === "valid") {
     console.log(`[signing] task ${taskNs} signature valid (keyId=${result.keyId})`);
-    return { result, reject: false, message: "" };
+    return {
+      result,
+      provenance: buildTaskSubmissionProvenance(submittedBy, policy, result),
+      reject: false,
+      message: "",
+    };
   }
 
   const descriptor =
@@ -1034,15 +1078,59 @@ function verifyTaskEntrySignature(
 
   if (policy === "warn") {
     console.warn(`[signing] task ${taskNs} ${descriptor} — policy=warn, proceeding`);
-    return { result, reject: false, message: "" };
+    return {
+      result,
+      provenance: buildTaskSubmissionProvenance(submittedBy, policy, result),
+      reject: false,
+      message: "",
+    };
   }
 
   // policy === "require"
+  if (!signingPolicyRejects(policy, result.status)) {
+    return {
+      result,
+      provenance: buildTaskSubmissionProvenance(submittedBy, policy, result),
+      reject: false,
+      message: "",
+    };
+  }
   return {
     result,
+    provenance: buildTaskSubmissionProvenance(submittedBy, policy, result),
     reject: true,
     message: `Task rejected by HUGIN_SIGNING_POLICY=require: ${descriptor}`,
   };
+}
+
+function formatTaskProvenance(provenance: TaskSubmissionProvenance): string {
+  return (
+    `[provenance] claimed=${JSON.stringify(provenance.claimedSubmitter)} ` +
+    `verified=${provenance.verifiedSubmitter === null ? "none" : JSON.stringify(provenance.verifiedSubmitter)} ` +
+    `policy=${provenance.policy} signature=${provenance.signatureStatus} ` +
+    `keyId=${provenance.keyId === null ? "none" : JSON.stringify(provenance.keyId)}`
+  );
+}
+
+async function resolveTaskProvenance(
+  taskNs: string,
+  client: MuninClient,
+): Promise<TaskSubmissionProvenance> {
+  const cached = taskProvenance.get(taskNs);
+  if (cached) return cached;
+
+  const entry = await client.read(taskNs, "status");
+  const content = entry?.content ?? "";
+  const declaredRuntime = parseDeclaredRuntime(content);
+  const parsedTask =
+    declaredRuntime && declaredRuntime !== "pipeline" ? parseTask(content) : null;
+  return assessTaskEntrySignature(
+    taskNs,
+    content,
+    parsedTask,
+    parseSubmittedByField(content),
+    declaredRuntime === "pipeline",
+  ).provenance;
 }
 
 function getInjectionViolationForTask(task: TaskConfig): string | null {
@@ -1084,14 +1172,24 @@ async function writeStructuredTaskResult(
   classification?: string,
   client: MuninClient = munin,
 ): Promise<void> {
+  const provenance = result.provenance ?? await resolveTaskProvenance(taskNs, client);
   await client.write(
     taskNs,
     "result-structured",
-    JSON.stringify(buildStructuredTaskResult(result), null, 2),
+    JSON.stringify(buildStructuredTaskResult({ ...result, provenance }), null, 2),
     ["type:task-result", "type:task-result-structured"],
     undefined,
     classification,
   );
+  taskProvenance.delete(taskNs);
+  try {
+    await client.log(taskNs, formatTaskProvenance(provenance));
+  } catch (err) {
+    console.warn(
+      `[provenance] failed to append lifecycle log for ${taskNs}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 }
 
 async function refreshPipelineSummary(
@@ -1213,11 +1311,11 @@ function createFailureStructuredResult(
 function getRuntimeFromTags(
   tags: string[],
   runtimeFallback = "runtime:claude"
-): DispatcherRuntime | "pipeline" {
+): DispatcherRuntime {
   return (tags.find((tag) => tag.startsWith("runtime:")) || runtimeFallback).replace(
     /^runtime:/,
     ""
-  ) as DispatcherRuntime | "pipeline";
+  ) as DispatcherRuntime;
 }
 
 function removeTag(tags: string[], tagToRemove: string): string[] {
@@ -2165,40 +2263,38 @@ async function reconcileDeliveryPending(
     entry.updated_at,
     classification,
   );
-  if ((runtime as string) !== "pipeline") {
-    await writeStructuredTaskResult(
-      taskNs,
-      buildStructuredTaskResult({
-        schemaVersion: 1,
-        taskId: extractTaskId(taskNs),
-        taskNamespace: taskNs,
-        lifecycle: ok ? "completed" : "failed",
-        outcome: ok ? "completed" : "failed",
-        runtime,
-        executor: "dispatcher",
-        resultSource: "delivery-reconciliation",
-        exitCode: ok ? 0 : 2,
-        completedAt: new Date().toISOString(),
-        bodyKind: "response",
-        bodyText: "",
-        errorMessage: ok ? undefined : delivery.error ?? "delivery failed",
-        artifactDelivery: {
-          ok: delivery.ok,
-          failureKind: delivery.failureKind,
-          artifacts: delivery.records.map((r) => ({
-            id: r.id,
-            status: r.status,
-            remote: r.remote,
-            bytes: r.bytes,
-            sha256: r.sha256,
-            error: r.error,
-          })),
-        },
-      }),
-      classification,
-      client,
-    );
-  }
+  await writeStructuredTaskResult(
+    taskNs,
+    buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: extractTaskId(taskNs),
+      taskNamespace: taskNs,
+      lifecycle: ok ? "completed" : "failed",
+      outcome: ok ? "completed" : "failed",
+      runtime,
+      executor: "dispatcher",
+      resultSource: "delivery-reconciliation",
+      exitCode: ok ? 0 : 2,
+      completedAt: new Date().toISOString(),
+      bodyKind: "response",
+      bodyText: "",
+      errorMessage: ok ? undefined : delivery.error ?? "delivery failed",
+      artifactDelivery: {
+        ok: delivery.ok,
+        failureKind: delivery.failureKind,
+        artifacts: delivery.records.map((r) => ({
+          id: r.id,
+          status: r.status,
+          remote: r.remote,
+          bytes: r.bytes,
+          sha256: r.sha256,
+          error: r.error,
+        })),
+      },
+    }),
+    classification,
+    client,
+  );
   await client.log(
     taskNs,
     `Delivery reconciled: ${delivery.ok ? "verified" : "failed"}`,
@@ -2284,21 +2380,19 @@ async function recoverStaleTasks(): Promise<void> {
       const runtime = (runtimeTag || "runtime:claude").replace(
         /^runtime:/,
         ""
-      ) as DispatcherRuntime | "pipeline";
-      if (runtime !== "pipeline") {
-        await writeStructuredTaskResult(
+      ) as DispatcherRuntime;
+      await writeStructuredTaskResult(
+        result.namespace,
+        createFailureStructuredResult(
           result.namespace,
-          createFailureStructuredResult(
-            result.namespace,
-            runtime,
-            `Task recovered (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)`,
-            {
-              executor: "dispatcher",
-              resultSource: "recovery",
-            }
-          )
-        );
-      }
+          runtime,
+          `Task recovered (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)`,
+          {
+            executor: "dispatcher",
+            resultSource: "recovery",
+          }
+        )
+      );
       await munin.log(
         result.namespace,
         `Task recovered as failed (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)`
@@ -2432,23 +2526,21 @@ async function reapExpiredLeases(): Promise<void> {
       // shared `munin` client here would attribute these writes to the active
       // task's task-scoped session (rotated at claim time in `executeTask`),
       // polluting the outcome-aware session telemetry from #48.
-      if (runtime !== "pipeline") {
-        await writeStructuredTaskResult(
-          result.namespace,
-          createFailureStructuredResult(result.namespace, runtime, errorMessage, {
-            executor: "dispatcher",
-            resultSource: "lease-reaper",
-            replyTo: task?.replyTo,
-            replyFormat: task?.replyFormat,
-            group: task?.group,
-            sequence: task?.sequence,
-            pipeline: task?.pipeline,
-            sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
-          }),
-          classification,
-          reaperMunin,
-        );
-      }
+      await writeStructuredTaskResult(
+        result.namespace,
+        createFailureStructuredResult(result.namespace, runtime, errorMessage, {
+          executor: "dispatcher",
+          resultSource: "lease-reaper",
+          replyTo: task?.replyTo,
+          replyFormat: task?.replyFormat,
+          group: task?.group,
+          sequence: task?.sequence,
+          pipeline: task?.pipeline,
+          sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
+        }),
+        classification,
+        reaperMunin,
+      );
       await reaperMunin.log(result.namespace, `Lease reaped: ${errorMessage}`);
       await promoteDependents(extractTaskId(result.namespace), reaperMunin);
       await refreshPipelineSummaryFromContent(entry.content, reaperMunin);
@@ -3053,30 +3145,28 @@ async function markTaskCancelled(
     classification
   );
 
-  if (runtime !== "pipeline") {
-    await writeStructuredTaskResult(
-      taskNs,
-      createCancelledStructuredResult(taskNs, runtime, reason, {
-        executor: options.executor,
-        resultSource: options.resultSource,
-        startedAt: options.startedAt,
-        completedAt,
-        durationSeconds: options.durationSeconds,
-        logFile: options.logFile,
-        replyTo: task?.replyTo,
-        replyFormat: task?.replyFormat,
-        group: task?.group,
-        sequence: task?.sequence,
-        pipeline: task?.pipeline,
-        runtimeMetadata: options.runtimeMetadata,
-        approval: approvalMetadata,
-        bodyKind: options.bodyKind,
-        bodyText: effectiveBodyText,
-        sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
-      }),
-      classification,
-    );
-  }
+  await writeStructuredTaskResult(
+    taskNs,
+    createCancelledStructuredResult(taskNs, runtime, reason, {
+      executor: options.executor,
+      resultSource: options.resultSource,
+      startedAt: options.startedAt,
+      completedAt,
+      durationSeconds: options.durationSeconds,
+      logFile: options.logFile,
+      replyTo: task?.replyTo,
+      replyFormat: task?.replyFormat,
+      group: task?.group,
+      sequence: task?.sequence,
+      pipeline: task?.pipeline,
+      runtimeMetadata: options.runtimeMetadata,
+      approval: approvalMetadata,
+      bodyKind: options.bodyKind,
+      bodyText: effectiveBodyText,
+      sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
+    }),
+    classification,
+  );
 
   await munin.log(taskNs, `Task cancelled: ${reason}`);
   if (task?.pipeline?.pipelineId) {
@@ -3451,7 +3541,7 @@ async function failTaskWithMessage(
     runtimeTagOverride ||
     entry.tags.find((tag) => tag.startsWith("runtime:")) ||
     "runtime:claude"
-  ).replace(/^runtime:/, "") as DispatcherRuntime | "pipeline";
+  ).replace(/^runtime:/, "") as DispatcherRuntime;
   const task = parseTask(entry.content);
   if (task && !task.sensitivityAssessment) {
     task.sensitivityAssessment = getTaskSensitivityAssessment(task);
@@ -3474,17 +3564,15 @@ async function failTaskWithMessage(
     undefined,
     classification
   );
-  if (runtime !== "pipeline") {
-    await writeStructuredTaskResult(
-      taskNs,
-      createFailureStructuredResult(taskNs, runtime, errorMessage, {
-        executor: "dispatcher",
-        resultSource: "dispatcher",
-        sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
-      }),
-      classification,
-    );
-  }
+  await writeStructuredTaskResult(
+    taskNs,
+    createFailureStructuredResult(taskNs, runtime, errorMessage, {
+      executor: "dispatcher",
+      resultSource: "dispatcher",
+      sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
+    }),
+    classification,
+  );
 }
 
 // --- Heartbeat ---
@@ -3629,12 +3717,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   }
 
   // Verify task signature per HUGIN_SIGNING_POLICY
-  const signingVerdict = verifyTaskEntrySignature(
+  const signingVerdict = assessTaskEntrySignature(
     taskNs,
     entry.content,
     parsedTask,
     submittedBy,
+    declaredRuntime === "pipeline",
   );
+  taskProvenance.set(taskNs, signingVerdict.provenance);
   if (signingVerdict.reject) {
     console.warn(
       `Rejecting task ${taskNs}: signature ${signingVerdict.result.status}` +
@@ -3746,20 +3836,32 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         await failTaskWithMessage(taskNs, entry, `Auto-routing failed: ${errorMsg}`);
         await writeStructuredTaskResult(
           taskNs,
-          createFailureStructuredResult(taskNs, parsedTask.runtime, `Auto-routing failed: ${errorMsg}`, {
-            executor: "dispatcher",
-            resultSource: "router",
-            replyTo: parsedTask.replyTo,
-            replyFormat: parsedTask.replyFormat,
-            group: parsedTask.group,
-            sequence: parsedTask.sequence,
-            pipeline: parsedTask.pipeline,
-            sensitivity: buildTaskSensitivitySnapshot(sensitivityAssessment),
-            runtimeMetadata: {
-              autoRouted: true,
-              routingReason: `routing failed: ${errorMsg}`,
-            },
-          }),
+          {
+            ...createFailureStructuredResult(
+              taskNs,
+              parsedTask.runtime,
+              `Auto-routing failed: ${errorMsg}`,
+              {
+                executor: "dispatcher",
+                resultSource: "router",
+                replyTo: parsedTask.replyTo,
+                replyFormat: parsedTask.replyFormat,
+                group: parsedTask.group,
+                sequence: parsedTask.sequence,
+                pipeline: parsedTask.pipeline,
+                sensitivity: buildTaskSensitivitySnapshot(sensitivityAssessment),
+                runtimeMetadata: {
+                  autoRouted: true,
+                  routingReason: `routing failed: ${errorMsg}`,
+                },
+              },
+            ),
+            // failTaskWithMessage already emitted a generic structured result
+            // and cleared the cache. Preserve the original claim-time identity
+            // on this richer replacement instead of re-verifying at a later
+            // timestamp (which could relabel a boundary-age signature).
+            provenance: signingVerdict.provenance,
+          },
           classification,
         );
         await promoteDependents(extractTaskId(taskNs));
@@ -3869,6 +3971,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     parsedTask &&
     (await gatePendingTaskForApproval(taskNs, entry, parsedTask))
   ) {
+    // Awaiting approval is non-terminal. Do not retain an assessment for a
+    // task that can sit for days and may be edited/re-signed before it is
+    // returned to pending; it will be assessed again on the next claim.
+    taskProvenance.delete(taskNs);
     return { hadTask: true, queueDepth };
   }
 
@@ -3902,6 +4008,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       entry.updated_at = claimResult.updated_at;
     }
   } catch (err) {
+    // Another dispatcher won the CAS. Its claim-time assessment owns the
+    // eventual result; retaining ours risks applying stale identity to a
+    // later re-submission under the same namespace.
+    taskProvenance.delete(taskNs);
     console.log(`Failed to claim ${taskNs} (concurrent claim?):`, err);
     return { hadTask: false, queueDepth };
   }
@@ -3924,6 +4034,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           failTaskWithMessage,
           promoteDependents,
           refreshPipelineSummary,
+          writeStructuredResult: writeStructuredTaskResult,
         },
         taskNs,
         entry,

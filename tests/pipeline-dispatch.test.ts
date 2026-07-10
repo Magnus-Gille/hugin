@@ -157,6 +157,25 @@ function createPipelineHooks(client: FakePipelineDispatchClient): {
           ["type:pipeline", "type:pipeline-summary"]
         );
       },
+      async writeStructuredResult(taskNs, result, classification) {
+        await client.write(
+          taskNs,
+          "result-structured",
+          JSON.stringify({
+            ...result,
+            provenance: {
+              claimedSubmitter: "Codex",
+              verifiedSubmitter: null,
+              policy: "off",
+              signatureStatus: "unverified",
+              keyId: null,
+            },
+          }),
+          ["type:task-result", "type:task-result-structured"],
+          undefined,
+          classification,
+        );
+      },
     },
     promotedTaskIds,
     refreshedPipelineIds,
@@ -227,6 +246,17 @@ describe("handlePipelineTask", () => {
     expect(parentResult?.content).toContain("- **Reply-format:** summary");
     expect(parentResult?.content).toContain("- **Group:** sprint-step3");
     expect(parentResult?.content).toContain("- **Sequence:** 2");
+    const parentStructured = JSON.parse(
+      client.get(taskNs, "result-structured")!.content,
+    );
+    expect(parentStructured.runtime).toBe("pipeline");
+    expect(parentStructured.provenance).toEqual({
+      claimedSubmitter: "Codex",
+      verifiedSubmitter: null,
+      policy: "off",
+      signatureStatus: "unverified",
+      keyId: null,
+    });
 
     const exploreStatus = client.get("tasks/20260403-valid-pipeline-explore", "status");
     expect(exploreStatus?.tags).toEqual([
@@ -408,6 +438,22 @@ Phase: Explore
     expect(
       client.get(compiled.phases[0]!.taskNamespace, "result")?.content
     ).toContain("Pipeline decomposition aborted before parent commit");
+    const rolledBackStructured = JSON.parse(
+      client.get(compiled.phases[0]!.taskNamespace, "result-structured")!.content,
+    );
+    expect(rolledBackStructured).toMatchObject({
+      lifecycle: "cancelled",
+      outcome: "cancelled",
+      runtime: "claude",
+      resultSource: "pipeline-decomposition-cleanup",
+      provenance: {
+        claimedSubmitter: "Codex",
+        verifiedSubmitter: null,
+        policy: "off",
+        signatureStatus: "unverified",
+        keyId: null,
+      },
+    });
     expect(client.get(compiled.phases[1]!.taskNamespace, "status")).toBeNull();
 
     const parentStatus = client.get(taskNs, "status");
