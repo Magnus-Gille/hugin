@@ -1,7 +1,7 @@
 # Hugin — Status
 
 **Last session:** 2026-07-11 (Codex) — canonical durable MCP→Hugin→M5 lifecycle (#167)
-**Branch:** `main`; production includes PR #173, deployed to Hugin-Munin on 2026-07-11.
+**Branch:** `main`; production includes PR #174 (`e9117be`), deployed to Hugin-Munin on 2026-07-11.
 
 ## Latest — canonical durable MCP→Hugin→M5 lifecycle (#167, 2026-07-11)
 
@@ -47,6 +47,11 @@ measure whether it reduces L1 attention. Feature expansion remains frozen except
 and security fixes. For future side-effecting destinations, add an execution-receipt protocol:
 persistent intake idempotency prevents duplicate task creation, but cannot by itself prove
 exactly-once external effects across a crash after an effect and before its receipt is stored.
+
+**Close audit:** the main checkout is clean and synchronized. Clean, squash-merged PR worktrees
+were intentionally retained pending explicit cleanup at `/private/tmp/hugin-167-durable-m5`,
+`/private/tmp/hugin-169-enable-hardening`, `/private/tmp/hugin-170-broker-port`,
+`/private/tmp/hugin-171-broker-port`, and `/private/tmp/hugin-172-preserve-tags`.
 
 ## Latest — truthful MCP Broker routing + roadmap reset (#168, 2026-07-11)
 
