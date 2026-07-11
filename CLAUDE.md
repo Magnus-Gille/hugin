@@ -131,6 +131,8 @@ maps to the `build` agent with `edit`/`bash` allowed.
 - `result` — human-readable markdown with exit code, timestamps, duration, and response body
 - `result-structured` — machine-readable JSON (Zod-validated) with schema version, lifecycle metadata, runtime metadata (requested vs effective model/host), sensitivity audit, honest submission provenance (`claimedSubmitter`, nullable `verifiedSubmitter`, signing policy/status/keyId), and structured body. Prefer this for programmatic consumption.
 
+**M5 execution provenance (issue #163):** every M5 `/delegate` call — whether it arrives via the canonical #167 Broker leaf (`runtime:homeserver`) or as an orchestrator fan-out worker leaf — records the same canonical trace: `ledgerId` (the join key to M5's authoritative evidence row), effective `nodeId`/`modelId`, `taskType`, verification `outcome`/`score`, `verifier` identity + `verifierNotes`, `delegated`/`escalated` + `decisionReason`, route-policy `policyMode`/`policyAction`/`policyReason`, `priceCatalogVersion`, and `costTraceId`. It surfaces at `runtimeMetadata.delegation` for the direct path and per-leaf at `orchestratorOutcomes[].delegation` for fan-out. `src/m5-provenance.ts` is the **only** sanctioned producer: the gateway body is untrusted input, so it validates enums/bounds and DROPS anything out of contract rather than throwing — a malformed gateway value must never sink the `result-structured` write of an already-paid run (`buildStructuredTaskResult` calls `.parse()`). This is a **trace, not a verdict**: M5 remains the sole capability-evidence authority and Hugin never duplicates its judgements into a Hugin-owned capability store. Retrieving the row *by* `ledgerId` currently needs an id-addressable read on the gateway — filed as gille-inference#227.
+
 ## Project structure
 
 ```
@@ -168,6 +170,7 @@ hugin/
 │   ├── task-graph.ts             # Task dependency graph for pipelines
 │   ├── result-format.ts          # Result formatting utilities
 │   ├── artifact-delivery.ts      # Runtime-owned artefact delivery (#68): manifest parse/validate, target allowlist, rsync→sha256→mv deliver+verify
+│   ├── m5-provenance.ts         # M5 execution provenance (#163): the ONE sanitizer for /delegate responses (untrusted input — validates enums/bounds, drops out-of-contract values, never throws). Used by BOTH M5 call sites: homeserver-executor.ts and orchestrator/worker-executor.ts
 │   ├── model-pricing.ts          # Vendor-neutral $/M-token table for cost-aware routing and result metadata
 │   ├── orchestrator/             # Native fanout engine (Runtime: orchestrator)
 │   │   ├── engine.ts             # Top-level fanout loop: plan → fan-out workers → optional verify → synthesize

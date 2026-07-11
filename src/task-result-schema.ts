@@ -94,6 +94,43 @@ export const skillRouteSchema = z.object({
 });
 export type SkillRoute = z.infer<typeof skillRouteSchema>;
 
+// M5 execution provenance (issue #163). ONE canonical shape, shared by both
+// places Hugin delegates to M5: `runtimeMetadata.delegation` (the direct
+// homeserver executor, which backs the canonical #167 MCP-Broker leaf) and
+// `orchestratorOutcomes[].delegation` (each orchestrator fan-out leaf). Before
+// #163 the orchestrator path carried none of this, so a fanout leaf could not
+// be traced to the node/model/verifier that produced it.
+//
+// Every field is optional: a gateway that omits one, or emits one out of
+// contract, must degrade to "absent" rather than fail the result-structured
+// write of an already-successful, paid run. src/m5-provenance.ts is the only
+// sanctioned producer — it validates enums/bounds on the untrusted gateway
+// response so this schema never sees a value it would reject.
+//
+// This is a TRACE, not a verdict: `ledgerId` joins back to M5's authoritative
+// evidence row. Hugin never duplicates M5's capability judgement into a
+// Hugin-owned capability store.
+export const delegationProvenanceSchema = z.object({
+  ledgerId: z.string().min(1).optional(),
+  nodeId: z.string().min(1).optional(),
+  modelId: z.string().min(1).optional(),
+  taskType: z.string().min(1).optional(),
+  outcome: z.string().min(1).optional(),
+  score: z.number().optional(),
+  decisionReason: z.string().min(1).optional(),
+  verifier: z.string().min(1).optional(),
+  verifierNotes: z.string().min(1).optional(),
+  delegated: z.boolean().optional(),
+  escalated: z.boolean().optional(),
+  formatRetried: z.boolean().optional(),
+  policyMode: z.string().min(1).optional(),
+  policyAction: z.string().min(1).optional(),
+  policyReason: z.string().min(1).optional(),
+  priceCatalogVersion: z.string().min(1).optional(),
+  costTraceId: z.string().min(1).optional(),
+});
+export type DelegationProvenance = z.infer<typeof delegationProvenanceSchema>;
+
 export const taskExecutionRuntimeMetadataSchema = z.object({
   requestedModel: z.string().min(1).optional(),
   effectiveModel: z.string().min(1).optional(),
@@ -105,18 +142,7 @@ export const taskExecutionRuntimeMetadataSchema = z.object({
   routingReason: z.string().min(1).optional(),
   eliminatedRuntimes: z.array(routingEliminationSchema).optional(),
   skillRoute: skillRouteSchema.optional(),
-  delegation: z.object({
-    taskType: z.string().min(1).optional(),
-    modelId: z.string().min(1).optional(),
-    nodeId: z.string().min(1).optional(),
-    outcome: z.string().min(1).optional(),
-    score: z.number().optional(),
-    decisionReason: z.string().min(1).optional(),
-    ledgerId: z.string().min(1).optional(),
-    verifierNotes: z.string().min(1).optional(),
-    delegated: z.boolean().optional(),
-    escalated: z.boolean().optional(),
-  }).optional(),
+  delegation: delegationProvenanceSchema.optional(),
 });
 export type TaskExecutionRuntimeMetadata = z.infer<
   typeof taskExecutionRuntimeMetadataSchema
@@ -197,6 +223,11 @@ export const orchestratorOutcomeSchema = z.object({
   // structured result instead of reading as mysterious agent flakiness.
   // Absent for successful workers.
   error: z.string().min(1).optional(),
+  // M5 execution provenance for this leaf (issue #163) — additive + optional,
+  // same non-breaking rationale as the fields above. Present only for workers
+  // that actually went through the M5 `/delegate` lane (provider `homeserver`);
+  // absent for OpenRouter/Berget/pi-harness leaves, which have no M5 ledger row.
+  delegation: delegationProvenanceSchema.optional(),
 });
 export type OrchestratorOutcomeRecord = z.infer<typeof orchestratorOutcomeSchema>;
 

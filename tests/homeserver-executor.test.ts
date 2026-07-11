@@ -251,6 +251,66 @@ describe("executeHomeserverTask — delegate path", () => {
     expect(body.premiumBaselineModelId).toBe("anthropic/claude-opus-4-5");
   });
 
+  // Issue #163: the direct path already carried the flat delegation fields, but
+  // dropped the gateway's policy/cost-version trace and never validated the
+  // response — so a single out-of-contract value could throw inside
+  // buildStructuredTaskResult and lose the result of a paid run.
+  it("captures the gateway's route-policy and price-catalog provenance (#163)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({
+        delegated: true, escalate: false, outcome: "unverified", output: "PROV_OK",
+        nodeId: "m5", modelId: "mellum", taskType: "qa-factual",
+        ledgerId: "487bae49-e751-4fc8-a10c-8f12f6aa59a4",
+        formatRetried: false,
+        delegatePolicy: {
+          mode: "shadow", action: "shadow", reason: "no verifier-backed lane",
+          evidence: { verifier: "answerIs" },
+        },
+        costTrace: {
+          id: "fc5e98f9-2d7c-4792-b2c3-c936d29d44fb",
+          priceCatalogVersion: "2026-07-08",
+        },
+      }),
+    );
+
+    const result = await executeHomeserverTask(
+      makeTaskConfig({ path: "delegate", taskType: "qa-factual" }), "delegate-prov", tmpLogDir,
+    );
+
+    const p = result.provenance!;
+    expect(p.ledgerId).toBe("487bae49-e751-4fc8-a10c-8f12f6aa59a4");
+    expect(p.nodeId).toBe("m5");
+    expect(p.verifier).toBe("answerIs");
+    expect(p.policyMode).toBe("shadow");
+    expect(p.policyAction).toBe("shadow");
+    expect(p.policyReason).toBe("no verifier-backed lane");
+    expect(p.priceCatalogVersion).toBe("2026-07-08");
+    expect(p.costTraceId).toBe("fc5e98f9-2d7c-4792-b2c3-c936d29d44fb");
+    expect(p.formatRetried).toBe(false);
+    // The pre-existing flat fields keep working for current consumers.
+    expect(result.ledgerId).toBe("487bae49-e751-4fc8-a10c-8f12f6aa59a4");
+    expect(result.nodeId).toBe("m5");
+  });
+
+  it("drops an out-of-contract gateway score instead of poisoning the result (#163)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      // A non-numeric score would previously flow straight into
+      // runtimeMetadata.delegation.score (z.number()) and throw inside
+      // buildStructuredTaskResult — losing the whole result of a paid run.
+      jsonResponse({ delegated: true, outcome: "pass", score: "high", output: "ok", ledgerId: "l-1" }),
+    );
+
+    const result = await executeHomeserverTask(
+      makeTaskConfig({ path: "delegate" }), "delegate-badscore", tmpLogDir,
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.resultText).toBe("ok");
+    expect(result.score).toBeNull(); // dropped, not coerced, not thrown
+    expect(result.provenance?.score).toBeUndefined();
+    expect(result.provenance?.ledgerId).toBe("l-1");
+  });
+
   it("omits optional /delegate fields that are not present", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       jsonResponse({ delegated: true, outcome: "unverified", output: "1998" }),

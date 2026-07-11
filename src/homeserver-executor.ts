@@ -21,6 +21,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { extractM5Provenance, sanitizeProviderTokenCount } from "./m5-provenance.js";
+import type { M5DelegationProvenance } from "./m5-provenance.js";
 import { resolveGatewayRootUrl } from "./orchestrator/provider-config.js";
 
 // --- Types ---
@@ -98,6 +100,14 @@ export interface HomeserverExecutorResult {
   modelId: string | null;
   verifierNotes: string | null;
   nodeId: string | null;
+  /**
+   * Full sanitized M5 execution provenance (issue #163). Superset of the flat
+   * fields above, which are retained for existing consumers and are derived
+   * from this. Null on the chat path. Includes the gateway's route-policy
+   * mode/action/reason and price-catalog version, which the flat fields never
+   * carried.
+   */
+  provenance: M5DelegationProvenance | null;
 }
 
 export interface HomeserverExecutorOptions {
@@ -238,6 +248,7 @@ export async function executeHomeserverTask(
     modelId: null,
     verifierNotes: null,
     nodeId: null,
+    provenance: null,
   };
 
   const finish = async (): Promise<HomeserverExecutorResult> => {
@@ -332,44 +343,51 @@ export async function executeHomeserverTask(
     }
 
     if (task.path === "delegate") {
-      // Non-streaming JSON: DelegationOutcome.
-      const outcome = (await res.json()) as {
-        delegated?: boolean;
-        escalate?: boolean;
-        outcome?: string;
-        score?: number | null;
-        output?: string;
-        decisionReason?: string;
-        ledgerId?: string;
+      // Non-streaming JSON: DelegationOutcome. The body is untrusted input
+      // (issue #163) — extractM5Provenance validates enums/bounds and drops
+      // anything out of contract, so a buggy or hostile gateway value cannot
+      // throw inside the downstream buildStructuredTaskResult .parse() and lose
+      // the result of an already-paid run.
+      const raw: unknown = await res.json();
+      const outcome = raw as {
+        output?: unknown;
+        frontierOutput?: unknown;
         metrics?: { promptTokens?: number; completionTokens?: number; latencyMs?: number };
-        frontierOutput?: string;
-        taskType?: string;
-        modelId?: string;
-        verifierNotes?: string;
-        nodeId?: string;
       };
-      const text = outcome.output ?? outcome.frontierOutput ?? "";
+      const provenance = extractM5Provenance(raw);
+
+      const text =
+        (typeof outcome.output === "string" ? outcome.output : undefined) ??
+        (typeof outcome.frontierOutput === "string" ? outcome.frontierOutput : undefined) ??
+        "";
       appendOutput(text);
       result.resultText = text.trim() || null;
-      result.delegated = outcome.delegated ?? null;
-      result.escalated = outcome.escalate ?? null;
-      result.outcome = outcome.outcome ?? null;
-      result.score = outcome.score ?? null;
-      result.decisionReason = outcome.decisionReason ?? null;
-      result.ledgerId = outcome.ledgerId ?? null;
-      result.taskType = outcome.taskType ?? null;
-      result.modelId = outcome.modelId ?? null;
-      result.verifierNotes = outcome.verifierNotes ?? null;
-      result.nodeId = outcome.nodeId ?? null;
-      result.promptTokens = outcome.metrics?.promptTokens ?? null;
-      result.completionTokens = outcome.metrics?.completionTokens ?? null;
+
+      result.provenance = provenance;
+      // Flat fields stay the public surface for existing consumers; they are now
+      // projections of the sanitized provenance rather than raw gateway values.
+      result.delegated = provenance.delegated ?? null;
+      result.escalated = provenance.escalated ?? null;
+      result.outcome = provenance.outcome ?? null;
+      result.score = provenance.score ?? null;
+      result.decisionReason = provenance.decisionReason ?? null;
+      result.ledgerId = provenance.ledgerId ?? null;
+      result.taskType = provenance.taskType ?? null;
+      result.modelId = provenance.modelId ?? null;
+      result.verifierNotes = provenance.verifierNotes ?? null;
+      result.nodeId = provenance.nodeId ?? null;
+
+      result.promptTokens = sanitizeProviderTokenCount(outcome.metrics?.promptTokens);
+      result.completionTokens = sanitizeProviderTokenCount(outcome.metrics?.completionTokens);
       if (result.promptTokens !== null || result.completionTokens !== null) {
         result.totalTokens = (result.promptTokens ?? 0) + (result.completionTokens ?? 0);
       }
-      if (typeof outcome.metrics?.latencyMs === "number") result.inferenceMs = outcome.metrics.latencyMs;
+      if (typeof outcome.metrics?.latencyMs === "number" && Number.isFinite(outcome.metrics.latencyMs)) {
+        result.inferenceMs = outcome.metrics.latencyMs;
+      }
       // A well-formed 200 DelegationOutcome can still report failure; don't mask fail/error
       // as a successful Hugin execution (that would suppress retry/escalation downstream).
-      result.exitCode = outcome.outcome === "fail" || outcome.outcome === "error" ? 1 : 0;
+      result.exitCode = provenance.outcome === "fail" || provenance.outcome === "error" ? 1 : 0;
       return finish();
     }
 

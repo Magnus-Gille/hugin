@@ -4982,17 +4982,15 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         ? {
             effectiveModel: homeserverResult.modelId ?? undefined,
             effectiveHost: homeserverResult.nodeId ?? "m5",
+            // Issue #163: the sanitized provenance is the whole delegation
+            // trace (node/model/verifier + route policy + price-catalog
+            // version). Spread it wholesale rather than re-listing fields, so a
+            // field added to the shared M5 shape can never be silently dropped
+            // here again. `taskType` keeps its historical fallback to the
+            // requested type when the gateway echoes none.
             delegation: {
+              ...(homeserverResult.provenance ?? {}),
               taskType: homeserverResult.taskType ?? task.homeserverTaskType,
-              modelId: homeserverResult.modelId ?? undefined,
-              nodeId: homeserverResult.nodeId ?? undefined,
-              outcome: homeserverResult.outcome ?? undefined,
-              score: homeserverResult.score ?? undefined,
-              decisionReason: homeserverResult.decisionReason ?? undefined,
-              ledgerId: homeserverResult.ledgerId ?? undefined,
-              verifierNotes: homeserverResult.verifierNotes ?? undefined,
-              delegated: homeserverResult.delegated ?? undefined,
-              escalated: homeserverResult.escalated ?? undefined,
             },
           }
         : isOllama
@@ -5081,6 +5079,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             // exact error (e.g. `HTTP 503 server_busy retryAfterS=5`) so a
             // failed fanout leaf is diagnosable from the structured result.
             ...(o.result.error ? { error: o.result.error } : {}),
+            // M5 execution provenance (issue #163): the node/model/verifier that
+            // actually produced this leaf, plus the ledgerId that joins it to
+            // M5's authoritative evidence row. Present only for `homeserver`
+            // leaves that went through /delegate; already sanitized against the
+            // untrusted gateway response by src/m5-provenance.ts.
+            ...(o.result.delegation ? { delegation: o.result.delegation } : {}),
           }))
         : undefined;
 

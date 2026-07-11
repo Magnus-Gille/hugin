@@ -19,6 +19,8 @@ import type {
   HomeserverResponseFormat,
   HomeserverVerifierSpec,
 } from "../homeserver-executor.js";
+import { extractM5Provenance, sanitizeProviderTokenCount } from "../m5-provenance.js";
+import type { M5DelegationProvenance } from "../m5-provenance.js";
 import { estimateCostUsd } from "../model-pricing.js";
 import { getRegistryEntryById } from "../runtime-registry.js";
 import {
@@ -245,6 +247,13 @@ export interface WorkerResult {
   fallbackTriggered?: boolean;
   /** Status-derived Orin fallback signal, never request content. */
   fallbackReason?: string;
+  /**
+   * M5 execution provenance for this leaf (issue #163). Set only on the
+   * `/delegate` path; `ledgerId` is the join key back to M5's authoritative
+   * evidence row. Sanitized from the untrusted gateway response by
+   * src/m5-provenance.ts — never trusted verbatim.
+   */
+  delegation?: M5DelegationProvenance;
 }
 
 export interface WorkerExecutor {
@@ -737,6 +746,12 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
         const outcomeStatus = typeof outcome.outcome === "string" ? outcome.outcome : null;
         const failed = outcomeStatus === "fail" || outcomeStatus === "error";
 
+        // Issue #163: preserve the M5 execution trace. Sanitized from the raw
+        // (untrusted) gateway body, not from the narrow parse type above — a
+        // failed leaf is exactly when an operator most needs the ledger row, so
+        // this is attached on both the ok and failed branches.
+        const delegation = extractM5Provenance(parsed);
+
         return {
           kind: "done",
           result: {
@@ -749,6 +764,7 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
             costUsd,
             latencyMs: Date.now() - start,
             ...(failed ? { error: `Delegation outcome: ${outcomeStatus}` } : {}),
+            ...(Object.keys(delegation).length > 0 ? { delegation } : {}),
           },
         };
       } finally {
@@ -1063,11 +1079,14 @@ function buildPiArgs(
 /**
  * Provider-reported token counts are only trusted as nonnegative integers;
  * anything else (fractional estimates, negatives, NaN, non-numbers) → null.
+ *
+ * Re-exported from src/m5-provenance.ts (issue #163) so the direct homeserver
+ * executor applies the identical contract — a fractional count from either M5
+ * path would otherwise fail the structured result's `.int()` constraint and
+ * poison the savings store.
  */
 function sanitizeTokenCount(value: unknown): number | null {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0
-    ? value
-    : null;
+  return sanitizeProviderTokenCount(value);
 }
 
 function buildHeaders(provider: string, apiKey: string): Record<string, string> {
