@@ -2,6 +2,23 @@ import { describe, expect, it } from "vitest";
 import { buildStructuredTaskResult } from "../src/task-result-schema.js";
 
 describe("structured task result schema", () => {
+  it("preserves M5 delegation provenance on canonical homeserver results", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1, taskId: "mcp-m5-abc", taskNamespace: "tasks/mcp-m5-abc",
+      lifecycle: "completed", outcome: "completed", runtime: "homeserver",
+      executor: "homeserver-delegate", resultSource: "homeserver-delegate", exitCode: 0,
+      completedAt: "2026-07-11T12:00:00Z", bodyKind: "response", bodyText: "ok",
+      runtimeMetadata: {
+        effectiveHost: "m5", effectiveModel: "mellum",
+        delegation: {
+          taskType: "extract", modelId: "mellum", nodeId: "m5", outcome: "pass", score: 1,
+          decisionReason: "ledger route", ledgerId: "ledger-1", verifierNotes: "exact",
+          delegated: true, escalated: false,
+        },
+      },
+    });
+    expect(result.runtimeMetadata?.delegation?.ledgerId).toBe("ledger-1");
+  });
   it("accepts completed pipeline phase results", () => {
     const result = buildStructuredTaskResult({
       schemaVersion: 1,

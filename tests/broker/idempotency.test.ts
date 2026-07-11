@@ -10,14 +10,24 @@ function makeRequest(
   overrides: Partial<DelegationRequest> = {},
 ): DelegationRequest {
   return {
-    envelope_version: 1,
+    envelope_version: 2,
     idempotency_key: "11111111-1111-4111-8111-111111111111",
     orchestrator_session_id: "sess-1",
     orchestrator_submitter: "claude-code",
     task_type: "summarize",
     prompt: "Summarize the README.",
-    alias_requested: "tiny",
-    alias_map_version: 1,
+    alias_requested: "m5",
+    alias_map_version: 2,
+    sensitivity: "internal",
+    timeout_ms: 300_000,
+    max_output_tokens: 4_096,
+    acceptance: { mode: "l1_review" },
+    allowed_destinations: ["m5"],
+    tool_policy: { mode: "none" },
+    budget: { max_attempts: 1, max_cost_usd: 0 },
+    durability: "required",
+    delivery: { mode: "munin" },
+    escalation: { mode: "return_to_l1" },
     ...overrides,
   };
 }
@@ -33,6 +43,13 @@ describe("canonicalizeRequest", () => {
     const a = makeRequest({ prompt: "hi" });
     const b = makeRequest({ prompt: "bye" });
     expect(canonicalizeRequest(a)).not.toBe(canonicalizeRequest(b));
+  });
+
+  it("ignores MCP session rotation while retaining behavior fields", () => {
+    const first = makeRequest();
+    const restarted = makeRequest({ orchestrator_session_id: "new-session" });
+    expect(hashPayload(first)).toBe(hashPayload(restarted));
+    expect(hashPayload(first)).not.toBe(hashPayload(makeRequest({ timeout_ms: 1 })));
   });
 });
 
@@ -117,14 +134,24 @@ describe("IdempotencyIndex", () => {
   it("canonicalizeRequest is stable under key insertion order", () => {
     const a = makeRequest({ prompt: "hi" });
     const b: DelegationRequest = {
-      alias_map_version: 1,
-      alias_requested: "tiny",
+      alias_map_version: 2,
+      alias_requested: "m5",
+      sensitivity: "internal",
+      timeout_ms: 300_000,
+      max_output_tokens: 4_096,
       prompt: "hi",
       task_type: "summarize",
       orchestrator_submitter: "claude-code",
       orchestrator_session_id: "sess-1",
       idempotency_key: "11111111-1111-4111-8111-111111111111",
-      envelope_version: 1,
+      envelope_version: 2,
+      acceptance: { mode: "l1_review" },
+      allowed_destinations: ["m5"],
+      tool_policy: { mode: "none" },
+      budget: { max_attempts: 1, max_cost_usd: 0 },
+      durability: "required",
+      delivery: { mode: "munin" },
+      escalation: { mode: "return_to_l1" },
     };
     expect(canonicalizeRequest(a)).toBe(canonicalizeRequest(b));
   });

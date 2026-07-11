@@ -7,10 +7,10 @@
  * Wiring:
  *   stdio  ↔  McpServer  ↔  buildTools()  ↔  BrokerClient  ↔  HTTP /v1/delegate
  *
- * The MCP layer fills in protocol envelope fields (envelope_version,
- * alias_map_version, idempotency_key, orchestrator_session_id,
- * orchestrator_submitter) so the model only has to think about the
- * task. See `src/mcp/tools.ts`.
+ * The MCP layer fills in the protocol identity plus safe sensitivity, timeout,
+ * token, destination, tool, attempt/cost, durability, delivery and escalation
+ * defaults so the model only has to think about the task and its acceptance
+ * contract. See `src/mcp/tools.ts`.
  *
  * Required env:
  *   HUGIN_BROKER_URL    — e.g. http://huginmunin.tail-scale.ts.net:3033

@@ -49,7 +49,6 @@ import {
   type DelegationEnvelope,
   type DelegationError,
 } from "./types.js";
-import { isBrokerExecutorImplemented } from "./executor-capabilities.js";
 
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
 /**
@@ -263,7 +262,11 @@ export class OrchWorker {
   }
 
   private canHandle(envelope: DelegationEnvelope): boolean {
-    return isBrokerExecutorImplemented(envelope.alias_resolved);
+    // Historical orch-v1 worker semantics. This class is no longer started;
+    // retaining the predicate keeps old recovery fixtures/readers intelligible
+    // without making OpenRouter a live Broker capability again.
+    return envelope.alias_resolved.runtime === "openrouter"
+      && envelope.alias_resolved.family === "one-shot";
   }
 
   private leaseDurationFor(envelope: DelegationEnvelope): number {

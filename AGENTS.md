@@ -114,13 +114,13 @@ hugin/
 │   ├── mcp/                      # hugin-mcp internals (broker client + tool definitions)
 │   │   ├── broker-client.ts      # HTTP client for /v1/delegate/* (bearer auth, AbortController timeout)
 │   │   └── tools.ts              # 5 MCP tools (hugin_submit/await/rate/list/models) with envelope autofill
-│   └── broker/                   # Orchestrator-v1 broker (Tailscale-only HTTP, /v1/delegate/*)
+│   └── broker/                   # MCP durable-delegation API (Tailscale-only HTTP, /v1/delegate/*)
 │       ├── server.ts             # Express app + opt-in startup (HUGIN_BROKER_KEYS)
 │       ├── handlers.ts           # submit/await/rate/list/models endpoint handlers
 │       ├── executor-capabilities.ts # Live executor truth shared by submit/models/worker
-│       ├── orch-worker.ts        # Polls Munin for orch-v1 tasks, claims via CAS, dispatches to OpenRouter
+│       ├── orch-worker.ts        # RETIRED historical orch-v1 worker; never started
 │       ├── openrouter-executor.ts # OpenRouter one-shot delegation runner
-│       ├── reconciliation.ts     # Periodic sweep: backfill journal events for orch-v1 tasks
+│       ├── reconciliation.ts     # RETIRED historical journal reconciler; never started
 │       └── task-store.ts         # Munin operations: submit / read / two-phase complete
 ├── tests/
 │   ├── dispatcher.test.ts
@@ -189,12 +189,12 @@ MUNIN_API_KEY=<same key Munin uses>
 | `HUGIN_SUBMITTER_KEYS_FILE` | — | Path to a JSON keystore file. Takes precedence over `HUGIN_SUBMITTER_KEYS`. |
 | `HUGIN_DELIVERY_POLICY` | `require` | Runtime-owned artefact delivery (issue #68): `off` (ignore `### Artifacts` manifests — rollback / old-skill compat; the `### Artifacts`-after-`### Prompt` grammar error is still rejected), `warn` (validate + report diagnostics, never fail a content-success task), `require` (missing/unsafe local content or an unrecoverable delivery failure → terminal `failed`, content preserved in the checkpoint so re-submission is free). |
 | `HUGIN_DELIVERY_TARGETS` | (single NAS) | JSON array of allowed delivery target tuples `[{ "user", "host", "remotePathPrefix", "localStagingPrefix" }]`. Separate from the fetch egress allowlist. A manifest `remote`/`local` must match a tuple, and the local path's realpath must stay under the staging prefix, or the task is rejected at submit time. |
-| `HUGIN_BROKER_HOST` | `127.0.0.1` | Bind address for the orchestrator-v1 broker (`/v1/delegate/*`). Set to the Tailscale interface IP in production. |
+| `HUGIN_BROKER_HOST` | `127.0.0.1` | Bind address for the durable MCP Broker (`/v1/delegate/*`). Set to the Tailscale interface IP in production. |
 | `HUGIN_BROKER_PORT` | `3033` | Port for the broker endpoint. |
 | `HUGIN_BROKER_KEYS` | — | Inline JSON keystore: `{"<principal>": "<token>"}`. Setting either this or `HUGIN_BROKER_KEYS_FILE` enables the broker. |
 | `HUGIN_BROKER_KEYS_FILE` | — | Path to a JSON keystore file for the broker. Takes precedence over `HUGIN_BROKER_KEYS`. |
-| `HUGIN_BROKER_RECONCILIATION_INTERVAL_MS` | `60000` | Interval between reconciliation sweeps (backfills journal events for orch-v1 tasks visible in Munin). |
-| `OPENROUTER_API_KEY` | — | OpenRouter API key. When set on a Pi-side broker, the orch-worker is enabled and `large-reasoning` appears in `/v1/delegate/models`. Without it the Broker advertises no executable aliases and rejects submissions; it never queues an undrainable task. |
+| `HUGIN_BROKER_RECONCILIATION_INTERVAL_MS` | — | Retired compatibility setting; canonical tasks use the normal Hugin/Munin lifecycle. |
+| `OPENROUTER_API_KEY` | — | Used by legacy/experimental cloud paths, not by the canonical MCP Broker executor. |
 | `OPENROUTER_REFERER` | `https://hugin.local` | `HTTP-Referer` header sent on OpenRouter requests (provider attribution). |
 | `OPENROUTER_APP_TITLE` | `hugin-orch-v1` | `X-Title` header sent on OpenRouter requests. |
 | `HUGIN_BROKER_URL` | — | hugin-mcp only (laptop side): URL of the Pi broker, e.g. `http://huginmunin.<tailnet>.ts.net:3033`. |
@@ -202,8 +202,9 @@ MUNIN_API_KEY=<same key Munin uses>
 | `HUGIN_MCP_SUBMITTER` | `claude-code` | hugin-mcp only: `orchestrator_submitter` principal stamped on each delegation envelope. |
 | `HUGIN_MCP_REQUEST_TIMEOUT_MS` | `60000` | hugin-mcp only: per-request HTTP timeout against the broker. |
 
-**Broker alias rule:** the four v1 aliases remain the historical protocol
-catalogue, but `/v1/delegate/models` is the live execution contract. Submission
-must fail before any durable write unless the requested alias is present in
-that response. The MCP discovers this set at startup and disables
-`hugin_submit` if discovery fails or returns no enabled aliases.
+**Broker v2 rule:** `m5` is the only executable alias. It creates a normal
+`runtime:homeserver` task in the canonical Hugin/Munin lifecycle and performs one
+M5 `/delegate` leaf; the gateway owns model selection and capability evidence.
+The complete envelope is embedded in the task and revalidated at claim time.
+Historical v1 aliases and journal rows remain readable but are never advertised
+or executed. Readiness depends on a valid M5 gateway configuration.

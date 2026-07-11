@@ -1,5 +1,5 @@
 /**
- * Munin-backed task store for orchestrator-v1 broker submissions.
+ * Munin-backed task store for durable MCP broker submissions.
  *
  * Per docs/orchestrator-v1-data-model.md §12, Munin is the canonical
  * durable record for submission, execution, and completion. This module
@@ -8,20 +8,22 @@
  *   namespace: tasks/<task_id>
  *   key:       status              — task envelope + lifecycle tags
  *   key:       result-structured   — DelegationResult JSON (success path)
- *   key:       result-error        — DelegationError JSON (failure path)
+ *   key:       feedback            — product usefulness rating
  *
- * The status entry tags include `pending | running | completed | failed`,
- * `runtime:<row_id>`, and `orch-v1` to keep these tasks out of the legacy
- * dispatcher's poll loop (filtered in src/index.ts:pollOnce).
+ * New v2 status entries are ordinary `runtime:homeserver` tasks consumed by
+ * the canonical dispatcher. The orch-v1 constants/methods below remain only
+ * for historical readers and the retired compatibility tests.
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { MuninClient } from "../munin-client.js";
 import type {
   AwaitRequest,
   DelegationEnvelope,
   DelegationError,
 } from "./types.js";
+import { delegationEnvelopeSchema, delegationRequestSchema } from "./types.js";
+import { hashPayload } from "./idempotency.js";
 
 export interface DelegationResultLike {
   task_id: string;
@@ -39,19 +41,15 @@ export interface TaskStoreConfig {
 }
 
 /**
- * Generate a broker task id of the form
- *   YYYYMMDD-HHMMSS-orch-<8-char-hex>
- * matching the existing Hugin scheme.
+ * Generate a stable principal-scoped task id. Persisting the request at this
+ * namespace is the restart-safe idempotency record; the raw key is never tagged.
  */
-export function generateBrokerTaskId(now: Date = new Date()): string {
-  const yyyy = now.getUTCFullYear().toString().padStart(4, "0");
-  const mm = (now.getUTCMonth() + 1).toString().padStart(2, "0");
-  const dd = now.getUTCDate().toString().padStart(2, "0");
-  const hh = now.getUTCHours().toString().padStart(2, "0");
-  const mi = now.getUTCMinutes().toString().padStart(2, "0");
-  const ss = now.getUTCSeconds().toString().padStart(2, "0");
-  const suffix = randomBytes(4).toString("hex");
-  return `${yyyy}${mm}${dd}-${hh}${mi}${ss}-orch-${suffix}`;
+export function generateBrokerTaskId(principal: string, idempotencyKey: string): string {
+  const digest = createHash("sha256")
+    .update(`${principal}\0${idempotencyKey}`)
+    .digest("hex")
+    .slice(0, 24);
+  return `mcp-m5-${digest}`;
 }
 
 export function namespaceForTaskId(taskId: string): string {
@@ -69,7 +67,14 @@ export class BrokerTaskStore {
     const ns = namespaceForTaskId(params.envelope.task_id);
     const tags = buildSubmitTags(params.envelope);
     const content = serializeEnvelope(params.envelope);
-    await this.munin.write(ns, STATUS_KEY, content, tags, undefined, "internal");
+    await this.munin.write(
+      ns,
+      STATUS_KEY,
+      content,
+      tags,
+      undefined,
+      params.envelope.sensitivity === "private" ? "client-restricted" : "internal",
+    );
   }
 
   /**
@@ -88,6 +93,57 @@ export class BrokerTaskStore {
   async readErrorResult(taskId: string) {
     const ns = namespaceForTaskId(taskId);
     return this.munin.read(ns, RESULT_ERROR_KEY);
+  }
+
+  async writeFeedback(taskId: string, feedback: Record<string, unknown>): Promise<void> {
+    const status = await this.readStatus(taskId);
+    const envelope = status ? parseStoredEnvelope(status.content) : null;
+    await this.munin.write(
+      namespaceForTaskId(taskId),
+      "feedback",
+      JSON.stringify(feedback),
+      ["broker:mcp-v2", "feedback"],
+      undefined,
+      envelope?.sensitivity === "private" ? "client-restricted" : "internal",
+    );
+  }
+
+  async listCanonical(principal: string, limit = 50): Promise<Array<{
+    task_id: string;
+    submitted_at: string;
+    outcome: "completed" | "failed" | "cancelled" | "running";
+    alias: DelegationEnvelope["alias_requested"];
+  }>> {
+    const { results } = await this.munin.query({
+      query: "task",
+      tags: ["broker:mcp-v2"],
+      namespace: "tasks/",
+      entry_type: "state",
+      limit: Math.min(500, Math.max(limit * 3, limit)),
+    });
+    const rows = [];
+    for (const result of results) {
+      if (result.key !== STATUS_KEY) continue;
+      const entry = await this.munin.read(result.namespace, STATUS_KEY);
+      if (!entry) continue;
+      const parsed = parseCanonicalEnvelope(entry.content);
+      if (!parsed.ok || parsed.envelope.broker_principal !== principal) continue;
+      const envelope = parsed.envelope;
+      rows.push({
+        task_id: envelope.task_id,
+        submitted_at: envelope.received_at,
+        outcome: entry.tags.includes("completed")
+          ? "completed" as const
+          : entry.tags.includes("failed")
+            ? "failed" as const
+            : entry.tags.includes("cancelled")
+              ? "cancelled" as const
+            : "running" as const,
+        alias: envelope.alias_requested,
+      });
+    }
+    rows.sort((a, b) => b.submitted_at.localeCompare(a.submitted_at));
+    return rows;
   }
 
   /**
@@ -187,11 +243,12 @@ export class BrokerTaskStore {
 export function buildSubmitTags(envelope: DelegationEnvelope): string[] {
   return [
     "pending",
-    `runtime:${envelope.alias_resolved.runtime}`,
+    "runtime:homeserver",
     `runtime-row:${envelope.alias_resolved.runtime_row_id}`,
     `alias:${envelope.alias_resolved.alias}`,
     `task-type:${envelope.task_type}`,
-    ORCH_V1_TAG,
+    "broker:mcp-v2",
+    `idempotency:${createHash("sha256").update(`${envelope.broker_principal}\0${envelope.idempotency_key}`).digest("hex")}`,
   ];
 }
 
@@ -206,7 +263,66 @@ export function flipLifecycleTags(
 }
 
 export function serializeEnvelope(envelope: DelegationEnvelope): string {
-  return JSON.stringify(envelope, null, 2);
+  const verifier = envelope.acceptance.mode === "verifier"
+    ? JSON.stringify(envelope.acceptance.verifier)
+    : "none";
+  return [
+    `## Task: MCP M5 leaf ${envelope.task_id}`,
+    "",
+    "- **Runtime:** homeserver",
+    "- **Homeserver path:** delegate",
+    `- **Task type:** ${envelope.task_type}`,
+    `- **Verifier:** ${verifier}`,
+    `- **Acceptance mode:** ${envelope.acceptance.mode}`,
+    `- **Allowed destinations:** ${envelope.allowed_destinations.join(",")}`,
+    `- **Tool policy:** ${envelope.tool_policy.mode}`,
+    `- **Max attempts:** ${envelope.budget.max_attempts}`,
+    `- **Max cost USD:** ${envelope.budget.max_cost_usd}`,
+    `- **Durability:** ${envelope.durability}`,
+    `- **Delivery mode:** ${envelope.delivery.mode}`,
+    `- **Escalation mode:** ${envelope.escalation.mode}`,
+    `- **Timeout:** ${envelope.timeout_ms ?? 300000}`,
+    `- **Max output tokens:** ${envelope.max_output_tokens ?? 4096}`,
+    `- **Submitted by:** ${envelope.orchestrator_submitter}`,
+    `- **Submitted at:** ${envelope.received_at}`,
+    `- **Sensitivity:** ${envelope.sensitivity ?? "internal"}`,
+    `- **Idempotency payload SHA256:** ${stableRequestHash(envelope)}`,
+    "",
+    "### Broker envelope",
+    "```json",
+    JSON.stringify(envelope, null, 2),
+    "```",
+    "",
+    "### Prompt",
+    envelope.prompt,
+  ].join("\n");
+}
+
+function stableRequestHash(envelope: DelegationEnvelope): string {
+  const request = delegationRequestSchema.parse(envelope);
+  return createHash("sha256")
+    .update(`${envelope.broker_principal}\0${hashPayload(request)}`)
+    .digest("hex");
+}
+
+export function parseStoredEnvelope(content: string): DelegationEnvelope | null {
+  const match = content.match(/### Broker envelope\s*\n```json\s*\n([\s\S]*?)\n```/i);
+  if (!match?.[1]) return null;
+  try {
+    return JSON.parse(match[1]) as DelegationEnvelope;
+  } catch {
+    return null;
+  }
+}
+
+export function parseCanonicalEnvelope(content: string):
+  | { ok: true; envelope: DelegationEnvelope }
+  | { ok: false; error: string } {
+  const raw = parseStoredEnvelope(content);
+  if (!raw) return { ok: false, error: "Canonical Broker envelope is missing or malformed" };
+  const parsed = delegationEnvelopeSchema.safeParse(raw);
+  if (!parsed.success) return { ok: false, error: "Canonical Broker envelope is invalid" };
+  return { ok: true, envelope: parsed.data };
 }
 
 export function parseAwaitRequest(value: AwaitRequest): AwaitRequest {

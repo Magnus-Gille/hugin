@@ -6,6 +6,8 @@ import {
   flipLifecycleTags,
   generateBrokerTaskId,
   namespaceForTaskId,
+  parseCanonicalEnvelope,
+  serializeEnvelope,
 } from "../../src/broker/task-store.js";
 import type { MuninClient } from "../../src/munin-client.js";
 import type { DelegationEnvelope } from "../../src/broker/types.js";
@@ -49,33 +51,45 @@ class FakeMunin {
 
 function envelope(taskId: string): DelegationEnvelope {
   return {
-    envelope_version: 1,
+    envelope_version: 2,
     idempotency_key: "11111111-1111-4111-8111-111111111111",
     orchestrator_session_id: "sess-1",
     orchestrator_submitter: "claude-code",
     task_type: "summarize",
     prompt: "Summarize.",
-    alias_requested: "tiny",
-    alias_map_version: 1,
+    alias_requested: "m5",
+    alias_map_version: 2,
+    sensitivity: "internal",
+    timeout_ms: 300_000,
+    max_output_tokens: 4_096,
+    acceptance: { mode: "l1_review" },
+    allowed_destinations: ["m5"],
+    tool_policy: { mode: "none" },
+    budget: { max_attempts: 1, max_cost_usd: 0 },
+    durability: "required",
+    delivery: { mode: "munin" },
+    escalation: { mode: "return_to_l1" },
     task_id: taskId,
     broker_principal: "claude-code",
     received_at: "2026-04-26T12:00:00Z",
     alias_resolved: {
-      alias: "tiny",
+      alias: "m5",
       family: "one-shot",
-      model_requested: "qwen2.5:3b",
-      runtime: "ollama",
-      runtime_row_id: "ollama-pi",
-      host: "pi",
+      model_requested: "gateway-selected",
+      runtime: "homeserver",
+      runtime_row_id: "homeserver-m5",
+      host: "m5",
     },
     policy_version: "zdr-v1+rlv-v1",
   };
 }
 
 describe("generateBrokerTaskId", () => {
-  it("produces YYYYMMDD-HHMMSS-orch-<hex> shape", () => {
-    const id = generateBrokerTaskId(new Date("2026-04-26T12:34:56Z"));
-    expect(id).toMatch(/^20260426-123456-orch-[0-9a-f]{8}$/);
+  it("produces a stable principal-scoped task id", () => {
+    const id = generateBrokerTaskId("claude-code", "11111111-1111-4111-8111-111111111111");
+    expect(id).toMatch(/^mcp-m5-[0-9a-f]{24}$/);
+    expect(generateBrokerTaskId("claude-code", "11111111-1111-4111-8111-111111111111")).toBe(id);
+    expect(generateBrokerTaskId("codex", "11111111-1111-4111-8111-111111111111")).not.toBe(id);
   });
 });
 
@@ -86,14 +100,15 @@ describe("namespaceForTaskId", () => {
 });
 
 describe("buildSubmitTags", () => {
-  it("includes pending + runtime + alias + orch-v1", () => {
+  it("includes canonical dispatcher tags without orch-v1", () => {
     const tags = buildSubmitTags(envelope("t1"));
     expect(tags).toContain("pending");
-    expect(tags).toContain("runtime:ollama");
-    expect(tags).toContain("runtime-row:ollama-pi");
-    expect(tags).toContain("alias:tiny");
+    expect(tags).toContain("runtime:homeserver");
+    expect(tags).toContain("runtime-row:homeserver-m5");
+    expect(tags).toContain("alias:m5");
     expect(tags).toContain("task-type:summarize");
-    expect(tags).toContain(ORCH_V1_TAG);
+    expect(tags).toContain("broker:mcp-v2");
+    expect(tags).not.toContain(ORCH_V1_TAG);
   });
 });
 
@@ -123,8 +138,64 @@ describe("BrokerTaskStore.submit", () => {
     expect(w.namespace).toBe("tasks/t1");
     expect(w.key).toBe("status");
     expect(w.tags).toContain("pending");
-    expect(w.tags).toContain(ORCH_V1_TAG);
+    expect(w.tags).toContain("broker:mcp-v2");
+    expect(w.tags).not.toContain(ORCH_V1_TAG);
+    expect(w.content).toContain("**Runtime:** homeserver");
+    expect(w.content).toContain("### Broker envelope");
     expect(w.classification).toBe("internal");
+  });
+
+  it("stores private task content at the restricted classification floor", async () => {
+    const munin = new FakeMunin();
+    const privateEnvelope = envelope("private");
+    privateEnvelope.sensitivity = "private";
+    await new BrokerTaskStore(munin as unknown as MuninClient).submit({ envelope: privateEnvelope });
+    expect(munin.writes[0]?.classification).toBe("client-restricted");
+  });
+});
+
+describe("canonical Broker envelope", () => {
+  it("round-trips the complete v2 contract and remains authoritative over display fields", () => {
+    const expected = envelope("t1");
+    const document = serializeEnvelope(expected)
+      .replace("- **Timeout:** 300000", "- **Timeout:** 1")
+      .replace("- **Sensitivity:** internal", "- **Sensitivity:** public");
+    const parsed = parseCanonicalEnvelope(document);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.envelope).toEqual(expected);
+      expect(parsed.envelope.timeout_ms).toBe(300_000);
+      expect(parsed.envelope.sensitivity).toBe("internal");
+    }
+  });
+
+  it("fails closed when a required policy field is removed", () => {
+    const expected = envelope("t1");
+    const document = serializeEnvelope(expected).replace(
+      '  "allowed_destinations": [\n    "m5"\n  ],\n',
+      "",
+    );
+    expect(parseCanonicalEnvelope(document)).toEqual({
+      ok: false,
+      error: "Canonical Broker envelope is invalid",
+    });
+  });
+});
+
+describe("BrokerTaskStore.listCanonical", () => {
+  it("classifies cancelled as terminal cancelled, never running", async () => {
+    const munin = new FakeMunin();
+    munin.queryReturn = {
+      results: [{ namespace: "tasks/t1", key: "status", tags: ["cancelled", "broker:mcp-v2"] }],
+      total: 1,
+    };
+    munin.readReturn["tasks/t1/status"] = {
+      content: serializeEnvelope(envelope("t1")),
+      tags: ["cancelled", "broker:mcp-v2"],
+    };
+    const rows = await new BrokerTaskStore(munin as unknown as MuninClient)
+      .listCanonical("claude-code");
+    expect(rows).toEqual([expect.objectContaining({ task_id: "t1", outcome: "cancelled" })]);
   });
 });
 

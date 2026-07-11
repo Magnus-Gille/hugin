@@ -1,4 +1,9 @@
-# Orchestrator v1 — Delegation Data Model
+# Orchestrator v1 — Historical Delegation Data Model
+
+> **Superseded for new submissions (2026-07-11, issue #167).** Historical
+> envelopes and JSONL events remain readable. New `hugin_submit` calls use the
+> v2 `m5` envelope and the normal Hugin/Munin dispatcher lifecycle; the separate
+> orch-v1 worker, reconciliation loop, and new journal writes are retired.
 
 **Status:** Draft contract spec, pending Magnus sign-off
 **Date:** 2026-04-25 (updated 2026-04-26 — Option B locked in: `pi` harness on Pi enters v1)

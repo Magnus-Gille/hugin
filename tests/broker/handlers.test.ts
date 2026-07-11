@@ -11,6 +11,7 @@ import { brokerExecutorCapabilities } from "../../src/broker/executor-capabiliti
 import type { MuninClient } from "../../src/munin-client.js";
 
 const SECRET = "a".repeat(64);
+const OTHER_SECRET = "b".repeat(64);
 
 class FakeMunin {
   writes: Array<{ namespace: string; key: string; content: string; tags?: string[] }> = [];
@@ -25,6 +26,11 @@ class FakeMunin {
     _classification?: string,
   ): Promise<Record<string, unknown>> {
     this.writes.push({ namespace, key, content, tags });
+    this.reads[`${namespace}/${key}`] = {
+      namespace, key, content, tags: tags ?? [],
+      created_at: "2026-07-11T12:00:00.000Z",
+      updated_at: "2026-07-11T12:00:00.000Z",
+    };
     return { ok: true };
   }
   async read(namespace: string, key: string): Promise<unknown> {
@@ -55,12 +61,12 @@ beforeEach(async () => {
   const broker = await startBroker({
     host: "127.0.0.1",
     port: 0,
-    keys: { "claude-code": SECRET },
+    keys: { "claude-code": SECRET, codex: OTHER_SECRET },
     deps: {
       taskStore,
       journal,
       idempotency,
-      executorCapabilities: brokerExecutorCapabilities({ openrouterEnabled: true }),
+      executorCapabilities: brokerExecutorCapabilities({ homeserverEnabled: true }),
     },
   });
   const addr = broker.server.address() as AddressInfo;
@@ -86,16 +92,37 @@ function authHeader(): Record<string, string> {
   };
 }
 
+function otherAuthHeader(): Record<string, string> {
+  return {
+    "content-type": "application/json",
+    authorization: `Bearer ${OTHER_SECRET}`,
+  };
+}
+
+function historicalBrokerStatus(principal = "claude-code"): string {
+  return JSON.stringify({ broker_principal: principal });
+}
+
 function validRequest(overrides: Record<string, unknown> = {}) {
   return {
-    envelope_version: 1,
+    envelope_version: 2,
     idempotency_key: "11111111-1111-4111-8111-111111111111",
     orchestrator_session_id: "sess-1",
     orchestrator_submitter: "claude-code",
     task_type: "summarize",
     prompt: "Summarize the README.",
-    alias_requested: "large-reasoning",
-    alias_map_version: 1,
+    alias_requested: "m5",
+    alias_map_version: 2,
+    sensitivity: "internal",
+    timeout_ms: 300_000,
+    max_output_tokens: 4_096,
+    acceptance: { mode: "l1_review" },
+    allowed_destinations: ["m5"],
+    tool_policy: { mode: "none" },
+    budget: { max_attempts: 1, max_cost_usd: 0 },
+    durability: "required",
+    delivery: { mode: "munin" },
+    escalation: { mode: "return_to_l1" },
     ...overrides,
   };
 }
@@ -128,10 +155,11 @@ describe("POST /v1/delegate/submit", () => {
     });
     expect(res.status).toBe(202);
     const body = await res.json();
-    expect(body.task_id).toMatch(/^\d{8}-\d{6}-orch-[0-9a-f]{8}$/);
+    expect(body.task_id).toMatch(/^mcp-m5-[0-9a-f]{24}$/);
     expect(body.reused_idempotency).toBe(false);
     expect(harness.munin.writes).toHaveLength(1);
-    expect(harness.munin.writes[0]!.tags).toContain(ORCH_V1_TAG);
+    expect(harness.munin.writes[0]!.tags).toContain("broker:mcp-v2");
+    expect(harness.munin.writes[0]!.tags).not.toContain("orch-v1");
   });
 
   it("returns 200 reused_idempotency on retry with same payload", async () => {
@@ -154,6 +182,49 @@ describe("POST /v1/delegate/submit", () => {
     expect(harness.munin.writes).toHaveLength(1);
   });
 
+  it("reuses the persisted task after a fresh Broker instance and ignores MCP session rotation", async () => {
+    const first = validRequest();
+    const firstResponse = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST", headers: authHeader(), body: JSON.stringify(first),
+    });
+    const accepted = await firstResponse.json();
+
+    const restarted = await startBroker({
+      host: "127.0.0.1",
+      port: 0,
+      keys: { "claude-code": SECRET },
+      deps: {
+        taskStore: new BrokerTaskStore(harness.munin as unknown as MuninClient),
+        journal: harness.journal,
+        idempotency: new IdempotencyIndex(),
+        executorCapabilities: brokerExecutorCapabilities({ homeserverEnabled: true }),
+      },
+    });
+    try {
+      const addr = restarted.server.address() as AddressInfo;
+      const res = await fetch(`http://127.0.0.1:${addr.port}/v1/delegate/submit`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(validRequest({ orchestrator_session_id: "new-mcp-session" })),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        task_id: accepted.task_id,
+        reused_idempotency: true,
+      });
+      expect(harness.munin.writes.filter((write) => write.key === "status")).toHaveLength(1);
+
+      const collision = await fetch(`http://127.0.0.1:${addr.port}/v1/delegate/submit`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(validRequest({ prompt: "different", orchestrator_session_id: "third" })),
+      });
+      expect(collision.status).toBe(409);
+    } finally {
+      await restarted.close();
+    }
+  });
+
   it("returns 409 collision when key reused with different payload", async () => {
     const r1 = await fetch(`${harness.url}/v1/delegate/submit`, {
       method: "POST",
@@ -172,6 +243,22 @@ describe("POST /v1/delegate/submit", () => {
     expect(body.existing_task_id).toBeDefined();
   });
 
+  it("scopes concurrent idempotency reservations by authenticated principal", async () => {
+    const claude = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest()),
+    });
+    const codex = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: otherAuthHeader(),
+      body: JSON.stringify(validRequest({ orchestrator_submitter: "codex" })),
+    });
+    expect(claude.status).toBe(202);
+    expect(codex.status).toBe(202);
+    expect((await claude.json()).task_id).not.toBe((await codex.json()).task_id);
+  });
+
   it("rejects invalid envelope shape", async () => {
     const res = await fetch(`${harness.url}/v1/delegate/submit`, {
       method: "POST",
@@ -179,6 +266,31 @@ describe("POST /v1/delegate/submit", () => {
       body: JSON.stringify({ envelope_version: 1 }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it.each([
+    { timeout_ms: 900_001 },
+    { max_output_tokens: 32_769 },
+  ])("rejects an unbounded leaf budget before persistence: %j", async (budget) => {
+    const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest(budget)),
+    });
+    expect(res.status).toBe(400);
+    expect(harness.munin.writes).toHaveLength(0);
+  });
+
+  it("rejects an unknown or malformed verifier before durable state", async () => {
+    const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest({
+        acceptance: { mode: "verifier", verifier: { type: "arbitrary-code", command: "rm" } },
+      })),
+    });
+    expect(res.status).toBe(400);
+    expect(harness.munin.writes).toHaveLength(0);
   });
 
   it.each(["tiny", "medium", "pi-large-coder"])(
@@ -194,7 +306,7 @@ describe("POST /v1/delegate/submit", () => {
       expect(body.error).toBe("alias_unavailable");
       expect(body.reason).toBe("no_executor_implemented");
       expect(body.retryable).toBe(false);
-      expect(body.executable_aliases).toEqual(["large-reasoning"]);
+      expect(body.executable_aliases).toEqual(["m5"]);
       expect(harness.munin.writes).toHaveLength(0);
       expect(await harness.journal.readAll()).toEqual([]);
 
@@ -219,7 +331,7 @@ describe("POST /v1/delegate/submit", () => {
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error).toBe("policy_rejected");
-    expect(body.alias_map_version).toBe(1);
+    expect(body.alias_map_version).toBe(2);
     expect(harness.munin.writes).toHaveLength(0);
   });
 
@@ -229,7 +341,7 @@ describe("POST /v1/delegate/submit", () => {
       headers: authHeader(),
       body: JSON.stringify(
         validRequest({
-          alias_requested: "large-reasoning",
+          alias_requested: "m5",
           worktree: { repo: "hugin", base_ref: "main" },
         }),
       ),
@@ -255,7 +367,7 @@ describe("POST /v1/delegate/await", () => {
       id: "1",
       namespace: "tasks/t1",
       key: "status",
-      content: "envelope",
+      content: historicalBrokerStatus(),
       tags: ["pending", ORCH_V1_TAG],
       created_at: "ts",
       updated_at: "ts",
@@ -278,7 +390,7 @@ describe("POST /v1/delegate/await", () => {
       id: "1",
       namespace: "tasks/t1",
       key: "status",
-      content: "envelope",
+      content: historicalBrokerStatus(),
       tags: [
         "running",
         ORCH_V1_TAG,
@@ -307,7 +419,7 @@ describe("POST /v1/delegate/await", () => {
       id: "1",
       namespace: "tasks/t1",
       key: "status",
-      content: "envelope",
+      content: historicalBrokerStatus(),
       tags: [
         "running",
         ORCH_V1_TAG,
@@ -330,7 +442,7 @@ describe("POST /v1/delegate/await", () => {
 
   it("returns completed with structured result", async () => {
     harness.munin.reads["tasks/t1/status"] = {
-      content: "envelope",
+      content: historicalBrokerStatus(),
       tags: ["completed", ORCH_V1_TAG],
       created_at: "ts",
       updated_at: "ts",
@@ -350,7 +462,7 @@ describe("POST /v1/delegate/await", () => {
 
   it("returns failed with error result", async () => {
     harness.munin.reads["tasks/t1/status"] = {
-      content: "envelope",
+      content: historicalBrokerStatus(),
       tags: ["failed", ORCH_V1_TAG],
       created_at: "ts",
       updated_at: "ts",
@@ -367,12 +479,42 @@ describe("POST /v1/delegate/await", () => {
     expect(body.status).toBe("failed");
     expect(body.error.kind).toBe("internal");
   });
+
+  it("returns a cancelled canonical task as terminal instead of running", async () => {
+    harness.munin.reads["tasks/cancelled/status"] = {
+      content: historicalBrokerStatus(), tags: ["cancelled", "broker:mcp-v2"],
+      created_at: "ts", updated_at: "ts",
+    };
+    harness.munin.reads["tasks/cancelled/result-structured"] = {
+      content: JSON.stringify({ outcome: "cancelled", bodyText: "operator cancelled" }),
+      tags: ["result-structured"], created_at: "ts", updated_at: "ts",
+    };
+    const res = await fetch(`${harness.url}/v1/delegate/await`, {
+      method: "POST", headers: authHeader(), body: JSON.stringify({ task_id: "cancelled" }),
+    });
+    expect(await res.json()).toMatchObject({
+      status: "failed",
+      result: { outcome: "cancelled" },
+      error: { kind: "cancelled", retryable: false },
+    });
+  });
+
+  it("prevents one principal from awaiting another principal's canonical result", async () => {
+    const submit = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST", headers: authHeader(), body: JSON.stringify(validRequest()),
+    });
+    const { task_id } = await submit.json();
+    const res = await fetch(`${harness.url}/v1/delegate/await`, {
+      method: "POST", headers: otherAuthHeader(), body: JSON.stringify({ task_id }),
+    });
+    expect(res.status).toBe(403);
+  });
 });
 
 describe("POST /v1/delegate/rate", () => {
-  it("appends rated event and returns 204", async () => {
+  it("writes product feedback to the canonical task and returns 204", async () => {
     harness.munin.reads["tasks/t1/status"] = {
-      content: "envelope",
+      content: historicalBrokerStatus(),
       tags: ["completed", ORCH_V1_TAG],
       created_at: "ts",
       updated_at: "ts",
@@ -388,9 +530,12 @@ describe("POST /v1/delegate/rate", () => {
       }),
     });
     expect(res.status).toBe(204);
-    const events = await harness.journal.readAll();
-    expect(events).toHaveLength(1);
-    expect(events[0]!.event_type).toBe("delegation_rated");
+    expect(harness.munin.writes.at(-1)?.key).toBe("feedback");
+    expect(JSON.parse(harness.munin.writes.at(-1)!.content)).toMatchObject({
+      task_id: "t1",
+      rating: "pass",
+      rated_by: "claude-code",
+    });
   });
 
   it("returns 404 if task not found", async () => {
@@ -406,6 +551,39 @@ describe("POST /v1/delegate/rate", () => {
     });
     expect(res.status).toBe(404);
   });
+
+  it("prevents another Broker principal from poisoning canonical product feedback", async () => {
+    const submit = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST", headers: authHeader(), body: JSON.stringify(validRequest()),
+    });
+    const { task_id } = await submit.json();
+    const res = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${OTHER_SECRET}` },
+      body: JSON.stringify({
+        task_id, rating: "wrong", rating_reason: "poison", verification_outcome: "discarded",
+      }),
+    });
+    expect(res.status).toBe(403);
+    expect(harness.munin.writes.some((write) => write.key === "feedback")).toBe(false);
+  });
+
+  it("rejects feedback before the canonical task is terminal", async () => {
+    const submit = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST", headers: authHeader(), body: JSON.stringify(validRequest()),
+    });
+    const { task_id } = await submit.json();
+    const res = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        task_id, rating: "pass", rating_reason: "too early",
+        verification_outcome: "accepted_unchanged",
+      }),
+    });
+    expect(res.status).toBe(409);
+    expect(harness.munin.writes.some((write) => write.key === "feedback")).toBe(false);
+  });
 });
 
 describe("GET /v1/delegate/list", () => {
@@ -418,18 +596,84 @@ describe("GET /v1/delegate/list", () => {
     expect(body.total).toBe(0);
   });
 
-  it("returns submitted tasks projected from journal", async () => {
+  it("returns submitted canonical tasks from Munin", async () => {
     await fetch(`${harness.url}/v1/delegate/submit`, {
       method: "POST",
       headers: authHeader(),
       body: JSON.stringify(validRequest()),
     });
+    const submitted = harness.munin.writes.find((write) => write.key === "status")!;
+    harness.munin.queryReturn = {
+      results: [{ namespace: submitted.namespace, key: "status", tags: submitted.tags }],
+      total: 1,
+    };
     const res = await fetch(`${harness.url}/v1/delegate/list`, {
       headers: { authorization: `Bearer ${SECRET}` },
     });
     const body = await res.json();
     expect(body.rows).toHaveLength(1);
     expect(body.total).toBe(1);
+    expect(body.rows[0].alias).toBe("m5");
+  });
+
+  it("lists only canonical tasks owned by the authenticated principal", async () => {
+    await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST", headers: authHeader(), body: JSON.stringify(validRequest()),
+    });
+    await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST", headers: otherAuthHeader(),
+      body: JSON.stringify(validRequest({ orchestrator_submitter: "codex" })),
+    });
+    const statuses = harness.munin.writes.filter((write) => write.key === "status");
+    harness.munin.queryReturn = {
+      results: statuses.map((write) => ({
+        namespace: write.namespace, key: "status", tags: write.tags,
+      })),
+      total: statuses.length,
+    };
+    const claude = await fetch(`${harness.url}/v1/delegate/list`, {
+      headers: { authorization: `Bearer ${SECRET}` },
+    });
+    const codex = await fetch(`${harness.url}/v1/delegate/list`, {
+      headers: { authorization: `Bearer ${OTHER_SECRET}` },
+    });
+    expect((await claude.json()).rows).toHaveLength(1);
+    expect((await codex.json()).rows).toHaveLength(1);
+  });
+
+  it("keeps historical orch-v1 journal rows readable without new dual writes", async () => {
+    await harness.journal.append({
+      event_schema_version: 1,
+      event_type: "delegation_submitted",
+      event_ts: "2026-04-26T12:00:00Z",
+      task_id: "legacy-orch-task",
+      envelope: {
+        envelope_version: 1,
+        idempotency_key: "11111111-1111-4111-8111-111111111111",
+        orchestrator_session_id: "legacy",
+        orchestrator_submitter: "claude-code",
+        task_type: "summarize",
+        prompt: "legacy",
+        alias_requested: "large-reasoning",
+        alias_map_version: 1,
+        task_id: "legacy-orch-task",
+        broker_principal: "claude-code",
+        received_at: "2026-04-26T12:00:00Z",
+        alias_resolved: {
+          alias: "large-reasoning", family: "one-shot", model_requested: "openai/gpt-oss-120b",
+          runtime: "openrouter", runtime_row_id: "openrouter", host: "openrouter",
+        },
+        policy_version: "zdr-v1+rlv-v1",
+      },
+      prompt_chars: 6,
+      prompt_sha256: "legacy",
+    } as never);
+    const res = await fetch(`${harness.url}/v1/delegate/list`, {
+      headers: { authorization: `Bearer ${SECRET}` },
+    });
+    const body = await res.json();
+    expect(body.rows).toHaveLength(1);
+    expect(body.rows[0].task_id).toBe("legacy-orch-task");
     expect(body.rows[0].envelope.alias_requested).toBe("large-reasoning");
   });
 });
@@ -441,17 +685,17 @@ describe("GET /v1/delegate/models", () => {
     });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.alias_map_version).toBe(1);
+    expect(body.alias_map_version).toBe(2);
     expect(body.aliases.map((entry: { alias: string }) => entry.alias)).toEqual([
-      "large-reasoning",
+      "m5",
     ]);
     expect(body.runtime_rows.map((row: { id: string }) => row.id)).toEqual([
-      "openrouter",
+      "homeserver-m5",
     ]);
     expect(body.policy_version).toBe("zdr-v1+rlv-v1");
   });
 
-  it("advertises nothing and rejects large-reasoning when its executor is disabled", async () => {
+  it("advertises nothing and rejects m5 when its executor is disabled", async () => {
     const tmpDir = mkdtempSync(path.join(tmpdir(), "broker-disabled-"));
     const munin = new FakeMunin();
     const broker = await startBroker({
@@ -463,7 +707,7 @@ describe("GET /v1/delegate/models", () => {
         journal: new DelegationJournal({ path: path.join(tmpDir, "events.jsonl") }),
         idempotency: new IdempotencyIndex(),
         executorCapabilities: brokerExecutorCapabilities({
-          openrouterEnabled: false,
+          homeserverEnabled: false,
         }),
       },
     });
@@ -510,7 +754,7 @@ describe("buildBrokerApp (in-process)", () => {
         }),
         idempotency: new IdempotencyIndex(),
         executorCapabilities: brokerExecutorCapabilities({
-          openrouterEnabled: true,
+          homeserverEnabled: true,
         }),
       },
     });

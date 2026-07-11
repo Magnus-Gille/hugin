@@ -21,6 +21,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { resolveGatewayRootUrl } from "./orchestrator/provider-config.js";
 
 // --- Types ---
 
@@ -93,6 +94,10 @@ export interface HomeserverExecutorResult {
   decisionReason: string | null;
   ledgerId: string | null;
   escalated: boolean | null;
+  taskType: string | null;
+  modelId: string | null;
+  verifierNotes: string | null;
+  nodeId: string | null;
 }
 
 export interface HomeserverExecutorOptions {
@@ -130,10 +135,14 @@ export function loadHomeserverGatewayConfig(
   // resolveProviderBaseUrl, which reads this env var too.
   const baseUrl = raw.replace(/\/+$/, "");
   const apiKey = env.HOMESERVER_GATEWAY_API_KEY?.trim() ?? "";
+  const resolved = resolveGatewayRootUrl(
+    { ...env, HOMESERVER_GATEWAY_URL: baseUrl },
+  );
+  if (!resolved.ok) return null;
   // A keyless gateway is only safe on loopback. Refuse to send unauthenticated
   // requests to a remote/LAN/public gateway — treat it as not-configured.
   if (!apiKey && !isLoopbackUrl(baseUrl)) return null;
-  return { baseUrl, apiKey };
+  return { baseUrl: resolved.baseUrl, apiKey };
 }
 
 // --- Constants ---
@@ -225,6 +234,10 @@ export async function executeHomeserverTask(
     decisionReason: null,
     ledgerId: null,
     escalated: null,
+    taskType: null,
+    modelId: null,
+    verifierNotes: null,
+    nodeId: null,
   };
 
   const finish = async (): Promise<HomeserverExecutorResult> => {
@@ -330,6 +343,10 @@ export async function executeHomeserverTask(
         ledgerId?: string;
         metrics?: { promptTokens?: number; completionTokens?: number; latencyMs?: number };
         frontierOutput?: string;
+        taskType?: string;
+        modelId?: string;
+        verifierNotes?: string;
+        nodeId?: string;
       };
       const text = outcome.output ?? outcome.frontierOutput ?? "";
       appendOutput(text);
@@ -340,6 +357,10 @@ export async function executeHomeserverTask(
       result.score = outcome.score ?? null;
       result.decisionReason = outcome.decisionReason ?? null;
       result.ledgerId = outcome.ledgerId ?? null;
+      result.taskType = outcome.taskType ?? null;
+      result.modelId = outcome.modelId ?? null;
+      result.verifierNotes = outcome.verifierNotes ?? null;
+      result.nodeId = outcome.nodeId ?? null;
       result.promptTokens = outcome.metrics?.promptTokens ?? null;
       result.completionTokens = outcome.metrics?.completionTokens ?? null;
       if (result.promptTokens !== null || result.completionTokens !== null) {

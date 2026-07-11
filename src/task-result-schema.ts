@@ -35,6 +35,7 @@ export const dispatcherRuntimeSchema = z.enum([
   "codex",
   "ollama",
   "opencode",
+  "homeserver",
   "auto",
   "orchestrator",
   "pipeline",
@@ -104,6 +105,18 @@ export const taskExecutionRuntimeMetadataSchema = z.object({
   routingReason: z.string().min(1).optional(),
   eliminatedRuntimes: z.array(routingEliminationSchema).optional(),
   skillRoute: skillRouteSchema.optional(),
+  delegation: z.object({
+    taskType: z.string().min(1).optional(),
+    modelId: z.string().min(1).optional(),
+    nodeId: z.string().min(1).optional(),
+    outcome: z.string().min(1).optional(),
+    score: z.number().optional(),
+    decisionReason: z.string().min(1).optional(),
+    ledgerId: z.string().min(1).optional(),
+    verifierNotes: z.string().min(1).optional(),
+    delegated: z.boolean().optional(),
+    escalated: z.boolean().optional(),
+  }).optional(),
 });
 export type TaskExecutionRuntimeMetadata = z.infer<
   typeof taskExecutionRuntimeMetadataSchema

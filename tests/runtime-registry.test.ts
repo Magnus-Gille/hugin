@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   ALIAS_MAP_V1,
+  ALIAS_MAP_V2,
   RUNTIME_REGISTRY,
   buildRuntimeCandidates,
   getAliasMap,
@@ -22,6 +23,7 @@ describe("RUNTIME_REGISTRY", () => {
     expect(ids).toContain("ollama-laptop");
     expect(ids).toContain("ollama-orin");
     expect(ids).toContain("opencode-m5");
+    expect(ids).toContain("homeserver-m5");
     expect(ids).toContain("openrouter");
     expect(ids).toContain("pi-harness");
   });
@@ -48,7 +50,7 @@ describe("RUNTIME_REGISTRY", () => {
 
   it("cloud entries are semi-trusted (except berget which is trusted/EU-sovereign)", () => {
     const cloudEntries = RUNTIME_REGISTRY.filter(
-      (r) => r.dispatcherRuntime !== "ollama" && r.id !== "berget",
+      (r) => r.egress !== "local" && r.id !== "berget",
     );
     for (const entry of cloudEntries) {
       expect(entry.trustTier).toBe("semi-trusted");
@@ -260,9 +262,12 @@ describe("orchestrator v1 policy fields", () => {
 });
 
 describe("alias map (v1)", () => {
-  it("getAliasMap returns ALIAS_MAP_V1", () => {
-    expect(getAliasMap()).toBe(ALIAS_MAP_V1);
+  it("preserves V1 while getAliasMap returns active V2", () => {
+    expect(getAliasMap()).toBe(ALIAS_MAP_V2);
     expect(ALIAS_MAP_V1.version).toBe(1);
+    expect(ALIAS_MAP_V2.version).toBe(2);
+    expect(Object.keys(ALIAS_MAP_V1.aliases)).not.toContain("m5");
+    expect(ALIAS_MAP_V2.aliases.m5?.runtimeId).toBe("homeserver-m5");
   });
 
   it("contains the four v1 aliases", () => {
