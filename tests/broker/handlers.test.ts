@@ -7,6 +7,7 @@ import { buildBrokerApp, startBroker, type RunningBroker } from "../../src/broke
 import { BrokerTaskStore, ORCH_V1_TAG } from "../../src/broker/task-store.js";
 import { DelegationJournal } from "../../src/broker/journal.js";
 import { IdempotencyIndex } from "../../src/broker/idempotency.js";
+import { brokerExecutorCapabilities } from "../../src/broker/executor-capabilities.js";
 import type { MuninClient } from "../../src/munin-client.js";
 
 const SECRET = "a".repeat(64);
@@ -55,7 +56,12 @@ beforeEach(async () => {
     host: "127.0.0.1",
     port: 0,
     keys: { "claude-code": SECRET },
-    deps: { taskStore, journal, idempotency },
+    deps: {
+      taskStore,
+      journal,
+      idempotency,
+      executorCapabilities: brokerExecutorCapabilities({ openrouterEnabled: true }),
+    },
   });
   const addr = broker.server.address() as AddressInfo;
   harness = {
@@ -88,7 +94,7 @@ function validRequest(overrides: Record<string, unknown> = {}) {
     orchestrator_submitter: "claude-code",
     task_type: "summarize",
     prompt: "Summarize the README.",
-    alias_requested: "tiny",
+    alias_requested: "large-reasoning",
     alias_map_version: 1,
     ...overrides,
   };
@@ -175,15 +181,46 @@ describe("POST /v1/delegate/submit", () => {
     expect(res.status).toBe(400);
   });
 
-  it("rejects harness alias without worktree", async () => {
+  it.each(["tiny", "medium", "pi-large-coder"])(
+    "rejects configured alias %s when no live Broker executor exists",
+    async (alias) => {
+      const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(validRequest({ alias_requested: alias })),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toBe("alias_unavailable");
+      expect(body.reason).toBe("no_executor_implemented");
+      expect(body.retryable).toBe(false);
+      expect(body.executable_aliases).toEqual(["large-reasoning"]);
+      expect(harness.munin.writes).toHaveLength(0);
+      expect(await harness.journal.readAll()).toEqual([]);
+
+      // Availability rejection happens before idempotency reservation: the
+      // same logical key remains usable for an executable alias.
+      const supported = await fetch(`${harness.url}/v1/delegate/submit`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(validRequest()),
+      });
+      expect(supported.status).toBe(202);
+      expect(harness.munin.writes).toHaveLength(1);
+    },
+  );
+
+  it("rejects alias-map version skew before creating durable state", async () => {
     const res = await fetch(`${harness.url}/v1/delegate/submit`, {
       method: "POST",
       headers: authHeader(),
-      body: JSON.stringify(validRequest({ alias_requested: "pi-large-coder" })),
+      body: JSON.stringify(validRequest({ alias_map_version: 99 })),
     });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(409);
     const body = await res.json();
-    expect(body.message).toContain("harness aliases require a worktree");
+    expect(body.error).toBe("policy_rejected");
+    expect(body.alias_map_version).toBe(1);
+    expect(harness.munin.writes).toHaveLength(0);
   });
 
   it("rejects worktree on non-harness alias", async () => {
@@ -192,7 +229,7 @@ describe("POST /v1/delegate/submit", () => {
       headers: authHeader(),
       body: JSON.stringify(
         validRequest({
-          alias_requested: "tiny",
+          alias_requested: "large-reasoning",
           worktree: { repo: "hugin", base_ref: "main" },
         }),
       ),
@@ -393,21 +430,70 @@ describe("GET /v1/delegate/list", () => {
     const body = await res.json();
     expect(body.rows).toHaveLength(1);
     expect(body.total).toBe(1);
-    expect(body.rows[0].envelope.alias_requested).toBe("tiny");
+    expect(body.rows[0].envelope.alias_requested).toBe("large-reasoning");
   });
 });
 
 describe("GET /v1/delegate/models", () => {
-  it("returns alias map + runtime rows + policy_version", async () => {
+  it("advertises only aliases and runtime rows backed by a live executor", async () => {
     const res = await fetch(`${harness.url}/v1/delegate/models`, {
       headers: { authorization: `Bearer ${SECRET}` },
     });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.alias_map_version).toBe(1);
-    expect(body.aliases.length).toBeGreaterThan(0);
-    expect(body.runtime_rows.length).toBeGreaterThan(0);
+    expect(body.aliases.map((entry: { alias: string }) => entry.alias)).toEqual([
+      "large-reasoning",
+    ]);
+    expect(body.runtime_rows.map((row: { id: string }) => row.id)).toEqual([
+      "openrouter",
+    ]);
     expect(body.policy_version).toBe("zdr-v1+rlv-v1");
+  });
+
+  it("advertises nothing and rejects large-reasoning when its executor is disabled", async () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), "broker-disabled-"));
+    const munin = new FakeMunin();
+    const broker = await startBroker({
+      host: "127.0.0.1",
+      port: 0,
+      keys: { "claude-code": SECRET },
+      deps: {
+        taskStore: new BrokerTaskStore(munin as unknown as MuninClient),
+        journal: new DelegationJournal({ path: path.join(tmpDir, "events.jsonl") }),
+        idempotency: new IdempotencyIndex(),
+        executorCapabilities: brokerExecutorCapabilities({
+          openrouterEnabled: false,
+        }),
+      },
+    });
+    try {
+      const addr = broker.server.address() as AddressInfo;
+      const url = `http://127.0.0.1:${addr.port}`;
+      const models = await fetch(`${url}/v1/delegate/models`, {
+        headers: { authorization: `Bearer ${SECRET}` },
+      });
+      const modelBody = await models.json();
+      expect(modelBody.aliases).toEqual([]);
+      expect(modelBody.runtime_rows).toEqual([]);
+
+      const submit = await fetch(`${url}/v1/delegate/submit`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(validRequest()),
+      });
+      expect(submit.status).toBe(503);
+      expect(await submit.json()).toMatchObject({
+        error: "alias_unavailable",
+        reason: "executor_disabled",
+        retryable: true,
+        executable_aliases: [],
+      });
+      expect(munin.writes).toHaveLength(0);
+    } finally {
+      await broker.close();
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -423,6 +509,9 @@ describe("buildBrokerApp (in-process)", () => {
           path: path.join(harness.tmpDir, "ignored.jsonl"),
         }),
         idempotency: new IdempotencyIndex(),
+        executorCapabilities: brokerExecutorCapabilities({
+          openrouterEnabled: true,
+        }),
       },
     });
     expect(app).toBeDefined();

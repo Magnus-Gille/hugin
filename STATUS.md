@@ -1,7 +1,40 @@
 # Hugin — Status
 
-**Last session:** 2026-07-10 (Codex) — #160 merged and deployed to Hugin-Munin
-**Branch:** `main`; production `/home/magnus/repos/hugin` is `main@cbb1f13`.
+**Last session:** 2026-07-11 (Codex) — truthful Broker routing and roadmap reconciliation (#168)
+**Branch:** `main`; production includes PR #168, deployed to Hugin-Munin on 2026-07-11.
+
+## Latest — truthful MCP Broker routing + roadmap reset (#168, 2026-07-11)
+
+PR [#168](https://github.com/Magnus-Gille/hugin/pull/168) closed the defect where
+the MCP Broker advertised and accepted aliases that no worker could drain.
+
+- Added one executor-capability truth shared by submission, `/models`, and the
+  worker. `large-reasoning` is executable only when the OpenRouter worker is
+  configured; `tiny`, `medium`, and `pi-large-coder` remain historical protocol
+  aliases but are rejected before idempotency reservation or durable writes.
+- `/v1/delegate/models` now returns only enabled aliases and their backing
+  runtime rows. hugin-mcp builds its submit enum from that live response and
+  disables submission if discovery fails or returns no enabled executor.
+- Alias-map version skew is rejected explicitly. Historical envelopes and
+  journal rows remain parseable.
+- Native Codex review found no blocking defects and strengthened the test that
+  proves rejected aliases consume neither journal state nor the idempotency key.
+  Claude review was intentionally skipped because it was unavailable. Full
+  suite: 91 files / 1518 tests green; TypeScript build and CI green.
+
+Roadmap reconciliation completed alongside the PR:
+
+- Added #163 provenance, #164 learning-loop health, #165 role-validation trial,
+  #166 truthful Broker routing, and #167 canonical durable Hugin→M5 leaf.
+- Closed solved/superseded #147, #138, #141, and #84.
+- Transferred cross-repo ownership: Hugin #98 → Grimnir #77, #117 → Grimnir
+  #78, and #162 → claude-config #2.
+- Corrected closed #38 and #129 to Done; removed optional #153 deploy hygiene
+  from the active Roadmap while leaving the issue open.
+
+**Next:** implement #167 as the architectural seam, with #163 provenance in the
+same or immediately following slice. Keep the mini-Conductor and skill lane
+frozen while #165 gathers evidence through 2026-08-22.
 
 ## Latest — Reviewed Orin macro route (#160, 2026-07-10)
 

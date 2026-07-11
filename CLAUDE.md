@@ -194,6 +194,7 @@ hugin/
 │   │   └── tools.ts              # 5 MCP tools (hugin_submit/await/rate/list/models) with envelope autofill
 │   └── broker/                   # Orchestrator-v1 broker (Tailscale-only HTTP, /v1/delegate/*)
 │       ├── server.ts             # Express app + opt-in startup (HUGIN_BROKER_KEYS)
+│       ├── executor-capabilities.ts # Live executor truth shared by submit/models/worker
 │       ├── handlers.ts           # submit/await/rate/list/models endpoint handlers
 │       ├── auth.ts               # Bearer-token middleware, constant-time compare
 │       ├── idempotency.ts        # In-memory idempotency-key dedupe (§3.1)
@@ -272,13 +273,19 @@ Claude Code  ⟷  hugin-mcp (stdio)  ⟶  HTTP /v1/delegate/* (Tailscale)  ⟶  
 ```
 
 **Tools exposed:**
-- `hugin_submit` — submit a delegation task
+- `hugin_submit` — submit a delegation task; its alias enum is built from the live Broker discovery result and is disabled when discovery finds no enabled executor
 - `hugin_await` — read current task state
 - `hugin_rate` — append a rating event for a completed task
 - `hugin_list` — list recent delegated tasks
-- `hugin_models` — read the active alias map and runtime registry
+- `hugin_models` — read only aliases with enabled executors and their backing runtime rows
 
 The MCP layer fills in protocol envelope fields (`envelope_version`, `alias_map_version`, `idempotency_key`, `orchestrator_session_id`, `orchestrator_submitter`) so callers only think about the task itself.
+
+The four v1 aliases remain the historical wire catalogue. They are not all
+live routes: as of 2026-07-11 only `large-reasoning` has a Broker executor, and
+only when the Pi has `OPENROUTER_API_KEY`. Never infer executability from the
+compiled alias map; `/v1/delegate/models` is authoritative. The Broker rejects
+an unavailable alias before idempotency reservation or durable writes.
 
 **Required env (orchestrator side):**
 - `HUGIN_BROKER_URL` — e.g. `http://huginmunin.<tailnet>.ts.net:3033`
@@ -325,7 +332,7 @@ claude mcp add-json hugin '{"command":"node","args":["/Users/magnus/repos/hugin/
 | `HUGIN_BROKER_KEYS` | — | Inline JSON keystore: `{"<principal>": "<token>"}`. Setting either this or `HUGIN_BROKER_KEYS_FILE` enables the broker. |
 | `HUGIN_BROKER_KEYS_FILE` | — | Path to a JSON keystore file for the broker. Takes precedence over `HUGIN_BROKER_KEYS`. |
 | `HUGIN_BROKER_RECONCILIATION_INTERVAL_MS` | `60000` | Interval between reconciliation sweeps (backfills journal events for orch-v1 tasks visible in Munin). |
-| `OPENROUTER_API_KEY` | — | Enables the orch-v1 OpenRouter worker (Step 5b). Required to actually execute one-shot delegations; without it the broker still accepts submissions but tasks stay `pending`. |
+| `OPENROUTER_API_KEY` | — | Enables the orch-v1 OpenRouter worker. With it, `large-reasoning` is advertised as executable; without it the Broker advertises no executable aliases and rejects submissions before durable state is created. |
 | `OPENROUTER_REFERER` | `https://hugin.local` | `HTTP-Referer` header value sent to OpenRouter (used for ranking/attribution). |
 | `OPENROUTER_APP_TITLE` | `hugin-orch-v1` | `X-Title` header value sent to OpenRouter. |
 | `HUGIN_FRICTION_INJECTION` | `off` | Set to `on` to inject `friction-mcp` into Claude SDK tasks. Each task gets `report_friction` available as an MCP tool. Default off — opt-in until signal quality is established. |

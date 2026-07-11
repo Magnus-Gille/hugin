@@ -117,6 +117,7 @@ hugin/
 │   └── broker/                   # Orchestrator-v1 broker (Tailscale-only HTTP, /v1/delegate/*)
 │       ├── server.ts             # Express app + opt-in startup (HUGIN_BROKER_KEYS)
 │       ├── handlers.ts           # submit/await/rate/list/models endpoint handlers
+│       ├── executor-capabilities.ts # Live executor truth shared by submit/models/worker
 │       ├── orch-worker.ts        # Polls Munin for orch-v1 tasks, claims via CAS, dispatches to OpenRouter
 │       ├── openrouter-executor.ts # OpenRouter one-shot delegation runner
 │       ├── reconciliation.ts     # Periodic sweep: backfill journal events for orch-v1 tasks
@@ -193,10 +194,16 @@ MUNIN_API_KEY=<same key Munin uses>
 | `HUGIN_BROKER_KEYS` | — | Inline JSON keystore: `{"<principal>": "<token>"}`. Setting either this or `HUGIN_BROKER_KEYS_FILE` enables the broker. |
 | `HUGIN_BROKER_KEYS_FILE` | — | Path to a JSON keystore file for the broker. Takes precedence over `HUGIN_BROKER_KEYS`. |
 | `HUGIN_BROKER_RECONCILIATION_INTERVAL_MS` | `60000` | Interval between reconciliation sweeps (backfills journal events for orch-v1 tasks visible in Munin). |
-| `OPENROUTER_API_KEY` | — | OpenRouter API key. When set on a Pi-side broker, the orch-worker is enabled and dispatches `runtime: openrouter, family: one-shot` tasks. |
+| `OPENROUTER_API_KEY` | — | OpenRouter API key. When set on a Pi-side broker, the orch-worker is enabled and `large-reasoning` appears in `/v1/delegate/models`. Without it the Broker advertises no executable aliases and rejects submissions; it never queues an undrainable task. |
 | `OPENROUTER_REFERER` | `https://hugin.local` | `HTTP-Referer` header sent on OpenRouter requests (provider attribution). |
 | `OPENROUTER_APP_TITLE` | `hugin-orch-v1` | `X-Title` header sent on OpenRouter requests. |
 | `HUGIN_BROKER_URL` | — | hugin-mcp only (laptop side): URL of the Pi broker, e.g. `http://huginmunin.<tailnet>.ts.net:3033`. |
 | `HUGIN_BROKER_TOKEN` | — | hugin-mcp only: bearer token registered in the Pi's `HUGIN_BROKER_KEYS`. |
 | `HUGIN_MCP_SUBMITTER` | `claude-code` | hugin-mcp only: `orchestrator_submitter` principal stamped on each delegation envelope. |
 | `HUGIN_MCP_REQUEST_TIMEOUT_MS` | `60000` | hugin-mcp only: per-request HTTP timeout against the broker. |
+
+**Broker alias rule:** the four v1 aliases remain the historical protocol
+catalogue, but `/v1/delegate/models` is the live execution contract. Submission
+must fail before any durable write unless the requested alias is present in
+that response. The MCP discovers this set at startup and disables
+`hugin_submit` if discovery fails or returns no enabled aliases.

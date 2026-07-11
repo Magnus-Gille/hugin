@@ -35,9 +35,19 @@ What v1 does **not** cover:
 
 ---
 
-## 2. Aliases (v1 active set)
+## 2. Aliases (v1 protocol catalogue and live availability)
 
 Aliases split into two families: one-shot aliases (`tiny`, `medium`, `large-reasoning`) and harness aliases (`pi-large-coder`).
+
+This table is the versioned protocol catalogue, **not** a promise that every
+alias is executable by every live Broker process. `GET /v1/delegate/models`
+is authoritative for the enabled set on that process and returns only aliases
+with a worker that can actually claim them, plus only their backing runtime
+rows. As of 2026-07-11 the only implemented Broker executor is OpenRouter
+one-shot (`large-reasoning`), and it is enabled only when
+`OPENROUTER_API_KEY` is configured. Without that key, the live alias list is
+empty. The other catalogue entries remain parseable for historical envelopes
+and journal rows but are rejected at submission until an executor ships.
 
 | Alias | Family | Harness | Backing model | Host | Runtime | Notes |
 |---|---|---|---|---|---|---|
@@ -49,6 +59,8 @@ Aliases split into two families: one-shot aliases (`tiny`, `medium`, `large-reas
 Alias governance rules:
 - Manual promotion only. No silent retargeting.
 - Each alias change bumps `alias_map_version` (monotonic integer).
+- Executor availability does not bump `alias_map_version`; it is live instance
+  state surfaced by `/models`.
 - Journal records `alias_requested` AND `model_effective` per delegation.
 - For harness aliases, journal also records `harness_version` (the `pi` CLI version at execution time).
 - Cross-version corpus comparisons require explicit segmentation by `alias_map_version` and (for harness rows) `harness_version`.
@@ -149,7 +161,13 @@ interface BrokerAnnotations {
 }
 ```
 
-The broker validates: `envelope_version === 1`, bearer token → known principal, idempotency key not seen (or seen with same prompt hash — see §3.1), alias is currently active, sensitivity ≤ runtime ceiling, prompt non-empty. Rejects with a typed error otherwise.
+The broker validates: `envelope_version === 1`, bearer token → known principal,
+`alias_map_version` exactly matches the Broker catalogue, the alias has an
+enabled executor in this process, idempotency key not seen (or seen with the
+same prompt hash — see §3.1), sensitivity ≤ runtime ceiling, and prompt
+non-empty. Unimplemented aliases fail with non-retryable `alias_unavailable`;
+an implemented but disabled executor fails with retryable `alias_unavailable`.
+Both checks happen before idempotency reservation or any durable write.
 
 ### 3.1 Idempotency-key reuse semantics
 
@@ -576,6 +594,9 @@ This section locks the durability model.
 
 The broker's `POST /v1/delegate/submit` performs writes in this order:
 
+0. **Validate version + executor availability.** Reject stale alias maps and
+   aliases without an enabled executor before reserving idempotency or writing
+   Munin/journal state.
 1. **Acquire dedupe lock** on the `idempotency_key` (in-memory; non-durable). If another submission with the same key is in-flight, queue this one or reject.
 2. **Munin write:** create `tasks/<task_id>` with the full envelope (request + `BrokerAnnotations`) and tags `["pending", "runtime:<runtime>", "orch-v1"]`. This write must succeed before the broker returns `200 OK` to the MCP. *This is the durability boundary — once Munin acks, the submission is durable.*
 3. **Journal append:** write `delegation_submitted` to `~/.hugin/delegation-events.jsonl`. If this fails, log a warning but do not roll back the Munin write — the event is reconstructible from the Munin envelope. Periodic reconciliation (§12.5) will detect and backfill missing journal entries.
