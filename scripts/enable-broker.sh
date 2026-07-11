@@ -23,7 +23,9 @@ if [ -z "$PI_HOST" ]; then
 fi
 REMOTE="magnus@$PI_HOST"
 REMOTE_ENV="/home/magnus/repos/hugin/.env"
-BROKER_PORT="3033"
+# Heimdall already owns 3033 on the Pi's tailnet address. Keep Hugin on a
+# dedicated production port; the generic Broker default remains 3033.
+BROKER_PORT="3034"
 
 DIST_PATH="/Users/magnus/repos/hugin/dist/mcp-server.js"
 if [ ! -f "$DIST_PATH" ]; then
@@ -56,6 +58,7 @@ fi
 
 echo "==> Configuring tailnet-only Broker bind..."
 ssh "$REMOTE" "if grep -q '^HUGIN_BROKER_HOST=' '$REMOTE_ENV'; then sed -i 's/^HUGIN_BROKER_HOST=.*/HUGIN_BROKER_HOST=$BROKER_HOST/' '$REMOTE_ENV'; else printf 'HUGIN_BROKER_HOST=$BROKER_HOST\\n' >> '$REMOTE_ENV'; fi"
+ssh "$REMOTE" "if grep -q '^HUGIN_BROKER_PORT=' '$REMOTE_ENV'; then sed -i 's/^HUGIN_BROKER_PORT=.*/HUGIN_BROKER_PORT=$BROKER_PORT/' '$REMOTE_ENV'; else printf 'HUGIN_BROKER_PORT=$BROKER_PORT\\n' >> '$REMOTE_ENV'; fi"
 
 echo "==> Restarting hugin on Pi..."
 ssh "$REMOTE" 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart hugin'
@@ -82,8 +85,8 @@ fi
 echo "==> Registering hugin-mcp on laptop..."
 # Build the MCP config JSON inline. claude mcp add-json takes a single JSON arg.
 # We use printf to assemble it so the token never crosses an echo'd argv.
-MCP_JSON=$(printf '{"command":"node","args":["%s"],"env":{"HUGIN_BROKER_URL":"http://%s:3033","HUGIN_BROKER_TOKEN":"%s"}}' \
-  "$DIST_PATH" "$BROKER_HOST" "$TOKEN")
+MCP_JSON=$(printf '{"command":"node","args":["%s"],"env":{"HUGIN_BROKER_URL":"http://%s:%s","HUGIN_BROKER_TOKEN":"%s"}}' \
+  "$DIST_PATH" "$BROKER_HOST" "$BROKER_PORT" "$TOKEN")
 
 # Remove any existing registration so we don't 409 on conflict
 claude mcp remove hugin -s user 2>/dev/null || true
