@@ -5,6 +5,14 @@ const TYPE_PREFIX = "type:";
 const AUTHORITY_PREFIX = "authority:";
 const SENSITIVITY_PREFIX = "sensitivity:";
 const ROUTING_PREFIX = "routing:";
+// Durable MCP Broker identity/query tags must survive claim, renewal and the
+// terminal flip. hugin_await/list/rate use them to keep the canonical task
+// visible and principal-scoped after execution.
+const BROKER_PREFIX = "broker:";
+const ALIAS_PREFIX = "alias:";
+const TASK_TYPE_PREFIX = "task-type:";
+const RUNTIME_ROW_PREFIX = "runtime-row:";
+const IDEMPOTENCY_PREFIX = "idempotency:";
 // Runtime-owned artefact delivery (issue #68). `delivery:*` must survive lease
 // renewal AND the terminal status flip: the nonterminal `delivery:pending`
 // checkpoint and the terminal `delivery:verified`/`delivery:failed` markers are
@@ -28,7 +36,10 @@ function getRuntimeTag(tags: string[], runtimeFallback?: string): string | undef
   return tags.find((tag) => tag.startsWith(RUNTIME_PREFIX)) || runtimeFallback;
 }
 
-function getPersistentTags(tags: string[], runtimeFallback?: string): string[] {
+export function getPersistentStatusTags(
+  tags: string[],
+  runtimeFallback?: string,
+): string[] {
   const runtimeTag = getRuntimeTag(tags, runtimeFallback);
   const typeTags = tags.filter((tag) => tag.startsWith(TYPE_PREFIX));
   const policyTags = tags.filter((tag) => tag.startsWith(ON_DEP_FAILURE_PREFIX));
@@ -36,6 +47,11 @@ function getPersistentTags(tags: string[], runtimeFallback?: string): string[] {
   const sensitivityTags = tags.filter((tag) => tag.startsWith(SENSITIVITY_PREFIX));
   const routingTags = tags.filter((tag) => tag.startsWith(ROUTING_PREFIX));
   const deliveryTags = tags.filter((tag) => tag.startsWith(DELIVERY_PREFIX));
+  const brokerTags = tags.filter((tag) => tag.startsWith(BROKER_PREFIX));
+  const aliasTags = tags.filter((tag) => tag.startsWith(ALIAS_PREFIX));
+  const taskTypeTags = tags.filter((tag) => tag.startsWith(TASK_TYPE_PREFIX));
+  const runtimeRowTags = tags.filter((tag) => tag.startsWith(RUNTIME_ROW_PREFIX));
+  const idempotencyTags = tags.filter((tag) => tag.startsWith(IDEMPOTENCY_PREFIX));
 
   return dedupeTags([
     ...(runtimeTag ? [runtimeTag] : []),
@@ -45,6 +61,11 @@ function getPersistentTags(tags: string[], runtimeFallback?: string): string[] {
     ...sensitivityTags,
     ...routingTags,
     ...deliveryTags,
+    ...brokerTags,
+    ...aliasTags,
+    ...taskTypeTags,
+    ...runtimeRowTags,
+    ...idempotencyTags,
   ]);
 }
 
@@ -53,14 +74,14 @@ export function buildTerminalStatusTags(
   tags: string[],
   runtimeFallback?: string
 ): string[] {
-  return [status, ...getPersistentTags(tags, runtimeFallback)];
+  return [status, ...getPersistentStatusTags(tags, runtimeFallback)];
 }
 
 export function buildAwaitingApprovalTags(
   tags: string[],
   runtimeFallback?: string
 ): string[] {
-  return ["awaiting-approval", ...getPersistentTags(tags, runtimeFallback)];
+  return ["awaiting-approval", ...getPersistentStatusTags(tags, runtimeFallback)];
 }
 
 export function buildPipelineParentSuccessTags(tags: string[]): string[] {
