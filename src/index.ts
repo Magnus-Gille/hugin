@@ -90,6 +90,7 @@ import {
   buildTerminalStatusTags,
   getPersistentStatusTags,
 } from "./task-status-tags.js";
+import { sanitizeProviderTokenCount } from "./m5-provenance.js";
 import {
   buildStructuredTaskResult,
   type DispatcherRuntime,
@@ -5059,16 +5060,13 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             // Savings tracker (PR3, S4): thread the per-call token counts
             // already present on WorkerResult through into the structured
             // result. Coerced to the schema's nonnegative-integer contract —
-            // a non-integer provider value must degrade to null, not fail
-            // the whole result-structured write after a successful run.
-            inputTokens:
-              Number.isInteger(o.result.inputTokens) && (o.result.inputTokens as number) >= 0
-                ? o.result.inputTokens
-                : null,
-            outputTokens:
-              Number.isInteger(o.result.outputTokens) && (o.result.outputTokens as number) >= 0
-                ? o.result.outputTokens
-                : null,
+            // an out-of-contract provider value must degrade to null, not fail
+            // the whole result-structured write after a successful run. Uses
+            // the one shared sanitizer (#163) rather than repeating the
+            // predicate: the local copy checked Number.isInteger, which lets
+            // 2**53 through into a zod `.int()` that rejects it.
+            inputTokens: sanitizeProviderTokenCount(o.result.inputTokens),
+            outputTokens: sanitizeProviderTokenCount(o.result.outputTokens),
             ...(o.result.selectedNode ? { selectedNode: o.result.selectedNode } : {}),
             ...(o.result.effectiveNode ? { effectiveNode: o.result.effectiveNode } : {}),
             ...(o.result.fallbackTriggered !== undefined

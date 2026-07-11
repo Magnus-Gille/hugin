@@ -4,6 +4,7 @@ import {
   pipelineSideEffectIdSchema,
   pipelineSensitivitySchema,
 } from "./pipeline-ir.js";
+import { M5_OUTCOMES } from "./m5-provenance.js";
 import { sensitivitySchema } from "./sensitivity.js";
 import {
   SIGNING_POLICIES,
@@ -115,8 +116,10 @@ export const delegationProvenanceSchema = z.object({
   nodeId: z.string().min(1).optional(),
   modelId: z.string().min(1).optional(),
   taskType: z.string().min(1).optional(),
-  outcome: z.string().min(1).optional(),
-  score: z.number().optional(),
+  // Enum + bounds declared here as well as in the sanitizer, so the contract
+  // cannot silently drift between the two (Codex review of #163).
+  outcome: z.enum(M5_OUTCOMES).optional(),
+  score: z.number().min(0).max(1).optional(),
   decisionReason: z.string().min(1).optional(),
   verifier: z.string().min(1).optional(),
   verifierNotes: z.string().min(1).optional(),

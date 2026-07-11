@@ -731,9 +731,19 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
           };
         }
 
+        // Issue #163: preserve the M5 execution trace. Sanitized from the raw
+        // (untrusted) gateway body and extracted BEFORE operational validation,
+        // so a response carrying a usable trace (real ledgerId/node/model) but
+        // one malformed operational field still surfaces the ledger key — that
+        // is precisely the response an operator needs to diagnose, and the call
+        // was paid for either way.
+        const delegation = extractM5Provenance(parsed);
+        const withDelegation = (result: WorkerResult): WorkerResult =>
+          Object.keys(delegation).length > 0 ? { ...result, delegation } : result;
+
         const outcome = extractDelegationOutcome(parsed);
         if (!outcome.ok) {
-          return { kind: "done", result: failResult(outcome.error, model) };
+          return { kind: "done", result: withDelegation(failResult(outcome.error, model)) };
         }
 
         const inputTokens = sanitizeTokenCount(outcome.metrics?.promptTokens);
@@ -746,15 +756,9 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
         const outcomeStatus = typeof outcome.outcome === "string" ? outcome.outcome : null;
         const failed = outcomeStatus === "fail" || outcomeStatus === "error";
 
-        // Issue #163: preserve the M5 execution trace. Sanitized from the raw
-        // (untrusted) gateway body, not from the narrow parse type above — a
-        // failed leaf is exactly when an operator most needs the ledger row, so
-        // this is attached on both the ok and failed branches.
-        const delegation = extractM5Provenance(parsed);
-
         return {
           kind: "done",
-          result: {
+          result: withDelegation({
             ok: !failed,
             output,
             provider: req.provider,
@@ -764,8 +768,7 @@ export class HomeserverDelegateWorkerExecutor implements WorkerExecutor {
             costUsd,
             latencyMs: Date.now() - start,
             ...(failed ? { error: `Delegation outcome: ${outcomeStatus}` } : {}),
-            ...(Object.keys(delegation).length > 0 ? { delegation } : {}),
-          },
+          }),
         };
       } finally {
         clearTimeout(timer);

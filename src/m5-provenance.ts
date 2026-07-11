@@ -68,12 +68,17 @@ export interface M5DelegationProvenance {
 }
 
 /**
- * Provider-reported token counts are only trusted as nonnegative integers;
+ * Provider-reported token counts are only trusted as nonnegative SAFE integers;
  * anything else (fractional estimates, negatives, NaN, non-numbers) → null.
  * Shared by both M5 call sites so the same contract holds on each.
+ *
+ * `Number.isSafeInteger`, not `Number.isInteger`: zod 4's `.int()` rejects
+ * values beyond the safe-integer range, so `2**53` would pass an isInteger
+ * check here and then THROW inside buildStructuredTaskResult's `.parse()` —
+ * losing the result of an already-paid run. Verified against zod 4.3.6.
  */
 export function sanitizeProviderTokenCount(value: unknown): number | null {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function str(v: unknown, max: number): string | undefined {
@@ -87,8 +92,13 @@ function bool(v: unknown): boolean | undefined {
   return typeof v === "boolean" ? v : undefined;
 }
 
-function num(v: unknown): number | undefined {
-  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+/**
+ * M5 verification scores are a 0..1 scale (observed live: 0, 0.2, 0.7, 1, null).
+ * A finite-but-out-of-scale value is out of contract and is DROPPED — retaining
+ * it would turn a buggy gateway value into a wrong-but-plausible trace.
+ */
+function score(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : undefined;
 }
 
 function obj(v: unknown): Record<string, unknown> | undefined {
@@ -139,8 +149,8 @@ export function extractM5Provenance(raw: unknown): M5DelegationProvenance {
   const oc = outcome(r["outcome"]);
   if (oc !== undefined) p.outcome = oc;
 
-  const score = num(r["score"]);
-  if (score !== undefined) p.score = score;
+  const scoreValue = score(r["score"]);
+  if (scoreValue !== undefined) p.score = scoreValue;
 
   const decisionReason = str(r["decisionReason"], MAX_REASON_CHARS);
   if (decisionReason !== undefined) p.decisionReason = decisionReason;

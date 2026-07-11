@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractM5Provenance } from "../src/m5-provenance.js";
+import { extractM5Provenance, sanitizeProviderTokenCount } from "../src/m5-provenance.js";
 
 // Verbatim shape of a real M5 gateway /delegate response, captured live from
 // the tailnet gateway on 2026-07-11. Ground truth for what we must preserve.
@@ -121,6 +121,33 @@ describe("extractM5Provenance", () => {
     const p = extractM5Provenance({ ledgerId: "", decisionReason: "   " });
     expect(p.ledgerId).toBeUndefined();
     expect(p.decisionReason).toBeUndefined();
+  });
+
+  // Codex review of #163: Zod 4's .int() rejects values outside the safe-integer
+  // range even though Number.isInteger() accepts them — so an unsafe-integer
+  // token count would sail through the sanitizer and then throw inside
+  // buildStructuredTaskResult, losing the result of a paid run. Verified against
+  // zod 4.3.6: Number.isInteger(2**53) === true, but z.number().int() rejects it.
+  it("drops token counts outside the safe-integer range", () => {
+    expect(sanitizeProviderTokenCount(42)).toBe(42);
+    expect(sanitizeProviderTokenCount(0)).toBe(0);
+    expect(sanitizeProviderTokenCount(Number.MAX_SAFE_INTEGER)).toBe(Number.MAX_SAFE_INTEGER);
+    expect(sanitizeProviderTokenCount(Number.MAX_SAFE_INTEGER + 1)).toBeNull();
+    expect(sanitizeProviderTokenCount(-1)).toBeNull();
+    expect(sanitizeProviderTokenCount(1.5)).toBeNull();
+    expect(sanitizeProviderTokenCount("50")).toBeNull();
+    expect(sanitizeProviderTokenCount(Number.NaN)).toBeNull();
+  });
+
+  // Codex review of #163: a finite-but-out-of-scale score was being retained as
+  // a valid trace. M5's real scale is 0..1 (observed live: 0, 0.2, 0.7, 1, null).
+  it("drops a score outside M5's 0..1 scale", () => {
+    expect(extractM5Provenance({ score: 0 }).score).toBe(0);
+    expect(extractM5Provenance({ score: 0.7 }).score).toBe(0.7);
+    expect(extractM5Provenance({ score: 1 }).score).toBe(1);
+    expect(extractM5Provenance({ score: -1 }).score).toBeUndefined();
+    expect(extractM5Provenance({ score: 2 }).score).toBeUndefined();
+    expect(extractM5Provenance({ score: 100 }).score).toBeUndefined();
   });
 
   it("never throws on junk input", () => {

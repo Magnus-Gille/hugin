@@ -597,6 +597,39 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
     expect(result.delegation?.ledgerId).toBe("ledger-2"); // rest survives
   });
 
+  // Codex review of #163: the response-VALIDATION failure branch returned
+  // failResult() with no provenance attached. A gateway that sends a usable
+  // trace (real ledgerId/node/model) alongside one malformed operational field
+  // would lose the ledger join key at exactly the moment an operator needs it to
+  // diagnose the bad response. Provenance is now extracted straight off the
+  // parsed body, before operational validation.
+  it("keeps provenance when the gateway body fails operational validation (#163)", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () =>
+      delegateResponse({
+        // Usable, well-formed provenance...
+        ledgerId: "ledger-diagnose-me",
+        nodeId: "orin",
+        modelId: "qwen2.5-coder:3b",
+        delegated: true,
+        // ...but a malformed operational field: output must be a string.
+        output: 12345,
+      })
+    ));
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver", model: "qwen2.5-coder:3b", prompt: "p", timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("output");
+    // The paid call still happened and M5 still wrote a ledger row — keep the key.
+    expect(result.delegation?.ledgerId).toBe("ledger-diagnose-me");
+    expect(result.delegation?.nodeId).toBe("orin");
+  });
+
   it("pins an Orin-routed owner leaf with nodeId and reports the selected node", async () => {
     vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
