@@ -49,6 +49,7 @@ import {
   type DelegationEnvelope,
   type DelegationError,
 } from "./types.js";
+import { isBrokerExecutorImplemented } from "./executor-capabilities.js";
 
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
 /**
@@ -262,10 +263,7 @@ export class OrchWorker {
   }
 
   private canHandle(envelope: DelegationEnvelope): boolean {
-    return (
-      envelope.alias_resolved.runtime === "openrouter" &&
-      envelope.alias_resolved.family === "one-shot"
-    );
+    return isBrokerExecutorImplemented(envelope.alias_resolved);
   }
 
   private leaseDurationFor(envelope: DelegationEnvelope): number {

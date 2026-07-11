@@ -135,6 +135,7 @@ import {
 } from "./task-signing.js";
 import { consultSkillLane } from "./skill/skill-lane-dispatch.js";
 import { readBrokerEnv, startBroker, type RunningBroker } from "./broker/server.js";
+import { brokerExecutorCapabilities } from "./broker/executor-capabilities.js";
 import { BrokerTaskStore } from "./broker/task-store.js";
 import { DelegationJournal } from "./broker/journal.js";
 import { IdempotencyIndex } from "./broker/idempotency.js";
@@ -5564,6 +5565,10 @@ if (brokerEnv.enabled) {
   const journal = new DelegationJournal({ path: brokerHome });
   const taskStore = new BrokerTaskStore(munin);
   const idempotency = new IdempotencyIndex();
+  const orKey = process.env.OPENROUTER_API_KEY?.trim();
+  const executorCapabilities = brokerExecutorCapabilities({
+    openrouterEnabled: Boolean(orKey),
+  });
   brokerReconciler = new BrokerReconciler({
     taskStore,
     journal,
@@ -5573,7 +5578,7 @@ if (brokerEnv.enabled) {
     host: brokerEnv.host,
     port: brokerEnv.port,
     keys: brokerEnv.keys,
-    deps: { taskStore, journal, idempotency },
+    deps: { taskStore, journal, idempotency, executorCapabilities },
   })
     .then((rb) => {
       runningBroker = rb;
@@ -5585,7 +5590,6 @@ if (brokerEnv.enabled) {
         `Broker reconciler: every ${config.brokerReconciliationIntervalMs}ms (journal: ${brokerHome})`,
       );
 
-      const orKey = process.env.OPENROUTER_API_KEY?.trim();
       if (orKey) {
         const orClient = new OpenRouterClient({
           apiKey: orKey,

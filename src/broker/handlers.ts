@@ -20,6 +20,11 @@ import {
   type AliasMap,
 } from "../runtime-registry.js";
 import { POLICY_VERSION, resolveAliasForBroker } from "./alias-resolution.js";
+import {
+  brokerAliasAvailability,
+  executableBrokerAliases,
+  type BrokerExecutorCapabilities,
+} from "./executor-capabilities.js";
 import type { DelegationJournal } from "./journal.js";
 import { projectDelegations } from "./journal.js";
 import type { IdempotencyIndex } from "./idempotency.js";
@@ -39,6 +44,7 @@ export interface BrokerHandlerDependencies {
   taskStore: BrokerTaskStore;
   journal: DelegationJournal;
   idempotency: IdempotencyIndex;
+  executorCapabilities: BrokerExecutorCapabilities;
   now?: () => Date;
 }
 
@@ -70,6 +76,15 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
       return;
     }
 
+    if (request.alias_map_version !== ALIAS_MAP_V1.version) {
+      res.status(409).json({
+        error: "policy_rejected",
+        message: `alias_map_version ${request.alias_map_version} does not match Broker version ${ALIAS_MAP_V1.version}`,
+        alias_map_version: ALIAS_MAP_V1.version,
+      });
+      return;
+    }
+
     let aliasResolution;
     try {
       aliasResolution = resolveAliasForBroker(request.alias_requested);
@@ -77,6 +92,21 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
       res.status(400).json({
         error: "alias_unknown",
         message: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    const availability = brokerAliasAvailability(
+      aliasResolution.alias_resolved,
+      deps.executorCapabilities,
+    );
+    if (!availability.executable) {
+      res.status(availability.retryable ? 503 : 409).json({
+        error: "alias_unavailable",
+        message: `alias '${request.alias_requested}' is configured but has no live Broker executor`,
+        reason: availability.reason,
+        retryable: availability.retryable,
+        executable_aliases: executableBrokerAliases(deps.executorCapabilities),
       });
       return;
     }
@@ -327,17 +357,19 @@ export function createListHandler(deps: BrokerHandlerDependencies) {
   };
 }
 
-export function createModelsHandler() {
+export function createModelsHandler(capabilities: BrokerExecutorCapabilities) {
   return async (_req: Request, res: Response): Promise<void> => {
     const map: AliasMap = ALIAS_MAP_V1;
-    const aliases = Object.values(map.aliases).map((entry) => ({
-      ...entry,
-      runtime_row_id: entry.runtimeId,
-    }));
+    const executable = new Set(executableBrokerAliases(capabilities));
+    const aliases = Object.values(map.aliases)
+      .filter((entry) => executable.has(entry.alias))
+      .map((entry) => ({
+        ...entry,
+        runtime_row_id: entry.runtimeId,
+      }));
+    const executableRuntimeIds = new Set(aliases.map((entry) => entry.runtimeId));
     const rows = RUNTIME_REGISTRY.filter((row) =>
-      row.dispatcherRuntime === "ollama" ||
-      row.dispatcherRuntime === "openrouter" ||
-      row.dispatcherRuntime === "pi-harness",
+      executableRuntimeIds.has(row.id),
     ).map((row) => ({
       id: row.id,
       runtime: row.dispatcherRuntime,

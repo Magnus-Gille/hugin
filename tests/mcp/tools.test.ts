@@ -40,7 +40,7 @@ describe("buildTools — hugin_submit", () => {
     const result = await tools.submit.handler({
       task_type: "summarize",
       prompt: "Summarize this.",
-      alias_requested: "tiny",
+      alias_requested: "large-reasoning",
     });
 
     expect(result.isError).toBeUndefined();
@@ -53,7 +53,7 @@ describe("buildTools — hugin_submit", () => {
       parent_task_id: undefined,
       task_type: "summarize",
       prompt: "Summarize this.",
-      alias_requested: "tiny",
+      alias_requested: "large-reasoning",
       alias_map_version: ALIAS_MAP_VERSION,
       worktree: undefined,
       sensitivity: undefined,
@@ -81,7 +81,7 @@ describe("buildTools — hugin_submit", () => {
     await tools.submit.handler({
       task_type: "summarize",
       prompt: "p",
-      alias_requested: "tiny",
+      alias_requested: "large-reasoning",
     });
 
     expect(submit.mock.calls[0]![0]).toMatchObject({ alias_map_version: 7 });
@@ -100,7 +100,7 @@ describe("buildTools — hugin_submit", () => {
     await tools.submit.handler({
       task_type: "summarize",
       prompt: "p",
-      alias_requested: "tiny",
+      alias_requested: "large-reasoning",
     });
 
     expect(submit.mock.calls[0]![0]).toMatchObject({
@@ -123,7 +123,7 @@ describe("buildTools — hugin_submit", () => {
     const result = await tools.submit.handler({
       task_type: "summarize",
       prompt: "p",
-      alias_requested: "tiny",
+      alias_requested: "large-reasoning",
     });
 
     expect(result.isError).toBe(true);
@@ -151,7 +151,7 @@ describe("buildTools — hugin_submit", () => {
     const result = await tools.submit.handler({
       task_type: "summarize",
       prompt: "p",
-      alias_requested: "tiny",
+      alias_requested: "large-reasoning",
     });
 
     expect(parseResult(result)).toMatchObject({
@@ -172,7 +172,7 @@ describe("buildTools — hugin_submit", () => {
     await tools.submit.handler({
       task_type: "summarize",
       prompt: "p",
-      alias_requested: "tiny",
+      alias_requested: "large-reasoning",
       idempotency_key: "22222222-2222-4222-8222-222222222222",
     });
 
@@ -181,8 +181,8 @@ describe("buildTools — hugin_submit", () => {
     });
   });
 
-  it("forwards worktree spec for pi-large-coder harness aliases", async () => {
-    const submit = vi.fn(async () => ({ task_id: "t3" }));
+  it("does not advertise or submit aliases without a live Broker executor", async () => {
+    const submit = vi.fn(async () => ({ task_id: "should-not-call" }));
     const broker = fakeBroker({ submit });
     const tools = buildTools({
       broker,
@@ -198,15 +198,35 @@ describe("buildTools — hugin_submit", () => {
       worktree: { repo: "hugin", base_ref: "main" },
       sensitivity: "internal",
       timeout_ms: 600_000,
+    } as unknown as Parameters<typeof tools.submit.handler>[0]);
+
+    expect(result.isError).toBe(true);
+    expect(parseResult(result)).toMatchObject({
+      error: { kind: "input_validation" },
+    });
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when Broker discovery found zero executable aliases", async () => {
+    const submit = vi.fn(async () => ({ task_id: "should-not-call" }));
+    const tools = buildTools({
+      broker: fakeBroker({ submit }),
+      sessionId: "sess",
+      submitter: "claude-code",
+      executableAliases: [],
     });
 
-    expect(result.isError).toBeUndefined();
-    expect(submit.mock.calls[0]![0]).toMatchObject({
-      alias_requested: "pi-large-coder",
-      worktree: { repo: "hugin", base_ref: "main" },
-      sensitivity: "internal",
-      timeout_ms: 600_000,
+    const result = await tools.submit.handler({
+      task_type: "summarize",
+      prompt: "p",
+      alias_requested: "large-reasoning",
     });
+
+    expect(result.isError).toBe(true);
+    expect(parseResult(result)).toMatchObject({
+      error: { kind: "input_validation" },
+    });
+    expect(submit).not.toHaveBeenCalled();
   });
 
   it("returns an isError result with input_validation kind when input is invalid", async () => {
@@ -221,7 +241,7 @@ describe("buildTools — hugin_submit", () => {
     const result = await tools.submit.handler({
       task_type: "summarize",
       prompt: "",
-      alias_requested: "tiny",
+      alias_requested: "large-reasoning",
     } as unknown as Parameters<typeof tools.submit.handler>[0]);
 
     expect(result.isError).toBe(true);
@@ -245,7 +265,7 @@ describe("buildTools — hugin_submit", () => {
     const result = await tools.submit.handler({
       task_type: "summarize",
       prompt: "p",
-      alias_requested: "tiny",
+      alias_requested: "large-reasoning",
     });
 
     expect(result.isError).toBe(true);
@@ -272,7 +292,7 @@ describe("buildTools — hugin_submit", () => {
     const result = await tools.submit.handler({
       task_type: "summarize",
       prompt: "p",
-      alias_requested: "tiny",
+      alias_requested: "large-reasoning",
     });
 
     expect(result.isError).toBe(true);

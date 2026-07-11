@@ -55,7 +55,11 @@ export function buildBrokerApp(config: BrokerServerConfig): Express {
   app.post("/v1/delegate/rate", auth, createRateHandler(config.deps));
   app.post("/v1/delegate/list", auth, createListHandler(config.deps));
   app.get("/v1/delegate/list", auth, createListHandler(config.deps));
-  app.get("/v1/delegate/models", auth, createModelsHandler());
+  app.get(
+    "/v1/delegate/models",
+    auth,
+    createModelsHandler(config.deps.executorCapabilities),
+  );
 
   return app;
 }

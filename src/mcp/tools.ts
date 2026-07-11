@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   aliasSchema,
+  type Alias,
   ratingSchema,
   sensitivitySchema,
   taskTypeSchema,
@@ -58,6 +59,12 @@ export interface ToolDeps {
    * detect orchestrator skew when it bumps the alias map.
    */
   aliasMapVersion?: number;
+  /**
+   * Alias set advertised by the live Broker `/models` response. An empty set
+   * disables `hugin_submit` in the MCP schema. Tests and embedded callers that
+   * omit this retain the one currently implemented alias.
+   */
+  executableAliases?: readonly Alias[];
   /** UUID generator (overridable for tests). */
   newId?: () => string;
 }
@@ -71,11 +78,11 @@ export const submitInputShape = {
     .min(1)
     .describe("The full task prompt to hand to the runtime."),
   alias_requested: aliasSchema.describe(
-    "Logical alias (`tiny` / `medium` / `large-reasoning` / `pi-large-coder`). The broker resolves this to a runtime row.",
+    "Logical alias. The live executable set is discovered from `hugin_models` when the MCP starts.",
   ),
   worktree: worktreeSpecSchema
     .optional()
-    .describe("Required for `pi-large-coder` (harness aliases). Omit for one-shots."),
+    .describe("Reserved for future harness aliases. Omit for the current one-shot alias."),
   sensitivity: sensitivitySchema
     .optional()
     .describe("Caps which runtimes can run this task. Defaults to `internal`."),
@@ -199,17 +206,30 @@ export function buildTools(deps: ToolDeps): {
   models: HuginTool<z.infer<typeof modelsInputSchema>>;
 } {
   const newId = deps.newId ?? randomUUID;
+  const executableAliases = deps.executableAliases ?? ["large-reasoning"];
+  const executableAliasInput = executableAliases.length > 0
+    ? z.enum(executableAliases as [Alias, ...Alias[]])
+    : z.never();
+  const activeSubmitInputShape = {
+    ...submitInputShape,
+    alias_requested: executableAliasInput.describe(
+      executableAliases.length > 0
+        ? `Executable logical alias. Live set: ${executableAliases.join(", ")}.`
+        : "No Broker alias currently has an enabled executor; submission is disabled.",
+    ),
+  };
+  const activeSubmitInputSchema = z.object(activeSubmitInputShape);
 
   const submit: HuginTool<z.infer<typeof submitInputSchema>> = {
     name: "hugin_submit",
     title: "Submit a delegation task to Hugin",
     description:
       "Hand a task off to the Pi-side broker for execution on a cheaper or differently-capable runtime. Returns the assigned task_id and the `idempotency_key` used (auto-generated if not supplied) — pass that key back as `idempotency_key` to safely retry the same logical request.",
-    inputShape: submitInputShape,
+    inputShape: activeSubmitInputShape,
     handler: async (rawInput) => {
       let idempotencyKey: string | undefined;
       try {
-        const input = submitInputSchema.parse(rawInput);
+        const input = activeSubmitInputSchema.parse(rawInput);
         idempotencyKey = input.idempotency_key ?? newId();
         const payload = {
           envelope_version: ENVELOPE_VERSION,
@@ -291,7 +311,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_models",
     title: "Read the active alias map and runtime registry",
     description:
-      "Returns the current alias map (`tiny`/`medium`/`large-reasoning`/`pi-large-coder`) and the runtime rows the broker can dispatch to.",
+      "Returns only aliases with a live Broker executor and the runtime rows they can actually dispatch to.",
     inputShape: modelsInputShape,
     handler: async () => {
       try {
