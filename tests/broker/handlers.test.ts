@@ -196,6 +196,17 @@ describe("POST /v1/delegate/submit", () => {
       expect(body.retryable).toBe(false);
       expect(body.executable_aliases).toEqual(["large-reasoning"]);
       expect(harness.munin.writes).toHaveLength(0);
+      expect(await harness.journal.readAll()).toEqual([]);
+
+      // Availability rejection happens before idempotency reservation: the
+      // same logical key remains usable for an executable alias.
+      const supported = await fetch(`${harness.url}/v1/delegate/submit`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(validRequest()),
+      });
+      expect(supported.status).toBe(202);
+      expect(harness.munin.writes).toHaveLength(1);
     },
   );
 
