@@ -4,9 +4,34 @@ import {
   buildPipelineParentCancelledTags,
   buildPipelineParentSuccessTags,
   buildTerminalStatusTags,
+  getPersistentStatusTags,
 } from "../src/task-status-tags.js";
 
 describe("task status tag helpers", () => {
+  it("preserves durable MCP Broker identity and query tags", () => {
+    const input = [
+      "running",
+      "runtime:homeserver",
+      "broker:mcp-v2",
+      "alias:m5",
+      "task-type:extract",
+      "runtime-row:homeserver-m5",
+      "idempotency:abc123",
+      "claimed_by:hugin-pi",
+    ];
+    const persistent = [
+      "completed",
+      "runtime:homeserver",
+      "broker:mcp-v2",
+      "alias:m5",
+      "task-type:extract",
+      "runtime-row:homeserver-m5",
+      "idempotency:abc123",
+    ];
+    expect(getPersistentStatusTags(input)).toEqual(persistent.slice(1));
+    expect(buildTerminalStatusTags("completed", input)).toEqual(persistent);
+  });
+
   it("preserves policy tags on terminal child tasks", () => {
     expect(
       buildTerminalStatusTags("completed", [

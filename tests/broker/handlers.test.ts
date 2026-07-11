@@ -460,6 +460,31 @@ describe("POST /v1/delegate/await", () => {
     expect(body.result.task_id).toBe("t1");
   });
 
+  it("recovers ownership from a valid canonical envelope if old terminal tags lost the marker", async () => {
+    const submit = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST", headers: authHeader(), body: JSON.stringify(validRequest()),
+    });
+    const { task_id } = await submit.json();
+    const statusKey = `tasks/${task_id}/status`;
+    const stored = harness.munin.reads[statusKey] as { content: string };
+    harness.munin.reads[statusKey] = {
+      ...stored,
+      tags: ["completed", "runtime:homeserver"],
+      updated_at: "2026-07-11T15:34:31Z",
+    };
+    harness.munin.reads[`tasks/${task_id}/result-structured`] = {
+      content: JSON.stringify({ task_id, bodyText: "ok" }),
+    };
+    const res = await fetch(`${harness.url}/v1/delegate/await`, {
+      method: "POST", headers: authHeader(), body: JSON.stringify({ task_id }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      status: "completed",
+      result: { task_id, bodyText: "ok" },
+    });
+  });
+
   it("returns failed with error result", async () => {
     harness.munin.reads["tasks/t1/status"] = {
       content: historicalBrokerStatus(),
@@ -481,16 +506,22 @@ describe("POST /v1/delegate/await", () => {
   });
 
   it("returns a cancelled canonical task as terminal instead of running", async () => {
-    harness.munin.reads["tasks/cancelled/status"] = {
-      content: historicalBrokerStatus(), tags: ["cancelled", "broker:mcp-v2"],
-      created_at: "ts", updated_at: "ts",
+    const submit = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST", headers: authHeader(), body: JSON.stringify(validRequest()),
+    });
+    const { task_id } = await submit.json();
+    const statusKey = `tasks/${task_id}/status`;
+    const stored = harness.munin.reads[statusKey] as { content: string };
+    harness.munin.reads[statusKey] = {
+      ...stored, tags: ["cancelled", "runtime:homeserver", "broker:mcp-v2"],
+      updated_at: "ts",
     };
-    harness.munin.reads["tasks/cancelled/result-structured"] = {
+    harness.munin.reads[`tasks/${task_id}/result-structured`] = {
       content: JSON.stringify({ outcome: "cancelled", bodyText: "operator cancelled" }),
       tags: ["result-structured"], created_at: "ts", updated_at: "ts",
     };
     const res = await fetch(`${harness.url}/v1/delegate/await`, {
-      method: "POST", headers: authHeader(), body: JSON.stringify({ task_id: "cancelled" }),
+      method: "POST", headers: authHeader(), body: JSON.stringify({ task_id }),
     });
     expect(await res.json()).toMatchObject({
       status: "failed",

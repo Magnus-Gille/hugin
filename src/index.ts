@@ -88,6 +88,7 @@ import {
 import {
   buildAwaitingApprovalTags,
   buildTerminalStatusTags,
+  getPersistentStatusTags,
 } from "./task-status-tags.js";
 import {
   buildStructuredTaskResult,
@@ -1887,23 +1888,9 @@ function buildClaimTags(
   baseTags: string[],
   lifecycle: string,
 ): string[] {
-  const runtimeTag = baseTags.find((t) => t.startsWith("runtime:"));
-  const typeTags = baseTags.filter((t) => t.startsWith("type:"));
-  const authorityTags = baseTags.filter((t) => t.startsWith("authority:"));
-  const sensitivityTags = baseTags.filter((t) => t.startsWith("sensitivity:"));
-  const routingTags = baseTags.filter((t) => t.startsWith("routing:"));
-  // `delivery:*` must survive lease renewal so the nonterminal
-  // `running + delivery:pending` checkpoint is not silently dropped when the
-  // lease renews mid-delivery (issue #68, debate R2 §A).
-  const deliveryTags = baseTags.filter((t) => t.startsWith("delivery:"));
   return [
     lifecycle,
-    ...(runtimeTag ? [runtimeTag] : []),
-    ...typeTags,
-    ...authorityTags,
-    ...sensitivityTags,
-    ...routingTags,
-    ...deliveryTags,
+    ...getPersistentStatusTags(baseTags),
     `claimed_by:${workerId}`,
     `lease_expires:${leaseExpiry()}`,
   ];

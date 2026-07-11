@@ -74,11 +74,15 @@ function requireOwnedBrokerTask(
   res: Response,
   status: { content: string; tags: string[] },
 ): boolean {
-  if (!status.tags.includes("broker:mcp-v2") && !status.tags.includes("orch-v1")) {
+  const canonical = parseCanonicalEnvelope(status.content);
+  const historicalTagged = status.tags.includes("orch-v1");
+  if (!canonical.ok && !historicalTagged) {
     res.status(404).json({ error: "policy_rejected", message: "task is not a Broker task" });
     return false;
   }
-  const owner = storedBrokerPrincipal(status.content);
+  const owner = canonical.ok
+    ? canonical.envelope.broker_principal
+    : storedBrokerPrincipal(status.content);
   if (!owner || owner !== req.brokerPrincipal) {
     res.status(403).json({
       error: "policy_rejected",
