@@ -10,6 +10,7 @@
 import { z } from "zod";
 
 export const aliasSchema = z.enum([
+  "m5",
   "tiny",
   "medium",
   "large-reasoning",
@@ -18,18 +19,34 @@ export const aliasSchema = z.enum([
 export type Alias = z.infer<typeof aliasSchema>;
 
 export const taskTypeSchema = z.enum([
+  "code-implement",
+  "code-edit",
+  "code-review",
+  "unit-test-gen",
   "summarize",
   "extract",
   "classify",
-  "draft",
-  "reason",
+  "data-transform",
+  "regex",
+  "sql",
+  "reason-math",
+  "reason-hard",
   "rewrite",
-  "code-edit",
+  "translate",
+  "plan-decompose",
+  "qa-factual",
+  "triage",
+  "memory-decision",
+  "research-plan",
+  "source-distill",
+  "claim-verify",
+  "gap-check",
+  "synthesis",
   "other",
 ]);
 export type TaskType = z.infer<typeof taskTypeSchema>;
 
-export const sensitivitySchema = z.enum(["public", "internal"]);
+export const sensitivitySchema = z.enum(["public", "internal", "private"]);
 export type DelegationSensitivity = z.infer<typeof sensitivitySchema>;
 
 export const worktreeSpecSchema = z.object({
@@ -40,8 +57,21 @@ export const worktreeSpecSchema = z.object({
 });
 export type WorktreeSpec = z.infer<typeof worktreeSpecSchema>;
 
+export const verifierSpecSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("nonEmpty"), minLen: z.number().int().nonnegative().optional() }).strict(),
+  z.object({ type: z.literal("answerIs"), expected: z.string(), ci: z.boolean().optional() }).strict(),
+  z.object({ type: z.literal("exact"), expected: z.string(), ci: z.boolean().optional() }).strict(),
+  z.object({ type: z.literal("containsAll"), subs: z.array(z.string()).min(1), ci: z.boolean().optional() }).strict(),
+  z.object({ type: z.literal("matches"), pattern: z.string(), flags: z.string().regex(/^[dimsuv]*$/).optional() }).strict()
+    .refine((value) => { try { new RegExp(value.pattern, value.flags); return true; } catch { return false; } }, "invalid regular expression"),
+  z.object({ type: z.literal("numeric"), expected: z.number().finite(), tol: z.number().nonnegative().finite().optional() }).strict(),
+  z.object({ type: z.literal("maxLength"), max: z.number().int().nonnegative(), min: z.number().int().nonnegative().optional() }).strict()
+    .refine((value) => value.min === undefined || value.min <= value.max, "min must be <= max"),
+  z.object({ type: z.literal("jsonValid") }).strict(),
+]);
+
 export const delegationRequestSchema = z.object({
-  envelope_version: z.literal(1),
+  envelope_version: z.literal(2),
   idempotency_key: z.string().uuid(),
   orchestrator_session_id: z.string().min(1),
   orchestrator_submitter: z.string().min(1),
@@ -51,19 +81,33 @@ export const delegationRequestSchema = z.object({
   alias_requested: aliasSchema,
   alias_map_version: z.number().int().nonnegative(),
   worktree: worktreeSpecSchema.optional(),
-  sensitivity: sensitivitySchema.optional(),
-  timeout_ms: z.number().int().positive().optional(),
-  max_output_tokens: z.number().int().positive().optional(),
+  sensitivity: sensitivitySchema,
+  timeout_ms: z.number().int().positive().max(900_000),
+  max_output_tokens: z.number().int().positive().max(32_768),
+  acceptance: z.discriminatedUnion("mode", [
+    z.object({ mode: z.literal("l1_review") }).strict(),
+    z.object({
+      mode: z.literal("verifier"),
+      verifier: verifierSpecSchema,
+    }).strict(),
+  ]),
+  allowed_destinations: z.array(z.literal("m5")).length(1),
+  tool_policy: z.object({ mode: z.literal("none") }).strict(),
+  budget: z.object({ max_attempts: z.literal(1), max_cost_usd: z.literal(0) }).strict(),
+  durability: z.literal("required"),
+  delivery: z.object({ mode: z.literal("munin") }).strict(),
+  escalation: z.object({ mode: z.literal("return_to_l1") }).strict(),
 });
 export type DelegationRequest = z.infer<typeof delegationRequestSchema>;
 
 export const runtimeFamilySchema = z.enum(["one-shot", "harness"]);
 export const runtimeEffectiveSchema = z.enum([
+  "homeserver",
   "ollama",
   "openrouter",
   "pi-harness",
 ]);
-export const hostEffectiveSchema = z.enum(["pi", "mba", "openrouter"]);
+export const hostEffectiveSchema = z.enum(["m5", "pi", "mba", "openrouter"]);
 export const reasoningLevelSchema = z.enum(["low", "medium", "high"]);
 
 export const aliasResolvedSchema = z.object({

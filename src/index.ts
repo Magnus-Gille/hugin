@@ -27,6 +27,12 @@ import {
 } from "./auth-alarm.js";
 import { executeOllamaTask } from "./ollama-executor.js";
 import {
+  executeHomeserverTask,
+  loadHomeserverGatewayConfig,
+  type HomeserverExecutorResult,
+  type HomeserverVerifierSpec,
+} from "./homeserver-executor.js";
+import {
   executeOpencodeTask,
   loadOpencodeGatewayConfig,
   type OpencodeExecutorResult,
@@ -136,12 +142,9 @@ import {
 import { consultSkillLane } from "./skill/skill-lane-dispatch.js";
 import { readBrokerEnv, startBroker, type RunningBroker } from "./broker/server.js";
 import { brokerExecutorCapabilities } from "./broker/executor-capabilities.js";
-import { BrokerTaskStore } from "./broker/task-store.js";
+import { BrokerTaskStore, parseCanonicalEnvelope } from "./broker/task-store.js";
 import { DelegationJournal } from "./broker/journal.js";
 import { IdempotencyIndex } from "./broker/idempotency.js";
-import { BrokerReconciler } from "./broker/reconciliation.js";
-import { OrchWorker } from "./broker/orch-worker.js";
-import { OpenRouterClient } from "./openrouter-client.js";
 import {
   effectiveOrchestratorConfig,
   isVerdictStoreEnabled,
@@ -468,8 +471,6 @@ let currentDeliveryAbort: AbortController | null = null;
 let currentReconcileAbort: AbortController | null = null;
 let server: Server;
 let runningBroker: RunningBroker | null = null;
-let brokerReconciler: BrokerReconciler | null = null;
-let orchWorker: OrchWorker | null = null;
 let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
 let cancelWatchTimer: ReturnType<typeof setInterval> | null = null;
 let leaseReaperTimer: ReturnType<typeof setInterval> | null = null;
@@ -588,7 +589,7 @@ const orchSavingsStore = savingsLayerEnabled
 
 interface TaskConfig {
   prompt: string;
-  runtime: "claude" | "codex" | "ollama" | "opencode" | "orchestrator";
+  runtime: "claude" | "codex" | "ollama" | "opencode" | "homeserver" | "orchestrator";
   workingDir: string;
   context?: string;
   timeoutMs: number;
@@ -626,12 +627,16 @@ interface TaskConfig {
   // HUGIN_DELIVERY_POLICY=off (the manifest would otherwise leak into the
   // agent prompt; Codex review #5).
   artifactManifestGrammarViolation?: boolean;
+  homeserverTaskType?: string;
+  homeserverVerifier?: HomeserverVerifierSpec;
+  homeserverMaxTokens?: number;
+  homeserverPolicyError?: string;
 }
 
 type DeclaredRuntime = TaskConfig["runtime"] | "pipeline" | "auto";
 
 function parseDeclaredRuntime(content: string): DeclaredRuntime | undefined {
-  return content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|opencode|pipeline|auto|orchestrator)/i)?.[1]?.toLowerCase() as
+  return content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|opencode|homeserver|pipeline|auto|orchestrator)/i)?.[1]?.toLowerCase() as
     | DeclaredRuntime
     | undefined;
 }
@@ -682,6 +687,7 @@ function parseTask(content: string): TaskConfig | null {
       | "codex"
       | "ollama"
       | "opencode"
+      | "homeserver"
       | "orchestrator"
       | undefined;
   const workingDir = content.match(
@@ -762,12 +768,35 @@ function parseTask(content: string): TaskConfig | null {
   const permissionProfileRaw = content.match(
     /\*\*Permission profile:\*\*\s*(.+)/i
   )?.[1]?.trim()?.toLowerCase();
-
-  // Extract prompt from ### Prompt section
+  const homeserverTaskType = content.match(/\*\*Task type:\*\*\s*(.+)/i)?.[1]?.trim();
+  const homeserverVerifierRaw = content.match(/\*\*Verifier:\*\*\s*(.+)/i)?.[1]?.trim();
+  const homeserverMaxTokensRaw = content.match(/\*\*Max output tokens:\*\*\s*(\d+)/i)?.[1];
   const promptMatch = content.match(/###\s*Prompt\s*\n([\s\S]+)$/i);
   const prompt = promptMatch?.[1]?.trim();
+  let homeserverVerifier: HomeserverVerifierSpec | undefined;
+  let homeserverPolicyError: string | undefined;
+  let canonicalBrokerEnvelope: import("./broker/types.js").DelegationEnvelope | undefined;
+  if (homeserverVerifierRaw && homeserverVerifierRaw !== "none") {
+    try {
+      const parsed = JSON.parse(homeserverVerifierRaw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        homeserverVerifier = parsed as HomeserverVerifierSpec;
+      }
+    } catch {
+      if (runtime !== "homeserver") homeserverPolicyError = "Verifier JSON is malformed";
+    }
+  }
 
-  if (!prompt || (!runtime && !isAutoRoute)) return null;
+  if (runtime === "homeserver") {
+    const parsedEnvelope = parseCanonicalEnvelope(content);
+    if (!parsedEnvelope.ok) homeserverPolicyError = parsedEnvelope.error;
+    else {
+      canonicalBrokerEnvelope = parsedEnvelope.envelope;
+      homeserverPolicyError = undefined;
+    }
+  }
+
+  if ((!prompt && !canonicalBrokerEnvelope) || (!runtime && !isAutoRoute)) return null;
 
   // Resolution priority: Context > Working dir > config.workspace
   const resolvedDir = contextRaw
@@ -792,11 +821,11 @@ function parseTask(content: string): TaskConfig | null {
   }
 
   return {
-    prompt,
+    prompt: canonicalBrokerEnvelope?.prompt ?? prompt!,
     runtime: runtime || "claude",  // temporary for auto — overwritten by router
     workingDir: resolvedDir,
     context: contextRaw || undefined,
-    timeoutMs: timeoutStr ? parseInt(timeoutStr) : config.defaultTimeoutMs,
+    timeoutMs: canonicalBrokerEnvelope?.timeout_ms ?? (timeoutStr ? parseInt(timeoutStr) : config.defaultTimeoutMs),
     submittedBy: submittedBy || "unknown",
     submittedAt: submittedAt || new Date().toISOString(),
     replyTo: replyTo || undefined,
@@ -812,7 +841,9 @@ function parseTask(content: string): TaskConfig | null {
       ? contextRefsRaw.split(",").map((r) => r.trim()).filter(Boolean)
       : undefined,
     contextBudget: contextBudgetStr ? parseInt(contextBudgetStr) : undefined,
-    declaredSensitivity: declaredSensitivityRaw
+    declaredSensitivity: canonicalBrokerEnvelope?.sensitivity
+      ? sensitivitySchema.parse(canonicalBrokerEnvelope.sensitivity)
+      : declaredSensitivityRaw
       ? sensitivitySchema.parse(declaredSensitivityRaw)
       : undefined,
     capabilities: validCapabilities.length > 0 ? validCapabilities : undefined,
@@ -825,6 +856,13 @@ function parseTask(content: string): TaskConfig | null {
     artifactManifestError: artifactManifestResult.error ?? undefined,
     artifactManifestGrammarViolation:
       artifactManifestResult.grammarViolation || undefined,
+    homeserverTaskType: canonicalBrokerEnvelope?.task_type ?? homeserverTaskType ?? undefined,
+    homeserverVerifier: canonicalBrokerEnvelope?.acceptance.mode === "verifier"
+      ? canonicalBrokerEnvelope.acceptance.verifier
+      : homeserverVerifier,
+    homeserverMaxTokens: canonicalBrokerEnvelope?.max_output_tokens
+      ?? (homeserverMaxTokensRaw ? Number(homeserverMaxTokensRaw) : undefined),
+    homeserverPolicyError,
     pipeline:
       pipelineId && pipelinePhase
         ? {
@@ -4056,13 +4094,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     }
 
     // Pre-task: checkout a fresh hugin/<taskId> branch from origin/main (#47)
-    const branchResult = await checkoutTaskBranch(task.workingDir, taskId, {
-      reposRoot: config.reposRoot,
-    });
-    if (branchResult.action === "fetch-failed") {
-      console.warn(`Pre-task branch checkout failed for ${taskNs} (non-fatal, proceeding without branch): ${branchResult.error}`);
-    } else if (branchResult.action === "created") {
-      console.log(`Pre-task: branch ${branchResult.branchName} ready in ${task.workingDir}`);
+    let branchResult: Awaited<ReturnType<typeof checkoutTaskBranch>> = { action: "skipped" };
+    if (task.runtime !== "homeserver") {
+      branchResult = await checkoutTaskBranch(task.workingDir, taskId, {
+        reposRoot: config.reposRoot,
+      });
+      if (branchResult.action === "fetch-failed") {
+        console.warn(`Pre-task branch checkout failed for ${taskNs} (non-fatal, proceeding without branch): ${branchResult.error}`);
+      } else if (branchResult.action === "created") {
+        console.log(`Pre-task: branch ${branchResult.branchName} ready in ${task.workingDir}`);
+      }
     }
 
     currentTaskConfig = task;
@@ -4100,11 +4141,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     const isOllama = task.runtime === "ollama";
     const isClaude = task.runtime === "claude";
     const isOpencode = task.runtime === "opencode";
+    const isHomeserver = task.runtime === "homeserver";
     const isOrchestrator = task.runtime === "orchestrator";
     const executorLabel = isOllama
       ? "ollama"
       : isClaude
         ? "agent-sdk"
+        : isHomeserver
+          ? "homeserver-delegate"
         : isOpencode
           ? "opencode"
           : isOrchestrator
@@ -4112,7 +4156,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             : "spawn";
 
     // Capture quota before task execution (skip for ollama — it's Claude-specific)
-    const quotaBefore = isOllama ? { q5: null, q7: null } : await fetchQuota();
+    const quotaBefore = isOllama || isHomeserver ? { q5: null, q7: null } : await fetchQuota();
 
     await munin.log(
       taskNs,
@@ -4137,6 +4181,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let ollamaJournalExtras: Record<string, unknown> = {};
     let opencodeJournalExtras: Record<string, unknown> = {};
     let opencodeResult: OpencodeExecutorResult | null = null;
+    let homeserverResult: HomeserverExecutorResult | null = null;
     let effectiveExecutor = executorLabel;
     let fallbackTriggered = false;
     let fallbackReason: string | null = null;
@@ -4320,6 +4365,38 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       };
     }
     currentOllamaAbort = null;
+    } else if (isHomeserver) {
+    const gateway = loadHomeserverGatewayConfig(process.env);
+    if (!gateway || !task.homeserverTaskType || task.homeserverPolicyError) {
+      exitCode = 1;
+      output = task.homeserverPolicyError
+        ? `Runtime homeserver policy rejected: ${task.homeserverPolicyError}`
+        : !gateway
+        ? "Runtime homeserver is not configured: set HOMESERVER_GATEWAY_URL and HOMESERVER_GATEWAY_API_KEY"
+        : "Runtime homeserver requires a canonical Task type";
+      logFile = path.join(LOG_DIR, `${taskId}.log`);
+      fs.writeFileSync(logFile, `=== Hugin Task Log (homeserver/M5) ===\n${output}\n`);
+    } else {
+      const homeserverAbort = new AbortController();
+      currentOllamaAbort = homeserverAbort;
+      homeserverResult = await executeHomeserverTask({
+        prompt: task.prompt,
+        gatewayBaseUrl: gateway.baseUrl,
+        apiKey: gateway.apiKey,
+        path: "delegate",
+        taskType: task.homeserverTaskType,
+        maxTokens: task.homeserverMaxTokens,
+        verifier: task.homeserverVerifier,
+        timeoutMs: task.timeoutMs,
+        maxOutputChars: config.maxOutputChars,
+        injectedContext: task.contextResolution?.content || undefined,
+      }, taskId, LOG_DIR, { abortController: homeserverAbort });
+      currentOllamaAbort = null;
+      exitCode = homeserverResult.exitCode;
+      output = homeserverResult.output;
+      logFile = homeserverResult.logFile;
+      resultText = homeserverResult.resultText;
+    }
     } else if (isClaude) {
     console.log(`Using Agent SDK executor for task ${taskNs}`);
     const sdkAbort = new AbortController();
@@ -4611,12 +4688,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let rawBodyText: string;
     let structuredBodyKind: TaskExecutionBodyKind;
 
-    if ((isClaude || isOllama || isOrchestrator || isOpencode) && resultText) {
-      resultSource = isOpencode ? "opencode-json" : effectiveExecutor;
+    if ((isClaude || isOllama || isOrchestrator || isOpencode || isHomeserver) && resultText) {
+      resultSource = isOpencode
+        ? "opencode-json"
+        : isHomeserver
+          ? "homeserver-delegate"
+          : effectiveExecutor;
       rawBodyText = resultText;
       structuredBodyKind = "response";
       resultBody = `### Response\n\n${resultText}`;
-    } else if (!isClaude && !isOllama && !isOrchestrator && !isOpencode) {
+    } else if (!isClaude && !isOllama && !isOrchestrator && !isOpencode && !isHomeserver) {
       const hookResult = readHookResult(taskId);
       if (hookResult) {
         resultSource = "hook";
@@ -4910,7 +4991,24 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       );
     }
     const baseRuntimeMetadata: TaskExecutionRuntimeMetadata | undefined =
-      isOllama
+      isHomeserver && homeserverResult
+        ? {
+            effectiveModel: homeserverResult.modelId ?? undefined,
+            effectiveHost: homeserverResult.nodeId ?? "m5",
+            delegation: {
+              taskType: homeserverResult.taskType ?? task.homeserverTaskType,
+              modelId: homeserverResult.modelId ?? undefined,
+              nodeId: homeserverResult.nodeId ?? undefined,
+              outcome: homeserverResult.outcome ?? undefined,
+              score: homeserverResult.score ?? undefined,
+              decisionReason: homeserverResult.decisionReason ?? undefined,
+              ledgerId: homeserverResult.ledgerId ?? undefined,
+              verifierNotes: homeserverResult.verifierNotes ?? undefined,
+              delegated: homeserverResult.delegated ?? undefined,
+              escalated: homeserverResult.escalated ?? undefined,
+            },
+          }
+        : isOllama
         ? {
             requestedModel: task.model || config.ollamaDefaultModel,
             effectiveModel:
@@ -5225,7 +5323,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     }
 
     // Capture quota after task execution (run for claude tasks or ollama fallback to claude)
-    const quotaAfter = (!isOllama || fallbackTriggered) ? await fetchQuota() : { q5: null, q7: null };
+    const quotaAfter = isClaude || fallbackTriggered
+      ? await fetchQuota()
+      : { q5: null, q7: null };
 
     // Append to invocation journal for usage analysis
     appendJournal({
@@ -5387,8 +5487,6 @@ async function shutdown(signal: string): Promise<void> {
 
   // Release the port immediately so a replacement instance can start.
   server?.close();
-  brokerReconciler?.stop();
-  orchWorker?.stop();
   if (runningBroker) {
     runningBroker.close().catch((err) => {
       console.error(
@@ -5565,14 +5663,9 @@ if (brokerEnv.enabled) {
   const journal = new DelegationJournal({ path: brokerHome });
   const taskStore = new BrokerTaskStore(munin);
   const idempotency = new IdempotencyIndex();
-  const orKey = process.env.OPENROUTER_API_KEY?.trim();
+  const homeserverReady = loadHomeserverGatewayConfig(process.env) !== null;
   const executorCapabilities = brokerExecutorCapabilities({
-    openrouterEnabled: Boolean(orKey),
-  });
-  brokerReconciler = new BrokerReconciler({
-    taskStore,
-    journal,
-    intervalMs: config.brokerReconciliationIntervalMs,
+    homeserverEnabled: homeserverReady,
   });
   startBroker({
     host: brokerEnv.host,
@@ -5585,34 +5678,10 @@ if (brokerEnv.enabled) {
       console.log(
         `Broker endpoint: http://${brokerEnv.host}:${brokerEnv.port}/v1/delegate/* (principals: ${Object.keys(brokerEnv.keys).join(", ")})`,
       );
-      brokerReconciler?.start();
       console.log(
-        `Broker reconciler: every ${config.brokerReconciliationIntervalMs}ms (journal: ${brokerHome})`,
+        `Broker canonical lifecycle: Munin dispatcher (legacy journal read-only: ${brokerHome})`,
       );
-
-      if (orKey) {
-        const orClient = new OpenRouterClient({
-          apiKey: orKey,
-          referer: process.env.OPENROUTER_REFERER || "https://hugin.local",
-          appTitle: process.env.OPENROUTER_APP_TITLE || "hugin-orch-v1",
-        });
-        orchWorker = new OrchWorker({
-          munin,
-          taskStore,
-          journal,
-          openrouterClient: orClient,
-          workerId: `orch-${workerId}`,
-          pollIntervalMs: config.pollIntervalMs,
-        });
-        orchWorker.start();
-        console.log(
-          `Orch worker (openrouter): polling every ${config.pollIntervalMs}ms`,
-        );
-      } else {
-        console.log(
-          "Orch worker (openrouter): disabled (set OPENROUTER_API_KEY to enable)",
-        );
-      }
+      console.log(`Broker M5 delegate executor: ${homeserverReady ? "enabled" : "disabled"}`);
     })
     .catch((err) => {
       console.error(

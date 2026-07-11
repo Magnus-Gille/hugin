@@ -21,6 +21,7 @@ import {
   taskTypeSchema,
   verificationOutcomeSchema,
   worktreeSpecSchema,
+  verifierSpecSchema,
 } from "../broker/types.js";
 import {
   BrokerHttpError,
@@ -28,8 +29,8 @@ import {
   type BrokerClient,
 } from "./broker-client.js";
 
-export const ALIAS_MAP_VERSION = 1;
-export const ENVELOPE_VERSION = 1 as const;
+export const ALIAS_MAP_VERSION = 2;
+export const ENVELOPE_VERSION = 2 as const;
 
 export interface ToolDeps {
   broker: BrokerClient;
@@ -71,7 +72,7 @@ export interface ToolDeps {
 
 export const submitInputShape = {
   task_type: taskTypeSchema.describe(
-    "What kind of task this is. Steers the broker's accounting + rating UI.",
+    "Canonical M5 task type. The gateway uses it for capability routing and ledger evidence.",
   ),
   prompt: z
     .string()
@@ -90,15 +91,21 @@ export const submitInputShape = {
     .number()
     .int()
     .positive()
+    .max(900_000)
     .optional()
-    .describe("Per-task timeout. Defaults to 300_000 (5 min) for one-shot."),
+    .describe("Per-task timeout in ms. Defaults to 300_000; maximum 900_000."),
   max_output_tokens: z
     .number()
     .int()
     .positive()
+    .max(32_768)
     .optional()
-    .describe("Cap on generated tokens. Optional."),
-  parent_task_id: z.string().min(1).optional().describe("Reserved; not used in v1."),
+    .describe("Cap on generated tokens. Defaults to 4_096; maximum 32_768."),
+  acceptance: z.discriminatedUnion("mode", [
+    z.object({ mode: z.literal("l1_review") }).strict(),
+    z.object({ mode: z.literal("verifier"), verifier: verifierSpecSchema }).strict(),
+  ]).optional().describe("Acceptance contract. Defaults to explicit L1 review."),
+  parent_task_id: z.string().min(1).optional().describe("Optional L1 parent-task correlation id."),
   idempotency_key: z
     .string()
     .uuid()
@@ -206,7 +213,7 @@ export function buildTools(deps: ToolDeps): {
   models: HuginTool<z.infer<typeof modelsInputSchema>>;
 } {
   const newId = deps.newId ?? randomUUID;
-  const executableAliases = deps.executableAliases ?? ["large-reasoning"];
+  const executableAliases = deps.executableAliases ?? ["m5"];
   const executableAliasInput = executableAliases.length > 0
     ? z.enum(executableAliases as [Alias, ...Alias[]])
     : z.never();
@@ -224,7 +231,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_submit",
     title: "Submit a delegation task to Hugin",
     description:
-      "Hand a task off to the Pi-side broker for execution on a cheaper or differently-capable runtime. Returns the assigned task_id and the `idempotency_key` used (auto-generated if not supplied) — pass that key back as `idempotency_key` to safely retry the same logical request.",
+      "Persist one bounded task in Hugin's durable lifecycle and execute it as one M5 `/delegate` leaf. M5 chooses the model and owns capability evidence; Hugin owns lifecycle and delivery. Returns the task_id and idempotency_key — reuse that key only to retry the same logical request.",
     inputShape: activeSubmitInputShape,
     handler: async (rawInput) => {
       let idempotencyKey: string | undefined;
@@ -242,9 +249,16 @@ export function buildTools(deps: ToolDeps): {
           alias_requested: input.alias_requested,
           alias_map_version: deps.aliasMapVersion ?? ALIAS_MAP_VERSION,
           worktree: input.worktree,
-          sensitivity: input.sensitivity,
-          timeout_ms: input.timeout_ms,
-          max_output_tokens: input.max_output_tokens,
+          sensitivity: input.sensitivity ?? "internal",
+          timeout_ms: input.timeout_ms ?? 300_000,
+          max_output_tokens: input.max_output_tokens ?? 4_096,
+          acceptance: input.acceptance ?? { mode: "l1_review" as const },
+          allowed_destinations: ["m5" as const],
+          tool_policy: { mode: "none" as const },
+          budget: { max_attempts: 1 as const, max_cost_usd: 0 as const },
+          durability: "required" as const,
+          delivery: { mode: "munin" as const },
+          escalation: { mode: "return_to_l1" as const },
         };
         const response = await deps.broker.submit(payload);
         return asResult(withIdempotencyKey(response, idempotencyKey));
@@ -277,7 +291,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_rate",
     title: "Rate the outcome of a delegated task",
     description:
-      "Append a rating event for a previously completed task. Used by the audit pipeline + future routing improvements.",
+      "Store a product-usefulness rating for a terminal task. This is Hugin product evidence; it does not directly modify M5's capability ledger.",
     inputShape: rateInputShape,
     handler: async (rawInput) => {
       try {
@@ -294,7 +308,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_list",
     title: "List recent delegated tasks",
     description:
-      "Projection over the broker's journal. Useful to find a forgotten task_id or review what ran today.",
+      "List this authenticated principal's recent canonical Munin tasks, plus its read-only historical orch-v1 rows.",
     inputShape: listInputShape,
     handler: async (rawInput) => {
       try {

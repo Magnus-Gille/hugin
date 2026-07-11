@@ -7,11 +7,9 @@
  *   - Same key, different payload, within window → reject (collision)
  *   - Same key, after window → new task accepted
  *
- * State is in-memory and not durable. The broker is the single source of
- * truth for the dedupe window; on restart, the recovery path is "re-create
- * fresh" — clients with same key + same payload will create a duplicate
- * task, which is acceptable since the window is short and Munin still
- * holds both records for audit.
+ * This in-memory index only closes concurrent-submit races. Durable reuse is
+ * provided by the principal-scoped deterministic Munin task namespace; after
+ * restart the submit handler reads and compares that persisted envelope.
  */
 
 import { createHash } from "node:crypto";
@@ -59,7 +57,8 @@ function canonicalize(value: unknown): unknown {
  * array-replacer rules.
  */
 export function canonicalizeRequest(request: DelegationRequest): string {
-  return JSON.stringify(canonicalize(request));
+  const { orchestrator_session_id: _sessionId, ...behavior } = request;
+  return JSON.stringify(canonicalize(behavior));
 }
 
 export function hashPayload(request: DelegationRequest): string {

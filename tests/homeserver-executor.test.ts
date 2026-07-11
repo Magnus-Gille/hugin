@@ -97,6 +97,20 @@ describe("loadHomeserverGatewayConfig", () => {
       HOMESERVER_GATEWAY_API_KEY: "k",
     } as NodeJS.ProcessEnv)).toEqual({ baseUrl: "http://10.0.0.5:8080", apiKey: "k" });
   });
+
+  it("refuses a public or path-bearing gateway even with a key", () => {
+    for (const url of [
+      "https://example.com",
+      "http://10.0.0.5:8080/v1",
+      "http://user@10.0.0.5:8080",
+      "ftp://10.0.0.5:8080",
+    ]) {
+      expect(loadHomeserverGatewayConfig({
+        HOMESERVER_GATEWAY_URL: url,
+        HOMESERVER_GATEWAY_API_KEY: "k",
+      } as NodeJS.ProcessEnv)).toBeNull();
+    }
+  });
 });
 
 describe("executeHomeserverTask — chat path", () => {
@@ -153,11 +167,13 @@ describe("executeHomeserverTask — delegate path", () => {
         escalate: false,
         taskType: "extract",
         modelId: "qwen3-coder",
+        nodeId: "m5",
         decisionReason: "viable (4/5 pass)",
         outcome: "pass",
         score: 1,
         output: "1998",
         ledgerId: "ledger-123",
+        verifierNotes: "numeric match",
         metrics: { promptTokens: 45, completionTokens: 3, latencyMs: 820 },
       }),
     );
@@ -199,6 +215,10 @@ describe("executeHomeserverTask — delegate path", () => {
     expect(result.score).toBe(1);
     expect(result.ledgerId).toBe("ledger-123");
     expect(result.decisionReason).toBe("viable (4/5 pass)");
+    expect(result.taskType).toBe("extract");
+    expect(result.modelId).toBe("qwen3-coder");
+    expect(result.nodeId).toBe("m5");
+    expect(result.verifierNotes).toBe("numeric match");
     expect(result.promptTokens).toBe(45);
     expect(result.completionTokens).toBe(3);
     expect(result.totalTokens).toBe(48);

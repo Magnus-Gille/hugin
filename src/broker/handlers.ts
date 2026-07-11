@@ -15,7 +15,7 @@
 import type { Request, Response } from "express";
 import { ZodError } from "zod";
 import {
-  ALIAS_MAP_V1,
+  ACTIVE_ALIAS_MAP,
   RUNTIME_REGISTRY,
   type AliasMap,
 } from "../runtime-registry.js";
@@ -30,7 +30,7 @@ import { projectDelegations } from "./journal.js";
 import type { IdempotencyIndex } from "./idempotency.js";
 import { hashPayload } from "./idempotency.js";
 import type { BrokerTaskStore } from "./task-store.js";
-import { generateBrokerTaskId } from "./task-store.js";
+import { generateBrokerTaskId, parseCanonicalEnvelope, parseStoredEnvelope } from "./task-store.js";
 import {
   awaitRequestSchema,
   delegationRequestSchema,
@@ -52,6 +52,43 @@ function nowFn(deps: BrokerHandlerDependencies): () => Date {
   return deps.now ?? (() => new Date());
 }
 
+function scopedIdempotencyKey(principal: string, idempotencyKey: string): string {
+  return `${principal}\0${idempotencyKey}`;
+}
+
+function storedBrokerPrincipal(content: string): string | null {
+  const canonical = parseCanonicalEnvelope(content);
+  if (canonical.ok) return canonical.envelope.broker_principal;
+  try {
+    const historical = JSON.parse(content) as { broker_principal?: unknown };
+    return typeof historical.broker_principal === "string"
+      ? historical.broker_principal
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function requireOwnedBrokerTask(
+  req: AuthenticatedRequest,
+  res: Response,
+  status: { content: string; tags: string[] },
+): boolean {
+  if (!status.tags.includes("broker:mcp-v2") && !status.tags.includes("orch-v1")) {
+    res.status(404).json({ error: "policy_rejected", message: "task is not a Broker task" });
+    return false;
+  }
+  const owner = storedBrokerPrincipal(status.content);
+  if (!owner || owner !== req.brokerPrincipal) {
+    res.status(403).json({
+      error: "policy_rejected",
+      message: "task belongs to a different broker principal",
+    });
+    return false;
+  }
+  return true;
+}
+
 export function createSubmitHandler(deps: BrokerHandlerDependencies) {
   return async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     const principal = req.brokerPrincipal;
@@ -68,7 +105,7 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
       return;
     }
 
-    if (request.envelope_version !== 1) {
+    if (request.envelope_version !== 2) {
       res.status(400).json({
         error: "policy_rejected",
         message: `unsupported envelope_version ${request.envelope_version}`,
@@ -76,11 +113,11 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
       return;
     }
 
-    if (request.alias_map_version !== ALIAS_MAP_V1.version) {
+    if (request.alias_map_version !== ACTIVE_ALIAS_MAP.version) {
       res.status(409).json({
         error: "policy_rejected",
-        message: `alias_map_version ${request.alias_map_version} does not match Broker version ${ALIAS_MAP_V1.version}`,
-        alias_map_version: ALIAS_MAP_V1.version,
+        message: `alias_map_version ${request.alias_map_version} does not match Broker version ${ACTIVE_ALIAS_MAP.version}`,
+        alias_map_version: ACTIVE_ALIAS_MAP.version,
       });
       return;
     }
@@ -140,7 +177,47 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
       return;
     }
 
-    const idemOutcome = deps.idempotency.reserve(request.idempotency_key, request);
+    const taskId = generateBrokerTaskId(principal, request.idempotency_key);
+    const persisted = await deps.taskStore.readStatus(taskId);
+    if (persisted) {
+      const persistedEnvelopeResult = parseCanonicalEnvelope(persisted.content);
+      if (!persistedEnvelopeResult.ok) {
+        res.status(409).json({
+          error: "policy_rejected",
+          message: "idempotency task exists but its canonical envelope is unreadable",
+          existing_task_id: taskId,
+        });
+        return;
+      }
+      const persistedEnvelope = persistedEnvelopeResult.envelope;
+      const persistedRequestResult = delegationRequestSchema.safeParse(persistedEnvelope);
+      if (!persistedRequestResult.success) {
+        res.status(409).json({
+          error: "policy_rejected",
+          message: "idempotency task exists but its request contract is invalid",
+          existing_task_id: taskId,
+        });
+        return;
+      }
+      const persistedRequest = persistedRequestResult.data;
+      if (hashPayload(persistedRequest) !== hashPayload(request)) {
+        res.status(409).json({
+          error: "policy_rejected",
+          message: "idempotency_key reused with a different payload",
+          existing_task_id: taskId,
+        });
+        return;
+      }
+      res.status(200).json({
+        task_id: taskId,
+        received_at: persistedEnvelope.received_at,
+        reused_idempotency: true,
+      });
+      return;
+    }
+
+    const reservationKey = scopedIdempotencyKey(principal, request.idempotency_key);
+    const idemOutcome = deps.idempotency.reserve(reservationKey, request);
     if (idemOutcome.kind === "retry") {
       res.status(200).json({
         task_id: idemOutcome.task_id,
@@ -166,7 +243,6 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
     }
 
     const now = nowFn(deps)();
-    const taskId = generateBrokerTaskId(now);
     const envelope: DelegationEnvelope = {
       ...request,
       task_id: taskId,
@@ -179,7 +255,7 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
     try {
       await deps.taskStore.submit({ envelope });
     } catch (err) {
-      deps.idempotency.release(request.idempotency_key);
+      deps.idempotency.release(reservationKey);
       res.status(500).json({
         error: "internal",
         message: `munin submit failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -187,23 +263,7 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
       return;
     }
 
-    deps.idempotency.record(request.idempotency_key, request, taskId);
-
-    try {
-      await deps.journal.append({
-        event_schema_version: 1,
-        event_type: "delegation_submitted",
-        event_ts: now.toISOString(),
-        task_id: taskId,
-        envelope,
-        prompt_chars: request.prompt.length,
-        prompt_sha256: hashPayload({ ...request, prompt: request.prompt }),
-      });
-    } catch (err) {
-      console.warn(
-        `[broker] journal append failed for ${taskId}; reconciliation will backfill: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+    deps.idempotency.record(reservationKey, request, taskId);
 
     res.status(202).json({
       task_id: taskId,
@@ -231,6 +291,7 @@ export function createAwaitHandler(deps: BrokerHandlerDependencies) {
       });
       return;
     }
+    if (!requireOwnedBrokerTask(req, res, status)) return;
 
     const lifecycle = pickLifecycleTag(status.tags);
     if (lifecycle === "completed") {
@@ -255,9 +316,24 @@ export function createAwaitHandler(deps: BrokerHandlerDependencies) {
       return;
     }
     if (lifecycle === "failed") {
-      const stored = await deps.taskStore.readErrorResult(parsed.task_id);
-      const error = stored
-        ? JSON.parse(stored.content)
+      const structured = await deps.taskStore.readStructuredResult(parsed.task_id);
+      if (structured) {
+        const result = JSON.parse(structured.content) as Record<string, unknown>;
+        res.status(200).json({
+          status: "failed",
+          result,
+          error: {
+            task_id: parsed.task_id,
+            kind: "executor_failed",
+            message: String(result.errorMessage ?? result.bodyText ?? "task failed"),
+            retryable: false,
+          },
+        });
+        return;
+      }
+      const legacyStored = await deps.taskStore.readErrorResult(parsed.task_id);
+      const error = legacyStored
+        ? JSON.parse(legacyStored.content)
         : {
             task_id: parsed.task_id,
             kind: "internal",
@@ -265,6 +341,20 @@ export function createAwaitHandler(deps: BrokerHandlerDependencies) {
             retryable: true,
           };
       res.status(200).json({ status: "failed", error });
+      return;
+    }
+    if (lifecycle === "cancelled") {
+      const structured = await deps.taskStore.readStructuredResult(parsed.task_id);
+      res.status(200).json({
+        status: "failed",
+        ...(structured ? { result: JSON.parse(structured.content) } : {}),
+        error: {
+          task_id: parsed.task_id,
+          kind: "cancelled",
+          message: "task was cancelled",
+          retryable: false,
+        },
+      });
       return;
     }
 
@@ -299,23 +389,25 @@ export function createRateHandler(deps: BrokerHandlerDependencies) {
       });
       return;
     }
+    if (!requireOwnedBrokerTask(req, res, status)) return;
+    if (!status.tags.some((tag) => ["completed", "failed", "cancelled"].includes(tag))) {
+      res.status(409).json({
+        error: "policy_rejected",
+        message: "task is not terminal and cannot be rated yet",
+      });
+      return;
+    }
 
     try {
-      await deps.journal.append({
-        event_schema_version: 1,
-        event_type: "delegation_rated",
-        event_ts: nowFn(deps)().toISOString(),
-        task_id: parsed.task_id,
-        rating: parsed.rating,
-        rating_reason: parsed.rating_reason,
-        verification_outcome: parsed.verification_outcome,
+      await deps.taskStore.writeFeedback(parsed.task_id, {
+        ...parsed,
+        rated_at: nowFn(deps)().toISOString(),
         rated_by: req.brokerPrincipal ?? "unknown",
-        retries_count: parsed.retries_count,
       });
     } catch (err) {
       res.status(500).json({
         error: "internal",
-        message: `journal append failed: ${err instanceof Error ? err.message : String(err)}`,
+        message: `feedback write failed: ${err instanceof Error ? err.message : String(err)}`,
       });
       return;
     }
@@ -325,7 +417,7 @@ export function createRateHandler(deps: BrokerHandlerDependencies) {
 }
 
 export function createListHandler(deps: BrokerHandlerDependencies) {
-  return async (req: Request, res: Response): Promise<void> => {
+  return async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     let parsed;
     try {
       parsed = listRequestSchema.parse(
@@ -336,13 +428,24 @@ export function createListHandler(deps: BrokerHandlerDependencies) {
       return;
     }
 
-    const events = await deps.journal.readAll();
-    const projection = projectDelegations(events);
-    const rows = Array.from(projection.values()).filter((row) => {
+    const principal = req.brokerPrincipal;
+    if (!principal) {
+      res.status(500).json({ error: "internal", message: "principal missing" });
+      return;
+    }
+    const canonical = await deps.taskStore.listCanonical(principal, parsed.limit ?? 50);
+    const historical = Array.from(projectDelegations(await deps.journal.readAll()).values())
+      .filter((row) => row.envelope?.broker_principal === principal);
+    const canonicalIds = new Set(canonical.map((row) => row.task_id));
+    const combined: Array<Record<string, any>> = [
+      ...canonical,
+      ...historical.filter((row) => !canonicalIds.has(row.task_id)),
+    ];
+    const rows = combined.filter((row) => {
       if (parsed.outcome === "completed" && row.outcome !== "completed") return false;
       if (parsed.outcome === "failed" && row.outcome !== "failed") return false;
-      if (parsed.outcome === "running" && row.outcome) return false;
-      if (parsed.alias && row.envelope?.alias_requested !== parsed.alias) return false;
+      if (parsed.outcome === "running" && row.outcome && row.outcome !== "running") return false;
+      if (parsed.alias && (row.alias ?? row.envelope?.alias_requested) !== parsed.alias) return false;
       if (parsed.since_ts) {
         const submittedAt = row.submitted_at ?? "";
         if (submittedAt < parsed.since_ts) return false;
@@ -352,14 +455,13 @@ export function createListHandler(deps: BrokerHandlerDependencies) {
     rows.sort((a, b) =>
       (b.submitted_at ?? "").localeCompare(a.submitted_at ?? ""),
     );
-    const limited = rows.slice(0, parsed.limit ?? 50);
-    res.status(200).json({ rows: limited, total: rows.length });
+    res.status(200).json({ rows: rows.slice(0, parsed.limit ?? 50), total: rows.length });
   };
 }
 
 export function createModelsHandler(capabilities: BrokerExecutorCapabilities) {
   return async (_req: Request, res: Response): Promise<void> => {
-    const map: AliasMap = ALIAS_MAP_V1;
+    const map: AliasMap = ACTIVE_ALIAS_MAP;
     const executable = new Set(executableBrokerAliases(capabilities));
     const aliases = Object.values(map.aliases)
       .filter((entry) => executable.has(entry.alias))
@@ -399,7 +501,7 @@ function coerceQueryToList(query: Request["query"]): unknown {
 }
 
 function pickLifecycleTag(tags: string[]): string | undefined {
-  for (const tag of ["completed", "failed", "running", "pending"]) {
+  for (const tag of ["completed", "failed", "cancelled", "running", "pending"]) {
     if (tags.includes(tag)) return tag;
   }
   return undefined;

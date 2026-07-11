@@ -6,12 +6,12 @@
  * submitted task for that resolved runtime/family right now?
  */
 
-import { ALIAS_MAP_V1 } from "../runtime-registry.js";
+import { ACTIVE_ALIAS_MAP } from "../runtime-registry.js";
 import { resolveAliasForBroker } from "./alias-resolution.js";
 import type { Alias, AliasResolved } from "./types.js";
 
 export interface BrokerExecutorCapabilities {
-  openrouterOneShot: boolean;
+  m5Delegate: boolean;
 }
 
 export type BrokerAliasAvailability =
@@ -23,13 +23,13 @@ export type BrokerAliasAvailability =
     };
 
 export function brokerExecutorCapabilities(options: {
-  openrouterEnabled: boolean;
+  homeserverEnabled: boolean;
 }): BrokerExecutorCapabilities {
-  return { openrouterOneShot: options.openrouterEnabled };
+  return { m5Delegate: options.homeserverEnabled };
 }
 
 export function isBrokerExecutorImplemented(resolved: AliasResolved): boolean {
-  return resolved.runtime === "openrouter" && resolved.family === "one-shot";
+  return resolved.runtime === "homeserver" && resolved.family === "one-shot";
 }
 
 export function brokerAliasAvailability(
@@ -43,7 +43,7 @@ export function brokerAliasAvailability(
       retryable: false,
     };
   }
-  if (!capabilities.openrouterOneShot) {
+  if (!capabilities.m5Delegate) {
     return {
       executable: false,
       reason: "executor_disabled",
@@ -56,7 +56,7 @@ export function brokerAliasAvailability(
 export function executableBrokerAliases(
   capabilities: BrokerExecutorCapabilities,
 ): Alias[] {
-  return Object.values(ALIAS_MAP_V1.aliases)
+  return Object.values(ACTIVE_ALIAS_MAP.aliases)
     .map((entry) => entry.alias)
     .filter((alias) =>
       brokerAliasAvailability(

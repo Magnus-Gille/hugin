@@ -12,7 +12,7 @@
  */
 
 import {
-  ALIAS_MAP_V1,
+  ACTIVE_ALIAS_MAP,
   RUNTIME_REGISTRY,
   resolveAlias,
 } from "../runtime-registry.js";
@@ -54,7 +54,7 @@ export function resolveAliasForBroker(alias: Alias): AliasResolutionResult {
 
   return {
     alias_resolved: aliasResolved,
-    alias_map_version: ALIAS_MAP_V1.version,
+    alias_map_version: ACTIVE_ALIAS_MAP.version,
     policy_version: POLICY_VERSION,
   };
 }
@@ -65,6 +65,7 @@ function mapRuntimeToEffective(
   if (dispatcherRuntime === "ollama") return "ollama";
   if (dispatcherRuntime === "openrouter") return "openrouter";
   if (dispatcherRuntime === "pi-harness") return "pi-harness";
+  if (dispatcherRuntime === "homeserver") return "homeserver";
   throw new Error(
     `Alias resolved to non-orchestrator dispatcher runtime: ${dispatcherRuntime}`,
   );

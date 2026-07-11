@@ -35,6 +35,6 @@ describe("resolveAliasForBroker", () => {
   });
 
   it("includes alias_map_version", () => {
-    expect(resolveAliasForBroker("tiny").alias_map_version).toBe(1);
+    expect(resolveAliasForBroker("m5").alias_map_version).toBe(2);
   });
 });

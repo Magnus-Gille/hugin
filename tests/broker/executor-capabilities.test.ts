@@ -8,14 +8,14 @@ import {
 } from "../../src/broker/executor-capabilities.js";
 
 describe("Broker executor capabilities", () => {
-  const enabled = brokerExecutorCapabilities({ openrouterEnabled: true });
-  const disabled = brokerExecutorCapabilities({ openrouterEnabled: false });
+  const enabled = brokerExecutorCapabilities({ homeserverEnabled: true });
+  const disabled = brokerExecutorCapabilities({ homeserverEnabled: false });
 
-  it("marks only the implemented OpenRouter one-shot alias executable", () => {
-    expect(executableBrokerAliases(enabled)).toEqual(["large-reasoning"]);
+  it("marks only the canonical M5 one-shot alias executable", () => {
+    expect(executableBrokerAliases(enabled)).toEqual(["m5"]);
     expect(
       isBrokerExecutorImplemented(
-        resolveAliasForBroker("large-reasoning").alias_resolved,
+        resolveAliasForBroker("m5").alias_resolved,
       ),
     ).toBe(true);
   });
@@ -36,11 +36,11 @@ describe("Broker executor capabilities", () => {
     },
   );
 
-  it("advertises no alias when the OpenRouter executor is disabled", () => {
+  it("advertises no alias when the M5 executor is disabled", () => {
     expect(executableBrokerAliases(disabled)).toEqual([]);
     expect(
       brokerAliasAvailability(
-        resolveAliasForBroker("large-reasoning").alias_resolved,
+        resolveAliasForBroker("m5").alias_resolved,
         disabled,
       ),
     ).toEqual({

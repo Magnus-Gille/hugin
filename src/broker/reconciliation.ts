@@ -277,6 +277,13 @@ export class BrokerReconciler {
         sensitivity: envelope.sensitivity,
         timeout_ms: envelope.timeout_ms,
         max_output_tokens: envelope.max_output_tokens,
+        acceptance: envelope.acceptance,
+        allowed_destinations: envelope.allowed_destinations,
+        tool_policy: envelope.tool_policy,
+        budget: envelope.budget,
+        durability: envelope.durability,
+        delivery: envelope.delivery,
+        escalation: envelope.escalation,
       }),
     });
   }

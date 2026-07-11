@@ -3,7 +3,7 @@ import type { Sensitivity } from "./sensitivity.js";
 
 // Direct dispatcher runtimes that src/index.ts can execute in-process.
 // Orchestrator runtimes never flow through this path.
-export type LegacyDispatcherRuntime = "claude" | "codex" | "ollama" | "opencode";
+export type LegacyDispatcherRuntime = "claude" | "codex" | "ollama" | "opencode" | "homeserver";
 export type AutoRoutableDispatcherRuntime = "claude" | "codex" | "ollama";
 
 // Wider union covering every runtime the registry can describe, including
@@ -21,6 +21,7 @@ const LEGACY_DISPATCHER_RUNTIMES: ReadonlySet<DispatcherRuntime> = new Set([
   "codex",
   "ollama",
   "opencode",
+  "homeserver",
 ]);
 const AUTO_ROUTABLE_DISPATCHER_RUNTIMES: ReadonlySet<DispatcherRuntime> = new Set([
   "claude",
@@ -48,6 +49,7 @@ export type Provider =
   | "openai-spawn"
   | "ollama-local"
   | "opencode"
+  | "homeserver"
   | "openrouter"
   | "pi-harness"
   | "berget";
@@ -157,6 +159,19 @@ export const RUNTIME_REGISTRY: readonly RuntimeDefinition[] = [
     egress: "local",
     zdrRequired: false,
     autoEligible: true,
+    family: "one-shot",
+  },
+  {
+    id: "homeserver-m5",
+    dispatcherRuntime: "homeserver",
+    trustTier: "trusted",
+    costModel: "free",
+    modelSize: "large",
+    capabilities: ["structured-output"],
+    provider: "homeserver",
+    egress: "local",
+    zdrRequired: false,
+    autoEligible: false,
     family: "one-shot",
   },
   {
@@ -301,7 +316,7 @@ export function buildRuntimeCandidates(
 // Stable aliases (orchestrator v1, see docs/orchestrator-v1-data-model.md §2)
 // ---------------------------------------------------------------------------
 
-export type Alias = "tiny" | "medium" | "large-reasoning" | "pi-large-coder";
+export type Alias = "m5" | "tiny" | "medium" | "large-reasoning" | "pi-large-coder";
 
 export interface AliasResolution {
   alias: Alias;
@@ -309,7 +324,7 @@ export interface AliasResolution {
   harness?: "pi";
   model: string;
   runtimeId: string;
-  host?: "pi" | "mba" | "openrouter";
+  host?: "m5" | "pi" | "mba" | "openrouter";
   reasoningLevel?: ReasoningLevel;
   notes?: string;
 }
@@ -317,13 +332,21 @@ export interface AliasResolution {
 export interface AliasMap {
   version: number;
   effective_at: string;
-  aliases: Record<Alias, AliasResolution>;
+  aliases: Partial<Record<Alias, AliasResolution>>;
 }
 
-export const ALIAS_MAP_V1: AliasMap = {
-  version: 1,
-  effective_at: "2026-04-26T00:00:00Z",
+export const ALIAS_MAP_V2: AliasMap = {
+  version: 2,
+  effective_at: "2026-07-11T00:00:00Z",
   aliases: {
+    m5: {
+      alias: "m5",
+      family: "one-shot",
+      model: "gateway-selected",
+      runtimeId: "homeserver-m5",
+      host: "m5",
+      notes: "Canonical durable leaf; the M5 gateway owns model selection and capability evidence.",
+    },
     tiny: {
       alias: "tiny",
       family: "one-shot",
@@ -363,12 +386,22 @@ export const ALIAS_MAP_V1: AliasMap = {
   },
 };
 
+const { m5: _m5Alias, ...v1Aliases } = ALIAS_MAP_V2.aliases;
+/** Frozen historical catalogue. It remains available for old envelopes/journal readers. */
+export const ALIAS_MAP_V1: AliasMap = {
+  version: 1,
+  effective_at: "2026-04-26T00:00:00Z",
+  aliases: v1Aliases,
+};
+
+export const ACTIVE_ALIAS_MAP: AliasMap = ALIAS_MAP_V2;
+
 export function getAliasMap(): AliasMap {
-  return ALIAS_MAP_V1;
+  return ACTIVE_ALIAS_MAP;
 }
 
 export function resolveAlias(alias: Alias): AliasResolution {
-  const resolution = ALIAS_MAP_V1.aliases[alias];
+  const resolution = ACTIVE_ALIAS_MAP.aliases[alias];
   if (!resolution) {
     throw new Error(`Unknown alias: ${alias}`);
   }
