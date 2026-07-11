@@ -23,9 +23,10 @@ if [ -z "$PI_HOST" ]; then
 fi
 REMOTE="magnus@$PI_HOST"
 REMOTE_ENV="/home/magnus/repos/hugin/.env"
-# Heimdall already owns 3033 on the Pi's tailnet address. Keep Hugin on a
-# dedicated production port; the generic Broker default remains 3033.
-BROKER_PORT="3034"
+# Heimdall owns 3033 and Ratatoskr owns 3034 on the Pi's tailnet address.
+# Keep Hugin on a dedicated production port; the generic Broker default
+# remains 3033 for other installations.
+BROKER_PORT="3035"
 
 DIST_PATH="/Users/magnus/repos/hugin/dist/mcp-server.js"
 if [ ! -f "$DIST_PATH" ]; then
