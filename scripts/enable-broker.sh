@@ -1,9 +1,9 @@
 #!/bin/bash
-# Enable the orchestrator-v1 broker on the Pi and register hugin-mcp locally.
+# Enable the durable MCP Broker on the Pi and register hugin-mcp locally.
 #
-# Generates a 64-char hex token on the Pi, appends HUGIN_BROKER_KEYS to the
-# Pi's .env (only if the var isn't already set), restarts hugin, and registers
-# the hugin-mcp MCP on the laptop pointing at the Pi over Tailscale.
+# Generates (or safely reuses) a 64-char hex token on the Pi, binds the Broker
+# to the Pi's Tailscale IP, restarts hugin, verifies both services, and
+# registers the hugin-mcp MCP on the laptop pointing at that tailnet-only bind.
 #
 # The token is held in a shell variable for the duration of the run and never
 # echoed. The script prints status only — no secret output.
@@ -23,6 +23,7 @@ if [ -z "$PI_HOST" ]; then
 fi
 REMOTE="magnus@$PI_HOST"
 REMOTE_ENV="/home/magnus/repos/hugin/.env"
+BROKER_PORT="3033"
 
 DIST_PATH="/Users/magnus/repos/hugin/dist/mcp-server.js"
 if [ ! -f "$DIST_PATH" ]; then
@@ -30,43 +31,59 @@ if [ ! -f "$DIST_PATH" ]; then
   exit 1
 fi
 
+echo "==> Resolving the Pi's tailnet-only Broker bind..."
+BROKER_HOST=$(ssh "$REMOTE" 'tailscale ip -4 2>/dev/null | sed -n "1p"')
+if ! [[ "$BROKER_HOST" =~ ^100\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "ERROR: Could not resolve a valid Tailscale IPv4 address for the Pi." >&2
+  exit 1
+fi
+
 echo "==> Checking Pi for existing HUGIN_BROKER_KEYS..."
 if ssh "$REMOTE" "grep -q '^HUGIN_BROKER_KEYS=' '$REMOTE_ENV'" 2>/dev/null; then
-  echo "    Pi .env already has HUGIN_BROKER_KEYS. Skipping token generation."
-  echo "    To rotate, remove the line manually first."
+  echo "    Reusing the existing claude-code token (kept in-memory only)."
+  TOKEN=$(ssh "$REMOTE" "node -e 'const fs=require(\"fs\");const line=fs.readFileSync(process.argv[1],\"utf8\").split(/\\r?\\n/).find((x)=>x.startsWith(\"HUGIN_BROKER_KEYS=\"));if(!line)process.exit(2);const keys=JSON.parse(line.slice(line.indexOf(\"=\")+1));const token=keys[\"claude-code\"];if(typeof token!==\"string\")process.exit(3);process.stdout.write(token)' '$REMOTE_ENV'")
+else
+  echo "==> Generating broker token on Pi (kept in-memory only)..."
+  # Generate the token on the Pi. It crosses to the laptop only in this shell
+  # variable so the local MCP client can be configured; it is never echoed.
+  TOKEN=$(ssh "$REMOTE" 'TOKEN=$(openssl rand -hex 32); printf "HUGIN_BROKER_KEYS={\"claude-code\":\"%s\"}\n" "$TOKEN" >> '"$REMOTE_ENV"'; printf "%s" "$TOKEN"')
+fi
+
+if ! [[ "$TOKEN" =~ ^[0-9a-fA-F]{64}$ ]]; then
+  echo "ERROR: Broker token load/generation failed." >&2
   exit 1
 fi
 
-echo "==> Generating broker token on Pi (kept in-memory only)..."
-# Generate the token on the Pi (so it never crosses the laptop except as MCP arg later).
-# The token lands in a remote shell variable, gets appended to .env, then is
-# printed *only* on stdout for the laptop to pipe straight into `claude mcp
-# add-json`. We capture it into a local shell var; nothing echoes it.
-TOKEN=$(ssh "$REMOTE" 'TOKEN=$(openssl rand -hex 32); printf "HUGIN_BROKER_KEYS={\"claude-code\":\"%s\"}\n" "$TOKEN" >> '"$REMOTE_ENV"'; printf "%s" "$TOKEN"')
-
-if [ -z "$TOKEN" ] || [ "${#TOKEN}" -ne 64 ]; then
-  echo "ERROR: Token generation failed (got ${#TOKEN} chars)." >&2
-  exit 1
-fi
+echo "==> Configuring tailnet-only Broker bind..."
+ssh "$REMOTE" "if grep -q '^HUGIN_BROKER_HOST=' '$REMOTE_ENV'; then sed -i 's/^HUGIN_BROKER_HOST=.*/HUGIN_BROKER_HOST=$BROKER_HOST/' '$REMOTE_ENV'; else printf 'HUGIN_BROKER_HOST=$BROKER_HOST\\n' >> '$REMOTE_ENV'; fi"
 
 echo "==> Restarting hugin on Pi..."
 ssh "$REMOTE" 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart hugin'
 
 echo "==> Verifying hugin came back up..."
 sleep 2
-HEALTH=$(ssh "$REMOTE" 'curl -fsS http://127.0.0.1:3032/healthz 2>/dev/null || echo FAIL')
-if [ "$HEALTH" != "ok" ]; then
-  echo "WARNING: hugin healthz returned: $HEALTH"
+HEALTH=$(ssh "$REMOTE" 'curl -fsS http://127.0.0.1:3032/health 2>/dev/null || echo FAIL')
+if [[ "$HEALTH" != *'"status":"ok"'* ]]; then
+  echo "WARNING: hugin health returned an unhealthy response."
   echo "Check: ssh $REMOTE 'XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u hugin -n 50'"
 else
-  echo "    hugin healthz: ok"
+  echo "    hugin health: ok"
+fi
+
+BROKER_HEALTH=$(ssh "$REMOTE" "curl -fsS http://$BROKER_HOST:$BROKER_PORT/health 2>/dev/null || echo FAIL")
+if [[ "$BROKER_HEALTH" != *'"service":"hugin-broker"'* ]]; then
+  echo "ERROR: Broker is not reachable on its tailnet bind." >&2
+  unset TOKEN
+  exit 1
+else
+  echo "    hugin Broker health: ok (tailnet-only)"
 fi
 
 echo "==> Registering hugin-mcp on laptop..."
 # Build the MCP config JSON inline. claude mcp add-json takes a single JSON arg.
 # We use printf to assemble it so the token never crosses an echo'd argv.
 MCP_JSON=$(printf '{"command":"node","args":["%s"],"env":{"HUGIN_BROKER_URL":"http://%s:3033","HUGIN_BROKER_TOKEN":"%s"}}' \
-  "$DIST_PATH" "$PI_HOST" "$TOKEN")
+  "$DIST_PATH" "$BROKER_HOST" "$TOKEN")
 
 # Remove any existing registration so we don't 409 on conflict
 claude mcp remove hugin -s user 2>/dev/null || true
