@@ -1,7 +1,52 @@
 # Hugin — Status
 
-**Last session:** 2026-07-11 (Codex) — truthful Broker routing and roadmap reconciliation (#168)
-**Branch:** `main`; production includes PR #168, deployed to Hugin-Munin on 2026-07-11.
+**Last session:** 2026-07-11 (Codex) — canonical durable MCP→Hugin→M5 lifecycle (#167)
+**Branch:** `main`; production includes PR #173, deployed to Hugin-Munin on 2026-07-11.
+
+## Latest — canonical durable MCP→Hugin→M5 lifecycle (#167, 2026-07-11)
+
+Issue [#167](https://github.com/Magnus-Gille/hugin/issues/167) is implemented,
+reviewed, merged, deployed, and proven against the live production path.
+
+- PR [#169](https://github.com/Magnus-Gille/hugin/pull/169) replaced the ordinary
+  MCP delegation path with a canonical Munin-backed Hugin task lifecycle. Hugin owns
+  intake, durable idempotency, macro placement, recovery, delivery, and product feedback;
+  it makes exactly one bounded M5 `/delegate` call, while M5 remains the sole capability
+  router and ledger authority. The legacy orch-v1 worker/reconciler no longer starts and
+  its journal is read-only for historical compatibility.
+- The v2 envelope has fail-closed defaults and bounds: internal sensitivity, M5-only
+  destination, no tools, one attempt, zero external spend, durable Munin delivery,
+  return-to-L1 review, 300 s default / 900 s maximum timeout, and 4,096 default /
+  32,768 maximum output tokens. Broker authentication isolates principal task/result,
+  list, await, rate, and idempotency state.
+- Production enablement exposed the authenticated Broker only on the Pi's tailnet address.
+  PRs [#170](https://github.com/Magnus-Gille/hugin/pull/170),
+  [#171](https://github.com/Magnus-Gille/hugin/pull/171), and
+  [#172](https://github.com/Magnus-Gille/hugin/pull/172) hardened credential reuse,
+  tailnet health verification, and port persistence. Final allocation is Hugin Broker
+  `100.97.117.37:3035`; Heimdall remains on 3033 and Ratatoskr on 3034.
+- Live task `mcp-m5-fd095190fd5074ac89dea1c2` returned exactly
+  `HUGIN167_LIVE_OK` through model `mellum`, outcome `pass`, score `1`, and M5 ledger ID
+  `1cf65112-da3d-4ad2-9e6e-2855d5a2ad63`. Hugin was restarted immediately after submit;
+  resubmitting the same principal + idempotency key with a rotated session returned the
+  original task ID and original receipt timestamp with `reused_idempotency:true`.
+- The restart exposed one final lifecycle seam: terminal status normalization had dropped
+  `broker:mcp-v2`, so `hugin_await` returned 404 even though the result was durable. PR
+  [#173](https://github.com/Magnus-Gille/hugin/pull/173) centralized persistent identity
+  tags across claim, renewal, and terminal transitions and safely recognizes canonical
+  pre-fix envelopes. After deployment, awaiting that same old task returned the complete
+  structured result and preserved ledger ID. Its Hugin product rating is stored separately
+  as `pass` / `accepted_unchanged`; it does not modify M5 capability evidence.
+- Native Codex review findings were fixed before merge. Final validation: TypeScript build,
+  `git diff --check`, GitHub CI, and the full suite (91 files / 1,538 tests) are green.
+  Local M5 dogfood was advisory: root output was rated `partial`; subagent output was rated
+  `wrong` and discarded. Final quality remained with the implementing/reviewing agents.
+
+**Next:** exercise this ordinary Broker path during the #165 role-validation trial and
+measure whether it reduces L1 attention. Feature expansion remains frozen except reliability
+and security fixes. For future side-effecting destinations, add an execution-receipt protocol:
+persistent intake idempotency prevents duplicate task creation, but cannot by itself prove
+exactly-once external effects across a crash after an effect and before its receipt is stored.
 
 ## Latest — truthful MCP Broker routing + roadmap reset (#168, 2026-07-11)
 
