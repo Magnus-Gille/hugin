@@ -109,52 +109,142 @@ assert_contains "$out" "FATAL" "irony guard: FATAL message present"
 # tree whose node_modules is a symlink, synced (rsync -av --delete) onto a
 # destination that already has a real, populated node_modules directory. The
 # destination's dependency tree must survive untouched and rsync must exit 0.
+#
+# rsync is required, not optional: this is the core regression coverage for
+# #187 (a CI runner-image change that dropped rsync must fail this test, not
+# silently no-op it — Codex review finding).
+command -v rsync >/dev/null 2>&1 || {
+  echo "FAIL: rsync is not installed — cannot verify the #187 regression, which is the point of this test" >&2
+  exit 1
+}
 
-if ! command -v rsync >/dev/null 2>&1; then
-  echo "SKIP: rsync not available, cannot verify exclusion semantics" >&2
+SRC="$WORK/rsync-src"
+DEST="$WORK/rsync-dest"
+REAL_DEPS="$WORK/rsync-real-deps"
+
+mkdir -p "$REAL_DEPS/node_modules/some-pkg"
+echo "real dep content" > "$REAL_DEPS/node_modules/some-pkg/index.js"
+
+mkdir -p "$SRC/dist"
+echo "console.log(1)" > "$SRC/dist/index.js"
+echo "SECRET" > "$SRC/.env"
+ln -s "$REAL_DEPS/node_modules" "$SRC/node_modules"
+
+mkdir -p "$DEST/node_modules/existing-dep"
+echo "installed dependency, must survive" > "$DEST/node_modules/existing-dep/index.js"
+mkdir -p "$DEST/dist"
+echo "old build" > "$DEST/dist/index.js"
+echo "REMOTE_SECRET" > "$DEST/.env"
+
+# Negative control: the OLD buggy exclude ('node_modules/' trailing slash)
+# must still reproduce the original rsync exit 23 against this exact fixture
+# — this proves the fixture actually recreates the incident, rather than the
+# hardened args just happening to exit 0 for an unrelated reason.
+old_rc=0
+rsync -av --delete --exclude='node_modules/' --exclude='.git' --exclude='.git/' \
+  --exclude='.env' --exclude='tests/' --exclude='.DS_Store' \
+  "$SRC/" "$DEST/" >/dev/null 2>&1 || old_rc=$?
+assert_eq "$old_rc" "23" "negative control: old trailing-slash exclude reproduces rsync exit 23"
+
+# Reset the destination (the negative control run above may have partially
+# mutated it) before exercising the hardened args on a clean fixture.
+rm -rf "$DEST"
+mkdir -p "$DEST/node_modules/existing-dep"
+echo "installed dependency, must survive" > "$DEST/node_modules/existing-dep/index.js"
+mkdir -p "$DEST/dist"
+echo "old build" > "$DEST/dist/index.js"
+echo "REMOTE_SECRET" > "$DEST/.env"
+
+rrc=0
+rsync -av --delete "${DEPLOY_RSYNC_EXCLUDE_ARGS[@]}" "$SRC/" "$DEST/" >/dev/null 2>&1 || rrc=$?
+assert_eq "$rrc" "0" "rsync with hardened excludes: exits 0 despite symlinked source node_modules"
+
+if [ -f "$DEST/node_modules/existing-dep/index.js" ]; then
+  echo "PASS: destination node_modules contents survived the sync"
 else
-  SRC="$WORK/rsync-src"
-  DEST="$WORK/rsync-dest"
-  REAL_DEPS="$WORK/rsync-real-deps"
+  echo "FAIL: destination node_modules contents were deleted (the #187 regression)"
+  failures=$((failures + 1))
+fi
 
-  mkdir -p "$REAL_DEPS/node_modules/some-pkg"
-  echo "real dep content" > "$REAL_DEPS/node_modules/some-pkg/index.js"
+if [ -L "$DEST/node_modules" ]; then
+  echo "FAIL: destination node_modules became a symlink (would point at the worktree's dep store)"
+  failures=$((failures + 1))
+else
+  echo "PASS: destination node_modules stayed a real directory"
+fi
 
-  mkdir -p "$SRC/dist"
-  echo "console.log(1)" > "$SRC/dist/index.js"
-  echo "SECRET" > "$SRC/.env"
-  ln -s "$REAL_DEPS/node_modules" "$SRC/node_modules"
+if [ "$(cat "$DEST/.env")" = "REMOTE_SECRET" ]; then
+  echo "PASS: destination .env preserved (not overwritten by source .env)"
+else
+  echo "FAIL: destination .env was overwritten"
+  failures=$((failures + 1))
+fi
 
-  mkdir -p "$DEST/node_modules/existing-dep"
-  echo "installed dependency, must survive" > "$DEST/node_modules/existing-dep/index.js"
-  mkdir -p "$DEST/dist"
-  echo "old build" > "$DEST/dist/index.js"
-  echo "REMOTE_SECRET" > "$DEST/.env"
+### --- Nested node_modules (Codex review finding) ---------------------------
+# The exclude/protect patterns are deliberately unanchored so they match at
+# any depth, not just the transfer root. Reproduce with a nested subpackage
+# node_modules directory (this repo has skills/markdown-frontmatter-
+# normalization/package.json, so a nested node_modules is a real possible
+# shape, not a hypothetical).
+NSRC="$WORK/nested-src"
+NDEST="$WORK/nested-dest"
+NREAL_DEPS="$WORK/nested-real-deps"
 
-  rrc=0
-  rsync -av --delete "${DEPLOY_RSYNC_EXCLUDE_ARGS[@]}" "$SRC/" "$DEST/" >/dev/null 2>&1 || rrc=$?
-  assert_eq "$rrc" "0" "rsync with hardened excludes: exits 0 despite symlinked source node_modules"
+mkdir -p "$NREAL_DEPS/node_modules/some-pkg"
+echo "real dep" > "$NREAL_DEPS/node_modules/some-pkg/index.js"
+mkdir -p "$NSRC/pkg"
+ln -s "$NREAL_DEPS/node_modules" "$NSRC/node_modules"
+mkdir -p "$NSRC/pkg/node_modules/nested-dep"
+echo "nested dep in source" > "$NSRC/pkg/node_modules/nested-dep/index.js"
 
-  if [ -f "$DEST/node_modules/existing-dep/index.js" ]; then
-    echo "PASS: destination node_modules contents survived the sync"
-  else
-    echo "FAIL: destination node_modules contents were deleted (the #187 regression)"
-    failures=$((failures + 1))
-  fi
+mkdir -p "$NDEST/node_modules/existing-dep"
+echo "top-level installed dep, must survive" > "$NDEST/node_modules/existing-dep/index.js"
+mkdir -p "$NDEST/pkg/node_modules/nested-existing-dep"
+echo "nested installed dep, must survive" > "$NDEST/pkg/node_modules/nested-existing-dep/index.js"
 
-  if [ -L "$DEST/node_modules" ]; then
-    echo "FAIL: destination node_modules became a symlink (would point at the worktree's dep store)"
-    failures=$((failures + 1))
-  else
-    echo "PASS: destination node_modules stayed a real directory"
-  fi
+nrc=0
+rsync -av --delete "${DEPLOY_RSYNC_EXCLUDE_ARGS[@]}" "$NSRC/" "$NDEST/" >/dev/null 2>&1 || nrc=$?
+assert_eq "$nrc" "0" "nested node_modules: rsync with hardened excludes exits 0"
 
-  if [ "$(cat "$DEST/.env")" = "REMOTE_SECRET" ]; then
-    echo "PASS: destination .env preserved (not overwritten by source .env)"
-  else
-    echo "FAIL: destination .env was overwritten"
-    failures=$((failures + 1))
-  fi
+if [ -f "$NDEST/node_modules/existing-dep/index.js" ] && [ -f "$NDEST/pkg/node_modules/nested-existing-dep/index.js" ]; then
+  echo "PASS: both top-level and nested destination node_modules contents survived"
+else
+  echo "FAIL: a nested node_modules directory was destroyed (unanchored-pattern regression)"
+  failures=$((failures + 1))
+fi
+
+if [ -e "$NDEST/pkg/node_modules/nested-dep/index.js" ]; then
+  echo "FAIL: nested source node_modules was transferred (should be excluded at any depth)"
+  failures=$((failures + 1))
+else
+  echo "PASS: nested source node_modules correctly excluded from transfer"
+fi
+
+### --- Protect filter alone (defense-in-depth sanity) ------------------------
+# Proves the 'P' protect rule is doing real work, not a no-op: even with NO
+# exclude at all, --delete must not remove the destination's node_modules
+# contents. (The transfer itself still errors, since nothing stops rsync
+# from attempting to place the symlink — only the destination-side deletion
+# protection is under test here.)
+PSRC="$WORK/protect-src"
+PDEST="$WORK/protect-dest"
+PREAL_DEPS="$WORK/protect-real-deps"
+
+mkdir -p "$PREAL_DEPS/node_modules/some-pkg"
+echo "real dep" > "$PREAL_DEPS/node_modules/some-pkg/index.js"
+ln -s "$PREAL_DEPS/node_modules" "$PSRC/node_modules" 2>/dev/null || {
+  mkdir -p "$PSRC"
+  ln -s "$PREAL_DEPS/node_modules" "$PSRC/node_modules"
+}
+mkdir -p "$PDEST/node_modules/existing-dep"
+echo "installed dependency, must survive" > "$PDEST/node_modules/existing-dep/index.js"
+
+rsync -av --delete -f 'P node_modules/***' "$PSRC/" "$PDEST/" >/dev/null 2>&1 || true
+if [ -f "$PDEST/node_modules/existing-dep/index.js" ]; then
+  echo "PASS: protect filter alone preserved destination node_modules contents (no-exclude case)"
+else
+  echo "FAIL: protect filter alone did not stop --delete from removing destination node_modules contents"
+  failures=$((failures + 1))
 fi
 
 if [ "$failures" -gt 0 ]; then

@@ -17,13 +17,23 @@
 #      node_modules is a symlink at all — the safest fix is never reaching
 #      rsync with the dangerous shape in the first place.
 #   2. DEPLOY_RSYNC_EXCLUDE_ARGS: the exclude pattern itself, hardened to
-#      match a symlink/dir/file alike ('/node_modules', anchored, no
-#      trailing slash), plus a 'protect' filter rule as defense-in-depth so
-#      --delete can never remove the destination's node_modules contents
-#      even if the exclude were ever bypassed or misconfigured.
+#      match a symlink/dir/file alike ('node_modules', no trailing slash),
+#      plus a 'protect' filter rule as defense-in-depth so --delete can
+#      never remove the destination's node_modules contents even if the
+#      exclude were ever bypassed or misconfigured.
 # Both layers exist because the preflight alone leaves a bypass path (someone
 # could run rsync directly, or the check could be skipped) — the rsync flags
 # must be independently safe.
+#
+# Deliberately UNANCHORED (no leading '/'): an anchored '/node_modules' only
+# matches the transfer root, so a nested node_modules (e.g. a subpackage
+# under skills/) would fall through both the exclude and the protect filter
+# — reintroducing the exact #187 failure mode one directory deeper, and
+# silently regressing behavior vs. the historical unanchored 'node_modules/'
+# pattern. Matching at any depth restores that coverage while still fixing
+# the type bug (Codex review finding, verified with a nested-directory rsync
+# experiment: both a top-level and a nested destination node_modules survive
+# --delete, and neither is transferred from the source).
 
 node_modules_preflight_check() {
   local dir="$1"
@@ -43,8 +53,8 @@ node_modules_preflight_check() {
 # Shared with the regression test (node-modules-preflight.test.sh) so the
 # test can never drift from what deploy-pi.sh actually runs.
 DEPLOY_RSYNC_EXCLUDE_ARGS=(
-  --exclude='/node_modules'
-  -f 'P /node_modules/**'
+  --exclude='node_modules'
+  -f 'P node_modules/***'
   --exclude='.git'
   --exclude='.git/'
   --exclude='.env'
