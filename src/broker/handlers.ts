@@ -40,6 +40,7 @@ import {
 } from "./types.js";
 import type { AwaitLifecycle } from "./await-observation.js";
 import type { AuthenticatedRequest } from "./auth.js";
+import { computeSubmitWarnings } from "./submit-warnings.js";
 
 export interface BrokerHandlerDependencies {
   taskStore: BrokerTaskStore;
@@ -109,6 +110,9 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
       respondZodError(res, err);
       return;
     }
+    // #184: same request payload on every success path below (fresh accept
+    // or any idempotent reuse), so computed once and reused verbatim.
+    const submitWarnings = computeSubmitWarnings(request);
 
     if (request.envelope_version !== 2) {
       res.status(400).json({
@@ -217,6 +221,7 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
         task_id: taskId,
         received_at: persistedEnvelope.received_at,
         reused_idempotency: true,
+        ...(submitWarnings.length > 0 ? { warnings: submitWarnings } : {}),
       });
       return;
     }
@@ -228,6 +233,7 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
         task_id: idemOutcome.task_id,
         received_at: nowFn(deps)().toISOString(),
         reused_idempotency: true,
+        ...(submitWarnings.length > 0 ? { warnings: submitWarnings } : {}),
       });
       return;
     }
@@ -274,6 +280,7 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
       task_id: taskId,
       received_at: envelope.received_at,
       reused_idempotency: false,
+      ...(submitWarnings.length > 0 ? { warnings: submitWarnings } : {}),
     });
   };
 }

@@ -182,6 +182,91 @@ describe("POST /v1/delegate/submit", () => {
     expect(harness.munin.writes).toHaveLength(1);
   });
 
+  it("propagates warnings on the in-memory idempotency retry path (#184)", async () => {
+    const req = validRequest({
+      task_type: "classify",
+      prompt: "Classify this ticket as bug or feature.",
+    });
+    const r1 = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(req),
+    });
+    expect(r1.status).toBe(202);
+    const b1 = await r1.json();
+    expect(b1.warnings).toEqual([
+      "judgment-type task submitted without verifier or rubric — capability evidence will be weak",
+    ]);
+
+    const r2 = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(req),
+    });
+    expect(r2.status).toBe(200);
+    const b2 = await r2.json();
+    expect(b2.reused_idempotency).toBe(true);
+    expect(b2.warnings).toEqual([
+      "judgment-type task submitted without verifier or rubric — capability evidence will be weak",
+    ]);
+  });
+
+  it("includes a warnings array for a judgment task_type submitted with default l1_review and no rubric (#184)", async () => {
+    const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest({
+        task_type: "classify",
+        prompt: "Classify this ticket as bug or feature.",
+      })),
+    });
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.warnings).toEqual([
+      "judgment-type task submitted without verifier or rubric — capability evidence will be weak",
+    ]);
+  });
+
+  it("omits warnings when a judgment task_type carries an explicit verifier (#184)", async () => {
+    const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest({
+        task_type: "classify",
+        prompt: "Classify this ticket as bug or feature.",
+        acceptance: { mode: "verifier", verifier: { type: "nonEmpty" } },
+      })),
+    });
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.warnings).toBeUndefined();
+  });
+
+  it("omits warnings when a judgment task_type's prompt has a rubric section (#184)", async () => {
+    const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest({
+        task_type: "triage",
+        prompt: "Triage this issue.\n\n## Rubric\n- p0: data loss\n- p1: broken feature",
+      })),
+    });
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.warnings).toBeUndefined();
+  });
+
+  it("never warns for a non-judgment task_type (#184)", async () => {
+    const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest({ task_type: "summarize", prompt: "Summarize the README." })),
+    });
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.warnings).toBeUndefined();
+  });
+
   it("reuses the persisted task after a fresh Broker instance and ignores MCP session rotation", async () => {
     const first = validRequest();
     const firstResponse = await fetch(`${harness.url}/v1/delegate/submit`, {
@@ -220,6 +305,47 @@ describe("POST /v1/delegate/submit", () => {
         body: JSON.stringify(validRequest({ prompt: "different", orchestrator_session_id: "third" })),
       });
       expect(collision.status).toBe(409);
+    } finally {
+      await restarted.close();
+    }
+  });
+
+  it("propagates warnings on the persisted-envelope reuse path after a fresh Broker instance (#184)", async () => {
+    const first = validRequest({
+      task_type: "triage",
+      prompt: "Triage this issue and assign a severity.",
+    });
+    const firstResponse = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST", headers: authHeader(), body: JSON.stringify(first),
+    });
+    expect((await firstResponse.json()).warnings).toEqual([
+      "judgment-type task submitted without verifier or rubric — capability evidence will be weak",
+    ]);
+
+    const restarted = await startBroker({
+      host: "127.0.0.1",
+      port: 0,
+      keys: { "claude-code": SECRET },
+      deps: {
+        taskStore: new BrokerTaskStore(harness.munin as unknown as MuninClient),
+        journal: harness.journal,
+        idempotency: new IdempotencyIndex(),
+        executorCapabilities: brokerExecutorCapabilities({ homeserverEnabled: true }),
+      },
+    });
+    try {
+      const addr = restarted.server.address() as AddressInfo;
+      const res = await fetch(`http://127.0.0.1:${addr.port}/v1/delegate/submit`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(first),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.reused_idempotency).toBe(true);
+      expect(body.warnings).toEqual([
+        "judgment-type task submitted without verifier or rubric — capability evidence will be weak",
+      ]);
     } finally {
       await restarted.close();
     }
