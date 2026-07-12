@@ -56,7 +56,7 @@ describe("LearningLoopCollector", () => {
 
     const evidence = await new LearningLoopCollector({
       munin, ledgerClient: fakeLedgerClient(okLedger),
-    }).collect();
+    }).refresh();
 
     expect(evidence.tasks).toHaveLength(1);
     const t = evidence.tasks[0]!;
@@ -94,7 +94,7 @@ describe("LearningLoopCollector", () => {
 
     const evidence = await new LearningLoopCollector({
       munin, ledgerClient: fakeLedgerClient(null),
-    }).collect();
+    }).refresh();
 
     expect(evidence.tasks).toHaveLength(1);
     expect(evidence.tasks[0]!.taskId).toBe("mcp-m5-old");
@@ -115,7 +115,7 @@ describe("LearningLoopCollector", () => {
 
     const evidence = await new LearningLoopCollector({
       munin, ledgerClient: fakeLedgerClient(null),
-    }).collect();
+    }).refresh();
 
     // Product evidence is about the BROKER path under test (#165), not the
     // general dispatcher corpus.
@@ -132,9 +132,11 @@ describe("LearningLoopCollector", () => {
 
     const evidence = await new LearningLoopCollector({
       munin, ledgerClient: fakeLedgerClient(okLedger),
-    }).collect();
+    }).refresh();
 
     // /heimdall.json must never break because evidence collection failed.
+    // Codex review: a failed query must NOT read as a measured-empty corpus.
+    expect(evidence.available).toBe(false);
     expect(evidence.tasks).toEqual([]);
     expect(evidence.ledger).toEqual(okLedger); // the ledger half still works
   });
@@ -146,7 +148,7 @@ describe("LearningLoopCollector", () => {
     const evidence = await new LearningLoopCollector({
       munin,
       ledgerClient: { getLedger: vi.fn(async () => { throw new Error("gateway down"); }) },
-    }).collect();
+    }).refresh();
 
     expect(evidence.ledger).toBeNull(); // "unavailable", not a fabricated zero
     expect(evidence.tasks).toHaveLength(1);
@@ -160,11 +162,12 @@ describe("LearningLoopCollector", () => {
       munin, ledgerClient: fakeLedgerClient(okLedger), ttlMs: 300_000, now: () => 1000,
     });
 
-    await collector.collect();
-    await collector.collect();
-    await collector.collect();
+    await collector.refresh(); // prime the cache
+    collector.collect();
+    collector.collect();
+    collector.collect();
 
-    // One corpus walk (two queries: tagged + homeserver), not three.
+    // Cached reads do no further corpus walks (one walk = two queries).
     expect(munin.query).toHaveBeenCalledTimes(2);
   });
 
@@ -174,7 +177,7 @@ describe("LearningLoopCollector", () => {
     });
     const collector = new LearningLoopCollector({ munin, ledgerClient: fakeLedgerClient(okLedger) });
 
-    await Promise.all([collector.collect(), collector.collect(), collector.collect()]);
+    await Promise.all([collector.refresh(), collector.refresh(), collector.refresh()]);
 
     // One corpus walk (two queries), not three.
     expect(munin.query).toHaveBeenCalledTimes(2);
@@ -187,9 +190,65 @@ describe("LearningLoopCollector", () => {
     });
     const evidence = await new LearningLoopCollector({
       munin, ledgerClient: fakeLedgerClient(null),
-    }).collect();
+    }).refresh();
 
     expect(evidence.tasks).toHaveLength(1);
     expect(evidence.tasks[0]!.rating).toBeNull(); // one lost data point, not a crash
+  });
+
+  // Codex review: awaiting a cold corpus walk on /heimdall.json (up to 200 tasks
+  // × several serialized Munin reads) can hang the descriptor for ~a minute and
+  // blank Hugin's Heimdall page — the #135 regression, no exception needed.
+  it("returns immediately on a cold cache instead of blocking on the walk", () => {
+    const munin = {
+      query: vi.fn(() => new Promise(() => {})), // a walk that never resolves
+      read: vi.fn(() => new Promise(() => {})),
+    } as unknown as MuninClient;
+
+    const collector = new LearningLoopCollector({
+      munin, ledgerClient: { getLedger: () => new Promise(() => {}) },
+    });
+
+    // Synchronous — no await. Must not hang, and must say "unavailable" rather
+    // than invent an empty corpus.
+    const evidence = collector.collect();
+    expect(evidence.available).toBe(false);
+    expect(evidence.tasks).toEqual([]);
+  });
+
+  it("serves stale evidence rather than blocking while it refreshes", async () => {
+    let clock = 1000;
+    const munin = fakeMunin({
+      "tasks/mcp-m5-1/status": { content: ENVELOPE("claude-code"), tags: ["completed"] },
+    });
+    const collector = new LearningLoopCollector({
+      munin, ledgerClient: fakeLedgerClient(okLedger), ttlMs: 100, now: () => clock,
+    });
+
+    await collector.refresh();
+    clock += 10_000; // cache is now stale
+
+    const evidence = collector.collect(); // still instant, stale but honest
+    expect(evidence.available).toBe(true);
+    expect(evidence.tasks).toHaveLength(1);
+  });
+
+  it("does not cache a failed collection — the next tick retries", async () => {
+    let fail = true;
+    const munin = {
+      query: vi.fn(async () => {
+        if (fail) throw new Error("munin down");
+        return { results: [{ namespace: "tasks/mcp-m5-1", key: "status" }], total: 1 };
+      }),
+      read: vi.fn(async (_ns: string, key: string) =>
+        key === "status" ? { content: ENVELOPE("claude-code"), tags: ["completed"] } : null
+      ),
+    } as unknown as MuninClient;
+
+    const collector = new LearningLoopCollector({ munin, ledgerClient: fakeLedgerClient(null) });
+
+    expect((await collector.refresh()).available).toBe(false);
+    fail = false;
+    expect((await collector.refresh()).available).toBe(true); // recovers
   });
 });

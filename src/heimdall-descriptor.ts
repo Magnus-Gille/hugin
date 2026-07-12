@@ -59,12 +59,15 @@ export const HEIMDALL_DESCRIPTOR = {
  * Fail-open: any collection failure yields honest "no evidence available"
  * panels rather than a broken descriptor.
  */
-export async function buildLearningLoopHealthPanels(
+export function buildLearningLoopHealthPanels(
   collector: LearningLoopCollector
-): Promise<TypedPanel[]> {
-  const { ledger, tasks } = await collector.collect();
+): TypedPanel[] {
+  // Synchronous by design: `collect()` is stale-while-revalidate and returns
+  // immediately. The descriptor must never wait on a cold corpus walk — hanging
+  // /heimdall.json blanks Hugin's whole Heimdall page (#135).
+  const { ledger, tasks, available, readFailures, truncated } = collector.collect();
   const capability = computeCapabilityPlane(ledger);
-  const product = computeProductPlane(tasks);
+  const product = computeProductPlane(tasks, { available, readFailures, truncated });
   const policy = deriveRoutePolicy(tasks, capability);
   return buildLearningLoopPanels({ capability, product, policy });
 }
@@ -82,13 +85,13 @@ export function registerHeimdallDescriptorRoute(
   app: Application,
   collector?: LearningLoopCollector
 ): void {
-  app.get("/heimdall.json", async (_req, res) => {
+  app.get("/heimdall.json", (_req, res) => {
     if (!collector) {
       res.json(HEIMDALL_DESCRIPTOR);
       return;
     }
     try {
-      const learningPanels = await buildLearningLoopHealthPanels(collector);
+      const learningPanels = buildLearningLoopHealthPanels(collector);
       res.json({
         ...HEIMDALL_DESCRIPTOR,
         panels: [...HEIMDALL_DESCRIPTOR.panels, ...learningPanels],

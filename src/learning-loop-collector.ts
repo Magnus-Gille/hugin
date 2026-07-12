@@ -38,6 +38,32 @@ function pickLifecycle(tags: string[]): string {
 export interface LearningLoopEvidence {
   ledger: Ledger | null;
   tasks: ProductTaskEvidence[];
+  /**
+   * Whether the task corpus was actually readable. A failed query must NOT
+   * degrade into an empty task list that renders as a measured zero — "we could
+   * not look" and "we looked and found nothing" are different facts, and the
+   * whole point of this panel is not to confuse them.
+   */
+  available: boolean;
+  /** Per-task reads that failed — counts derived from this are a lower bound. */
+  readFailures: number;
+  /** The corpus walk hit its cap — counts derived from this are a lower bound. */
+  truncated: boolean;
+}
+
+const UNAVAILABLE: LearningLoopEvidence = {
+  ledger: null,
+  tasks: [],
+  available: false,
+  readFailures: 0,
+  truncated: false,
+};
+
+interface CorpusResult {
+  tasks: ProductTaskEvidence[];
+  available: boolean;
+  readFailures: number;
+  truncated: boolean;
 }
 
 export interface CollectorOptions {
@@ -66,9 +92,29 @@ export class LearningLoopCollector {
     this.now = opts.now ?? (() => Date.now());
   }
 
-  async collect(): Promise<LearningLoopEvidence> {
+  /**
+   * Return the best evidence available RIGHT NOW, without ever blocking the
+   * caller on a cold walk.
+   *
+   * `/heimdall.json` is unauthenticated and polled every 60s, and a cold
+   * collection is up to `maxTasks` × several serialized Munin reads — easily
+   * tens of seconds. Awaiting that on the request path would hang the descriptor
+   * and blank Hugin's whole Heimdall page (the #135 regression), no exception
+   * required. So: stale-while-revalidate. Serve the cached snapshot (even if
+   * stale) or an explicit "unavailable" immediately, and refresh in the
+   * background.
+   */
+  collect(): LearningLoopEvidence {
     const nowMs = this.now();
-    if (this.cache && nowMs - this.cache.at < this.ttlMs) return this.cache.data;
+    const fresh = this.cache !== null && nowMs - this.cache.at < this.ttlMs;
+    if (!fresh) void this.refresh();
+    // Stale data is still honest data; "unavailable" is honest too. Neither is
+    // worth hanging the dashboard for.
+    return this.cache?.data ?? UNAVAILABLE;
+  }
+
+  /** Force a collection and wait for it. For tests and warmup, not the hot path. */
+  async refresh(): Promise<LearningLoopEvidence> {
     if (this.inFlight) return this.inFlight;
 
     this.inFlight = this.collectUncached()
@@ -77,10 +123,9 @@ export class LearningLoopCollector {
         return data;
       })
       .catch(() => {
-        // Fail open: an unreachable Munin/ledger must never break the dashboard
-        // endpoint. "No evidence available" is rendered honestly downstream.
-        const empty: LearningLoopEvidence = { ledger: null, tasks: [] };
-        return empty;
+        // Fail open — but as "unavailable", never as an empty measured corpus.
+        // A rejected collection is NOT cached, so the next tick retries.
+        return UNAVAILABLE;
       })
       .finally(() => {
         this.inFlight = null;
@@ -90,11 +135,13 @@ export class LearningLoopCollector {
   }
 
   private async collectUncached(): Promise<LearningLoopEvidence> {
-    const [ledger, tasks] = await Promise.all([
+    const [ledger, corpus] = await Promise.all([
       this.ledgerClient.getLedger().catch(() => null),
-      this.collectTasks().catch(() => [] as ProductTaskEvidence[]),
+      this.collectTasks().catch(
+        (): CorpusResult => ({ tasks: [], available: false, readFailures: 0, truncated: false })
+      ),
     ]);
-    return { ledger, tasks };
+    return { ledger, ...corpus };
   }
 
   /**
@@ -112,7 +159,10 @@ export class LearningLoopCollector {
    * then let collectOne() confirm each by the definitive marker — an embedded,
    * parseable broker envelope.
    */
-  private async collectTasks(): Promise<ProductTaskEvidence[]> {
+  private async collectTasks(): Promise<CorpusResult> {
+    // A FAILED query is not an empty corpus. If we cannot enumerate the tasks,
+    // say the corpus is unavailable — never let it collapse into a confident
+    // zero downstream.
     const [tagged, homeserver] = await Promise.all([
       this.munin
         .query({
@@ -122,7 +172,8 @@ export class LearningLoopCollector {
           entry_type: "state",
           limit: this.maxTasks,
         })
-        .catch(() => ({ results: [], total: 0 })),
+        .then((r) => ({ ok: true as const, r }))
+        .catch(() => ({ ok: false as const })),
       this.munin
         .query({
           query: "task",
@@ -131,23 +182,35 @@ export class LearningLoopCollector {
           entry_type: "state",
           limit: this.maxTasks,
         })
-        .catch(() => ({ results: [], total: 0 })),
+        .then((r) => ({ ok: true as const, r }))
+        .catch(() => ({ ok: false as const })),
     ]);
 
-    const namespaces = [
+    if (!tagged.ok && !homeserver.ok) {
+      return { tasks: [], available: false, readFailures: 0, truncated: false };
+    }
+
+    const all = [
       ...new Set(
-        [...tagged.results, ...homeserver.results]
+        [...(tagged.ok ? tagged.r.results : []), ...(homeserver.ok ? homeserver.r.results : [])]
           .map((r) => r.namespace)
           .filter((ns): ns is string => typeof ns === "string")
       ),
-    ].slice(0, this.maxTasks);
+    ];
+    const namespaces = all.slice(0, this.maxTasks);
+    // A cap that hides what it dropped turns a lower bound into a fact.
+    const truncated = all.length > namespaces.length || !tagged.ok || !homeserver.ok;
 
     const tasks: ProductTaskEvidence[] = [];
+    let readFailures = 0;
     for (const ns of namespaces) {
-      const evidence = await this.collectOne(ns).catch(() => null);
+      const evidence = await this.collectOne(ns).catch(() => {
+        readFailures++;
+        return null;
+      });
       if (evidence) tasks.push(evidence);
     }
-    return tasks;
+    return { tasks, available: true, readFailures, truncated };
   }
 
   private async collectOne(namespace: string): Promise<ProductTaskEvidence | null> {
@@ -210,6 +273,8 @@ export class LearningLoopCollector {
               policyMode?: string;
               policyAction?: string;
               priceCatalogVersion?: string;
+              modelId?: string;
+              taskType?: string;
             };
           };
         };
@@ -219,6 +284,10 @@ export class LearningLoopCollector {
             ...(d.policyMode ? { policyMode: d.policyMode } : {}),
             ...(d.policyAction ? { policyAction: d.policyAction } : {}),
             ...(d.priceCatalogVersion ? { priceCatalogVersion: d.priceCatalogVersion } : {}),
+            // Needed to tie a route-policy claim to the exact ledger row that
+            // backs it, instead of to any verified sample anywhere.
+            ...(d.modelId ? { modelId: d.modelId } : {}),
+            ...(d.taskType ? { taskType: d.taskType } : {}),
           };
         }
       } catch {
@@ -233,6 +302,8 @@ export class LearningLoopCollector {
       rating,
       verificationOutcome,
       durableHandoff,
+      // Deterministic ordering for "most recent policy" — never array order.
+      ...(status.updated_at ? { updatedAt: status.updated_at } : {}),
       ...(delegation ? { delegation } : {}),
     };
   }
