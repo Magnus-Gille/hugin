@@ -56,7 +56,7 @@ export interface CanonicalListRow {
 
 export interface CanonicalListResult {
   rows: CanonicalListRow[];
-  /** True when at least one Munin query matched more entries than it returned. */
+  /** True when at least one Munin query hit its cap and may have omitted matches. */
   truncated: boolean;
 }
 
@@ -261,13 +261,14 @@ export class BrokerTaskStore {
       this.munin.query({ ...baseOpts, tags: ["broker:mcp-v2"] }),
       this.munin.query({ ...baseOpts, tags: ["runtime:homeserver"] }),
     ]);
-    // Munin exposes no cursor/offset and orders these results lexically rather
-    // than temporally. A timestamp walk-back could therefore skip omitted
-    // newer rows. Disclose the incomplete candidate set instead of presenting
-    // the discovered row count as exact (#183).
+    // Munin exposes no cursor/offset and its `total` is only the number of
+    // formatted rows returned, not a pre-limit count. A result set at the
+    // server cap is therefore indistinguishable from an exactly-full set.
+    // Mark it conservatively: a timestamp walk-back is not safe because the
+    // ranked query is not guaranteed to expose every omitted row in time order.
     const truncated =
-      tagged.total > tagged.results.length ||
-      homeserver.total > homeserver.results.length;
+      tagged.results.length >= MUNIN_QUERY_MAX ||
+      homeserver.results.length >= MUNIN_QUERY_MAX;
     const namespaces = new Set<string>();
     for (const result of [...tagged.results, ...homeserver.results]) {
       if (typeof result.namespace === "string") namespaces.add(result.namespace);

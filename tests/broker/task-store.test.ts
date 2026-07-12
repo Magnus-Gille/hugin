@@ -288,18 +288,20 @@ describe("BrokerTaskStore.listCanonical", () => {
     }
   });
 
-  it("discloses when Munin capped either candidate query", async () => {
+  it("discloses when either Munin candidate query hits its result cap", async () => {
     const munin = new FakeMunin();
     const rawResults = Array.from({ length: MUNIN_QUERY_MAX }, (_, index) => ({
       namespace: `tasks/t${index}`,
       key: "status",
     }));
-    munin.queryByTags = (tags) => ({
-      results: rawResults,
-      total: tags.includes("broker:mcp-v2")
-        ? MUNIN_QUERY_MAX + 51
-        : MUNIN_QUERY_MAX,
-    });
+    munin.queryByTags = (tags) => {
+      const results = tags.includes("broker:mcp-v2")
+        ? rawResults
+        : rawResults.slice(0, MUNIN_QUERY_MAX - 1);
+      // Munin's real memory_query contract reports the formatted row count,
+      // so total cannot reveal whether a full 50-row page omitted matches.
+      return { results, total: results.length };
+    };
     for (let index = 0; index < MUNIN_QUERY_MAX; index += 1) {
       munin.readReturn[`tasks/t${index}/status`] = {
         content: serializeEnvelope(envelope(`t${index}`)),
@@ -314,14 +316,14 @@ describe("BrokerTaskStore.listCanonical", () => {
     expect(result.truncated).toBe(true);
   });
 
-  it("does not report truncation at the exact Munin result boundary", async () => {
+  it("does not report truncation below the Munin result boundary", async () => {
     const munin = new FakeMunin();
-    const rawResults = Array.from({ length: MUNIN_QUERY_MAX }, (_, index) => ({
+    const rawResults = Array.from({ length: MUNIN_QUERY_MAX - 1 }, (_, index) => ({
       namespace: `tasks/boundary-${index}`,
       key: "status",
     }));
-    munin.queryReturn = { results: rawResults, total: MUNIN_QUERY_MAX };
-    for (let index = 0; index < MUNIN_QUERY_MAX; index += 1) {
+    munin.queryReturn = { results: rawResults, total: rawResults.length };
+    for (let index = 0; index < rawResults.length; index += 1) {
       munin.readReturn[`tasks/boundary-${index}/status`] = {
         content: serializeEnvelope(envelope(`boundary-${index}`)),
         tags: ["completed", "broker:mcp-v2", "runtime:homeserver"],
@@ -331,7 +333,7 @@ describe("BrokerTaskStore.listCanonical", () => {
     const result = await new BrokerTaskStore(munin as unknown as MuninClient)
       .listCanonical("claude-code");
 
-    expect(result.rows).toHaveLength(MUNIN_QUERY_MAX);
+    expect(result.rows).toHaveLength(MUNIN_QUERY_MAX - 1);
     expect(result.truncated).toBe(false);
   });
 
