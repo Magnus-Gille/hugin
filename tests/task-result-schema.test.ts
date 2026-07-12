@@ -19,6 +19,78 @@ describe("structured task result schema", () => {
     });
     expect(result.runtimeMetadata?.delegation?.ledgerId).toBe("ledger-1");
   });
+
+  // Issue #163: the orchestrator fan-out path delegated to M5 too, but dropped
+  // every M5 provenance field before the durable result — so an operator could
+  // not tell which node/model/verifier produced a fanout leaf, nor join it back
+  // to the authoritative M5 ledger row.
+  it("preserves M5 delegation provenance on orchestrator fanout outcomes", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1, taskId: "orch-1", taskNamespace: "tasks/orch-1",
+      lifecycle: "completed", outcome: "completed", runtime: "orchestrator",
+      executor: "orchestrator", resultSource: "orchestrator", exitCode: 0,
+      completedAt: "2026-07-11T12:00:00Z", bodyKind: "response", bodyText: "ok",
+      orchestratorOutcomes: [
+        {
+          subtaskId: "s1", taskType: "extract", provider: "homeserver",
+          model: "qwen3-30b-instruct", ok: true, verdictOk: null,
+          costUsd: 0, latencyMs: 1200,
+          delegation: {
+            ledgerId: "487bae49-e751-4fc8-a10c-8f12f6aa59a4",
+            nodeId: "orin", modelId: "qwen2.5-coder:3b", taskType: "extract",
+            outcome: "unverified", decisionReason: "viable (10/10 pass)",
+            verifier: "answerIs", delegated: true, escalated: false,
+            policyMode: "shadow", policyAction: "shadow",
+            priceCatalogVersion: "2026-07-08",
+            costTraceId: "fc5e98f9-2d7c-4792-b2c3-c936d29d44fb",
+          },
+        },
+      ],
+    });
+    const d = result.orchestratorOutcomes?.[0]?.delegation;
+    expect(d?.ledgerId).toBe("487bae49-e751-4fc8-a10c-8f12f6aa59a4");
+    expect(d?.nodeId).toBe("orin");
+    expect(d?.modelId).toBe("qwen2.5-coder:3b");
+    expect(d?.verifier).toBe("answerIs");
+    expect(d?.policyMode).toBe("shadow");
+    expect(d?.priceCatalogVersion).toBe("2026-07-08");
+  });
+
+  it("keeps the delegation block optional so non-M5 workers still validate", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1, taskId: "orch-2", taskNamespace: "tasks/orch-2",
+      lifecycle: "completed", outcome: "completed", runtime: "orchestrator",
+      executor: "orchestrator", resultSource: "orchestrator", exitCode: 0,
+      completedAt: "2026-07-11T12:00:00Z", bodyKind: "response", bodyText: "ok",
+      orchestratorOutcomes: [
+        {
+          subtaskId: "s1", taskType: "summarize", provider: "openrouter",
+          model: "deepseek-v4-flash", ok: true, verdictOk: true,
+          costUsd: 0.0001, latencyMs: 900,
+        },
+      ],
+    });
+    expect(result.orchestratorOutcomes?.[0]?.delegation).toBeUndefined();
+  });
+
+  it("accepts the widened M5 provenance fields on runtimeMetadata.delegation", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1, taskId: "mcp-m5-def", taskNamespace: "tasks/mcp-m5-def",
+      lifecycle: "completed", outcome: "completed", runtime: "homeserver",
+      executor: "homeserver-delegate", resultSource: "homeserver-delegate", exitCode: 0,
+      completedAt: "2026-07-11T12:00:00Z", bodyKind: "response", bodyText: "ok",
+      runtimeMetadata: {
+        delegation: {
+          ledgerId: "ledger-2", verifier: "answerIs", policyMode: "shadow",
+          policyAction: "shadow", policyReason: "no verifier-backed lane",
+          priceCatalogVersion: "2026-07-08", costTraceId: "ct-1", formatRetried: false,
+        },
+      },
+    });
+    expect(result.runtimeMetadata?.delegation?.policyMode).toBe("shadow");
+    expect(result.runtimeMetadata?.delegation?.priceCatalogVersion).toBe("2026-07-08");
+    expect(result.runtimeMetadata?.delegation?.costTraceId).toBe("ct-1");
+  });
   it("accepts completed pipeline phase results", () => {
     const result = buildStructuredTaskResult({
       schemaVersion: 1,

@@ -491,6 +491,143 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
     });
     expect(body.verifier).toBeUndefined();
     expect(body.responseFormat).toBeUndefined();
+
+    // Issue #163: the ledger id must survive onto the result, not just be parsed
+    // and dropped — it is the join key back to M5's authoritative evidence row.
+    expect(result.delegation?.ledgerId).toBe("ledger-1");
+  });
+
+  it("preserves the full M5 execution provenance on the worker result (#163)", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () =>
+      delegateResponse({
+        delegated: true,
+        escalate: false,
+        taskType: "extract",
+        nodeId: "orin",
+        modelId: "qwen2.5-coder:3b",
+        outcome: "pass",
+        score: 1,
+        decisionReason: "viable (10/10 pass, rate 1)",
+        verifierNotes: "answerIs matched exactly",
+        output: "leaf",
+        ledgerId: "487bae49-e751-4fc8-a10c-8f12f6aa59a4",
+        formatRetried: false,
+        delegatePolicy: {
+          mode: "shadow",
+          action: "shadow",
+          reason: "no verifier-backed lane",
+          evidence: { verifier: "answerIs" },
+        },
+        costTrace: {
+          id: "fc5e98f9-2d7c-4792-b2c3-c936d29d44fb",
+          delegationId: "487bae49-e751-4fc8-a10c-8f12f6aa59a4",
+          priceCatalogVersion: "2026-07-08",
+        },
+        metrics: { promptTokens: 30, completionTokens: 7 },
+      })
+    ));
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver", model: "qwen2.5-coder:3b", prompt: "extract this",
+      taskType: "extract", timeoutMs: 5000,
+    });
+
+    const d = result.delegation!;
+    expect(d.ledgerId).toBe("487bae49-e751-4fc8-a10c-8f12f6aa59a4");
+    expect(d.nodeId).toBe("orin");
+    expect(d.modelId).toBe("qwen2.5-coder:3b");
+    expect(d.taskType).toBe("extract");
+    expect(d.outcome).toBe("pass");
+    expect(d.score).toBe(1);
+    expect(d.verifier).toBe("answerIs");
+    expect(d.verifierNotes).toBe("answerIs matched exactly");
+    expect(d.delegated).toBe(true);
+    expect(d.escalated).toBe(false);
+    expect(d.policyMode).toBe("shadow");
+    expect(d.policyAction).toBe("shadow");
+    expect(d.priceCatalogVersion).toBe("2026-07-08");
+    expect(d.costTraceId).toBe("fc5e98f9-2d7c-4792-b2c3-c936d29d44fb");
+  });
+
+  it("still preserves provenance when the M5 leaf reports a failed outcome (#163)", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () =>
+      delegateResponse({
+        delegated: true, outcome: "fail", score: 0, output: "bad",
+        ledgerId: "ledger-fail", nodeId: "m5",
+        decisionReason: "verifier rejected",
+      })
+    ));
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver", model: "mellum", prompt: "p", timeoutMs: 5000,
+    });
+
+    // A failed leaf is exactly when an operator most needs the ledger row.
+    expect(result.ok).toBe(false);
+    expect(result.delegation?.ledgerId).toBe("ledger-fail");
+    expect(result.delegation?.outcome).toBe("fail");
+    expect(result.delegation?.decisionReason).toBe("verifier rejected");
+  });
+
+  it("drops out-of-contract gateway provenance without failing the leaf (#163)", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () =>
+      delegateResponse({
+        delegated: true, outcome: "unverified", output: "ok",
+        ledgerId: "ledger-2",
+        score: "high", // hostile/buggy: not a number
+      })
+    ));
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver", model: "mellum", prompt: "p", timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toBe("ok");
+    expect(result.delegation?.score).toBeUndefined(); // dropped, not coerced
+    expect(result.delegation?.ledgerId).toBe("ledger-2"); // rest survives
+  });
+
+  // Codex review of #163: the response-VALIDATION failure branch returned
+  // failResult() with no provenance attached. A gateway that sends a usable
+  // trace (real ledgerId/node/model) alongside one malformed operational field
+  // would lose the ledger join key at exactly the moment an operator needs it to
+  // diagnose the bad response. Provenance is now extracted straight off the
+  // parsed body, before operational validation.
+  it("keeps provenance when the gateway body fails operational validation (#163)", async () => {
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
+
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () =>
+      delegateResponse({
+        // Usable, well-formed provenance...
+        ledgerId: "ledger-diagnose-me",
+        nodeId: "orin",
+        modelId: "qwen2.5-coder:3b",
+        delegated: true,
+        // ...but a malformed operational field: output must be a string.
+        output: 12345,
+      })
+    ));
+
+    const result = await new HomeserverDelegateWorkerExecutor().run({
+      provider: "homeserver", model: "qwen2.5-coder:3b", prompt: "p", timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("output");
+    // The paid call still happened and M5 still wrote a ledger row — keep the key.
+    expect(result.delegation?.ledgerId).toBe("ledger-diagnose-me");
+    expect(result.delegation?.nodeId).toBe("orin");
   });
 
   it("pins an Orin-routed owner leaf with nodeId and reports the selected node", async () => {
