@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { type Server } from "node:http";
 import * as fs from "node:fs";
+import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import express from "express";
@@ -18,13 +19,24 @@ import {
 } from "./munin-client.js";
 import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveContext, normalizeRoot, DEFAULT_REPOS_ROOT } from "./task-helpers.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
-import { classifyClaudeFailure } from "./failure-classification.js";
+import {
+  classifyClaudeFailure,
+  driftFailureClassification,
+  AUTH_FAILURE_KIND,
+  DEPS_DRIFT_FAILURE_KIND,
+} from "./failure-classification.js";
 import {
   decideAuthAlarm,
   INITIAL_AUTH_ALARM_STATE,
   type AlertEnvelope,
   type AuthAlarmState,
 } from "./auth-alarm.js";
+import {
+  buildVersionSnapshot,
+  compareVersionSnapshots,
+  type VersionDriftResult,
+  type VersionSnapshot,
+} from "./version-drift.js";
 import { executeOllamaTask } from "./ollama-executor.js";
 import {
   executeHomeserverTask,
@@ -370,6 +382,13 @@ const config = {
   // (network error, missing endpoint, no creds file) lets the task run as before.
   // Set to `off` to disable the probe entirely.
   claudeAuthPreflight: (process.env.HUGIN_CLAUDE_AUTH_PREFLIGHT ?? "on") !== "off",
+  // Version-drift self-check (issue #123). A baseline snapshot of the on-disk
+  // @anthropic-ai/claude-agent-sdk version + vendored cli.js identity is taken
+  // once at startup; before each agent-sdk task a fresh on-disk read is
+  // compared against it (src/version-drift.ts). Default on. The CHECK itself
+  // is always fail-open (a read error never blocks a task) — this flag only
+  // disables the feature outright.
+  versionDriftCheck: (process.env.HUGIN_VERSION_DRIFT_CHECK ?? "on") !== "off",
   // Proactive Pi Claude credential-expiry alarm (issue #131). A periodic probe
   // (the same OAuth-usage check the pre-flight uses) feeds the edge-triggered
   // state machine in src/auth-alarm.ts; a transition to `unauthorized` (or an
@@ -1602,20 +1621,184 @@ async function fetchQuota(): Promise<QuotaSnapshot> {
   return (await probeClaudeUsage()).snapshot;
 }
 
+// --- Version-drift self-check (#123) ---
+
+// Resolves via Node's own module resolution (not a hardcoded src/vs-dist
+// relative path), so it always finds whichever @anthropic-ai/claude-agent-sdk
+// this running process actually imported. Resolves the bare package specifier
+// (its main entry, sdk.mjs) rather than a subpath — the package's `exports`
+// map does NOT expose `./package.json` or `./cli.js` as subpaths, so
+// resolving those directly throws ERR_PACKAGE_PATH_NOT_EXPORTED. sdk.mjs
+// lives in the package root alongside package.json and cli.js, so its
+// dirname is the directory we actually want.
+const requireFromHere = createRequire(import.meta.url);
+
+function resolveClaudeSdkDir(): string {
+  return path.dirname(requireFromHere.resolve("@anthropic-ai/claude-agent-sdk"));
+}
+
 /**
- * Run a Claude SDK task, but first (issue #129) probe the Pi credential and
- * short-circuit to a synthetic AUTH_FAILED result when it is definitively
- * invalid — avoiding a paid, slot-consuming run that would only 401. Fail-open:
- * any non-401 probe outcome (or the probe disabled) runs the task normally. The
- * synthetic output carries the 401 signature so the shared finalize path
- * classifies + tags it identically to a real runtime auth failure.
+ * Read the on-disk SDK version + vendored cli.js identity. Dependency-light:
+ * only `fs`/`path`, no hashing of the (multi-MB) cli.js bundle — size + mtime
+ * are a cheap, sufficient proxy for "did the binary content change". Throws on
+ * any read error; callers decide how to fail open.
  */
-async function executeClaudeSdkWithAuthPreflight(
+function readOnDiskVersionSnapshot(sdkDir: string): VersionSnapshot {
+  const pkg = JSON.parse(fs.readFileSync(path.join(sdkDir, "package.json"), "utf-8")) as {
+    version?: string;
+  };
+  const cliPath = path.join(sdkDir, "cli.js");
+  const stat = fs.statSync(cliPath);
+  return buildVersionSnapshot({
+    sdkVersion: pkg.version,
+    cliPath,
+    cliSizeBytes: stat.size,
+    cliMtimeMs: stat.mtimeMs,
+  });
+}
+
+// Baseline snapshot taken once at process start — this is what the running
+// process actually has loaded (Node caches the imported SDK module for the
+// life of the process, even if node_modules is overwritten on disk later).
+// null means either the check is disabled or the startup snapshot failed
+// (logged below); either way the drift check fails open and never runs.
+let versionDriftBaseline: VersionSnapshot | null = null;
+if (config.versionDriftCheck) {
+  try {
+    versionDriftBaseline = readOnDiskVersionSnapshot(resolveClaudeSdkDir());
+    console.log(
+      `[version-drift] baseline snapshot: sdk=${versionDriftBaseline.sdkVersion} ` +
+        `cli=${versionDriftBaseline.cliPath} (${versionDriftBaseline.cliSizeBytes}b, ` +
+        `mtime=${new Date(versionDriftBaseline.cliMtimeMs).toISOString()})`,
+    );
+  } catch (err) {
+    console.error(
+      "[version-drift] Failed to snapshot on-disk SDK/binary state at startup — drift self-check disabled for this process run:",
+      err,
+    );
+  }
+}
+
+/**
+ * Re-read the on-disk SDK/binary state and compare against the startup
+ * baseline. Fail-open by design (issue #123): any read error here — a
+ * mid-`npm install` partial write, a permissions hiccup — must never block a
+ * task, so it is caught and treated as "no drift detected" rather than
+ * propagated. Only a genuine, confirmed mismatch returns non-null.
+ */
+function checkVersionDrift(): VersionDriftResult | null {
+  if (!versionDriftBaseline) return null;
+  try {
+    const current = readOnDiskVersionSnapshot(resolveClaudeSdkDir());
+    const result = compareVersionSnapshots(versionDriftBaseline, current);
+    return result.drifted ? result : null;
+  } catch (err) {
+    console.error(
+      "[version-drift] Failed to read on-disk SDK/binary state before task — skipping drift check for this task (fail-open):",
+      err,
+    );
+    return null;
+  }
+}
+
+// Edge-triggered like the auth alarm (#131): once the drift alert has been
+// successfully delivered (or there is no send target configured), don't
+// re-push it on every subsequent refused task — the worker still refuses
+// EVERY task while drifted, only the Telegram push is deduped. Reset only by
+// a process restart (which re-takes the baseline and clears this).
+let versionDriftAlerted = false;
+const VERSION_DRIFT_DEDUP_KEY = "hugin-version-drift";
+
+async function maybeAlertVersionDrift(drift: VersionDriftResult): Promise<void> {
+  if (versionDriftAlerted) return;
+  const alert: AlertEnvelope = {
+    severity: "critical",
+    source: "hugin",
+    title: "Hugin worker: on-disk SDK/binary changed under live process",
+    body:
+      `Agent-sdk tasks are being refused until the worker restarts. ${drift.message}`,
+    dedup_key: VERSION_DRIFT_DEDUP_KEY,
+  };
+  const status = await sendRatatoskrAlert(alert);
+  if (status !== "failed") {
+    versionDriftAlerted = true;
+  }
+}
+
+/**
+ * {@link SdkExecutorResult} plus, ONLY for a synthetic pre-flight
+ * short-circuit, a trusted failure-kind discriminator. The caller already
+ * knows with certainty which check refused the task — this lets the shared
+ * finalize path classify it directly instead of regex-sniffing `output`
+ * (Codex review, issue #123: a regex could false-positive on a legitimate
+ * task's real output). Absent (undefined) for an actual SDK run, which keeps
+ * classifying via {@link classifyClaudeFailure} exactly as before.
+ */
+interface PreflightCheckedSdkResult extends SdkExecutorResult {
+  preflightFailureKind?: typeof AUTH_FAILURE_KIND | typeof DEPS_DRIFT_FAILURE_KIND;
+}
+
+/**
+ * Run a Claude SDK task, but first refuse it fast on a confirmed drift or
+ * auth problem instead of burning a paid, slot-consuming run that can only
+ * fail:
+ *  - (issue #123) the on-disk SDK/cli.js has changed since this worker
+ *    process started (see checkVersionDrift above) — deps were bumped
+ *    out-of-band under a live worker.
+ *  - (issue #129) the Pi Claude credential is definitively invalid (401).
+ * Both short-circuits are fail-open on anything inconclusive; only a
+ * confirmed problem blocks.
+ */
+async function executeClaudeSdkWithPreflightChecks(
   cfg: SdkTaskConfig,
   taskId: string,
   logDir: string,
   options?: SdkExecutorOptions,
-): Promise<SdkExecutorResult> {
+): Promise<PreflightCheckedSdkResult> {
+  const drift = checkVersionDrift();
+  if (drift) {
+    const logFile = path.join(logDir, `${taskId}.log`);
+    const reason = `Version-drift pre-flight check failed. DEPS_DRIFT: ${drift.message}`;
+    try {
+      fs.writeFileSync(
+        logFile,
+        [
+          "=== Hugin Task Log (SDK) ===",
+          `Task: ${taskId}`,
+          "Runtime: claude (agent-sdk)",
+          `Started: ${new Date().toISOString()}`,
+          "===",
+          reason,
+          "",
+          "===",
+          "Exit code: 1",
+          "Failure kind: DEPS_DRIFT",
+          "===",
+          "",
+        ].join("\n"),
+        { encoding: "utf-8" },
+      );
+    } catch {
+      /* log is best-effort — never fail the task on a log write */
+    }
+    console.error(
+      `Version-drift pre-flight check failed for task ${taskId} — refusing to spawn agent-sdk task (restart the worker)`,
+    );
+    await maybeAlertVersionDrift(drift).catch((err) =>
+      console.error("[version-drift] Failed to send drift alert:", err),
+    );
+    return {
+      exitCode: 1,
+      output: reason,
+      logFile,
+      resultText: null,
+      costUsd: 0,
+      numTurns: 0,
+      durationApiMs: 0,
+      preflightFailureKind: DEPS_DRIFT_FAILURE_KIND,
+    };
+  }
+
   if (config.claudeAuthPreflight) {
     const probe = await probeClaudeUsage();
     if (probe.auth === "unauthorized") {
@@ -1656,6 +1839,7 @@ async function executeClaudeSdkWithAuthPreflight(
         costUsd: 0,
         numTurns: 0,
         durationApiMs: 0,
+        preflightFailureKind: AUTH_FAILURE_KIND,
       };
     }
   }
@@ -4172,6 +4356,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let opencodeResult: OpencodeExecutorResult | null = null;
     let homeserverResult: HomeserverExecutorResult | null = null;
     let effectiveExecutor = executorLabel;
+    // Trusted failure-kind discriminator from a pre-flight short-circuit
+    // (issue #123 Codex review) — set only when executeClaudeSdkWithPreflightChecks
+    // refused the task itself, so the classification below never has to
+    // regex-sniff synthetic output.
+    let sdkPreflightFailureKind: typeof AUTH_FAILURE_KIND | typeof DEPS_DRIFT_FAILURE_KIND | undefined;
     let fallbackTriggered = false;
     let fallbackReason: string | null = null;
 
@@ -4205,7 +4394,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         // Execute via Claude SDK with fallback
         const sdkAbort = new AbortController();
         currentSdkAbort = sdkAbort;
-        const sdkResult = await executeClaudeSdkWithAuthPreflight(
+        const sdkResult = await executeClaudeSdkWithPreflightChecks(
           {
             prompt: task.prompt,
             workingDir: task.workingDir,
@@ -4226,6 +4415,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         logFile = sdkResult.logFile;
         resultText = sdkResult.resultText;
         costUsd = sdkResult.costUsd;
+        sdkPreflightFailureKind = sdkResult.preflightFailureKind;
       } else {
         exitCode = 1;
         output = reason;
@@ -4266,7 +4456,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
         const sdkAbort = new AbortController();
         currentSdkAbort = sdkAbort;
-        const sdkResult = await executeClaudeSdkWithAuthPreflight(
+        const sdkResult = await executeClaudeSdkWithPreflightChecks(
           {
             prompt: task.prompt,
             workingDir: task.workingDir,
@@ -4287,6 +4477,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         logFile = sdkResult.logFile;
         resultText = sdkResult.resultText;
         costUsd = sdkResult.costUsd;
+        sdkPreflightFailureKind = sdkResult.preflightFailureKind;
       } else {
         exitCode = ollamaResult.exitCode;
         output = ollamaResult.output;
@@ -4390,7 +4581,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     console.log(`Using Agent SDK executor for task ${taskNs}`);
     const sdkAbort = new AbortController();
     currentSdkAbort = sdkAbort;
-    const sdkResult = await executeClaudeSdkWithAuthPreflight(
+    const sdkResult = await executeClaudeSdkWithPreflightChecks(
       {
         prompt: task.prompt,
         workingDir: task.workingDir,
@@ -4435,6 +4626,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     logFile = sdkResult.logFile;
     resultText = sdkResult.resultText;
     costUsd = sdkResult.costUsd;
+    sdkPreflightFailureKind = sdkResult.preflightFailureKind;
     } else if (isOpencode) {
     console.log(`Using OpenCode executor for task ${taskNs}`);
     const opencodeGateway = loadOpencodeGatewayConfig(process.env);
@@ -4608,18 +4800,25 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // the task finalizes as `cancelled`, not as a spurious DELIVERY_FAILED.
     let isCancelled = cancellation !== null;
 
-    // Distinct failure classification (issue #129): a Claude SDK run (direct or
-    // via ollama→claude fallback) that failed to authenticate (401 / expired Pi
-    // credential) is tagged + surfaced distinctly from a generic task-logic
-    // failure, so the cause is legible in Munin instead of buried in the raw log.
+    // Distinct failure classification: a Claude SDK run (direct or via
+    // ollama→claude fallback) that failed to authenticate (401 / expired Pi
+    // credential, issue #129) or was refused by the version-drift pre-flight
+    // check (issue #123) is tagged + surfaced distinctly from a generic
+    // task-logic failure, so the cause is legible in Munin instead of buried
+    // in the raw log. A pre-flight short-circuit already carries a trusted
+    // discriminator (sdkPreflightFailureKind) — only a REAL SDK run (no
+    // discriminator) falls back to regex-classifying its output (Codex
+    // review, #123: DEPS_DRIFT is never inferred from output text).
     const failureClassification =
       !ok && !isTimeout && !isCancelled && (isClaude || fallbackTriggered)
-        ? classifyClaudeFailure(output)
+        ? sdkPreflightFailureKind === DEPS_DRIFT_FAILURE_KIND
+          ? driftFailureClassification()
+          : classifyClaudeFailure(output)
         : null;
     if (failureClassification) {
       await munin.log(
         taskNs,
-        `Task failed to authenticate (${failureClassification.kind}): ${failureClassification.reason}`,
+        `Task failed (${failureClassification.kind}): ${failureClassification.reason}`,
       );
     }
 
@@ -4628,8 +4827,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // can't judge a refreshable token); a Claude success confirms recovery. Only
     // for Claude-involving runs — an ollama/orchestrator outcome says nothing
     // about the Pi Claude credential. Best-effort: never let it fail the task.
+    // Gated specifically on AUTH_FAILURE_KIND (Codex review, #123): a
+    // DEPS_DRIFT classification says nothing about the credential and must
+    // never flip the auth alarm to "unauthorized" or block its recovery.
     if (isClaude || fallbackTriggered) {
-      if (failureClassification) {
+      if (failureClassification?.kind === AUTH_FAILURE_KIND) {
         await noteClaudeAuthOutcome("unauthorized").catch((err) =>
           console.error("[auth-alarm] reactive unauthorized note failed:", err),
         );

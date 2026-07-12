@@ -19,6 +19,16 @@ export const AUTH_FAILURE_TAG = "failure:auth";
 /** Machine-readable failure kind rendered into the result document. */
 export const AUTH_FAILURE_KIND = "AUTH_FAILED";
 
+/**
+ * Distinct status tag applied to a task refused by the version-drift
+ * pre-flight check (issue #123: on-disk SDK/binary changed under a live
+ * worker — see src/version-drift.ts).
+ */
+export const DEPS_DRIFT_FAILURE_TAG = "failure:deps-drift";
+
+/** Machine-readable failure kind rendered into the result document. */
+export const DEPS_DRIFT_FAILURE_KIND = "DEPS_DRIFT";
+
 export interface FailureClassification {
   /** Failure kind, e.g. `AUTH_FAILED`. Rendered as `- **Failure kind:** …`. */
   kind: string;
@@ -46,6 +56,14 @@ const AUTH_FAILURE_PATTERNS: RegExp[] = [
   /"type"\s*:\s*"authentication_error"/i,
 ];
 
+const DEPS_DRIFT_CLASSIFICATION: FailureClassification = {
+  kind: DEPS_DRIFT_FAILURE_KIND,
+  tag: DEPS_DRIFT_FAILURE_TAG,
+  reason:
+    "On-disk @anthropic-ai/claude-agent-sdk (or its cli.js runtime) changed under this " +
+    "live worker process. Restart the worker to pick up the current on-disk SDK/binary.",
+};
+
 /**
  * Classify a failed Claude SDK task's captured output.
  *
@@ -57,17 +75,38 @@ const AUTH_FAILURE_PATTERNS: RegExp[] = [
  * The caller is responsible for only invoking this on an actual failure
  * (non-zero, non-timeout, non-cancelled) — a successful run whose text happens
  * to quote "401" is never passed in.
+ *
+ * DEPS_DRIFT is deliberately NOT inferred here (Codex review, issue #123): a
+ * regex over arbitrary task output could false-positive on a legitimate task
+ * that happens to print/discuss a similar marker for an unrelated reason,
+ * silently overwriting its real failure reason. The version-drift pre-flight
+ * short-circuit (src/index.ts) already knows with certainty it refused a task
+ * for drift — it calls {@link driftFailureClassification} directly instead of
+ * round-tripping through this regex classifier.
  */
 export function classifyClaudeFailure(
   output: string | null | undefined,
 ): FailureClassification | null {
   if (!output) return null;
-  if (!AUTH_FAILURE_PATTERNS.some((re) => re.test(output))) return null;
-  return {
-    kind: AUTH_FAILURE_KIND,
-    tag: AUTH_FAILURE_TAG,
-    reason:
-      "Runtime failed to authenticate (HTTP 401 — expired or absent Pi Claude credential). " +
-      "Refresh the Pi's Claude Code credential to unblock autonomous tasks.",
-  };
+  if (AUTH_FAILURE_PATTERNS.some((re) => re.test(output))) {
+    return {
+      kind: AUTH_FAILURE_KIND,
+      tag: AUTH_FAILURE_TAG,
+      reason:
+        "Runtime failed to authenticate (HTTP 401 — expired or absent Pi Claude credential). " +
+        "Refresh the Pi's Claude Code credential to unblock autonomous tasks.",
+    };
+  }
+  return null;
+}
+
+/**
+ * Trusted DEPS_DRIFT classification for the version-drift pre-flight
+ * short-circuit (issue #123). The caller already knows with certainty this is
+ * a drift refusal (it generated the synthetic result itself) — this is never
+ * inferred from output text. See {@link classifyClaudeFailure}'s doc comment
+ * for why that distinction matters.
+ */
+export function driftFailureClassification(): FailureClassification {
+  return DEPS_DRIFT_CLASSIFICATION;
 }
