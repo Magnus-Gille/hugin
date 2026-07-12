@@ -330,12 +330,14 @@ export class MuninClient {
     namespace?: string;
     limit?: number;
     entry_type?: string;
+    since?: string;
   }): Promise<{ results: MuninQueryResult[]; total: number }> {
     const args: Record<string, unknown> = { query: opts.query };
     if (opts.tags) args.tags = opts.tags;
     if (opts.namespace) args.namespace = opts.namespace;
     if (opts.limit) args.limit = opts.limit;
     if (opts.entry_type) args.entry_type = opts.entry_type;
+    if (opts.since) args.since = opts.since;
     return (await this.callTool("memory_query", args)) as {
       results: MuninQueryResult[];
       total: number;

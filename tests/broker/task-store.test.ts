@@ -27,6 +27,10 @@ class FakeMunin {
   queries: Parameters<MuninClient["query"]>[0][] = [];
   readReturn: Record<string, unknown> = {};
   queryReturn: { results: unknown[]; total: number } = { results: [], total: 0 };
+  /** Optional per-call override, keyed by the requested tags — lets a test
+   * make the two tag-scoped queries in listCanonical diverge instead of
+   * always sharing queryReturn. */
+  queryByTags?: (tags: string[]) => { results: unknown[]; total: number };
 
   async write(
     namespace: string,
@@ -45,6 +49,7 @@ class FakeMunin {
   }
   async query(opts: Parameters<MuninClient["query"]>[0]) {
     this.queries.push(opts);
+    if (this.queryByTags) return this.queryByTags(opts.tags ?? []);
     return this.queryReturn;
   }
 }
@@ -196,6 +201,104 @@ describe("BrokerTaskStore.listCanonical", () => {
     const rows = await new BrokerTaskStore(munin as unknown as MuninClient)
       .listCanonical("claude-code");
     expect(rows).toEqual([expect.objectContaining({ task_id: "t1", outcome: "cancelled" })]);
+  });
+
+  // #181: hugin_list under-counted real broker tasks. A tag-scoped Munin query
+  // (`broker:mcp-v2`) matches every key sharing that tag — status, feedback,
+  // and await-observation alike — and the query is capped server-side. Once a
+  // task is rated (writeFeedback) or polled (recordAwait), its co-tagged
+  // sibling entries compete with its own `status` entry for the same limited
+  // result window. The old code discarded any raw result whose `key` wasn't
+  // `status` instead of using it to learn the task's namespace, so a task
+  // whose status entry fell out of the window (crowded out by its own or
+  // another task's feedback/await-observation entry) vanished from the list
+  // even though its canonical status entry was untouched and still readable.
+  it("still lists a task whose status entry is crowded out of the raw query window by a co-tagged feedback entry", async () => {
+    const munin = new FakeMunin();
+    munin.readReturn["tasks/t1/status"] = {
+      content: serializeEnvelope(envelope("t1")),
+      tags: ["completed", "broker:mcp-v2", "runtime:homeserver"],
+    };
+    // Simulates a Munin-side query result window that, after hugin_rate wrote
+    // the co-tagged `feedback` entry, no longer contains the `status` entry
+    // for this task — only the newer sibling entry survived the cap.
+    munin.queryReturn = {
+      results: [{ namespace: "tasks/t1", key: "feedback", tags: ["broker:mcp-v2", "feedback"] }],
+      total: 1,
+    };
+    const rows = await new BrokerTaskStore(munin as unknown as MuninClient)
+      .listCanonical("claude-code");
+    expect(rows).toEqual([expect.objectContaining({ task_id: "t1", outcome: "completed" })]);
+  });
+
+  it("still lists a task whose status entry is crowded out by an await-observation entry", async () => {
+    const munin = new FakeMunin();
+    munin.readReturn["tasks/t2/status"] = {
+      content: serializeEnvelope(envelope("t2")),
+      tags: ["running", "broker:mcp-v2", "runtime:homeserver"],
+    };
+    munin.queryReturn = {
+      results: [
+        { namespace: "tasks/t2", key: "await-observation", tags: ["broker:mcp-v2", "await-observation"] },
+      ],
+      total: 1,
+    };
+    const rows = await new BrokerTaskStore(munin as unknown as MuninClient)
+      .listCanonical("claude-code");
+    expect(rows).toEqual([expect.objectContaining({ task_id: "t2", outcome: "running" })]);
+  });
+
+  it("forwards sinceTs as the since field on both munin.query calls", async () => {
+    const munin = new FakeMunin();
+
+    await new BrokerTaskStore(munin as unknown as MuninClient)
+      .listCanonical("claude-code", "2026-07-12T13:03:00Z");
+
+    expect(munin.queries).toHaveLength(2);
+    for (const query of munin.queries) {
+      expect(query).toHaveProperty("since", "2026-07-12T13:03:00Z");
+    }
+  });
+
+  // Codex review of #181/PR182: a caller-requested small output limit must
+  // never narrow the raw Munin candidate window below the server's real
+  // per-query cap (50) — doing so reintroduces the exact crowding-out risk
+  // this PR fixes, just triggered by a small `?limit=` instead of a rating
+  // event. The final row count is already enforced downstream by the
+  // handler's own slice(), so listCanonical has no reason to accept (or be
+  // shrunk by) an output-size hint at all.
+  it("always queries Munin at its real per-query cap, independent of the caller's desired row count", async () => {
+    const munin = new FakeMunin();
+
+    await new BrokerTaskStore(munin as unknown as MuninClient).listCanonical("claude-code");
+
+    expect(munin.queries).toHaveLength(2);
+    for (const query of munin.queries) {
+      expect(query.limit).toBe(50);
+    }
+  });
+
+  // Codex review of #181/PR182: the earlier crowd-out tests above share one
+  // `queryReturn` fixture for both tag queries, so they cannot distinguish
+  // "found via the broker:mcp-v2 channel" from "found via the runtime:homeserver
+  // union" — a reverted union would still pass them. This test makes the two
+  // channels diverge: the mcp-v2 query returns only unrelated/polluting
+  // namespaces, and only the runtime:homeserver query returns the target's
+  // status entry, proving the union is what surfaces it.
+  it("surfaces a task found only via the runtime:homeserver union when the broker:mcp-v2 channel is fully crowded out", async () => {
+    const munin = new FakeMunin();
+    munin.readReturn["tasks/t3/status"] = {
+      content: serializeEnvelope(envelope("t3")),
+      tags: ["completed", "broker:mcp-v2", "runtime:homeserver"],
+    };
+    munin.queryByTags = (tags) =>
+      tags.includes("broker:mcp-v2")
+        ? { results: [{ namespace: "tasks/unrelated-1", key: "feedback" }, { namespace: "tasks/unrelated-2", key: "await-observation" }], total: 2 }
+        : { results: [{ namespace: "tasks/t3", key: "status" }], total: 1 };
+
+    const rows = await new BrokerTaskStore(munin as unknown as MuninClient)
+      .listCanonical("claude-code");
+    expect(rows).toEqual([expect.objectContaining({ task_id: "t3", outcome: "completed" })]);
   });
 });
 

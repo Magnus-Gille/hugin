@@ -102,6 +102,43 @@ describe("LearningLoopCollector", () => {
     expect(evidence.tasks[0]!.submitter).toBe("claude-code");
   });
 
+  // #181: hugin_list under-counted real broker tasks because its `broker:mcp-v2`
+  // tag-scoped query is polluted by co-tagged `feedback`/`await-observation`
+  // entries and capped server-side, so a rated task's own `status` entry can
+  // fall out of the returned window. This collector counts by embedded
+  // envelope, not the lossy tag alone (see the pre-#173 test above) — confirm
+  // it does not share that defect: even when the `broker:mcp-v2` query window
+  // contains only the co-tagged `feedback` entry (status crowded out), the
+  // `runtime:homeserver` union still surfaces the status entry directly.
+  it("still counts a rated task when the broker:mcp-v2 query window is crowded out by its own feedback entry (#181)", async () => {
+    const entries: Record<string, { content: string; tags?: string[] }> = {
+      "tasks/mcp-m5-rated/status": {
+        content: ENVELOPE("claude-code"),
+        tags: ["completed", "broker:mcp-v2", "runtime:homeserver"],
+      },
+      "tasks/mcp-m5-rated/feedback": { content: JSON.stringify({ rating: "pass" }) },
+    };
+    const munin = {
+      // Simulates Munin's server-side cap: the broker:mcp-v2 window is fully
+      // consumed by the feedback entry written after hugin_rate; only the
+      // runtime:homeserver-tagged query still contains the status entry.
+      query: vi.fn(async (q: { tags?: string[] }) =>
+        q.tags?.includes("broker:mcp-v2")
+          ? { results: [{ namespace: "tasks/mcp-m5-rated", key: "feedback" }], total: 1 }
+          : { results: [{ namespace: "tasks/mcp-m5-rated", key: "status" }], total: 1 }
+      ),
+      read: vi.fn(async (ns: string, key: string) => entries[`${ns}/${key}`] ?? null),
+    } as unknown as MuninClient;
+
+    const evidence = await new LearningLoopCollector({
+      munin, ledgerClient: fakeLedgerClient(null),
+    }).refresh();
+
+    expect(evidence.tasks).toHaveLength(1);
+    expect(evidence.tasks[0]!.taskId).toBe("mcp-m5-rated");
+    expect(evidence.tasks[0]!.rating).toBe("pass");
+  });
+
   it("ignores a non-broker task that carries no envelope", async () => {
     const munin = {
       query: vi.fn(async () => ({

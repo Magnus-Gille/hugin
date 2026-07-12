@@ -482,7 +482,7 @@ export function createListHandler(deps: BrokerHandlerDependencies) {
       res.status(500).json({ error: "internal", message: "principal missing" });
       return;
     }
-    const canonical = await deps.taskStore.listCanonical(principal, parsed.limit ?? 50);
+    const canonical = await deps.taskStore.listCanonical(principal, parsed.since_ts);
     const historical = Array.from(projectDelegations(await deps.journal.readAll()).values())
       .filter((row) => row.envelope?.broker_principal === principal);
     const canonicalIds = new Set(canonical.map((row) => row.task_id));
