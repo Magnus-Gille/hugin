@@ -39,6 +39,9 @@ export const RESULT_STRUCTURED_KEY = "result-structured";
 export const RESULT_ERROR_KEY = "result-error";
 /** Durable-handoff evidence for the #165 trial (#164). */
 export const AWAIT_OBSERVATION_KEY = "await-observation";
+/** Munin's memory_query tool documents a hard server-side cap of 50 results
+ * per call regardless of the requested `limit` — see listCanonical (#181). */
+export const MUNIN_QUERY_MAX = 50;
 
 export interface TaskStoreConfig {
   munin: MuninClient;
@@ -225,19 +228,25 @@ export class BrokerTaskStore {
    * so it is immune to feedback/await-observation pollution), then read each
    * unique namespace's `status` entry directly rather than relying on it
    * having survived inside the raw query window.
+   *
+   * Always queries Munin at its real per-query cap (`MUNIN_QUERY_MAX`),
+   * independent of how many rows the caller ultimately wants — the final
+   * row count is enforced downstream by the handler's own slice(). A caller-
+   * requested small output limit narrowing this raw candidate window would
+   * reintroduce the same crowding-out risk this fix closes, just triggered
+   * by `?limit=1` instead of a rating event (caught in review of #181).
    */
-  async listCanonical(principal: string, limit = 50, sinceTs?: string): Promise<Array<{
+  async listCanonical(principal: string, sinceTs?: string): Promise<Array<{
     task_id: string;
     submitted_at: string;
     outcome: "completed" | "failed" | "cancelled" | "running";
     alias: DelegationEnvelope["alias_requested"];
   }>> {
-    const queryLimit = Math.min(50, Math.max(limit * 2, limit));
     const baseOpts = {
       query: "task",
       namespace: "tasks/",
       entry_type: "state" as const,
-      limit: queryLimit,
+      limit: MUNIN_QUERY_MAX,
       ...(sinceTs ? { since: sinceTs } : {}),
     };
     const [tagged, homeserver] = await Promise.all([

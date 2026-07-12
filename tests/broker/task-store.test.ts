@@ -27,6 +27,10 @@ class FakeMunin {
   queries: Parameters<MuninClient["query"]>[0][] = [];
   readReturn: Record<string, unknown> = {};
   queryReturn: { results: unknown[]; total: number } = { results: [], total: 0 };
+  /** Optional per-call override, keyed by the requested tags — lets a test
+   * make the two tag-scoped queries in listCanonical diverge instead of
+   * always sharing queryReturn. */
+  queryByTags?: (tags: string[]) => { results: unknown[]; total: number };
 
   async write(
     namespace: string,
@@ -45,6 +49,7 @@ class FakeMunin {
   }
   async query(opts: Parameters<MuninClient["query"]>[0]) {
     this.queries.push(opts);
+    if (this.queryByTags) return this.queryByTags(opts.tags ?? []);
     return this.queryReturn;
   }
 }
@@ -247,12 +252,53 @@ describe("BrokerTaskStore.listCanonical", () => {
     const munin = new FakeMunin();
 
     await new BrokerTaskStore(munin as unknown as MuninClient)
-      .listCanonical("claude-code", 10, "2026-07-12T13:03:00Z");
+      .listCanonical("claude-code", "2026-07-12T13:03:00Z");
 
     expect(munin.queries).toHaveLength(2);
     for (const query of munin.queries) {
       expect(query).toHaveProperty("since", "2026-07-12T13:03:00Z");
     }
+  });
+
+  // Codex review of #181/PR182: a caller-requested small output limit must
+  // never narrow the raw Munin candidate window below the server's real
+  // per-query cap (50) — doing so reintroduces the exact crowding-out risk
+  // this PR fixes, just triggered by a small `?limit=` instead of a rating
+  // event. The final row count is already enforced downstream by the
+  // handler's own slice(), so listCanonical has no reason to accept (or be
+  // shrunk by) an output-size hint at all.
+  it("always queries Munin at its real per-query cap, independent of the caller's desired row count", async () => {
+    const munin = new FakeMunin();
+
+    await new BrokerTaskStore(munin as unknown as MuninClient).listCanonical("claude-code");
+
+    expect(munin.queries).toHaveLength(2);
+    for (const query of munin.queries) {
+      expect(query.limit).toBe(50);
+    }
+  });
+
+  // Codex review of #181/PR182: the earlier crowd-out tests above share one
+  // `queryReturn` fixture for both tag queries, so they cannot distinguish
+  // "found via the broker:mcp-v2 channel" from "found via the runtime:homeserver
+  // union" — a reverted union would still pass them. This test makes the two
+  // channels diverge: the mcp-v2 query returns only unrelated/polluting
+  // namespaces, and only the runtime:homeserver query returns the target's
+  // status entry, proving the union is what surfaces it.
+  it("surfaces a task found only via the runtime:homeserver union when the broker:mcp-v2 channel is fully crowded out", async () => {
+    const munin = new FakeMunin();
+    munin.readReturn["tasks/t3/status"] = {
+      content: serializeEnvelope(envelope("t3")),
+      tags: ["completed", "broker:mcp-v2", "runtime:homeserver"],
+    };
+    munin.queryByTags = (tags) =>
+      tags.includes("broker:mcp-v2")
+        ? { results: [{ namespace: "tasks/unrelated-1", key: "feedback" }, { namespace: "tasks/unrelated-2", key: "await-observation" }], total: 2 }
+        : { results: [{ namespace: "tasks/t3", key: "status" }], total: 1 };
+
+    const rows = await new BrokerTaskStore(munin as unknown as MuninClient)
+      .listCanonical("claude-code");
+    expect(rows).toEqual([expect.objectContaining({ task_id: "t3", outcome: "completed" })]);
   });
 });
 
