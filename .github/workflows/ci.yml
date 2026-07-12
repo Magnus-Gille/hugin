@@ -27,3 +27,5 @@ jobs:
       - run: npm test
 
       - run: bash scripts/lib/claude-config-bootstrap.test.sh
+
+      - run: bash scripts/lib/node-modules-preflight.test.sh

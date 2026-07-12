@@ -17,17 +17,20 @@ DEPLOY_USER="${DEPLOY_USER:-magnus}"
 REMOTE="$DEPLOY_USER@$PI_HOST"
 REMOTE_DIR="/home/$DEPLOY_USER/repos/hugin"
 
+# Node_modules preflight + hardened rsync exclusion (issue #187). See
+# scripts/lib/node-modules-preflight.sh for the full incident writeup.
+# shellcheck source=lib/node-modules-preflight.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/node-modules-preflight.sh"
+
+echo "==> node_modules preflight (issue #187)..."
+node_modules_preflight_check "." || exit 1
+
 echo "==> Building locally..."
 npm run build
 
 echo "==> Syncing to $REMOTE:$REMOTE_DIR..."
 rsync -av --delete \
-  --exclude='node_modules/' \
-  --exclude='.git' \
-  --exclude='.git/' \
-  --exclude='.env' \
-  --exclude='tests/' \
-  --exclude='.DS_Store' \
+  "${DEPLOY_RSYNC_EXCLUDE_ARGS[@]}" \
   ./ "$REMOTE:$REMOTE_DIR/"
 
 echo "==> Installing dependencies on Pi..."
