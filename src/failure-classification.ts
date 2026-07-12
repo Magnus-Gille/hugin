@@ -19,6 +19,16 @@ export const AUTH_FAILURE_TAG = "failure:auth";
 /** Machine-readable failure kind rendered into the result document. */
 export const AUTH_FAILURE_KIND = "AUTH_FAILED";
 
+/**
+ * Distinct status tag applied to a task refused by the version-drift
+ * pre-flight check (issue #123: on-disk SDK/binary changed under a live
+ * worker — see src/version-drift.ts).
+ */
+export const DEPS_DRIFT_FAILURE_TAG = "failure:deps-drift";
+
+/** Machine-readable failure kind rendered into the result document. */
+export const DEPS_DRIFT_FAILURE_KIND = "DEPS_DRIFT";
+
 export interface FailureClassification {
   /** Failure kind, e.g. `AUTH_FAILED`. Rendered as `- **Failure kind:** …`. */
   kind: string;
@@ -46,6 +56,14 @@ const AUTH_FAILURE_PATTERNS: RegExp[] = [
   /"type"\s*:\s*"authentication_error"/i,
 ];
 
+// The version-drift pre-flight short-circuit (src/index.ts) hand-crafts its
+// synthetic output to always include this literal, anchored marker — mirrors
+// how the AUTH_FAILED preflight text above is crafted to trip
+// AUTH_FAILURE_PATTERNS. Kept narrow (an all-caps token a legitimate task's
+// prose is very unlikely to emit) rather than matching on looser phrasing
+// like "dependency drift" a task could plausibly discuss.
+const DEPS_DRIFT_PATTERNS: RegExp[] = [/\bDEPS_DRIFT:/];
+
 /**
  * Classify a failed Claude SDK task's captured output.
  *
@@ -62,12 +80,23 @@ export function classifyClaudeFailure(
   output: string | null | undefined,
 ): FailureClassification | null {
   if (!output) return null;
-  if (!AUTH_FAILURE_PATTERNS.some((re) => re.test(output))) return null;
-  return {
-    kind: AUTH_FAILURE_KIND,
-    tag: AUTH_FAILURE_TAG,
-    reason:
-      "Runtime failed to authenticate (HTTP 401 — expired or absent Pi Claude credential). " +
-      "Refresh the Pi's Claude Code credential to unblock autonomous tasks.",
-  };
+  if (DEPS_DRIFT_PATTERNS.some((re) => re.test(output))) {
+    return {
+      kind: DEPS_DRIFT_FAILURE_KIND,
+      tag: DEPS_DRIFT_FAILURE_TAG,
+      reason:
+        "On-disk @anthropic-ai/claude-agent-sdk (or its cli.js runtime) changed under this " +
+        "live worker process. Restart the worker to pick up the current on-disk SDK/binary.",
+    };
+  }
+  if (AUTH_FAILURE_PATTERNS.some((re) => re.test(output))) {
+    return {
+      kind: AUTH_FAILURE_KIND,
+      tag: AUTH_FAILURE_TAG,
+      reason:
+        "Runtime failed to authenticate (HTTP 401 — expired or absent Pi Claude credential). " +
+        "Refresh the Pi's Claude Code credential to unblock autonomous tasks.",
+    };
+  }
+  return null;
 }

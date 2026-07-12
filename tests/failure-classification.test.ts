@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   AUTH_FAILURE_KIND,
   AUTH_FAILURE_TAG,
+  DEPS_DRIFT_FAILURE_KIND,
+  DEPS_DRIFT_FAILURE_TAG,
   classifyClaudeFailure,
 } from "../src/failure-classification.js";
 
@@ -62,5 +64,29 @@ describe("classifyClaudeFailure", () => {
     expect(classifyClaudeFailure("")).toBeNull();
     expect(classifyClaudeFailure(null)).toBeNull();
     expect(classifyClaudeFailure(undefined)).toBeNull();
+  });
+
+  it("classifies a version-drift pre-flight short-circuit as DEPS_DRIFT (issue #123)", () => {
+    const output =
+      "Version-drift pre-flight check failed. DEPS_DRIFT: deps changed under live worker " +
+      "(sdkVersion 0.2.81 → 0.2.82) — restart the worker to pick up the current on-disk SDK/binary.";
+    const result = classifyClaudeFailure(output);
+    expect(result).not.toBeNull();
+    expect(result?.kind).toBe(DEPS_DRIFT_FAILURE_KIND);
+    expect(result?.tag).toBe(DEPS_DRIFT_FAILURE_TAG);
+    expect(result?.reason).toMatch(/restart the worker/i);
+  });
+
+  it("does not misclassify a task whose prose merely mentions dependency drift", () => {
+    const output = "I noticed the dependency versions had drifted between environments.";
+    expect(classifyClaudeFailure(output)).toBeNull();
+  });
+
+  it("prefers DEPS_DRIFT over AUTH_FAILED when (hypothetically) both markers are present", () => {
+    const output =
+      "DEPS_DRIFT: deps changed under live worker — restart the worker.\n" +
+      'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error"}}';
+    const result = classifyClaudeFailure(output);
+    expect(result?.kind).toBe(DEPS_DRIFT_FAILURE_KIND);
   });
 });
