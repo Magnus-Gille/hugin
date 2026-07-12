@@ -76,7 +76,12 @@ export interface RoutePolicy {
   explanation: string;
 }
 
-export type TrialCriterionState = "met" | "not-met" | "not-instrumented";
+export type TrialCriterionState =
+  | "met"
+  | "not-met"
+  | "not-instrumented"
+  /** Tracked as a cost, not scored against a threshold (e.g. rescue/redo). */
+  | "informational";
 
 export interface TrialCriterion {
   id: string;
@@ -89,7 +94,19 @@ export interface TrialCriterion {
   note?: string;
 }
 
+/** Whether the corpus behind the product plane was actually readable. */
+export interface ProductSource {
+  /** False when the task corpus could not be read at all — unmeasured, not zero. */
+  available: boolean;
+  /** Per-task reads that failed: counts below are then a lower bound. */
+  readFailures?: number;
+  /** The corpus walk hit its cap: counts below are then a lower bound. */
+  truncated?: boolean;
+}
+
 export interface ProductPlane {
+  /** False ⇒ every count here is unmeasured. Never render them as zeroes. */
+  available: boolean;
   substantiveTasks: number;
   producers: string[];
   ratedTasks: number;
@@ -108,16 +125,31 @@ export interface ProductTaskEvidence {
   submitter: string | null;
   rating: "pass" | "partial" | "redo" | "wrong" | null;
   verificationOutcome: string | null;
-  /** A LATER session collected the terminal result (src/broker/await-observation.ts). */
+  /** A different MCP process collected the completed result. A PROXY — see the panel note. */
   durableHandoff: boolean;
+  /** For deterministic ordering of "most recent". */
+  updatedAt?: string;
   delegation?: {
     policyMode?: string;
     policyAction?: string;
     priceCatalogVersion?: string;
+    /** Needed to tie a route claim to the ledger row that backs it. */
+    modelId?: string;
+    taskType?: string;
   };
 }
 
-/** Heimdall's typed-panel kinds — rendered with zero Heimdall code. */
+/**
+ * Heimdall's typed-panel kinds — rendered with zero Heimdall code.
+ *
+ * `rows` MUST be an array of plain OBJECTS keyed by column name. Heimdall's
+ * normalizer (`src/contract/panel-data.js`, `isObj` = not-null, object, and
+ * NOT an array) silently FILTERS OUT array rows — a `string[][]` table renders
+ * completely empty on the dashboard while every local test still passes. Found
+ * by cross-checking the consumer contract, not by typechecking.
+ */
+export type TableRow = Record<string, string>;
+
 export interface TypedPanel {
   id: string;
   label: string;
@@ -133,8 +165,23 @@ const GATE_PRODUCERS = 2;
 const GATE_USEFUL_RATE = 0.7;
 const GATE_DURABLE_HANDOFFS = 5;
 
+/**
+ * A useful-completion rate is only meaningful over a decent slice of the corpus.
+ * Below this, the gate reports "not instrumented" rather than a rate inferred
+ * from a self-selected handful of ratings.
+ */
+const MIN_RATING_COVERAGE = 0.5;
+
 /** The live ledger carries ~100 rows; a dashboard table needs a ranked subset. */
 const MAX_CAPABILITY_ROWS = 15;
+
+/** Delegate-policy modes that actually change a route (vs merely observing). */
+const ENFORCING_POLICY_MODES: ReadonlySet<string> = new Set(["enforce", "enforcing", "active"]);
+
+/** A trustworthy count: a nonnegative safe integer, or null. */
+function countOrNull(v: unknown): number | null {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null;
+}
 
 export function computeCapabilityPlane(ledger: Ledger | null): CapabilityPlane {
   if (!ledger) {
@@ -149,19 +196,29 @@ export function computeCapabilityPlane(ledger: Ledger | null): CapabilityPlane {
     };
   }
 
-  const rows: CapabilityRow[] = ledger.report.map((r) => {
-    const passes = r.passes ?? 0;
-    const fails = r.fails ?? 0;
-    const attempts = r.attempts ?? 0;
-    const verifiedSamples = passes + fails;
+  const rows: CapabilityRow[] = [];
+  for (const r of ledger.report) {
+    // The ledger is another service's output — validate its numeric invariants
+    // rather than trusting them. A malformed row (attempts:0 but passes:1, or a
+    // fractional/negative count) would otherwise render as confident positive
+    // evidence — a false 100% quality rate is worse than no row at all.
+    const passes = countOrNull(r.passes);
+    const fails = countOrNull(r.fails);
+    const attempts = countOrNull(r.attempts);
+    const errors = countOrNull(r.errors);
+    if (passes === null || fails === null || attempts === null || errors === null) continue;
 
-    return {
+    const verifiedSamples = passes + fails;
+    // Verified outcomes cannot exceed attempts, and attempts must cover errors.
+    if (verifiedSamples > attempts || errors > attempts) continue;
+
+    rows.push({
       taskType: r.taskType,
       modelId: r.modelId,
       attempts,
       passes,
       fails,
-      errors: r.errors ?? 0,
+      errors,
       verifiedSamples,
       // Errors are infra, not model quality — excluded from the denominator.
       qualityRate: verifiedSamples > 0 ? passes / verifiedSamples : null,
@@ -169,8 +226,8 @@ export function computeCapabilityPlane(ledger: Ledger | null): CapabilityPlane {
         attempts === 0 ? "aspirational" : verifiedSamples > 0 ? "verified" : "unverified",
       recommendation: r.recommendation,
       frozen: r.frozen ?? false,
-    };
-  });
+    });
+  }
 
   const totalAttempts = rows.reduce((n, r) => n + r.attempts, 0);
   const totalVerifiedSamples = rows.reduce((n, r) => n + r.verifiedSamples, 0);
@@ -199,9 +256,13 @@ export function deriveRoutePolicy(
   tasks: ProductTaskEvidence[],
   capability: CapabilityPlane
 ): RoutePolicy {
-  // Most recent task carrying delegation provenance wins.
-  const withProvenance = tasks.filter((t) => t.delegation?.policyMode);
-  const latest = withProvenance[withProvenance.length - 1]?.delegation;
+  // Deterministic "most recent": explicitly by recorded time, not by the
+  // arbitrary order of a union of two Munin queries.
+  const withProvenance = tasks
+    .filter((t) => t.delegation?.policyMode)
+    .sort((a, b) => (a.updatedAt ?? "").localeCompare(b.updatedAt ?? ""));
+  const latestTask = withProvenance[withProvenance.length - 1];
+  const latest = latestTask?.delegation;
 
   const policyMode = latest?.policyMode ?? null;
   const policyAction = latest?.policyAction ?? null;
@@ -218,24 +279,33 @@ export function deriveRoutePolicy(
     };
   }
 
-  const isShadow = policyMode === "shadow";
-  const backedByVerifiedEvidence = capability.actionable;
-  const evidenceDrivenRouteChange = !isShadow && backedByVerifiedEvidence;
+  const isEnforcing = ENFORCING_POLICY_MODES.has(policyMode);
+
+  // A route change is "evidence-driven" only if the evidence in question is the
+  // evidence for THIS route. Any-verified-sample-anywhere would assert a causal
+  // link that was never established — the whole point of the criterion is to show
+  // that a specific route changed BECAUSE of specific verified evidence.
+  const backingRow = ledgerRowFor(capability, latest?.modelId, latest?.taskType);
+  const backedBySpecificEvidence =
+    backingRow !== undefined && backingRow.verifiedSamples > 0;
+  const evidenceDrivenRouteChange = isEnforcing && backedBySpecificEvidence;
 
   let explanation: string;
-  if (isShadow) {
+  if (!isEnforcing) {
     explanation =
       `Routing is still shadow/manual: the M5 delegate policy is in "${policyMode}" mode, ` +
       `so it observes and records evidence but does not change any route. ` +
       `No route change has been caused by verified evidence.`;
   } else if (evidenceDrivenRouteChange) {
     explanation =
-      `Route policy "${policyMode}" is enforcing action "${policyAction}" ` +
-      `backed by ${capability.totalVerifiedSamples} verified sample(s).`;
+      `Route policy "${policyMode}" is enforcing "${policyAction}" for ` +
+      `${latest?.taskType}×${latest?.modelId}, backed by ${backingRow!.verifiedSamples} ` +
+      `verified sample(s) for that exact pair (M5 recommends "${backingRow!.recommendation}").`;
   } else {
     explanation =
-      `Route policy "${policyMode}" reports action "${policyAction}", but no verified ` +
-      `evidence backs it yet — treat the route as manual, not evidence-driven.`;
+      `Route policy "${policyMode}" reports action "${policyAction}", but no verified ledger ` +
+      `evidence for that specific model × task type backs it — treat the route as manual, ` +
+      `not evidence-driven.`;
   }
 
   return {
@@ -252,73 +322,165 @@ function gateState(observed: number | null, target: number): TrialCriterionState
   return observed >= target ? "met" : "not-met";
 }
 
-export function computeProductPlane(tasks: ProductTaskEvidence[]): ProductPlane {
-  const substantiveTasks = tasks.length;
+/** Find the ledger row backing a specific (model × task type) claim. */
+function ledgerRowFor(
+  capability: CapabilityPlane,
+  modelId?: string,
+  taskType?: string
+): CapabilityRow | undefined {
+  if (!modelId || !taskType) return undefined;
+  return capability.rows.find((r) => r.modelId === modelId && r.taskType === taskType);
+}
+
+/**
+ * A `partial` is only USEFUL if the human actually used it. `partial` +
+ * `major_rewrite`/`discarded`/`escalated_to_claude` means the human had to
+ * rescue it — counting that as "useful completion" would inflate the gate with
+ * exactly the outcomes that prove the delegation didn't work.
+ */
+const USEFUL_PARTIAL_OUTCOMES: ReadonlySet<string> = new Set([
+  "accepted_unchanged",
+  "minor_edit",
+]);
+
+function isUseful(t: ProductTaskEvidence): boolean {
+  if (t.rating === "pass") return true;
+  if (t.rating !== "partial") return false;
+  // An unlabelled partial cannot be assumed useful.
+  return t.verificationOutcome !== null && USEFUL_PARTIAL_OUTCOMES.has(t.verificationOutcome);
+}
+
+function isRescue(t: ProductTaskEvidence): boolean {
+  if (t.rating === "redo" || t.rating === "wrong") return true;
+  return t.rating === "partial" && !isUseful(t);
+}
+
+/**
+ * Compute the #165 product gate.
+ *
+ * `available` distinguishes "we measured, and it is zero" from "we could not
+ * measure". They must never render the same: a failed Munin read that displays
+ * as `0 tasks` would let a broken collector masquerade as a failing trial (or,
+ * worse, an empty corpus masquerade as a measured one).
+ */
+export function computeProductPlane(
+  tasks: ProductTaskEvidence[],
+  source: ProductSource = { available: true }
+): ProductPlane {
+  // Only a COMPLETED task is a completed task. Pending/running/cancelled work
+  // is not evidence that Hugin delivered anything.
+  const completed = tasks.filter((t) => t.lifecycle === "completed");
+  const substantiveTasks = completed.length;
 
   const producers = [
-    ...new Set(tasks.map((t) => t.submitter).filter((s): s is string => !!s)),
+    ...new Set(completed.map((t) => t.submitter).filter((s): s is string => !!s)),
   ].sort();
 
-  const rated = tasks.filter((t) => t.rating !== null);
+  const rated = completed.filter((t) => t.rating !== null);
   const ratedTasks = rated.length;
-  const usefulTasks = rated.filter((t) => t.rating === "pass" || t.rating === "partial").length;
-  const rescueRedo = rated.filter((t) => t.rating === "redo" || t.rating === "wrong").length;
+  const usefulTasks = rated.filter(isUseful).length;
+  const rescueRedo = rated.filter(isRescue).length;
 
   // Unrated is NOT unuseful. With no ratings there is no rate — say so.
   const usefulRate = ratedTasks > 0 ? usefulTasks / ratedTasks : null;
+  const durableHandoffs = completed.filter((t) => t.durableHandoff).length;
 
-  const durableHandoffs = tasks.filter((t) => t.durableHandoff).length;
+  // A rate over a tiny slice of the corpus is not a rate for the corpus. Judging
+  // "70% useful" from 1 rated task out of 10 would be a lie of selection.
+  const coverage = substantiveTasks > 0 ? ratedTasks / substantiveTasks : 0;
+  const sufficientCoverage = ratedTasks > 0 && coverage >= MIN_RATING_COVERAGE;
+
+  // If the corpus itself could not be read, EVERY derived count is unmeasured.
+  const unavailable = !source.available;
+  const incomplete = source.truncated === true || (source.readFailures ?? 0) > 0;
+
+  const measured = <T>(value: T): T | null => (unavailable ? null : value);
+  const measuredState = (observed: number | null, target: number): TrialCriterionState =>
+    unavailable ? "not-instrumented" : gateState(observed, target);
+
+  const incompleteNote = incomplete
+    ? ` (corpus incomplete: ${source.readFailures ?? 0} read failure(s)${
+        source.truncated ? ", results truncated" : ""
+      } — counts are a LOWER BOUND)`
+    : "";
+  const unavailableNote =
+    "Task corpus could not be read — this is unmeasured, NOT zero.";
 
   const criteria: TrialCriterion[] = [
     {
       id: "substantive-tasks",
-      label: "Substantive tasks",
-      observed: substantiveTasks,
+      label: "Completed broker tasks",
+      observed: measured(substantiveTasks),
       target: GATE_SUBSTANTIVE_TASKS,
       unit: "tasks",
-      state: gateState(substantiveTasks, GATE_SUBSTANTIVE_TASKS),
+      state: measuredState(measured(substantiveTasks), GATE_SUBSTANTIVE_TASKS),
+      note: unavailable ? unavailableNote : `Completed only${incompleteNote}`,
     },
     {
       id: "producers",
       label: "Independent producers",
-      observed: producers.length,
+      observed: measured(producers.length),
       target: GATE_PRODUCERS,
       unit: "producers",
-      state: gateState(producers.length, GATE_PRODUCERS),
+      state: measuredState(measured(producers.length), GATE_PRODUCERS),
+      note: unavailable
+        ? unavailableNote
+        : `Distinct submitting principals — an identity label, not a verified identity${incompleteNote}`,
     },
     {
       id: "useful-completion",
-      label: "Useful completion (pass or useful partial)",
-      // A rate over zero ratings is not 0% — it is unmeasured.
-      observed: usefulRate === null ? null : Math.round(usefulRate * 100),
+      label: "Useful completion (pass, or partial the human actually used)",
+      observed: usefulRate === null || unavailable ? null : Math.round(usefulRate * 100),
       target: Math.round(GATE_USEFUL_RATE * 100),
       unit: "%",
-      state: usefulRate === null ? "not-instrumented" : gateState(Math.round(usefulRate * 100), 70),
-      note:
-        usefulRate === null
-          ? "No task has been rated yet — rate delegated tasks with hugin_rate, or this gate cannot be judged."
-          : `n=${ratedTasks} rated of ${substantiveTasks} tasks`,
+      // Unrated, under-covered, or unreadable ⇒ unmeasured. Never a zero, and
+      // never a "met" inferred from a flattering handful of ratings.
+      state:
+        unavailable || usefulRate === null || !sufficientCoverage
+          ? "not-instrumented"
+          : gateState(Math.round(usefulRate * 100), Math.round(GATE_USEFUL_RATE * 100)),
+      note: unavailable
+        ? unavailableNote
+        : ratedTasks === 0
+          ? "No completed task has been rated — rate them with hugin_rate or this gate cannot be judged."
+          : !sufficientCoverage
+            ? `Only ${ratedTasks} of ${substantiveTasks} completed tasks rated (${Math.round(
+                coverage * 100
+              )}% coverage; need ${Math.round(MIN_RATING_COVERAGE * 100)}%) — too few to judge the gate.`
+            : `n=${ratedTasks} rated of ${substantiveTasks} completed${incompleteNote}`,
     },
     {
       id: "durable-handoff",
-      label: "Results collected after the initiating session ended",
-      observed: durableHandoffs,
+      label: "Results collected by a later MCP process",
+      observed: measured(durableHandoffs),
       target: GATE_DURABLE_HANDOFFS,
       unit: "tasks",
-      state: gateState(durableHandoffs, GATE_DURABLE_HANDOFFS),
-      note:
-        "Conservative proxy: a terminal result collected by a DIFFERENT orchestrator " +
-        "session than the one that submitted it. Under-counts rather than over-counts.",
+      state: measuredState(measured(durableHandoffs), GATE_DURABLE_HANDOFFS),
+      // Say exactly what this measures, and where it can be WRONG. #165 asks for
+      // "completed after the initiating L1 session closed"; we cannot observe a
+      // session closing, and the session id is client-asserted and minted per
+      // MCP process — so an MCP restart inside a still-live session also trips
+      // this. It is a proxy in both directions, not a measurement.
+      note: unavailable
+        ? unavailableNote
+        : "PROXY: a completed result collected by a different orchestrator_session_id than " +
+          "submitted it. Session closure is not observable; the id is client-asserted and " +
+          "minted per MCP process, so an MCP restart within a live session also counts. " +
+          "Corroborate before relying on this at the 2026-08-22 decision.",
     },
     {
       id: "rescue-redo",
-      label: "Human rescue / redo (lower is better)",
-      observed: rescueRedo,
+      label: "Human rescue / redo (a cost, not a gate)",
+      observed: measured(rescueRedo),
       target: 0,
       unit: "tasks",
-      // Not a pass/fail gate — a tracked cost. Reported, never scored.
-      state: ratedTasks > 0 ? "met" : "not-instrumented",
-      note: ratedTasks > 0 ? `n=${ratedTasks} rated` : "No ratings yet.",
+      // Reported, never scored — a count with no threshold cannot be "met".
+      state: unavailable || ratedTasks === 0 ? "not-instrumented" : "informational",
+      note: unavailable
+        ? unavailableNote
+        : ratedTasks === 0
+          ? "No ratings yet."
+          : `n=${ratedTasks} rated; includes partials the human rewrote, discarded, or escalated`,
     },
     {
       id: "maintenance-time",
@@ -343,6 +505,7 @@ export function computeProductPlane(tasks: ProductTaskEvidence[]): ProductPlane 
   ];
 
   return {
+    available: source.available,
     substantiveTasks,
     producers,
     ratedTasks,
@@ -381,27 +544,40 @@ export function buildLearningLoopPanels(input: {
   const shown = ranked.slice(0, MAX_CAPABILITY_ROWS);
   const dropped = ranked.length - shown.length;
 
-  const capabilityRows: string[][] = capability.available
+  const CAP_COLS = [
+    "Task type", "Model", "Attempts", "Verified n", "Quality", "Maturity", "M5 recommends",
+  ] as const;
+  const emptyCapRow = Object.fromEntries(CAP_COLS.map((c) => [c, ""])) as TableRow;
+
+  const capabilityRows: TableRow[] = capability.available
     ? [
-        ...shown.map((r) => [
-          r.taskType,
-          r.modelId,
-          String(r.attempts),
-          String(r.verifiedSamples),
-          // No percentage without n.
-          r.qualityRate === null ? "— (unverified)" : pct(r.qualityRate),
-          r.maturity,
-          r.recommendation,
-        ]),
+        ...shown.map(
+          (r): TableRow => ({
+            "Task type": r.taskType,
+            Model: r.modelId,
+            Attempts: String(r.attempts),
+            "Verified n": String(r.verifiedSamples),
+            // No percentage without n.
+            Quality: r.qualityRate === null ? "— (unverified)" : pct(r.qualityRate),
+            Maturity: r.maturity,
+            "M5 recommends": r.recommendation,
+          })
+        ),
         ...(dropped > 0
-          ? [[`… ${dropped} more row(s) with less evidence, not shown`, "", "", "", "", "", ""]]
+          ? [
+              {
+                ...emptyCapRow,
+                "Task type": `… ${dropped} more row(s) with less evidence, not shown`,
+              },
+            ]
           : []),
       ]
     : [
-        [
-          "M5 ledger unreachable — no capability evidence available (not the same as zero)",
-          "", "", "", "", "", "",
-        ],
+        {
+          ...emptyCapRow,
+          "Task type":
+            "M5 ledger unreachable — no capability evidence available (not the same as zero)",
+        },
       ];
 
   const capabilityPanel: TypedPanel = {
@@ -410,7 +586,7 @@ export function buildLearningLoopPanels(input: {
     kind: "table",
     fullWidth: true,
     refresh: 300,
-    cols: ["Task type", "Model", "Attempts", "Verified n", "Quality", "Maturity", "M5 recommends"],
+    cols: [...CAP_COLS],
     rows: capabilityRows,
   };
 
@@ -420,13 +596,17 @@ export function buildLearningLoopPanels(input: {
     kind: "table",
     fullWidth: true,
     refresh: 300,
-    cols: ["Criterion", "Observed", "Target", "State"],
-    rows: product.criteria.map((c) => [
-      c.note ? `${c.label} — ${c.note}` : c.label,
-      c.observed === null ? "not instrumented" : `${c.observed} ${c.unit}`.trim(),
-      `${c.target} ${c.unit}`.trim(),
-      c.state,
-    ]),
+    cols: ["Criterion", "Observed", "Target", "State", "Note"],
+    rows: product.criteria.map(
+      (c): TableRow => ({
+        Criterion: c.label,
+        // An unmeasured criterion says so; it never renders as a zero.
+        Observed: c.observed === null ? "not measured" : `${c.observed} ${c.unit}`.trim(),
+        Target: `${c.target} ${c.unit}`.trim(),
+        State: c.state,
+        Note: c.note ?? "",
+      })
+    ),
   };
 
   const policyPanel: TypedPanel = {
@@ -440,12 +620,14 @@ export function buildLearningLoopPanels(input: {
       (policy.priceCatalogVersion ? ` (price catalog ${policy.priceCatalogVersion})` : ""),
   };
 
+  // A `0` here would read as "measured, and it's zero". When the corpus is
+  // unreadable it is neither — show a dash, not a number.
   const handoffPanel: TypedPanel = {
     id: "hugin-durable-handoffs",
-    label: `Durable handoffs (target ${GATE_DURABLE_HANDOFFS})`,
+    label: `Results collected by a later MCP process (proxy; target ${GATE_DURABLE_HANDOFFS})`,
     kind: "stat",
     refresh: 300,
-    value: product.durableHandoffs,
+    value: product.available ? product.durableHandoffs : "—",
   };
 
   return [capabilityPanel, gatePanel, policyPanel, handoffPanel];

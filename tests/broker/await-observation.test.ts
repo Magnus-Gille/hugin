@@ -80,13 +80,17 @@ describe("deriveAwaitObservation", () => {
     expect(next.terminalCollected).toBe(false);
   });
 
-  it("treats failed and cancelled as terminal collections too", () => {
+  // Codex review: #165 asks for tasks that COMPLETE after the session closes. A
+  // failed or cancelled task collected later proves durability, but it is not a
+  // completion — counting it would pad the headline with work that delivered
+  // nothing.
+  it("does not count a failed or cancelled task as a completion", () => {
     for (const lifecycle of ["failed", "cancelled"] as const) {
       const { next } = deriveAwaitObservation(null, {
         sessionId: "session-B", at: "2026-07-12T11:00:00Z", lifecycle, submitSessionId: SUBMIT,
       });
-      expect(next.terminalCollected).toBe(true);
-      expect(next.durableHandoff).toBe(true);
+      expect(next.terminalCollected).toBe(false);
+      expect(next.durableHandoff).toBe(false);
     }
   });
 

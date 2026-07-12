@@ -77,21 +77,66 @@ describe("deriveRoutePolicy", () => {
     expect(policy.explanation).toMatch(/shadow/i);
   });
 
-  it("reports an evidence-driven route change once the policy actually enforces on verified evidence", () => {
+  it("reports an evidence-driven route change once the policy enforces on evidence for THAT pair", () => {
     const policy = deriveRoutePolicy(
-      [task({ delegation: { policyMode: "enforce", policyAction: "delegate-local" } })],
-      computeCapabilityPlane(ledger([{ attempts: 20, passes: 18, fails: 2, recommendation: "delegate-local" }]))
+      [task({
+        delegation: {
+          policyMode: "enforce", policyAction: "delegate-local",
+          modelId: "mellum", taskType: "extract",
+        },
+      })],
+      computeCapabilityPlane(
+        ledger([{ taskType: "extract", modelId: "mellum", attempts: 20, passes: 18, fails: 2, recommendation: "delegate-local" }])
+      )
     );
     expect(policy.evidenceDrivenRouteChange).toBe(true);
     expect(policy.explanation).toMatch(/delegate-local/);
+    expect(policy.explanation).toMatch(/extract×mellum/);
   });
 
-  it("does not claim an evidence-driven change when the policy enforces but no verified evidence backs it", () => {
+  // Codex review: "any verified sample anywhere in the ledger" asserts a causal
+  // link that was never established. The evidence must be evidence for THIS route.
+  it("does not claim causation from verified evidence about a DIFFERENT model or task type", () => {
     const policy = deriveRoutePolicy(
-      [task({ delegation: { policyMode: "enforce", policyAction: "delegate-local" } })],
-      computeCapabilityPlane(ledger([{ attempts: 20, passes: 0, fails: 0 }])) // all unverified
+      [task({
+        delegation: {
+          policyMode: "enforce", policyAction: "delegate-local",
+          modelId: "mellum", taskType: "extract",
+        },
+      })],
+      // Plenty of verified evidence — but all of it about a different pair.
+      computeCapabilityPlane(
+        ledger([{ taskType: "summarize", modelId: "gemma4", attempts: 50, passes: 50, fails: 0 }])
+      )
     );
     expect(policy.evidenceDrivenRouteChange).toBe(false);
+    expect(policy.explanation).toMatch(/no verified ledger evidence for that specific/i);
+  });
+
+  it("does not claim an evidence-driven change when the policy enforces but nothing is verified", () => {
+    const policy = deriveRoutePolicy(
+      [task({
+        delegation: {
+          policyMode: "enforce", policyAction: "delegate-local",
+          modelId: "mellum", taskType: "extract",
+        },
+      })],
+      computeCapabilityPlane(
+        ledger([{ taskType: "extract", modelId: "mellum", attempts: 20, passes: 0, fails: 0 }])
+      )
+    );
+    expect(policy.evidenceDrivenRouteChange).toBe(false);
+  });
+
+  it("picks the latest policy deterministically by time, not by array order", () => {
+    const policy = deriveRoutePolicy(
+      [
+        task({ taskId: "new", updatedAt: "2026-07-12T00:00:00Z", delegation: { policyMode: "enforce" } }),
+        task({ taskId: "old", updatedAt: "2026-01-01T00:00:00Z", delegation: { policyMode: "shadow" } }),
+      ],
+      computeCapabilityPlane(null)
+    );
+    expect(policy.policyMode).toBe("enforce"); // newest wins regardless of position
   });
 
   it("reports unknown policy rather than guessing when no task carries provenance", () => {
@@ -121,17 +166,72 @@ describe("computeProductPlane (#165 trial gate)", () => {
     expect(useful.state).toBe("not-instrumented"); // unrated ≠ unuseful
   });
 
-  it("treats pass and partial as useful, redo and wrong as rescue/redo", () => {
+  // Codex review: a `partial` the human had to REWRITE or DISCARD is not a
+  // useful completion — counting it as one would inflate the gate with exactly
+  // the outcomes that prove the delegation failed.
+  it("counts a partial as useful only when the human actually used it", () => {
     const plane = computeProductPlane([
       task({ taskId: "a", rating: "pass" }),
-      task({ taskId: "b", rating: "partial" }),
-      task({ taskId: "c", rating: "redo" }),
-      task({ taskId: "d", rating: "wrong" }),
+      task({ taskId: "b", rating: "partial", verificationOutcome: "minor_edit" }),
+      task({ taskId: "c", rating: "partial", verificationOutcome: "major_rewrite" }),
+      task({ taskId: "d", rating: "partial", verificationOutcome: "discarded" }),
+      task({ taskId: "e", rating: "partial", verificationOutcome: "escalated_to_claude" }),
+      task({ taskId: "f", rating: "redo" }),
+      task({ taskId: "g", rating: "wrong" }),
     ]);
-    expect(plane.ratedTasks).toBe(4);
-    expect(plane.usefulTasks).toBe(2);
-    expect(plane.usefulRate).toBe(0.5);
-    expect(plane.rescueRedo).toBe(2);
+    expect(plane.ratedTasks).toBe(7);
+    expect(plane.usefulTasks).toBe(2); // pass + minor_edit partial only
+    expect(plane.rescueRedo).toBe(5); // rewritten/discarded/escalated partials count as rescue
+  });
+
+  // Only a completed task is a completed task.
+  it("does not count pending, running or cancelled work as a completed task", () => {
+    const plane = computeProductPlane([
+      task({ taskId: "a", lifecycle: "completed" }),
+      task({ taskId: "b", lifecycle: "running" }),
+      task({ taskId: "c", lifecycle: "cancelled" }),
+      task({ taskId: "d", lifecycle: "failed" }),
+    ]);
+    expect(plane.substantiveTasks).toBe(1);
+  });
+
+  // Codex review: a rate over a self-selected handful is a lie of selection.
+  it("refuses to judge useful-completion from too thin a rating coverage", () => {
+    const tasks = Array.from({ length: 10 }, (_, i) =>
+      task({ taskId: `t${i}`, rating: i === 0 ? "pass" : null })
+    );
+    const plane = computeProductPlane(tasks);
+    const useful = plane.criteria.find((c) => c.id === "useful-completion")!;
+    // 1 rated pass out of 10 completed is NOT "100% useful, gate met".
+    expect(useful.state).toBe("not-instrumented");
+    expect(useful.note).toMatch(/coverage/i);
+  });
+
+  // Codex review: the corpus failing to load must not render as a measured zero.
+  it("reports every count as unmeasured when the task corpus could not be read", () => {
+    const plane = computeProductPlane([], { available: false });
+    expect(plane.available).toBe(false);
+    for (const c of plane.criteria) {
+      expect(c.observed).toBeNull();
+      expect(c.state).toBe("not-instrumented");
+    }
+    const subs = plane.criteria.find((c) => c.id === "substantive-tasks")!;
+    expect(subs.note).toMatch(/unmeasured, NOT zero/i);
+  });
+
+  it("flags a partially-read corpus as a lower bound rather than a fact", () => {
+    const plane = computeProductPlane([task()], {
+      available: true, readFailures: 3, truncated: true,
+    });
+    const subs = plane.criteria.find((c) => c.id === "substantive-tasks")!;
+    expect(subs.note).toMatch(/LOWER BOUND/);
+    expect(subs.note).toMatch(/3 read failure/);
+  });
+
+  it("reports rescue/redo as a cost, never as a satisfied gate", () => {
+    const plane = computeProductPlane([task({ rating: "pass" })]);
+    const rescue = plane.criteria.find((c) => c.id === "rescue-redo")!;
+    expect(rescue.state).toBe("informational"); // a count with no threshold cannot be "met"
   });
 
   it("counts durable handoffs — the criterion that proves the DURABLE broker earns its keep", () => {
@@ -187,6 +287,36 @@ describe("buildLearningLoopPanels", () => {
     expect(ids).not.toContain("hugin-learning-loop");
   });
 
+  // THE consumer-contract test. Heimdall's normalizer
+  // (heimdall src/contract/panel-data.js) keeps only rows passing
+  //   isObj = v != null && typeof v === 'object' && !Array.isArray(v)
+  // and SILENTLY DROPS the rest. An array-of-arrays table therefore renders
+  // completely empty on the real dashboard while every local test passes —
+  // which is exactly what happened until Codex cross-checked the consumer.
+  // Replicate Heimdall's rule here so the contract can never silently rot again.
+  it("emits table rows Heimdall will actually keep (objects, not arrays)", () => {
+    const isObj = (v: unknown) => v != null && typeof v === "object" && !Array.isArray(v);
+
+    const panels = buildLearningLoopPanels({
+      capability: computeCapabilityPlane(ledger([{ attempts: 5, passes: 4, fails: 1 }])),
+      product: computeProductPlane([task({ rating: "pass" })]),
+      policy: deriveRoutePolicy([], computeCapabilityPlane(null)),
+    });
+
+    for (const panel of panels.filter((p) => p.kind === "table")) {
+      const rows = panel.rows as unknown[];
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) {
+        expect(isObj(row)).toBe(true); // an array row would be dropped by Heimdall
+      }
+      // Every row must key off the declared columns, or its cells vanish.
+      const cols = panel.cols as string[];
+      for (const row of rows as Record<string, string>[]) {
+        for (const key of Object.keys(row)) expect(cols).toContain(key);
+      }
+    }
+  });
+
   it("emits only Heimdall's typed-panel kinds, so no Heimdall code change is needed", () => {
     const panels = buildLearningLoopPanels({
       capability: computeCapabilityPlane(null),
@@ -210,10 +340,10 @@ describe("buildLearningLoopPanels", () => {
       policy: deriveRoutePolicy([], computeCapabilityPlane(null)),
     });
     const table = panels.find((p) => p.id === "hugin-capability-evidence")!;
-    const rows = table.rows as string[][];
+    const rows = table.rows as Record<string, string>[];
     expect(rows.length).toBeLessThanOrEqual(16); // 15 rows + 1 disclosure row
     // Ranked: the most-evidenced row leads, not an arbitrary one.
-    expect(rows[0]![0]).toBe("type-39");
+    expect(rows[0]!["Task type"]).toBe("type-39");
     // The drop is stated, not hidden.
     expect(JSON.stringify(rows)).toMatch(/25 more/);
   });

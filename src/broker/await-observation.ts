@@ -37,11 +37,19 @@ export type AwaitLifecycle =
   | "awaiting-approval"
   | "unknown";
 
-const TERMINAL: ReadonlySet<AwaitLifecycle> = new Set<AwaitLifecycle>([
-  "completed",
-  "failed",
-  "cancelled",
-]);
+/**
+ * ONLY `completed` is evidence for the gate.
+ *
+ * #165 asks for tasks that *complete* after the initiating session closes. A
+ * `failed` or `cancelled` task collected by a later session proves the broker
+ * stayed durable, but it is not a completion — counting it toward the gate would
+ * pad the headline number with work that delivered nothing. The caller records
+ * `completed` only once the structured result has actually been loaded and is
+ * about to be returned, so a `completed` status whose result checkpoint is still
+ * missing (the client gets a retryable internal error and collects nothing) is
+ * not counted either.
+ */
+const EVIDENCE_LIFECYCLE: AwaitLifecycle = "completed";
 
 /** Bound the stored set — an await is client-driven, so this is untrusted growth. */
 const MAX_SESSION_IDS = 8;
@@ -54,9 +62,20 @@ export interface AwaitObservation {
   awaitSessionIds: string[];
   firstAwaitAt: string;
   lastAwaitAt: string;
-  /** At least one await saw the task in a terminal state. */
+  /** A COMPLETED result was actually collected by someone. */
   terminalCollected: boolean;
-  /** A session OTHER than the submitter collected a terminal result. */
+  /**
+   * A session other than the submitter collected the completed result.
+   *
+   * A PROXY, and imperfect in both directions — the panel says so:
+   *  - It can MISS durability (a task that outlived its session but was never
+   *    collected).
+   *  - It can OVER-count (the session id is client-asserted and minted per MCP
+   *    *process*, so an MCP restart inside a still-live L1 session mints a new
+   *    id and trips this). Codex flagged this; the original "under-counts
+   *    rather than over-counts" claim was simply wrong.
+   * Never present this as a measurement of session closure.
+   */
   durableHandoff: boolean;
 }
 
@@ -82,7 +101,7 @@ export function deriveAwaitObservation(
   prev: AwaitObservation | null,
   event: AwaitEvent
 ): { next: AwaitObservation; changed: boolean } {
-  const isTerminal = TERMINAL.has(event.lifecycle);
+  const isTerminal = event.lifecycle === EVIDENCE_LIFECYCLE;
 
   // The handoff is proven only when a KNOWN, DIFFERENT session collects a
   // terminal result. Unknown session (legacy client) or unknown submitter
