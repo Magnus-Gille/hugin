@@ -38,6 +38,7 @@ import {
   rateRequestSchema,
   type DelegationEnvelope,
 } from "./types.js";
+import type { AwaitLifecycle } from "./await-observation.js";
 import type { AuthenticatedRequest } from "./auth.js";
 
 export interface BrokerHandlerDependencies {
@@ -298,9 +299,50 @@ export function createAwaitHandler(deps: BrokerHandlerDependencies) {
     if (!requireOwnedBrokerTask(req, res, status)) return;
 
     const lifecycle = pickLifecycleTag(status.tags);
+
+    /**
+     * Durable-handoff evidence for the #165 trial (#164). Fire-and-forget:
+     * recorded AFTER ownership is enforced, never awaited, and its failure can
+     * never affect the client's await — evidence collection must not be able to
+     * break the thing it observes.
+     *
+     * `evidenceLifecycle` is what the client ACTUALLY collected, not merely what
+     * the status tag said: a `completed` task whose result checkpoint is still
+     * missing returns a retryable error and collected nothing, so it must not
+     * count toward "tasks completed after the session closed". The already-read
+     * `status` is handed down so the recorder needn't re-read it on this hot
+     * polling path.
+     */
+    const recordEvidence = (evidenceLifecycle: AwaitLifecycle): void => {
+      void deps.taskStore
+        .recordAwait(
+          parsed.task_id,
+          {
+            sessionId: parsed.orchestrator_session_id ?? null,
+            at: new Date().toISOString(),
+            lifecycle: evidenceLifecycle,
+          },
+          status
+        )
+        .catch((err: unknown) => {
+          console.warn(
+            `[broker] await-observation write failed for ${parsed.task_id}: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          );
+        });
+    };
+
+    if (lifecycle !== "completed") {
+      recordEvidence((lifecycle ?? "unknown") as AwaitLifecycle);
+    }
+
     if (lifecycle === "completed") {
       const result = await deps.taskStore.readStructuredResult(parsed.task_id);
       if (!result) {
+        // Status says completed but the result checkpoint is missing: the client
+        // gets a retryable error and collects NOTHING. Not gate evidence.
+        recordEvidence("unknown");
         res.status(200).json({
           status: "failed",
           error: {
@@ -313,6 +355,9 @@ export function createAwaitHandler(deps: BrokerHandlerDependencies) {
         });
         return;
       }
+      // A completed result was genuinely handed to the caller — this, and only
+      // this, is evidence for the #165 completed-after-session criterion.
+      recordEvidence("completed");
       res.status(200).json({
         status: "completed",
         result: JSON.parse(result.content),

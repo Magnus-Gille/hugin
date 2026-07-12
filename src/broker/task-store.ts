@@ -24,6 +24,8 @@ import type {
 } from "./types.js";
 import { delegationEnvelopeSchema, delegationRequestSchema } from "./types.js";
 import { hashPayload } from "./idempotency.js";
+import { deriveAwaitObservation } from "./await-observation.js";
+import type { AwaitEvent, AwaitObservation } from "./await-observation.js";
 
 export interface DelegationResultLike {
   task_id: string;
@@ -35,6 +37,8 @@ export const ORCH_V1_TAG = "orch-v1";
 export const STATUS_KEY = "status";
 export const RESULT_STRUCTURED_KEY = "result-structured";
 export const RESULT_ERROR_KEY = "result-error";
+/** Durable-handoff evidence for the #165 trial (#164). */
+export const AWAIT_OBSERVATION_KEY = "await-observation";
 
 export interface TaskStoreConfig {
   munin: MuninClient;
@@ -61,6 +65,9 @@ export interface SubmitTaskParams {
 }
 
 export class BrokerTaskStore {
+  /** Per-task guard so a poll storm cannot pile up un-awaited observation writes. */
+  private readonly awaitWritesInFlight = new Set<string>();
+
   constructor(private readonly munin: MuninClient) {}
 
   async submit(params: SubmitTaskParams): Promise<void> {
@@ -93,6 +100,101 @@ export class BrokerTaskStore {
   async readErrorResult(taskId: string) {
     const ns = namespaceForTaskId(taskId);
     return this.munin.read(ns, RESULT_ERROR_KEY);
+  }
+
+  /**
+   * Durable-handoff evidence (#164). Read the stored await observation, if any.
+   */
+  async readAwaitObservation(taskId: string): Promise<AwaitObservation | null> {
+    const entry = await this.munin.read(namespaceForTaskId(taskId), AWAIT_OBSERVATION_KEY);
+    if (!entry) return null;
+    try {
+      return JSON.parse(entry.content) as AwaitObservation;
+    } catch {
+      // A corrupt observation is evidence we lost, not a reason to fail an
+      // await. Start over rather than throw on the hot read path.
+      return null;
+    }
+  }
+
+  /**
+   * Fold one await into the task's durable-handoff observation.
+   *
+   * Best-effort — the caller must never await this on the request path, and a
+   * failure must never affect the client's await.
+   *
+   * Three things this has to get right, all found by review:
+   *
+   *  - **CAS, not blind overwrite.** The read-modify-write is guarded by
+   *    `expected_updated_at` and retried once. Without it, two overlapping
+   *    writers (a deploy/restart overlap, or concurrent polls) can have a later
+   *    writer with a stale `durableHandoff:false` fold clobber an earlier
+   *    `true` — permanently erasing proven evidence. The in-memory fold is
+   *    monotonic; persistence has to be too.
+   *  - **Bounded hot-path work.** `/v1/delegate/await` is a poll loop. The
+   *    caller hands down the `status` it already read, and a per-task in-flight
+   *    guard means a burst of polls can't enqueue a pile of un-awaited writes
+   *    faster than a slow Munin drains them.
+   *  - **Only write real evidence.** `changed` gates the write, so a re-poll
+   *    that reveals nothing new costs no write at all.
+   */
+  async recordAwait(
+    taskId: string,
+    event: Omit<AwaitEvent, "submitSessionId">,
+    knownStatus?: { content: string; updated_at?: string } | null
+  ): Promise<void> {
+    // Hot-path guard: one in-flight observation write per task. A poll storm
+    // must not create an unbounded backlog of un-awaited Munin writes.
+    if (this.awaitWritesInFlight.has(taskId)) return;
+    this.awaitWritesInFlight.add(taskId);
+    try {
+      const status = knownStatus ?? (await this.readStatus(taskId));
+      const envelope = status ? parseStoredEnvelope(status.content) : null;
+      const classification =
+        envelope?.sensitivity === "private" ? "client-restricted" : "internal";
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const current = await this.munin.read(
+          namespaceForTaskId(taskId),
+          AWAIT_OBSERVATION_KEY
+        );
+        let prev: AwaitObservation | null = null;
+        if (current) {
+          try {
+            prev = JSON.parse(current.content) as AwaitObservation;
+          } catch {
+            prev = null; // corrupt doc: start over rather than throw
+          }
+        }
+
+        const { next, changed } = deriveAwaitObservation(prev, {
+          ...event,
+          submitSessionId: envelope?.orchestrator_session_id ?? null,
+        });
+        if (!changed) return;
+
+        try {
+          await this.munin.write(
+            namespaceForTaskId(taskId),
+            AWAIT_OBSERVATION_KEY,
+            JSON.stringify(next),
+            ["broker:mcp-v2", "await-observation"],
+            // CAS: refuse the write if someone else moved the doc under us.
+            current?.updated_at,
+            classification,
+          );
+          return;
+        } catch (err) {
+          // Lost the CAS race — re-read and re-fold. The derivation ORs the
+          // previous evidence in, so the retry preserves the other writer's
+          // proof instead of overwriting it. One retry, then give up: this is
+          // evidence, not billing, and it must never spin on the hot path.
+          if (attempt === 1) throw err;
+        }
+      }
+    } finally {
+      this.awaitWritesInFlight.delete(taskId);
+    }
   }
 
   async writeFeedback(taskId: string, feedback: Record<string, unknown>): Promise<void> {

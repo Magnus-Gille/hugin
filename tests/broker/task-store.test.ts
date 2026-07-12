@@ -267,3 +267,120 @@ describe("BrokerTaskStore.listInFlight", () => {
     expect(inflight.every((r) => r.namespace === "tasks/t1")).toBe(true);
   });
 });
+
+// Codex review of #164: the observation write is a read-modify-write. Without
+// CAS, two overlapping writers (a deploy/restart overlap, or concurrent polls)
+// can have a later writer holding a stale `durableHandoff:false` fold clobber an
+// earlier `true` — permanently ERASING proven trial evidence. The in-memory fold
+// is monotonic; persistence has to be too.
+describe("BrokerTaskStore.recordAwait — durable-handoff evidence (#164)", () => {
+  const ENVELOPE_CONTENT = `## Task\n\n### Broker envelope\n\`\`\`json\n${JSON.stringify({
+    envelope_version: 2,
+    orchestrator_submitter: "claude-code",
+    orchestrator_session_id: "session-A",
+    sensitivity: "internal",
+  })}\n\`\`\`\n`;
+
+  function makeMunin(overrides: Partial<Record<string, unknown>> = {}) {
+    const writes: WriteCall[] = [];
+    const store: Record<string, { content: string; updated_at: string }> = {};
+    const munin = {
+      writes,
+      store,
+      read: async (ns: string, key: string) => store[`${ns}/${key}`] ?? null,
+      write: async (
+        namespace: string,
+        key: string,
+        content: string,
+        tags?: string[],
+        expectedUpdatedAt?: string,
+      ) => {
+        const existing = store[`${namespace}/${key}`];
+        if (existing && existing.updated_at !== expectedUpdatedAt) {
+          throw new Error("CAS conflict: entry was modified");
+        }
+        writes.push({ namespace, key, content, tags, expectedUpdatedAt });
+        store[`${namespace}/${key}`] = {
+          content,
+          updated_at: `v${writes.length}`,
+        };
+        return { ok: true };
+      },
+      ...overrides,
+    };
+    return munin;
+  }
+
+  it("sends the CAS token so a concurrent writer cannot silently clobber evidence", async () => {
+    const munin = makeMunin();
+    munin.store["tasks/t1/status"] = { content: ENVELOPE_CONTENT, updated_at: "s1" };
+    const store = new BrokerTaskStore(munin as unknown as MuninClient);
+
+    // First await: same session, still running — records a baseline observation.
+    await store.recordAwait("t1", {
+      sessionId: "session-A", at: "2026-07-12T10:00:00Z", lifecycle: "running",
+    });
+    // Second await: a LATER session collects the completed result.
+    await store.recordAwait("t1", {
+      sessionId: "session-B", at: "2026-07-12T11:00:00Z", lifecycle: "completed",
+    });
+
+    const obs = munin.writes.filter((w) => w.key === "await-observation");
+    expect(obs).toHaveLength(2);
+    // The second write must be CAS-guarded against the first's version.
+    expect(obs[1]!.expectedUpdatedAt).toBe("v1");
+    expect(JSON.parse(obs[1]!.content).durableHandoff).toBe(true);
+  });
+
+  it("re-folds and preserves a proven handoff after losing a CAS race", async () => {
+    const munin = makeMunin();
+    munin.store["tasks/t1/status"] = { content: ENVELOPE_CONTENT, updated_at: "s1" };
+    const store = new BrokerTaskStore(munin as unknown as MuninClient);
+
+    // Another writer has already proven the handoff.
+    munin.store["tasks/t1/await-observation"] = {
+      content: JSON.stringify({
+        schemaVersion: 1, submitSessionId: "session-A", awaitSessionIds: ["session-B"],
+        firstAwaitAt: "x", lastAwaitAt: "x", terminalCollected: true, durableHandoff: true,
+      }),
+      updated_at: "v9",
+    };
+
+    let firstTry = true;
+    const realWrite = munin.write;
+    munin.write = async (...args: Parameters<typeof realWrite>) => {
+      if (firstTry && args[1] === "await-observation") {
+        firstTry = false;
+        // Simulate the doc moving under us mid-write.
+        munin.store["tasks/t1/await-observation"]!.updated_at = "v10";
+        throw new Error("CAS conflict: entry was modified");
+      }
+      return realWrite(...args);
+    };
+
+    // A different session polls; on its own it would prove nothing.
+    await store.recordAwait("t1", {
+      sessionId: "session-C", at: "2026-07-12T12:00:00Z", lifecycle: "running",
+    });
+
+    const obs = munin.writes.filter((w) => w.key === "await-observation");
+    expect(obs).toHaveLength(1);
+    // The retry re-read and re-folded: the earlier proof SURVIVES.
+    expect(JSON.parse(obs[0]!.content).durableHandoff).toBe(true);
+  });
+
+  it("skips the write entirely when a re-poll reveals nothing new (hot path)", async () => {
+    const munin = makeMunin();
+    munin.store["tasks/t1/status"] = { content: ENVELOPE_CONTENT, updated_at: "s1" };
+    const store = new BrokerTaskStore(munin as unknown as MuninClient);
+
+    for (let i = 0; i < 5; i++) {
+      await store.recordAwait("t1", {
+        sessionId: "session-A", at: `2026-07-12T10:0${i}:00Z`, lifecycle: "running",
+      });
+    }
+
+    // Five polls, ONE write: only the first carried new evidence.
+    expect(munin.writes.filter((w) => w.key === "await-observation")).toHaveLength(1);
+  });
+});

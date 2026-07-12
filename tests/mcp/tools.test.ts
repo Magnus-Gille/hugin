@@ -316,7 +316,12 @@ describe("buildTools — hugin_await", () => {
 
     const result = await tools.await_.handler({ task_id: "t-123" });
 
-    expect(await_).toHaveBeenCalledWith({ task_id: "t-123" });
+    // #164: the awaiting session id is autofilled from the envelope, so the
+    // broker can distinguish a durable handoff from an ordinary same-session poll.
+    expect(await_).toHaveBeenCalledWith({
+      task_id: "t-123",
+      orchestrator_session_id: "sess",
+    });
     expect(parseResult(result)).toEqual({ state: "completed" });
   });
 });

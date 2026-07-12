@@ -6,6 +6,14 @@
  */
 
 import type { Application } from "express";
+import {
+  buildLearningLoopPanels,
+  computeCapabilityPlane,
+  computeProductPlane,
+  deriveRoutePolicy,
+  type TypedPanel,
+} from "./learning-loop-health.js";
+import type { LearningLoopCollector } from "./learning-loop-collector.js";
 
 export const HEIMDALL_DESCRIPTOR = {
   _schema: "https://heimdall.gille.ai/schema/service/v1",
@@ -41,11 +49,60 @@ export const HEIMDALL_DESCRIPTOR = {
 } as const;
 
 /**
+ * Build the learning-loop health panels (#164) from collected evidence.
+ *
+ * These are Heimdall TYPED panels (`stat`/`table`/`status`), which Heimdall
+ * renders natively with zero per-panel code — unlike the `plugin`/`view` panels
+ * above, which require a matching renderer in the heimdall repo. That is what
+ * keeps this a Hugin-only change.
+ *
+ * Fail-open: any collection failure yields honest "no evidence available"
+ * panels rather than a broken descriptor.
+ */
+export function buildLearningLoopHealthPanels(
+  collector: LearningLoopCollector
+): TypedPanel[] {
+  // Synchronous by design: `collect()` is stale-while-revalidate and returns
+  // immediately. The descriptor must never wait on a cold corpus walk — hanging
+  // /heimdall.json blanks Hugin's whole Heimdall page (#135).
+  const { ledger, tasks, available, readFailures, truncated } = collector.collect();
+  const capability = computeCapabilityPlane(ledger);
+  const product = computeProductPlane(tasks, { available, readFailures, truncated });
+  const policy = deriveRoutePolicy(tasks, capability);
+  return buildLearningLoopPanels({ capability, product, policy });
+}
+
+/**
  * Register the GET /heimdall.json route on the given Express app.
  * No auth required — same open posture as /health.
+ *
+ * When a collector is supplied, the learning-loop health panels (#164) are
+ * appended to the static descriptor panels. The route NEVER fails on their
+ * account: a collector error degrades to the static descriptor, because a
+ * broken /heimdall.json would blank Hugin's whole Heimdall page (#135).
  */
-export function registerHeimdallDescriptorRoute(app: Application): void {
+export function registerHeimdallDescriptorRoute(
+  app: Application,
+  collector?: LearningLoopCollector
+): void {
   app.get("/heimdall.json", (_req, res) => {
-    res.json(HEIMDALL_DESCRIPTOR);
+    if (!collector) {
+      res.json(HEIMDALL_DESCRIPTOR);
+      return;
+    }
+    try {
+      const learningPanels = buildLearningLoopHealthPanels(collector);
+      res.json({
+        ...HEIMDALL_DESCRIPTOR,
+        panels: [...HEIMDALL_DESCRIPTOR.panels, ...learningPanels],
+      });
+    } catch (err) {
+      console.warn(
+        `[heimdall] learning-loop panels unavailable, serving static descriptor: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+      res.json(HEIMDALL_DESCRIPTOR);
+    }
   });
 }
