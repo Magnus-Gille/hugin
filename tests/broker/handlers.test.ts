@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -458,6 +458,101 @@ describe("POST /v1/delegate/await", () => {
     const body = await res.json();
     expect(body.status).toBe("completed");
     expect(body.result.task_id).toBe("t1");
+  });
+
+  // Durable-handoff evidence (#164) — the #165 gate criterion that nothing
+  // recorded before: did a result outlive the session that asked for it?
+  it("records a durable handoff when a LATER session collects the terminal result", async () => {
+    const submit = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest({ orchestrator_session_id: "session-A" })),
+    });
+    const { task_id } = await submit.json();
+
+    const statusKey = `tasks/${task_id}/status`;
+    const stored = harness.munin.reads[statusKey] as { content: string };
+    harness.munin.reads[statusKey] = { ...stored, tags: ["completed", "broker:mcp-v2"] };
+    harness.munin.reads[`tasks/${task_id}/result-structured`] = {
+      content: JSON.stringify({ task_id, bodyText: "ok" }),
+    };
+
+    // A DIFFERENT MCP process collects the result: the original conductor is gone.
+    const res = await fetch(`${harness.url}/v1/delegate/await`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({ task_id, orchestrator_session_id: "session-B" }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).status).toBe("completed");
+
+    // The write is fire-and-forget, so let the microtask queue drain.
+    await vi.waitFor(() => {
+      const obs = harness.munin.writes.find(
+        (w) => w.key === "await-observation" && w.namespace === `tasks/${task_id}`
+      );
+      expect(obs).toBeDefined();
+      const parsed = JSON.parse(obs!.content);
+      expect(parsed.durableHandoff).toBe(true);
+      expect(parsed.terminalCollected).toBe(true);
+      expect(parsed.submitSessionId).toBe("session-A");
+    });
+  });
+
+  it("does not claim a handoff when the submitting session collects its own result", async () => {
+    const submit = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest({ orchestrator_session_id: "session-A" })),
+    });
+    const { task_id } = await submit.json();
+    const statusKey = `tasks/${task_id}/status`;
+    const stored = harness.munin.reads[statusKey] as { content: string };
+    harness.munin.reads[statusKey] = { ...stored, tags: ["completed", "broker:mcp-v2"] };
+    harness.munin.reads[`tasks/${task_id}/result-structured`] = {
+      content: JSON.stringify({ task_id, bodyText: "ok" }),
+    };
+
+    await fetch(`${harness.url}/v1/delegate/await`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({ task_id, orchestrator_session_id: "session-A" }),
+    });
+
+    await vi.waitFor(() => {
+      const obs = harness.munin.writes.find((w) => w.key === "await-observation");
+      expect(obs).toBeDefined();
+      const parsed = JSON.parse(obs!.content);
+      expect(parsed.terminalCollected).toBe(true);
+      expect(parsed.durableHandoff).toBe(false); // same session — nothing proven
+    });
+  });
+
+  // Evidence collection must never be able to break the thing it observes.
+  it("still answers the await when the observation write throws", async () => {
+    harness.munin.reads["tasks/t1/status"] = {
+      content: historicalBrokerStatus(),
+      tags: ["completed", ORCH_V1_TAG],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    harness.munin.reads["tasks/t1/result-structured"] = {
+      content: JSON.stringify({ task_id: "t1", result_schema_version: 1 }),
+    };
+    const originalWrite = harness.munin.write.bind(harness.munin);
+    harness.munin.write = vi.fn(async (ns: string, key: string, ...rest: unknown[]) => {
+      if (key === "await-observation") throw new Error("munin down");
+      return originalWrite(ns, key, ...(rest as [string, string[], unknown, unknown]));
+    }) as typeof harness.munin.write;
+
+    const res = await fetch(`${harness.url}/v1/delegate/await`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({ task_id: "t1", orchestrator_session_id: "session-B" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).status).toBe("completed");
   });
 
   it("recovers ownership from a valid canonical envelope if old terminal tags lost the marker", async () => {

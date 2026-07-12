@@ -84,7 +84,11 @@ export class BrokerClient {
     return this.post("/v1/delegate/submit", payload);
   }
 
-  async await_(payload: { task_id: string; max_wait_s?: number }): Promise<unknown> {
+  async await_(payload: {
+    task_id: string;
+    max_wait_s?: number;
+    orchestrator_session_id?: string;
+  }): Promise<unknown> {
     return this.post("/v1/delegate/await", payload);
   }
 

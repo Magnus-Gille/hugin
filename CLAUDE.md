@@ -133,6 +133,25 @@ maps to the `build` agent with `edit`/`bash` allowed.
 
 **M5 execution provenance (issue #163):** every M5 `/delegate` call — whether it arrives via the canonical #167 Broker leaf (`runtime:homeserver`) or as an orchestrator fan-out worker leaf — records the same canonical trace: `ledgerId` (the join key to M5's authoritative evidence row), effective `nodeId`/`modelId`, `taskType`, verification `outcome`/`score`, `verifier` identity + `verifierNotes`, `delegated`/`escalated` + `decisionReason`, route-policy `policyMode`/`policyAction`/`policyReason`, `priceCatalogVersion`, and `costTraceId`. It surfaces at `runtimeMetadata.delegation` for the direct path and per-leaf at `orchestratorOutcomes[].delegation` for fan-out. `src/m5-provenance.ts` is the **only** sanctioned producer: the gateway body is untrusted input, so it validates enums/bounds and DROPS anything out of contract rather than throwing — a malformed gateway value must never sink the `result-structured` write of an already-paid run (`buildStructuredTaskResult` calls `.parse()`). This is a **trace, not a verdict**: M5 remains the sole capability-evidence authority and Hugin never duplicates its judgements into a Hugin-owned capability store. Retrieving the row *by* `ledgerId` currently needs an id-addressable read on the gateway — filed as gille-inference#227.
 
+## Learning-loop health (issue #164)
+
+`GET /heimdall.json` serves live **typed** panels (`stat`/`table`/`status`) that Heimdall renders with zero Heimdall-side code — so this surface is Hugin-owned end to end, unlike the `plugin`/`view` panels which need a matching renderer in the heimdall repo.
+
+Two evidence planes, deliberately **not** collapsed into one verdict:
+
+1. **M5 capability evidence** — "can this execution cell do the task?" Read from the M5 gateway ledger. M5 stays the sole capability authority; Hugin never keeps a competing capability store.
+2. **Hugin product evidence** — "was durable delegation actually useful enough to keep?" The `#165` trial gate that decides keep/reduce/remove on **2026-08-22**, computed from the broker task corpus: task count, distinct producers, useful completion (from `hugin_rate`), durable handoffs, rescue/redo.
+
+**Honesty rules, enforced in code:**
+- **No percentage without an `n`.** A rate over zero verified samples is `null`, never `0` — "not checked" and "failed" are different facts.
+- **An unmeasured metric reports `not-instrumented`**, never a flattering zero. Maintenance time and incident counts have no data source and say so.
+- Infra errors are excluded from quality rates; they are not evidence about a model.
+- A capped table **discloses what it dropped**.
+
+**Durable handoffs** (`src/broker/await-observation.ts`) are the criterion that proves a *durable* broker earns its keep. We cannot observe an L1 session *closing*, so we record the conservative, positively-observable proxy: **a terminal result collected by a different `orchestrator_session_id` than the one that submitted the task**. A different MCP process means the original conductor is gone and the work outlived it. It under-counts rather than over-counts. Recorded fire-and-forget on `/v1/delegate/await`, only when the evidence actually changes (the await path is a hot poll loop), and its failure can never affect a client's await.
+
+**Broker tasks are identified by their embedded envelope, not by the `broker:mcp-v2` tag** — tasks written before PR #173 lost that tag during terminal-status normalization, and keying off it under-counts the very trial the panel measures.
+
 ## Project structure
 
 ```
@@ -170,6 +189,8 @@ hugin/
 │   ├── task-graph.ts             # Task dependency graph for pipelines
 │   ├── result-format.ts          # Result formatting utilities
 │   ├── artifact-delivery.ts      # Runtime-owned artefact delivery (#68): manifest parse/validate, target allowlist, rsync→sha256→mv deliver+verify
+│   ├── learning-loop-health.ts   # Learning-loop health (#164), PURE: the two evidence planes (M5 capability / Hugin product) + #165 trial gate + Heimdall typed panels. No percentage without an `n`; an unmeasured metric reports `not-instrumented`, never a flattering zero
+│   ├── learning-loop-collector.ts # Learning-loop health (#164), IO: bounded + TTL-cached + fail-open collection of ledger + broker-task evidence. Can never break /heimdall.json
 │   ├── m5-provenance.ts         # M5 execution provenance (#163): the ONE sanitizer for /delegate responses (untrusted input — validates enums/bounds, drops out-of-contract values, never throws). Used by BOTH M5 call sites: homeserver-executor.ts and orchestrator/worker-executor.ts
 │   ├── model-pricing.ts          # Vendor-neutral $/M-token table for cost-aware routing and result metadata
 │   ├── orchestrator/             # Native fanout engine (Runtime: orchestrator)
@@ -196,6 +217,7 @@ hugin/
 │   │   ├── broker-client.ts      # HTTP client for /v1/delegate/* (bearer auth, AbortController timeout)
 │   │   └── tools.ts              # 5 MCP tools (hugin_submit/await/rate/list/models) with envelope autofill
 │   └── broker/                   # Orchestrator-v1 broker (Tailscale-only HTTP, /v1/delegate/*)
+│       ├── await-observation.ts  # Durable-handoff evidence (#164): folds each await into a per-task observation. `durableHandoff` = a terminal result collected by a DIFFERENT orchestrator session than the one that submitted it
 │       ├── server.ts             # Express app + opt-in startup (HUGIN_BROKER_KEYS)
 │       ├── executor-capabilities.ts # Live executor truth shared by submit/models/worker
 │       ├── handlers.ts           # submit/await/rate/list/models endpoint handlers

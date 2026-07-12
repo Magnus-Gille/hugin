@@ -90,6 +90,7 @@ import {
   buildTerminalStatusTags,
   getPersistentStatusTags,
 } from "./task-status-tags.js";
+import { LearningLoopCollector } from "./learning-loop-collector.js";
 import { sanitizeProviderTokenCount } from "./m5-provenance.js";
 import {
   buildStructuredTaskResult,
@@ -5457,7 +5458,16 @@ app.get("/health", (_req, res) => {
   });
 });
 
-registerHeimdallDescriptorRoute(app);
+// Learning-loop health panels (#164). Its own LedgerClient (cached, fail-open)
+// so the dashboard surface does not depend on the verdict layer being enabled.
+// The collector is bounded + TTL-cached and can never break /heimdall.json.
+registerHeimdallDescriptorRoute(
+  app,
+  new LearningLoopCollector({
+    munin,
+    ledgerClient: new LedgerClient({ env: process.env }),
+  })
+);
 
 // --- Graceful shutdown ---
 

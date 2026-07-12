@@ -279,7 +279,13 @@ export function buildTools(deps: ToolDeps): {
     handler: async (rawInput) => {
       try {
         const input = awaitInputSchema.parse(rawInput);
-        const response = await deps.broker.await_(input);
+        // Envelope autofill (#164): the awaiting session id is what lets the
+        // broker tell a durable handoff (a LATER session collecting a result)
+        // from an ordinary same-session poll. Callers never supply it.
+        const response = await deps.broker.await_({
+          ...input,
+          orchestrator_session_id: deps.sessionId,
+        });
         return asResult(response);
       } catch (err) {
         return asResult(errorPayload(err), true);
