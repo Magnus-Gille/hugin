@@ -184,6 +184,10 @@ export type RateRequest = z.infer<typeof rateRequestSchema>;
 
 export const awaitRequestSchema = z.object({
   task_id: z.string().min(1),
+  // Durable-handoff evidence (#164). OPTIONAL on purpose: an older hugin-mcp
+  // sends no session id, and must keep working — it simply proves nothing. See
+  // src/broker/await-observation.ts.
+  orchestrator_session_id: z.string().min(1).optional(),
 });
 export type AwaitRequest = z.infer<typeof awaitRequestSchema>;
 

@@ -24,6 +24,8 @@ import type {
 } from "./types.js";
 import { delegationEnvelopeSchema, delegationRequestSchema } from "./types.js";
 import { hashPayload } from "./idempotency.js";
+import { deriveAwaitObservation } from "./await-observation.js";
+import type { AwaitEvent, AwaitObservation } from "./await-observation.js";
 
 export interface DelegationResultLike {
   task_id: string;
@@ -35,6 +37,8 @@ export const ORCH_V1_TAG = "orch-v1";
 export const STATUS_KEY = "status";
 export const RESULT_STRUCTURED_KEY = "result-structured";
 export const RESULT_ERROR_KEY = "result-error";
+/** Durable-handoff evidence for the #165 trial (#164). */
+export const AWAIT_OBSERVATION_KEY = "await-observation";
 
 export interface TaskStoreConfig {
   munin: MuninClient;
@@ -93,6 +97,56 @@ export class BrokerTaskStore {
   async readErrorResult(taskId: string) {
     const ns = namespaceForTaskId(taskId);
     return this.munin.read(ns, RESULT_ERROR_KEY);
+  }
+
+  /**
+   * Durable-handoff evidence (#164). Read the stored await observation, if any.
+   */
+  async readAwaitObservation(taskId: string): Promise<AwaitObservation | null> {
+    const entry = await this.munin.read(namespaceForTaskId(taskId), AWAIT_OBSERVATION_KEY);
+    if (!entry) return null;
+    try {
+      return JSON.parse(entry.content) as AwaitObservation;
+    } catch {
+      // A corrupt observation is evidence we lost, not a reason to fail an
+      // await. Start over rather than throw on the hot read path.
+      return null;
+    }
+  }
+
+  /**
+   * Fold one await into the task's durable-handoff observation.
+   *
+   * Lossy and best-effort BY DESIGN — the caller must never await this on the
+   * request path. This is trial evidence, not billing: a dropped write under a
+   * concurrent-poll race costs one data point, and the monotonic derivation
+   * means a genuine handoff will be re-proven by any later collecting await.
+   * Blocking or failing a client's `await` to record evidence about that await
+   * would be exactly backwards.
+   */
+  async recordAwait(
+    taskId: string,
+    event: Omit<AwaitEvent, "submitSessionId">
+  ): Promise<void> {
+    const status = await this.readStatus(taskId);
+    const envelope = status ? parseStoredEnvelope(status.content) : null;
+    const prev = await this.readAwaitObservation(taskId);
+
+    const { next, changed } = deriveAwaitObservation(prev, {
+      ...event,
+      submitSessionId: envelope?.orchestrator_session_id ?? null,
+    });
+    // Hot polling path: only persist genuinely new evidence.
+    if (!changed) return;
+
+    await this.munin.write(
+      namespaceForTaskId(taskId),
+      AWAIT_OBSERVATION_KEY,
+      JSON.stringify(next),
+      ["broker:mcp-v2", "await-observation"],
+      undefined,
+      envelope?.sensitivity === "private" ? "client-restricted" : "internal",
+    );
   }
 
   async writeFeedback(taskId: string, feedback: Record<string, unknown>): Promise<void> {
