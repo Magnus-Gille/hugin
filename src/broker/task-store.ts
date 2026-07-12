@@ -47,6 +47,19 @@ export interface TaskStoreConfig {
   munin: MuninClient;
 }
 
+export interface CanonicalListRow {
+  task_id: string;
+  submitted_at: string;
+  outcome: "completed" | "failed" | "cancelled" | "running";
+  alias: DelegationEnvelope["alias_requested"];
+}
+
+export interface CanonicalListResult {
+  rows: CanonicalListRow[];
+  /** True when at least one Munin query matched more entries than it returned. */
+  truncated: boolean;
+}
+
 /**
  * Generate a stable principal-scoped task id. Persisting the request at this
  * namespace is the restart-safe idempotency record; the raw key is never tagged.
@@ -236,12 +249,7 @@ export class BrokerTaskStore {
    * reintroduce the same crowding-out risk this fix closes, just triggered
    * by `?limit=1` instead of a rating event (caught in review of #181).
    */
-  async listCanonical(principal: string, sinceTs?: string): Promise<Array<{
-    task_id: string;
-    submitted_at: string;
-    outcome: "completed" | "failed" | "cancelled" | "running";
-    alias: DelegationEnvelope["alias_requested"];
-  }>> {
+  async listCanonical(principal: string, sinceTs?: string): Promise<CanonicalListResult> {
     const baseOpts = {
       query: "task",
       namespace: "tasks/",
@@ -253,6 +261,13 @@ export class BrokerTaskStore {
       this.munin.query({ ...baseOpts, tags: ["broker:mcp-v2"] }),
       this.munin.query({ ...baseOpts, tags: ["runtime:homeserver"] }),
     ]);
+    // Munin exposes no cursor/offset and orders these results lexically rather
+    // than temporally. A timestamp walk-back could therefore skip omitted
+    // newer rows. Disclose the incomplete candidate set instead of presenting
+    // the discovered row count as exact (#183).
+    const truncated =
+      tagged.total > tagged.results.length ||
+      homeserver.total > homeserver.results.length;
     const namespaces = new Set<string>();
     for (const result of [...tagged.results, ...homeserver.results]) {
       if (typeof result.namespace === "string") namespaces.add(result.namespace);
@@ -283,7 +298,7 @@ export class BrokerTaskStore {
       });
     }
     rows.sort((a, b) => b.submitted_at.localeCompare(a.submitted_at));
-    return rows;
+    return { rows, truncated };
   }
 
   /**

@@ -314,7 +314,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_list",
     title: "List recent delegated tasks",
     description:
-      "List this authenticated principal's recent canonical Munin tasks, plus its read-only historical orch-v1 rows.",
+      "List this authenticated principal's recent canonical Munin tasks, plus its read-only historical orch-v1 rows. A true truncated field means Munin capped candidate discovery, so total is only a lower bound.",
     inputShape: listInputShape,
     handler: async (rawInput) => {
       try {

@@ -865,7 +865,30 @@ describe("GET /v1/delegate/list", () => {
     const body = await res.json();
     expect(body.rows).toHaveLength(1);
     expect(body.total).toBe(1);
+    expect(body.truncated).toBe(false);
     expect(body.rows[0].alias).toBe("m5");
+  });
+
+  it("marks the returned total as truncated when Munin capped candidate discovery", async () => {
+    await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest()),
+    });
+    const submitted = harness.munin.writes.find((write) => write.key === "status")!;
+    harness.munin.queryReturn = {
+      results: [{ namespace: submitted.namespace, key: "status", tags: submitted.tags }],
+      total: 101,
+    };
+
+    const res = await fetch(`${harness.url}/v1/delegate/list`, {
+      headers: { authorization: `Bearer ${SECRET}` },
+    });
+    const body = await res.json();
+
+    expect(body.rows).toHaveLength(1);
+    expect(body.total).toBe(1);
+    expect(body.truncated).toBe(true);
   });
 
   it("lists only canonical tasks owned by the authenticated principal", async () => {

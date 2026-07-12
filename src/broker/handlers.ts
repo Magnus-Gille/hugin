@@ -492,9 +492,9 @@ export function createListHandler(deps: BrokerHandlerDependencies) {
     const canonical = await deps.taskStore.listCanonical(principal, parsed.since_ts);
     const historical = Array.from(projectDelegations(await deps.journal.readAll()).values())
       .filter((row) => row.envelope?.broker_principal === principal);
-    const canonicalIds = new Set(canonical.map((row) => row.task_id));
+    const canonicalIds = new Set(canonical.rows.map((row) => row.task_id));
     const combined: Array<Record<string, any>> = [
-      ...canonical,
+      ...canonical.rows,
       ...historical.filter((row) => !canonicalIds.has(row.task_id)),
     ];
     const rows = combined.filter((row) => {
@@ -511,7 +511,11 @@ export function createListHandler(deps: BrokerHandlerDependencies) {
     rows.sort((a, b) =>
       (b.submitted_at ?? "").localeCompare(a.submitted_at ?? ""),
     );
-    res.status(200).json({ rows: rows.slice(0, parsed.limit ?? 50), total: rows.length });
+    res.status(200).json({
+      rows: rows.slice(0, parsed.limit ?? 50),
+      total: rows.length,
+      truncated: canonical.truncated,
+    });
   };
 }
 

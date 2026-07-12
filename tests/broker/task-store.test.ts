@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BrokerTaskStore,
+  MUNIN_QUERY_MAX,
   ORCH_V1_TAG,
   buildSubmitTags,
   flipLifecycleTags,
@@ -198,9 +199,12 @@ describe("BrokerTaskStore.listCanonical", () => {
       content: serializeEnvelope(envelope("t1")),
       tags: ["cancelled", "broker:mcp-v2"],
     };
-    const rows = await new BrokerTaskStore(munin as unknown as MuninClient)
+    const result = await new BrokerTaskStore(munin as unknown as MuninClient)
       .listCanonical("claude-code");
-    expect(rows).toEqual([expect.objectContaining({ task_id: "t1", outcome: "cancelled" })]);
+    expect(result).toEqual({
+      rows: [expect.objectContaining({ task_id: "t1", outcome: "cancelled" })],
+      truncated: false,
+    });
   });
 
   // #181: hugin_list under-counted real broker tasks. A tag-scoped Munin query
@@ -226,9 +230,12 @@ describe("BrokerTaskStore.listCanonical", () => {
       results: [{ namespace: "tasks/t1", key: "feedback", tags: ["broker:mcp-v2", "feedback"] }],
       total: 1,
     };
-    const rows = await new BrokerTaskStore(munin as unknown as MuninClient)
+    const result = await new BrokerTaskStore(munin as unknown as MuninClient)
       .listCanonical("claude-code");
-    expect(rows).toEqual([expect.objectContaining({ task_id: "t1", outcome: "completed" })]);
+    expect(result.rows).toEqual([
+      expect.objectContaining({ task_id: "t1", outcome: "completed" }),
+    ]);
+    expect(result.truncated).toBe(false);
   });
 
   it("still lists a task whose status entry is crowded out by an await-observation entry", async () => {
@@ -243,9 +250,12 @@ describe("BrokerTaskStore.listCanonical", () => {
       ],
       total: 1,
     };
-    const rows = await new BrokerTaskStore(munin as unknown as MuninClient)
+    const result = await new BrokerTaskStore(munin as unknown as MuninClient)
       .listCanonical("claude-code");
-    expect(rows).toEqual([expect.objectContaining({ task_id: "t2", outcome: "running" })]);
+    expect(result.rows).toEqual([
+      expect.objectContaining({ task_id: "t2", outcome: "running" }),
+    ]);
+    expect(result.truncated).toBe(false);
   });
 
   it("forwards sinceTs as the since field on both munin.query calls", async () => {
@@ -278,6 +288,53 @@ describe("BrokerTaskStore.listCanonical", () => {
     }
   });
 
+  it("discloses when Munin capped either candidate query", async () => {
+    const munin = new FakeMunin();
+    const rawResults = Array.from({ length: MUNIN_QUERY_MAX }, (_, index) => ({
+      namespace: `tasks/t${index}`,
+      key: "status",
+    }));
+    munin.queryByTags = (tags) => ({
+      results: rawResults,
+      total: tags.includes("broker:mcp-v2")
+        ? MUNIN_QUERY_MAX + 51
+        : MUNIN_QUERY_MAX,
+    });
+    for (let index = 0; index < MUNIN_QUERY_MAX; index += 1) {
+      munin.readReturn[`tasks/t${index}/status`] = {
+        content: serializeEnvelope(envelope(`t${index}`)),
+        tags: ["completed", "broker:mcp-v2", "runtime:homeserver"],
+      };
+    }
+
+    const result = await new BrokerTaskStore(munin as unknown as MuninClient)
+      .listCanonical("claude-code");
+
+    expect(result.rows).toHaveLength(MUNIN_QUERY_MAX);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("does not report truncation at the exact Munin result boundary", async () => {
+    const munin = new FakeMunin();
+    const rawResults = Array.from({ length: MUNIN_QUERY_MAX }, (_, index) => ({
+      namespace: `tasks/boundary-${index}`,
+      key: "status",
+    }));
+    munin.queryReturn = { results: rawResults, total: MUNIN_QUERY_MAX };
+    for (let index = 0; index < MUNIN_QUERY_MAX; index += 1) {
+      munin.readReturn[`tasks/boundary-${index}/status`] = {
+        content: serializeEnvelope(envelope(`boundary-${index}`)),
+        tags: ["completed", "broker:mcp-v2", "runtime:homeserver"],
+      };
+    }
+
+    const result = await new BrokerTaskStore(munin as unknown as MuninClient)
+      .listCanonical("claude-code");
+
+    expect(result.rows).toHaveLength(MUNIN_QUERY_MAX);
+    expect(result.truncated).toBe(false);
+  });
+
   // Codex review of #181/PR182: the earlier crowd-out tests above share one
   // `queryReturn` fixture for both tag queries, so they cannot distinguish
   // "found via the broker:mcp-v2 channel" from "found via the runtime:homeserver
@@ -296,9 +353,12 @@ describe("BrokerTaskStore.listCanonical", () => {
         ? { results: [{ namespace: "tasks/unrelated-1", key: "feedback" }, { namespace: "tasks/unrelated-2", key: "await-observation" }], total: 2 }
         : { results: [{ namespace: "tasks/t3", key: "status" }], total: 1 };
 
-    const rows = await new BrokerTaskStore(munin as unknown as MuninClient)
+    const result = await new BrokerTaskStore(munin as unknown as MuninClient)
       .listCanonical("claude-code");
-    expect(rows).toEqual([expect.objectContaining({ task_id: "t3", outcome: "completed" })]);
+    expect(result.rows).toEqual([
+      expect.objectContaining({ task_id: "t3", outcome: "completed" }),
+    ]);
+    expect(result.truncated).toBe(false);
   });
 });
 
