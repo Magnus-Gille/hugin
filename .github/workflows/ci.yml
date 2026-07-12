@@ -26,4 +26,6 @@ jobs:
 
       - run: npm test
 
+      - run: bash scripts/deploy-pi.test.sh
+
       - run: bash scripts/lib/claude-config-bootstrap.test.sh
