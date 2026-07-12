@@ -1,5 +1,30 @@
 # Hugin — Status
 
+**Latest session:** 2026-07-12 (Codex: deploy source hardening, issue #187)
+**Branch:** `codex/hugin-187-node-modules-symlink` from `main@565f9e6`; PR pending.
+
+## Latest — `node_modules` worktree symlinks rejected before deploy mutation (#187)
+
+- `scripts/deploy-pi.sh` now fails before build, rsync, or SSH when the local
+  `node_modules` entry is a symlink, with remediation to replace it with worktree-local
+  dependencies via `npm ci`.
+- Rsync now excludes both the `node_modules` entry and `node_modules/` contents. This is
+  defence in depth against the incident where a worktree symlink bypassed the trailing-slash
+  exclusion and rsync partially deleted the Pi dependency tree before exiting 23.
+- New `scripts/deploy-pi.test.sh`, wired into CI, proves the preflight invokes none of npm,
+  rsync, or SSH for a symlinked source; checks all prior deployment exclusions remain; and
+  uses real local rsync to prove a source symlink cannot replace or delete a destination's
+  real dependency directory.
+- Validation: red/green shell regression, Bash syntax checks, TypeScript build, full suite
+  (97 files / 1,657 tests), both shell test suites, and `git diff --check` are green.
+- No production action was taken. After review/merge, deploy from a clean `main` checkout with
+  real local dependencies using `./scripts/deploy-pi.sh`, then verify the user service is
+  active/enabled and Pi loopback `/health` reports `status:"ok"`, `polling:true`, queue depth 0.
+  Rollback is `git revert` of the merged #187 commit followed by the same deploy; the change has
+  no data migration or configuration impact.
+
+**Next:** independent PR review, green GitHub CI, merge, then deploy and verify from clean `main`.
+
 **Last session:** 2026-07-12 (Claude) — M5 provenance (#163) + learning-loop health panel (#164)
 **Branch:** `main` @ `287d473`; deployed to Hugin-Munin on 2026-07-12, health `ok` / `polling:true` / queue 0.
 

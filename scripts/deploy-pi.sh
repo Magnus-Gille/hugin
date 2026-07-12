@@ -17,11 +17,24 @@ DEPLOY_USER="${DEPLOY_USER:-magnus}"
 REMOTE="$DEPLOY_USER@$PI_HOST"
 REMOTE_DIR="/home/$DEPLOY_USER/repos/hugin"
 
+echo "==> Checking deploy source..."
+# rsync distinguishes a directory from a symlink to a directory. The trailing-
+# slash node_modules exclusion below therefore does not match the common
+# worktree optimization where node_modules links to another checkout. Reject
+# that source shape before any build, sync, or remote mutation can happen.
+if [ -L node_modules ]; then
+  echo "ERROR: local node_modules is a symlink; refusing to deploy." >&2
+  echo "Replace it with worktree-local dependencies, for example:" >&2
+  echo "  unlink node_modules && npm ci" >&2
+  exit 1
+fi
+
 echo "==> Building locally..."
 npm run build
 
 echo "==> Syncing to $REMOTE:$REMOTE_DIR..."
 rsync -av --delete \
+  --exclude='node_modules' \
   --exclude='node_modules/' \
   --exclude='.git' \
   --exclude='.git/' \
