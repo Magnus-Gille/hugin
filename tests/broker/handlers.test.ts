@@ -865,7 +865,43 @@ describe("GET /v1/delegate/list", () => {
     const body = await res.json();
     expect(body.rows).toHaveLength(1);
     expect(body.total).toBe(1);
+    expect(body.truncated).toBe(false);
     expect(body.rows[0].alias).toBe("m5");
+  });
+
+  it("marks the returned total as truncated when Munin candidate discovery hits its cap", async () => {
+    await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest()),
+    });
+    const submitted = harness.munin.writes.find((write) => write.key === "status")!;
+    const rawResults = Array.from({ length: 50 }, (_, index) => {
+      const namespace = `tasks/capped-${index}`;
+      harness.munin.reads[`${namespace}/status`] = {
+        namespace,
+        key: "status",
+        content: submitted.content,
+        tags: submitted.tags ?? [],
+        created_at: "2026-07-11T12:00:00.000Z",
+        updated_at: "2026-07-11T12:00:00.000Z",
+      };
+      return { namespace, key: "status", tags: submitted.tags };
+    });
+    harness.munin.queryReturn = {
+      results: rawResults,
+      // Munin reports the number of formatted rows, not matches before LIMIT.
+      total: rawResults.length,
+    };
+
+    const res = await fetch(`${harness.url}/v1/delegate/list`, {
+      headers: { authorization: `Bearer ${SECRET}` },
+    });
+    const body = await res.json();
+
+    expect(body.rows).toHaveLength(50);
+    expect(body.total).toBe(50);
+    expect(body.truncated).toBe(true);
   });
 
   it("lists only canonical tasks owned by the authenticated principal", async () => {

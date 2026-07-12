@@ -47,6 +47,19 @@ export interface TaskStoreConfig {
   munin: MuninClient;
 }
 
+export interface CanonicalListRow {
+  task_id: string;
+  submitted_at: string;
+  outcome: "completed" | "failed" | "cancelled" | "running";
+  alias: DelegationEnvelope["alias_requested"];
+}
+
+export interface CanonicalListResult {
+  rows: CanonicalListRow[];
+  /** True when at least one Munin query hit its cap and may have omitted matches. */
+  truncated: boolean;
+}
+
 /**
  * Generate a stable principal-scoped task id. Persisting the request at this
  * namespace is the restart-safe idempotency record; the raw key is never tagged.
@@ -236,12 +249,7 @@ export class BrokerTaskStore {
    * reintroduce the same crowding-out risk this fix closes, just triggered
    * by `?limit=1` instead of a rating event (caught in review of #181).
    */
-  async listCanonical(principal: string, sinceTs?: string): Promise<Array<{
-    task_id: string;
-    submitted_at: string;
-    outcome: "completed" | "failed" | "cancelled" | "running";
-    alias: DelegationEnvelope["alias_requested"];
-  }>> {
+  async listCanonical(principal: string, sinceTs?: string): Promise<CanonicalListResult> {
     const baseOpts = {
       query: "task",
       namespace: "tasks/",
@@ -253,6 +261,14 @@ export class BrokerTaskStore {
       this.munin.query({ ...baseOpts, tags: ["broker:mcp-v2"] }),
       this.munin.query({ ...baseOpts, tags: ["runtime:homeserver"] }),
     ]);
+    // Munin exposes no cursor/offset and its `total` is only the number of
+    // formatted rows returned, not a pre-limit count. A result set at the
+    // server cap is therefore indistinguishable from an exactly-full set.
+    // Mark it conservatively: a timestamp walk-back is not safe because the
+    // ranked query is not guaranteed to expose every omitted row in time order.
+    const truncated =
+      tagged.results.length >= MUNIN_QUERY_MAX ||
+      homeserver.results.length >= MUNIN_QUERY_MAX;
     const namespaces = new Set<string>();
     for (const result of [...tagged.results, ...homeserver.results]) {
       if (typeof result.namespace === "string") namespaces.add(result.namespace);
@@ -283,7 +299,7 @@ export class BrokerTaskStore {
       });
     }
     rows.sort((a, b) => b.submitted_at.localeCompare(a.submitted_at));
-    return rows;
+    return { rows, truncated };
   }
 
   /**
