@@ -112,4 +112,20 @@ describe("compareVersionSnapshots", () => {
     expect(forward.drifted).toBe(true);
     expect(backward.drifted).toBe(true);
   });
+
+  it("detects a cliPath change even when sdkVersion is 'unknown' on both sides", () => {
+    const unknownBaseline: VersionSnapshot = { ...BASELINE, sdkVersion: "unknown", cliPath: "/old/cli" };
+    const current: VersionSnapshot = { ...unknownBaseline, cliPath: "/new/cli" };
+    const result = compareVersionSnapshots(unknownBaseline, current);
+    expect(result.drifted).toBe(true);
+    expect(result.changedFields).toEqual(["cliPath"]);
+  });
+
+  it("detects cliSizeBytes rising from 0 (e.g. a stat race mid-write)", () => {
+    const zeroBaseline: VersionSnapshot = { ...BASELINE, cliSizeBytes: 0 };
+    const current: VersionSnapshot = { ...zeroBaseline, cliSizeBytes: 1024 };
+    const result = compareVersionSnapshots(zeroBaseline, current);
+    expect(result.drifted).toBe(true);
+    expect(result.changedFields).toEqual(["cliSizeBytes"]);
+  });
 });
