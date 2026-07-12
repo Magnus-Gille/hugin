@@ -182,6 +182,62 @@ describe("POST /v1/delegate/submit", () => {
     expect(harness.munin.writes).toHaveLength(1);
   });
 
+  it("includes a warnings array for a judgment task_type submitted with default l1_review and no rubric (#184)", async () => {
+    const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest({
+        task_type: "classify",
+        prompt: "Classify this ticket as bug or feature.",
+      })),
+    });
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.warnings).toEqual([
+      "judgment-type task submitted without verifier or rubric — capability evidence will be weak",
+    ]);
+  });
+
+  it("omits warnings when a judgment task_type carries an explicit verifier (#184)", async () => {
+    const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest({
+        task_type: "classify",
+        prompt: "Classify this ticket as bug or feature.",
+        acceptance: { mode: "verifier", verifier: { type: "nonEmpty" } },
+      })),
+    });
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.warnings).toBeUndefined();
+  });
+
+  it("omits warnings when a judgment task_type's prompt has a rubric section (#184)", async () => {
+    const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest({
+        task_type: "triage",
+        prompt: "Triage this issue.\n\n## Rubric\n- p0: data loss\n- p1: broken feature",
+      })),
+    });
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.warnings).toBeUndefined();
+  });
+
+  it("never warns for a non-judgment task_type (#184)", async () => {
+    const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest({ task_type: "summarize", prompt: "Summarize the README." })),
+    });
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.warnings).toBeUndefined();
+  });
+
   it("reuses the persisted task after a fresh Broker instance and ignores MCP session rotation", async () => {
     const first = validRequest();
     const firstResponse = await fetch(`${harness.url}/v1/delegate/submit`, {

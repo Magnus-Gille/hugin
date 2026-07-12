@@ -195,6 +195,10 @@ export const submitResponseSchema = z.object({
   task_id: z.string().min(1),
   received_at: z.string().min(1),
   reused_idempotency: z.boolean(),
+  // Non-blocking submit-time advice (#184), e.g. a judgment-flavored
+  // task_type submitted with the default l1_review acceptance and no
+  // rubric in the prompt. Never causes rejection — see submit-warnings.ts.
+  warnings: z.array(z.string()).optional(),
 });
 export type SubmitResponse = z.infer<typeof submitResponseSchema>;
 

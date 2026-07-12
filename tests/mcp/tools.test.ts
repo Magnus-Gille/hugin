@@ -166,6 +166,35 @@ describe("buildTools — hugin_submit", () => {
     });
   });
 
+  it("passes through a judgment-task warnings array from the broker response unchanged (#184)", async () => {
+    const submit = vi.fn(async () => ({
+      task_id: "t1",
+      warnings: [
+        "judgment-type task submitted without verifier or rubric — capability evidence will be weak",
+      ],
+    }));
+    const broker = fakeBroker({ submit });
+    const tools = buildTools({
+      broker,
+      sessionId: "sess",
+      submitter: "claude-code",
+      newId: () => "44444444-4444-4444-8444-444444444444",
+    });
+
+    const result = await tools.submit.handler({
+      task_type: "classify",
+      prompt: "Classify this ticket.",
+      alias_requested: "m5",
+    });
+
+    expect(parseResult(result)).toMatchObject({
+      task_id: "t1",
+      warnings: [
+        "judgment-type task submitted without verifier or rubric — capability evidence will be weak",
+      ],
+    });
+  });
+
   it("uses the caller-supplied idempotency_key when provided", async () => {
     const submit = vi.fn(async () => ({ task_id: "t2" }));
     const broker = fakeBroker({ submit });

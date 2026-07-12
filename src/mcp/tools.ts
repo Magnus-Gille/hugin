@@ -231,7 +231,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_submit",
     title: "Submit a delegation task to Hugin",
     description:
-      "Persist one bounded task in Hugin's durable lifecycle and execute it as one M5 `/delegate` leaf. M5 chooses the model and owns capability evidence; Hugin owns lifecycle and delivery. Returns the task_id and idempotency_key — reuse that key only to retry the same logical request.",
+      "Persist one bounded task in Hugin's durable lifecycle and execute it as one M5 `/delegate` leaf. M5 chooses the model and owns capability evidence; Hugin owns lifecycle and delivery. Returns the task_id and idempotency_key — reuse that key only to retry the same logical request. For judgment-flavored task_type values (classify, qa-factual, triage, memory-decision, claim-verify) submitted with the default `l1_review` acceptance and a prompt with no rubric, the response carries a non-blocking `warnings` array — the task still runs, but attach a mechanical `acceptance.verifier` or add a rubric/grading-criteria section to the prompt for stronger capability evidence.",
     inputShape: activeSubmitInputShape,
     handler: async (rawInput) => {
       let idempotencyKey: string | undefined;
