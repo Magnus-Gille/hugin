@@ -1,9 +1,124 @@
 # Hugin — Status
 
-**Last session:** 2026-07-11 (Codex) — canonical durable MCP→Hugin→M5 lifecycle (#167)
-**Branch:** `main`; production includes PR #174 (`e9117be`), deployed to Hugin-Munin on 2026-07-11.
+**Last session:** 2026-07-12 (Claude) — M5 provenance (#163) + learning-loop health panel (#164)
+**Branch:** `main` @ `287d473`; deployed to Hugin-Munin on 2026-07-12, health `ok` / `polling:true` / queue 0.
 
-## Latest — canonical durable MCP→Hugin→M5 lifecycle (#167, 2026-07-11)
+## Latest — M5 provenance + learning-loop health (#163, #164 — 2026-07-12)
+
+Both merged and deployed. Both Codex-reviewed (`gpt-5.6-sol`, high effort); every finding fixed
+before merge. Final suite 95 files / 1,612 tests, `tsc` clean, CI green.
+
+### #163 — M5 execution provenance (PR [#176](https://github.com/Magnus-Gille/hugin/pull/176) → `1dd4e7e`)
+
+Hugin delegates to M5 from two places. The direct executor carried a partial trace; the
+**orchestrator fan-out worker parsed a few fields and then dropped every one of them** — a fanout
+leaf could not be traced to the node/model/verifier that produced it. (The existing test even
+stubbed a `ledgerId` and never asserted it survived, so the drop was invisible to CI.)
+
+- New `src/m5-provenance.ts` — the ONE sanitizer of the untrusted `/delegate` response, shared by
+  both M5 call sites. Validates enums/bounds, drops out-of-contract values, never throws.
+- Provenance now flows into `orchestratorOutcomes[].delegation` on **every** post-JSON branch (a
+  failed leaf is when the ledger row is most needed), and `runtimeMetadata.delegation` is widened
+  with what neither path captured: verifier identity, delegate-policy mode/action/reason,
+  `priceCatalogVersion`, `costTraceId`, `formatRetried`.
+- **Latent bug fixed:** `buildStructuredTaskResult` calls Zod `.parse()` (throws) and
+  `delegation.score` was `z.number()` — a non-numeric gateway `score` would have sunk the
+  `result-structured` write of a successful, PAID run.
+- Codex found 3 mediums, all real, all fixed: `Number.isInteger` vs zod 4's `.int()` (verified
+  empirically — `Number.isInteger(2**53)` is `true` but `.int()` rejects it, so an unsafe-integer
+  token count reached a `.parse()` that throws); out-of-scale `score` retained as valid (M5's real
+  scale confirmed from its live ledger: `0, 0.2, 0.7, 1, null`); provenance lost on the
+  response-validation failure branch.
+
+**⚠️ #163 is REOPENED — its last hop is blocked on M5.** The acceptance asks that an operator
+retrieve the M5 evidence row *by* the stored `ledgerId`. **M5's API cannot do that:** `GET /ledger`
+`recent[]` rows carry **no id field at all**, `?id=` / `?delegationId=` are accepted (HTTP 200) but
+**silently ignored**, and there is no `GET /ledger/:id` (404). Joining by id would need exactly the
+timestamp archaeology #163 exists to eliminate. Hugin's half is done and live-verified (the join key
+is durably stored). Filed as **[gille-inference#227](https://github.com/Magnus-Gille/gille-inference/issues/227)**;
+close #163 when that lands and the by-id join can be demonstrated end to end.
+
+### #164 — Learning-loop health panel (PR [#178](https://github.com/Magnus-Gille/hugin/pull/178) → `287d473`)
+
+> PR #177 was the original; GitHub auto-closed it when its stacked base (`feat/163-m5-provenance`)
+> was deleted on merge. #178 is the same commits rebased onto `main`, suite re-verified after rebase.
+
+Auditing the data first showed the panel *alone* would have rendered "not instrumented" for the
+criterion that matters most — so this instruments it too (Magnus approved the wider scope).
+
+- **Durable-handoff instrumentation** (`src/broker/await-observation.ts`): `/v1/delegate/await` only
+  ever READ state, so nothing recorded whether a result outlived the session that asked for it.
+  `durableHandoff` = a **completed** result collected by a **different `orchestrator_session_id`**
+  than submitted it. Documented as a **proxy that errs in BOTH directions** (the id is
+  client-asserted and minted per MCP *process*, so an MCP restart inside a live session also trips
+  it) — never presented as a measurement of session closure. Recorded fire-and-forget, CAS-guarded,
+  and only when the evidence actually changes.
+- **The panel** (`learning-loop-health.ts` pure + `learning-loop-collector.ts` IO): two evidence
+  planes, deliberately NOT collapsed into one verdict — M5 capability (read from M5's ledger; M5
+  stays the sole capability authority) and Hugin product (the #165 gate). Emitted as Heimdall
+  **typed panels** (`stat`/`table`/`status`), which render with **zero Heimdall code** — so this is
+  Hugin-only, no cross-repo ticket. (The `plugin`/`view` path would have needed a heimdall renderer.)
+- **Honesty rules enforced in code + tests:** no percentage without an `n`; an unmeasured metric
+  reports `not-instrumented`, never a flattering zero; infra errors excluded from quality rates; a
+  capped table discloses what it dropped.
+
+**Two bugs a green test suite completely hid** — both found by checking reality, not the schema:
+
+1. **Production Munin:** the sole existing broker task predates PR #173 and lost its
+   `broker:mcp-v2` status tag. Keying the corpus walk off that tag reported **0 tasks against a
+   Munin holding 1** — under-counting the very trial the panel measures. Broker tasks are now
+   identified by their embedded **envelope**, which was never dropped.
+2. **Heimdall's normalizer** (`heimdall src/contract/panel-data.js`) keeps only rows passing
+   `isObj = ... && !Array.isArray(v)` and **silently drops the rest**. Rows were `string[][]`, so
+   **both tables would have rendered EMPTY on the real dashboard** while every test passed. Now
+   objects keyed by column, with a test replicating Heimdall's exact rule. Live: 16/16 and 7/7 rows
+   survive (previously 0/16, 0/7).
+
+Codex found 9 mediums + 1 low, several attacking the PR's own honesty thesis — all fixed: a failed
+corpus read rendering as a **measured zero**; a `partial` the human *discarded* counting as "useful
+completion"; useful-completion readable as "met, 100%" from 1 rated pass out of 10 unrated (now
+requires ≥50% rating coverage); `deriveRoutePolicy` asserting causation from any verified sample
+anywhere (now requires evidence for that exact model × task-type); no CAS on the observation write
+(a stale writer could permanently erase a proven handoff); unbounded fire-and-forget pile-up under
+polling; `/heimdall.json` awaiting a cold corpus walk (~a minute — enough to blank Hugin's Heimdall
+page, the #135 regression, with no exception thrown → now synchronous stale-while-revalidate);
+unvalidated ledger counters yielding a false 100%.
+
+### Deploy verification (2026-07-12)
+
+`./scripts/deploy-pi.sh` → `hugin.service` active/enabled on huginmunin, `/health` `status:"ok"`,
+`polling:true`, `queue_depth:0`, M5 delegate executor enabled, Broker on `100.97.117.37:3035`.
+Panels verified live end-to-end: served from the Pi's `/heimdall.json` (16/16 + 7/7 rows survive
+normalization) and **rendering real values on Heimdall's `/services/hugin`** page. Cold start
+correctly showed `—`/"unavailable" rather than a fabricated zero, then populated after the
+background refresh.
+
+### ⚠️ What the panel says — the finding that matters
+
+The capability plane is genuinely learning (`source-distill`/Mellum **698/698 verified at 71%**,
+`classify`/mellum 12/12, `delegate-local`). The **product** plane — the one that decides Hugin's
+fate on **2026-08-22** — is nearly empty:
+
+| Criterion | Observed | Target | State |
+|---|---|---|---|
+| Completed broker tasks | 1 | 10 | not-met |
+| Independent producers | 1 | 2 | not-met |
+| Useful completion | 100% (n=1) | 70% | met |
+| Collected by a later MCP process | 0 | 5 | not-met |
+| Human rescue / redo | 0 | — | informational |
+| Maintenance time | not measured | <2h | not-instrumented |
+| Incidents | not measured | 0 | not-instrumented |
+
+Route policy: still **shadow** — no route has changed because of evidence.
+
+**On current evidence the #165 trial is not on track to be decidable.** It needs ≥10 completed broker
+tasks from ≥2 independent producers, and tasks **must be rated with `hugin_rate`** — without ratings
+the useful-completion gate reads `not-instrumented`, and it now refuses to declare "met" from thin
+coverage (<50% of completed tasks rated). Backfilling volume without ratings would move exactly one row.
+
+**Next session (agreed with Magnus): populate the trial database with more useful information.**
+
+## Previous — canonical durable MCP→Hugin→M5 lifecycle (#167, 2026-07-11)
 
 Issue [#167](https://github.com/Magnus-Gille/hugin/issues/167) is implemented,
 reviewed, merged, deployed, and proven against the live production path.
