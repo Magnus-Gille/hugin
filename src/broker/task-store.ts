@@ -210,23 +210,52 @@ export class BrokerTaskStore {
     );
   }
 
-  async listCanonical(principal: string, limit = 50): Promise<Array<{
+  /**
+   * Enumerate canonical broker tasks for a principal.
+   *
+   * Deliberately does NOT trust the raw results of a single `broker:mcp-v2`
+   * tag query. That tag is shared by a task's `status` entry AND its
+   * `feedback` (hugin_rate) and `await-observation` (poll) entries, and the
+   * query is capped server-side — so once a task is rated or polled, its own
+   * or another task's sibling entries can crowd the `status` entry out of the
+   * returned window even though nothing about the status entry changed
+   * (#181). Mirrors learning-loop-collector.ts's approach: use whatever
+   * matched (any key, either tag) only to learn the task's *namespace*, union
+   * with a `runtime:homeserver` tag query (carried only by `status` entries,
+   * so it is immune to feedback/await-observation pollution), then read each
+   * unique namespace's `status` entry directly rather than relying on it
+   * having survived inside the raw query window.
+   */
+  async listCanonical(principal: string, limit = 50, sinceTs?: string): Promise<Array<{
     task_id: string;
     submitted_at: string;
     outcome: "completed" | "failed" | "cancelled" | "running";
     alias: DelegationEnvelope["alias_requested"];
   }>> {
-    const { results } = await this.munin.query({
+    const queryLimit = Math.min(50, Math.max(limit * 2, limit));
+    const baseOpts = {
       query: "task",
-      tags: ["broker:mcp-v2"],
       namespace: "tasks/",
-      entry_type: "state",
-      limit: Math.min(500, Math.max(limit * 3, limit)),
-    });
+      entry_type: "state" as const,
+      limit: queryLimit,
+      ...(sinceTs ? { since: sinceTs } : {}),
+    };
+    const [tagged, homeserver] = await Promise.all([
+      this.munin.query({ ...baseOpts, tags: ["broker:mcp-v2"] }),
+      this.munin.query({ ...baseOpts, tags: ["runtime:homeserver"] }),
+    ]);
+    const namespaces = new Set<string>();
+    for (const result of [...tagged.results, ...homeserver.results]) {
+      if (typeof result.namespace === "string") namespaces.add(result.namespace);
+    }
+
+    const namespaceList = [...namespaces];
+    const entries = await Promise.all(
+      namespaceList.map((namespace) => this.munin.read(namespace, STATUS_KEY)),
+    );
+
     const rows = [];
-    for (const result of results) {
-      if (result.key !== STATUS_KEY) continue;
-      const entry = await this.munin.read(result.namespace, STATUS_KEY);
+    for (const entry of entries) {
       if (!entry) continue;
       const parsed = parseCanonicalEnvelope(entry.content);
       if (!parsed.ok || parsed.envelope.broker_principal !== principal) continue;

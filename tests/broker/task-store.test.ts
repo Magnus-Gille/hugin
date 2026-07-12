@@ -197,6 +197,63 @@ describe("BrokerTaskStore.listCanonical", () => {
       .listCanonical("claude-code");
     expect(rows).toEqual([expect.objectContaining({ task_id: "t1", outcome: "cancelled" })]);
   });
+
+  // #181: hugin_list under-counted real broker tasks. A tag-scoped Munin query
+  // (`broker:mcp-v2`) matches every key sharing that tag — status, feedback,
+  // and await-observation alike — and the query is capped server-side. Once a
+  // task is rated (writeFeedback) or polled (recordAwait), its co-tagged
+  // sibling entries compete with its own `status` entry for the same limited
+  // result window. The old code discarded any raw result whose `key` wasn't
+  // `status` instead of using it to learn the task's namespace, so a task
+  // whose status entry fell out of the window (crowded out by its own or
+  // another task's feedback/await-observation entry) vanished from the list
+  // even though its canonical status entry was untouched and still readable.
+  it("still lists a task whose status entry is crowded out of the raw query window by a co-tagged feedback entry", async () => {
+    const munin = new FakeMunin();
+    munin.readReturn["tasks/t1/status"] = {
+      content: serializeEnvelope(envelope("t1")),
+      tags: ["completed", "broker:mcp-v2", "runtime:homeserver"],
+    };
+    // Simulates a Munin-side query result window that, after hugin_rate wrote
+    // the co-tagged `feedback` entry, no longer contains the `status` entry
+    // for this task — only the newer sibling entry survived the cap.
+    munin.queryReturn = {
+      results: [{ namespace: "tasks/t1", key: "feedback", tags: ["broker:mcp-v2", "feedback"] }],
+      total: 1,
+    };
+    const rows = await new BrokerTaskStore(munin as unknown as MuninClient)
+      .listCanonical("claude-code");
+    expect(rows).toEqual([expect.objectContaining({ task_id: "t1", outcome: "completed" })]);
+  });
+
+  it("still lists a task whose status entry is crowded out by an await-observation entry", async () => {
+    const munin = new FakeMunin();
+    munin.readReturn["tasks/t2/status"] = {
+      content: serializeEnvelope(envelope("t2")),
+      tags: ["running", "broker:mcp-v2", "runtime:homeserver"],
+    };
+    munin.queryReturn = {
+      results: [
+        { namespace: "tasks/t2", key: "await-observation", tags: ["broker:mcp-v2", "await-observation"] },
+      ],
+      total: 1,
+    };
+    const rows = await new BrokerTaskStore(munin as unknown as MuninClient)
+      .listCanonical("claude-code");
+    expect(rows).toEqual([expect.objectContaining({ task_id: "t2", outcome: "running" })]);
+  });
+
+  it("forwards sinceTs as the since field on both munin.query calls", async () => {
+    const munin = new FakeMunin();
+
+    await new BrokerTaskStore(munin as unknown as MuninClient)
+      .listCanonical("claude-code", 10, "2026-07-12T13:03:00Z");
+
+    expect(munin.queries).toHaveLength(2);
+    for (const query of munin.queries) {
+      expect(query).toHaveProperty("since", "2026-07-12T13:03:00Z");
+    }
+  });
 });
 
 describe("BrokerTaskStore.completeSuccess", () => {

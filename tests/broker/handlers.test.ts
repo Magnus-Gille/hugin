@@ -802,6 +802,47 @@ describe("GET /v1/delegate/list", () => {
     expect(body.rows[0].task_id).toBe("legacy-orch-task");
     expect(body.rows[0].envelope.alias_requested).toBe("large-reasoning");
   });
+
+  // #181: a task that is visible right after submission must stay visible
+  // after a rating event (hugin_rate) is appended, including under an
+  // explicit since_ts filter — the acceptance criterion from the issue.
+  it("keeps a rated task visible under since_ts even when the query window no longer contains its status entry", async () => {
+    const submit = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST", headers: authHeader(), body: JSON.stringify(validRequest()),
+    });
+    const { task_id } = await submit.json();
+    const statusEntry = harness.munin.reads[`tasks/${task_id}/status`] as {
+      content: string; tags: string[];
+    };
+    // Mark it terminal so hugin_rate is allowed to write feedback.
+    harness.munin.reads[`tasks/${task_id}/status`] = { ...statusEntry, tags: ["completed"] };
+
+    const rate = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        task_id, rating: "pass", rating_reason: "correct", verification_outcome: "accepted_unchanged",
+      }),
+    });
+    expect(rate.status).toBe(204);
+
+    // Simulate the Munin-side truncated query window after rating: only the
+    // co-tagged `feedback` entry survived the cap, not the `status` entry.
+    harness.munin.queryReturn = {
+      results: [
+        { namespace: `tasks/${task_id}`, key: "feedback", tags: ["broker:mcp-v2", "feedback"] },
+      ],
+      total: 1,
+    };
+
+    const res = await fetch(
+      `${harness.url}/v1/delegate/list?since_ts=${encodeURIComponent("2000-01-01T00:00:00Z")}`,
+      { headers: { authorization: `Bearer ${SECRET}` } },
+    );
+    const body = await res.json();
+    expect(body.rows.map((r: { task_id: string }) => r.task_id)).toContain(task_id);
+    expect(body.total).toBeGreaterThanOrEqual(1);
+  });
 });
 
 describe("GET /v1/delegate/models", () => {
