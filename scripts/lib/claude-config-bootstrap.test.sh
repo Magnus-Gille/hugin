@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Bash-level test for claude-config-bootstrap.sh (issue #153).
 #
-# Stubs `ssh` so no network/remote access happens. Exercises the three
+# Stubs `ssh` so no network/remote access happens. Exercises the four
 # outcomes the deploy script must distinguish:
 #   1. checkout missing on the Pi  -> informational message, no WARNING
 #   2. checkout present, pull/bootstrap succeeds -> silent (no WARNING)
 #   3. checkout present, pull/bootstrap fails    -> WARNING
+#   4. presence probe itself inconclusive (ssh/network failure, not the
+#      remote `test` reporting "absent") -> WARNING, never INFO
 #
 # Run: bash scripts/lib/claude-config-bootstrap.test.sh
 
@@ -23,7 +25,10 @@ remote="$1"
 shift
 cmd="$*"
 case "$cmd" in
-  *"test -d ~/repos/claude-config/.git"*)
+  *"test -d ~/repos/claude-config"*)
+    if [ -n "${MOCK_PROBE_RC:-}" ]; then
+      exit "$MOCK_PROBE_RC"
+    fi
     [ "${MOCK_DIR_EXISTS:-0}" = "1" ]
     ;;
   *"git pull"*"bootstrap.sh"*)
@@ -92,6 +97,16 @@ assert_not_contains "$out" "WARNING" "healthy checkout: no WARNING"
 out="$(MOCK_DIR_EXISTS=1 MOCK_BOOTSTRAP_OK=0 claude_config_bootstrap "magnus@testhost")"
 assert_contains "$out" "WARNING" "broken checkout: WARNING present"
 assert_not_contains "$out" "git clone" "broken checkout: no clone remediation (checkout already exists)"
+
+# Case 4: the presence probe itself fails inconclusively (e.g. ssh exits 255
+# for a transport/auth/timeout failure) rather than the remote `test`
+# cleanly reporting "absent" (exit 1). Must NOT be reported as the optional
+# "missing" case — that would hide a real connectivity problem behind an
+# informational message.
+out="$(MOCK_PROBE_RC=255 claude_config_bootstrap "magnus@testhost")"
+assert_contains "$out" "WARNING" "inconclusive probe: WARNING present"
+assert_not_contains "$out" "INFO" "inconclusive probe: no INFO"
+assert_not_contains "$out" "git clone" "inconclusive probe: no clone remediation (absence unproven)"
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures assertion(s) failed"
