@@ -5,6 +5,7 @@ import {
   DEPS_DRIFT_FAILURE_KIND,
   DEPS_DRIFT_FAILURE_TAG,
   classifyClaudeFailure,
+  driftFailureClassification,
 } from "../src/failure-classification.js";
 
 describe("classifyClaudeFailure", () => {
@@ -66,27 +67,30 @@ describe("classifyClaudeFailure", () => {
     expect(classifyClaudeFailure(undefined)).toBeNull();
   });
 
-  it("classifies a version-drift pre-flight short-circuit as DEPS_DRIFT (issue #123)", () => {
+  it("NEVER classifies a task's output as DEPS_DRIFT, even when it literally contains the marker (Codex review, #123)", () => {
+    // DEPS_DRIFT is a synthetic, pre-flight-only signal the caller already
+    // knows with certainty (see driftFailureClassification below) — it is
+    // never inferred from arbitrary captured output. A regex-based inference
+    // here would let a legitimate task that happens to print/discuss this
+    // exact literal token (e.g. one working on this very feature) get
+    // mis-tagged `failure:deps-drift` for an unrelated failure reason.
     const output =
       "Version-drift pre-flight check failed. DEPS_DRIFT: deps changed under live worker " +
       "(sdkVersion 0.2.81 → 0.2.82) — restart the worker to pick up the current on-disk SDK/binary.";
-    const result = classifyClaudeFailure(output);
-    expect(result).not.toBeNull();
-    expect(result?.kind).toBe(DEPS_DRIFT_FAILURE_KIND);
-    expect(result?.tag).toBe(DEPS_DRIFT_FAILURE_TAG);
-    expect(result?.reason).toMatch(/restart the worker/i);
+    expect(classifyClaudeFailure(output)).toBeNull();
   });
 
   it("does not misclassify a task whose prose merely mentions dependency drift", () => {
     const output = "I noticed the dependency versions had drifted between environments.";
     expect(classifyClaudeFailure(output)).toBeNull();
   });
+});
 
-  it("prefers DEPS_DRIFT over AUTH_FAILED when (hypothetically) both markers are present", () => {
-    const output =
-      "DEPS_DRIFT: deps changed under live worker — restart the worker.\n" +
-      'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error"}}';
-    const result = classifyClaudeFailure(output);
-    expect(result?.kind).toBe(DEPS_DRIFT_FAILURE_KIND);
+describe("driftFailureClassification", () => {
+  it("returns the trusted DEPS_DRIFT classification unconditionally", () => {
+    const result = driftFailureClassification();
+    expect(result.kind).toBe(DEPS_DRIFT_FAILURE_KIND);
+    expect(result.tag).toBe(DEPS_DRIFT_FAILURE_TAG);
+    expect(result.reason).toMatch(/restart the worker/i);
   });
 });

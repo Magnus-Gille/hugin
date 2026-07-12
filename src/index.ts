@@ -19,7 +19,12 @@ import {
 } from "./munin-client.js";
 import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveContext, normalizeRoot, DEFAULT_REPOS_ROOT } from "./task-helpers.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
-import { classifyClaudeFailure } from "./failure-classification.js";
+import {
+  classifyClaudeFailure,
+  driftFailureClassification,
+  AUTH_FAILURE_KIND,
+  DEPS_DRIFT_FAILURE_KIND,
+} from "./failure-classification.js";
 import {
   decideAuthAlarm,
   INITIAL_AUTH_ALARM_STATE,
@@ -1721,6 +1726,19 @@ async function maybeAlertVersionDrift(drift: VersionDriftResult): Promise<void> 
 }
 
 /**
+ * {@link SdkExecutorResult} plus, ONLY for a synthetic pre-flight
+ * short-circuit, a trusted failure-kind discriminator. The caller already
+ * knows with certainty which check refused the task — this lets the shared
+ * finalize path classify it directly instead of regex-sniffing `output`
+ * (Codex review, issue #123: a regex could false-positive on a legitimate
+ * task's real output). Absent (undefined) for an actual SDK run, which keeps
+ * classifying via {@link classifyClaudeFailure} exactly as before.
+ */
+interface PreflightCheckedSdkResult extends SdkExecutorResult {
+  preflightFailureKind?: typeof AUTH_FAILURE_KIND | typeof DEPS_DRIFT_FAILURE_KIND;
+}
+
+/**
  * Run a Claude SDK task, but first refuse it fast on a confirmed drift or
  * auth problem instead of burning a paid, slot-consuming run that can only
  * fail:
@@ -1729,16 +1747,14 @@ async function maybeAlertVersionDrift(drift: VersionDriftResult): Promise<void> 
  *    out-of-band under a live worker.
  *  - (issue #129) the Pi Claude credential is definitively invalid (401).
  * Both short-circuits are fail-open on anything inconclusive; only a
- * confirmed problem blocks. Each synthetic output carries a signature
- * (`DEPS_DRIFT:` / the 401 envelope) so the shared finalize path classifies +
- * tags it identically to the equivalent real runtime failure.
+ * confirmed problem blocks.
  */
 async function executeClaudeSdkWithPreflightChecks(
   cfg: SdkTaskConfig,
   taskId: string,
   logDir: string,
   options?: SdkExecutorOptions,
-): Promise<SdkExecutorResult> {
+): Promise<PreflightCheckedSdkResult> {
   const drift = checkVersionDrift();
   if (drift) {
     const logFile = path.join(logDir, `${taskId}.log`);
@@ -1779,6 +1795,7 @@ async function executeClaudeSdkWithPreflightChecks(
       costUsd: 0,
       numTurns: 0,
       durationApiMs: 0,
+      preflightFailureKind: DEPS_DRIFT_FAILURE_KIND,
     };
   }
 
@@ -1822,6 +1839,7 @@ async function executeClaudeSdkWithPreflightChecks(
         costUsd: 0,
         numTurns: 0,
         durationApiMs: 0,
+        preflightFailureKind: AUTH_FAILURE_KIND,
       };
     }
   }
@@ -4338,6 +4356,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let opencodeResult: OpencodeExecutorResult | null = null;
     let homeserverResult: HomeserverExecutorResult | null = null;
     let effectiveExecutor = executorLabel;
+    // Trusted failure-kind discriminator from a pre-flight short-circuit
+    // (issue #123 Codex review) — set only when executeClaudeSdkWithPreflightChecks
+    // refused the task itself, so the classification below never has to
+    // regex-sniff synthetic output.
+    let sdkPreflightFailureKind: typeof AUTH_FAILURE_KIND | typeof DEPS_DRIFT_FAILURE_KIND | undefined;
     let fallbackTriggered = false;
     let fallbackReason: string | null = null;
 
@@ -4392,6 +4415,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         logFile = sdkResult.logFile;
         resultText = sdkResult.resultText;
         costUsd = sdkResult.costUsd;
+        sdkPreflightFailureKind = sdkResult.preflightFailureKind;
       } else {
         exitCode = 1;
         output = reason;
@@ -4453,6 +4477,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         logFile = sdkResult.logFile;
         resultText = sdkResult.resultText;
         costUsd = sdkResult.costUsd;
+        sdkPreflightFailureKind = sdkResult.preflightFailureKind;
       } else {
         exitCode = ollamaResult.exitCode;
         output = ollamaResult.output;
@@ -4601,6 +4626,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     logFile = sdkResult.logFile;
     resultText = sdkResult.resultText;
     costUsd = sdkResult.costUsd;
+    sdkPreflightFailureKind = sdkResult.preflightFailureKind;
     } else if (isOpencode) {
     console.log(`Using OpenCode executor for task ${taskNs}`);
     const opencodeGateway = loadOpencodeGatewayConfig(process.env);
@@ -4774,18 +4800,25 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // the task finalizes as `cancelled`, not as a spurious DELIVERY_FAILED.
     let isCancelled = cancellation !== null;
 
-    // Distinct failure classification (issue #129): a Claude SDK run (direct or
-    // via ollama→claude fallback) that failed to authenticate (401 / expired Pi
-    // credential) is tagged + surfaced distinctly from a generic task-logic
-    // failure, so the cause is legible in Munin instead of buried in the raw log.
+    // Distinct failure classification: a Claude SDK run (direct or via
+    // ollama→claude fallback) that failed to authenticate (401 / expired Pi
+    // credential, issue #129) or was refused by the version-drift pre-flight
+    // check (issue #123) is tagged + surfaced distinctly from a generic
+    // task-logic failure, so the cause is legible in Munin instead of buried
+    // in the raw log. A pre-flight short-circuit already carries a trusted
+    // discriminator (sdkPreflightFailureKind) — only a REAL SDK run (no
+    // discriminator) falls back to regex-classifying its output (Codex
+    // review, #123: DEPS_DRIFT is never inferred from output text).
     const failureClassification =
       !ok && !isTimeout && !isCancelled && (isClaude || fallbackTriggered)
-        ? classifyClaudeFailure(output)
+        ? sdkPreflightFailureKind === DEPS_DRIFT_FAILURE_KIND
+          ? driftFailureClassification()
+          : classifyClaudeFailure(output)
         : null;
     if (failureClassification) {
       await munin.log(
         taskNs,
-        `Task failed to authenticate (${failureClassification.kind}): ${failureClassification.reason}`,
+        `Task failed (${failureClassification.kind}): ${failureClassification.reason}`,
       );
     }
 
@@ -4794,8 +4827,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // can't judge a refreshable token); a Claude success confirms recovery. Only
     // for Claude-involving runs — an ollama/orchestrator outcome says nothing
     // about the Pi Claude credential. Best-effort: never let it fail the task.
+    // Gated specifically on AUTH_FAILURE_KIND (Codex review, #123): a
+    // DEPS_DRIFT classification says nothing about the credential and must
+    // never flip the auth alarm to "unauthorized" or block its recovery.
     if (isClaude || fallbackTriggered) {
-      if (failureClassification) {
+      if (failureClassification?.kind === AUTH_FAILURE_KIND) {
         await noteClaudeAuthOutcome("unauthorized").catch((err) =>
           console.error("[auth-alarm] reactive unauthorized note failed:", err),
         );

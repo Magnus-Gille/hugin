@@ -56,13 +56,13 @@ const AUTH_FAILURE_PATTERNS: RegExp[] = [
   /"type"\s*:\s*"authentication_error"/i,
 ];
 
-// The version-drift pre-flight short-circuit (src/index.ts) hand-crafts its
-// synthetic output to always include this literal, anchored marker — mirrors
-// how the AUTH_FAILED preflight text above is crafted to trip
-// AUTH_FAILURE_PATTERNS. Kept narrow (an all-caps token a legitimate task's
-// prose is very unlikely to emit) rather than matching on looser phrasing
-// like "dependency drift" a task could plausibly discuss.
-const DEPS_DRIFT_PATTERNS: RegExp[] = [/\bDEPS_DRIFT:/];
+const DEPS_DRIFT_CLASSIFICATION: FailureClassification = {
+  kind: DEPS_DRIFT_FAILURE_KIND,
+  tag: DEPS_DRIFT_FAILURE_TAG,
+  reason:
+    "On-disk @anthropic-ai/claude-agent-sdk (or its cli.js runtime) changed under this " +
+    "live worker process. Restart the worker to pick up the current on-disk SDK/binary.",
+};
 
 /**
  * Classify a failed Claude SDK task's captured output.
@@ -75,20 +75,19 @@ const DEPS_DRIFT_PATTERNS: RegExp[] = [/\bDEPS_DRIFT:/];
  * The caller is responsible for only invoking this on an actual failure
  * (non-zero, non-timeout, non-cancelled) — a successful run whose text happens
  * to quote "401" is never passed in.
+ *
+ * DEPS_DRIFT is deliberately NOT inferred here (Codex review, issue #123): a
+ * regex over arbitrary task output could false-positive on a legitimate task
+ * that happens to print/discuss a similar marker for an unrelated reason,
+ * silently overwriting its real failure reason. The version-drift pre-flight
+ * short-circuit (src/index.ts) already knows with certainty it refused a task
+ * for drift — it calls {@link driftFailureClassification} directly instead of
+ * round-tripping through this regex classifier.
  */
 export function classifyClaudeFailure(
   output: string | null | undefined,
 ): FailureClassification | null {
   if (!output) return null;
-  if (DEPS_DRIFT_PATTERNS.some((re) => re.test(output))) {
-    return {
-      kind: DEPS_DRIFT_FAILURE_KIND,
-      tag: DEPS_DRIFT_FAILURE_TAG,
-      reason:
-        "On-disk @anthropic-ai/claude-agent-sdk (or its cli.js runtime) changed under this " +
-        "live worker process. Restart the worker to pick up the current on-disk SDK/binary.",
-    };
-  }
   if (AUTH_FAILURE_PATTERNS.some((re) => re.test(output))) {
     return {
       kind: AUTH_FAILURE_KIND,
@@ -99,4 +98,15 @@ export function classifyClaudeFailure(
     };
   }
   return null;
+}
+
+/**
+ * Trusted DEPS_DRIFT classification for the version-drift pre-flight
+ * short-circuit (issue #123). The caller already knows with certainty this is
+ * a drift refusal (it generated the synthetic result itself) — this is never
+ * inferred from output text. See {@link classifyClaudeFailure}'s doc comment
+ * for why that distinction matters.
+ */
+export function driftFailureClassification(): FailureClassification {
+  return DEPS_DRIFT_CLASSIFICATION;
 }
