@@ -68,12 +68,47 @@ export interface AuthAlarmState {
   lastAuth: "ok" | "unauthorized" | null;
   /** Whether the current token's impending-expiry warning has already fired. */
   expiryWarned: boolean;
+  /**
+   * Producer-owned expiry dedup lifecycle generation. Persisted legacy states
+   * have no generation and hydrate as 0 so one positive safe reading can
+   * reconcile an alert that predates resolved-envelope support.
+   */
+  expiryAlertLifecycleVersion: number;
 }
+
+export const AUTH_EXPIRY_LIFECYCLE_VERSION = 1;
 
 export const INITIAL_AUTH_ALARM_STATE: AuthAlarmState = {
   lastAuth: null,
   expiryWarned: false,
+  // No persisted state means no historical producer alert to reconcile.
+  expiryAlertLifecycleVersion: AUTH_EXPIRY_LIFECYCLE_VERSION,
 };
+
+/**
+ * Parse an existing persisted state. Callers intentionally invoke this only
+ * when a Munin entry exists: no entry uses {@link INITIAL_AUTH_ALARM_STATE},
+ * while a pre-generation entry must hydrate as legacy for one reconciliation.
+ */
+export function hydratePersistedAuthAlarmState(value: unknown): AuthAlarmState {
+  const parsed = value && typeof value === "object"
+    ? value as Partial<AuthAlarmState>
+    : {};
+  const rawLifecycleVersion = parsed.expiryAlertLifecycleVersion;
+  return {
+    lastAuth:
+      parsed.lastAuth === "ok" || parsed.lastAuth === "unauthorized"
+        ? parsed.lastAuth
+        : null,
+    expiryWarned: parsed.expiryWarned === true,
+    expiryAlertLifecycleVersion:
+      typeof rawLifecycleVersion === "number" &&
+      Number.isSafeInteger(rawLifecycleVersion) &&
+      rawLifecycleVersion >= AUTH_EXPIRY_LIFECYCLE_VERSION
+        ? rawLifecycleVersion
+        : 0,
+  };
+}
 
 /** Stable dedup keys so Heimdall collapses repeats of the same condition. */
 export const AUTH_ALARM_DEDUP_KEY = "hugin-claude-auth";
@@ -165,9 +200,18 @@ export function decideAuthAlarm(
   const expiryEvidence = reading.expiryEvidence ?? (
     reading.expiresAtMs === null ? "unknown" : "known"
   );
+  const expiryLifecycleCurrent =
+    state.expiryAlertLifecycleVersion >= AUTH_EXPIRY_LIFECYCLE_VERSION;
+  const currentExpiryLifecycleVersion = Math.max(
+    state.expiryAlertLifecycleVersion || 0,
+    AUTH_EXPIRY_LIFECYCLE_VERSION,
+  );
   if (expiryEvidence === "not-applicable") {
-    if (state.expiryWarned) alerts.push(expiryRecoveredAlert());
+    if (state.expiryWarned || !expiryLifecycleCurrent) {
+      alerts.push(expiryRecoveredAlert());
+    }
     nextState.expiryWarned = false;
+    nextState.expiryAlertLifecycleVersion = currentExpiryLifecycleVersion;
   } else if (expiryEvidence === "known" && reading.expiresAtMs !== null) {
     const msLeft = reading.expiresAtMs - opts.nowMs;
     if (msLeft > 0 && msLeft <= opts.expiryWarnMs) {
@@ -175,10 +219,16 @@ export function decideAuthAlarm(
         const hoursLeft = Math.max(1, Math.ceil(msLeft / 3_600_000));
         alerts.push(expiryAlert(hoursLeft));
         nextState.expiryWarned = true;
+        // A successfully committed firing transition establishes ownership of
+        // the current external dedup lifecycle too.
+        nextState.expiryAlertLifecycleVersion = currentExpiryLifecycleVersion;
       }
     } else if (msLeft > opts.expiryWarnMs) {
-      if (state.expiryWarned) alerts.push(expiryRecoveredAlert());
+      if (state.expiryWarned || !expiryLifecycleCurrent) {
+        alerts.push(expiryRecoveredAlert());
+      }
       nextState.expiryWarned = false;
+      nextState.expiryAlertLifecycleVersion = currentExpiryLifecycleVersion;
     }
   }
 
