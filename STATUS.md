@@ -1,5 +1,43 @@
 # Hugin — Status
 
+**Close audit (2026-07-13, Codex) — sequence #190+#183 → #191 → #192 remains reviewable;
+gi#158 shipped; gi#199/#156 were re-scoped only.** Hugin draft PR
+[#193](https://github.com/Magnus-Gille/hugin/pull/193) adds full, boundary-honest Munin pagination
+and starvation-free oldest-first claiming; PR
+[#194](https://github.com/Magnus-Gille/hugin/pull/194) mirrors `draft` and `conversation` through the
+shared Broker/MCP taxonomy; PR
+[#195](https://github.com/Magnus-Gille/hugin/pull/195) records the wave-5 evidence. All three remain
+intentional drafts, their worktrees are clean and origin-synced, and current GitHub CI is green.
+None has been reviewed, merged, or deployed yet.
+
+Wave 5 ran six matched one-shot leaves and six official `code_loop` harness leaves across those
+Hugin tickets and gille-inference #158. Every one-shot was rated `redo` (three repo-hallucinated
+local diffs; three no-local-attempt frontier escalations). Harness result: one correct narrow
+single-file schema edit, five cap-exceeded/no-diff leaves; no multi-file success. Full evidence and
+work/task IDs: `docs/m5-harness-wave5-2026-07-13.md`. gille-inference PR
+[#246](https://github.com/Magnus-Gille/gille-inference/pull/246) implemented #158 with 18 triage
+cases, 34 seeded review bugs + 6 clean controls, review recall/precision/confabulation evidence,
+and empty/truncation promotion gates. Its requested Claude Opus review was blocked by Codex's
+default external-disclosure auto-review policy, so the native Codex gate ran and caught two release
+blockers; both were fixed. PR #246 was squash-merged as `cc64a69` and deployed from clean committed
+`main`; final validation was 144 files / 2,377 tests. A close-time rsync dry run reports zero drift,
+`home-gateway`, `llama-swap`, and `cloudflared` are active, and public `/healthz` is overall healthy.
+The same response reports Orin `ok:false` because `qwen2.5-coder:3b` is unavailable; treat that as a
+separate backend availability follow-up. gi#199 and gi#156 were edited on GitHub into narrow future
+audit/verification scopes; no code was built for either.
+
+The Claude-policy mismatch is diagnosed but not changed: the narrow fix is to retain Guardian and
+add a full-default-derived `[auto_review].policy` that trusts authenticated Claude Code only for the
+verified gille-inference and Ratatoskr repositories while continuing to deny secrets and unrelated
+data. `~/.codex/config.toml` was left untouched pending Magnus's decision.
+
+**Next:** (1) review, merge in order, and deploy Hugin #193 → #194 → #195 from clean `main`; (2)
+investigate or acknowledge the unavailable Orin model; (3) under gi#156, run one supervised observed
+scout/corpus pass before admitting #246's verifier to judgment-quality evidence; (4) decide whether
+to install the scoped Claude trust policy.
+
+---
+
 **Latest session:** 2026-07-13 (Claude) — **M5-harvest campaign (`m5h-2026-07`): 9 tickets, 10 PRs, ~92 graded delegations, shadow lane live**
 **Branch:** `main` @ `977e851` + this handoff; hugin deployed to Pi (health `ok`, polling, queue 0).
 
