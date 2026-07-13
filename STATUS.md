@@ -1,9 +1,57 @@
 # Hugin — Status
 
-**Latest session (2026-07-13, Codex) — continuous Hugin/M5 improvement loop + Gate D adapter
-published for review.** Draft PR [#196](https://github.com/Magnus-Gille/hugin/pull/196) from
-`codex/continuous-harness-learning-loop`; implementation commit `916b689`, reconciled with
-`origin/main@8b1bfdd`. Not merged or deployed.
+**Latest session:** 2026-07-13 (Codex) — **general hardening implementation complete locally; awaiting parent review/publish/deploy**
+**Branch:** `codex/hugin-hardening-20260713` rebased onto `origin/main@bb66fcd` (includes merged starvation/pagination fix #193 and continuous M5 harness #196).
+
+## Latest — bounded operations, honest alert lifecycle, and Daily Analysis reliability
+
+- Recovery/control scans now paginate past Munin's 50-row cap under a 200-entry
+  per-pass budget and retain a timestamp continuation so repeated sweeps rotate
+  through old work. Canonical Broker history is capped at 1,000 candidates per
+  discovery channel, reads status with concurrency 25, and reports truncation.
+- `Working dir` now uses the same normalized `/home/magnus` path guard as
+  `Context`; task timeout/output-token/env settings and context ref/character
+  fan-out have hard ceilings.
+- Daily Analysis no longer sends raw 24-hour JSONL to the Pi model. A streaming
+  deterministic pre-aggregation keeps the evidence below 5,000 characters even
+  for the 2,000-row regression fixture, and the existing Ollama task is capped
+  at 192 output tokens. Malformed/non-object journal rows and invalid, negative,
+  or overflowing duration/cost samples are ignored without aborting or emitting
+  misleading JSON `null` aggregates. Production evidence motivating this:
+  2026-07-13 had 116 rows / 46,091 prompt characters and timed out before output;
+  2026-07-12 also timed out at 5,675 prompt characters while streaming an
+  overlong answer.
+- Ratatoskr/Heimdall alert lifecycle now resolves the existing exact dedup keys:
+  confirmed auth recovery resolves `hugin-claude-auth`; expiry resolves only on
+  known-safe expiry or refresh-token N/A evidence (never unknown null); version
+  drift resolves only from persisted prior-process firing state after a fresh
+  startup baseline. Resolution state commits only after Ratatoskr delivery; the
+  drift path additionally retries until state persistence succeeds.
+- Heimdall usefulness was checked against the live descriptor: Tasks and Task
+  history remain the concrete operational views; capability evidence discloses
+  verified n and omitted rows; the trial gate shows targets/state/notes; route
+  policy is explicitly warn/shadow; uninstrumented metrics say so. No Hugin view
+  should be removed. The misleading relative descriptor links to `/health` and
+  `/heimdall.json` were removed because Heimdall resolved them against itself;
+  the unambiguous repository link remains. Resolution events prevent stale
+  auth/drift incidents from degrading that at-a-glance signal.
+- Compatible lockfile updates clear Hono, qs, Vitest/Vite, and esbuild advisories.
+  Final validation after rebasing onto `bb66fcd`: clean `npm ci`; TypeScript
+  build; standalone Gate D runner typecheck; 103 files / 1,721 tests; both CI
+  shell suites; Bash/Node syntax; `git diff --check`; and full plus
+  production-only `npm audit` (0 vulnerabilities).
+
+**Next:** parent agent publishes the local commit as a PR, obtains independent
+review, merges only with green CI, deploys from clean `main`, and verifies Pi
+health plus alert-resolution delivery. No live alerts, Munin writes, deploy, or
+production mutation occurred in this implementation session.
+
+---
+
+**Previous session (2026-07-13, Codex) — continuous Hugin/M5 improvement loop + Gate D adapter,
+merged as [#196](https://github.com/Magnus-Gille/hugin/pull/196) in `bb66fcd`.** Implementation
+commit `916b689` was originally reconciled with `origin/main@8b1bfdd`; it was not deployed during
+that session.
 
 Hugin now has a durable, principal-isolated champion/challenger experiment ledger under
 `experiments/hugin/*`, exposed through five authenticated Broker/MCP operations: create, observe,
@@ -38,19 +86,12 @@ existing ten-case Gate D battery. The owning M5 work (phase telemetry, immutable
 metadata, and optional edit-deadline policy) is filed as gille-inference #247 and added to the
 Grimnir Roadmap with the exact wire contract.
 
-Validation after merging current `origin/main`: `npm run build`, standalone runner typecheck,
-focused integration/unit suite (103 tests after the last adapter hardening), full `npm test`
-(**102 files / 1,700 tests**), and `git diff --check` are green. No production state or M5
-configuration was changed. A live run was
-not started: #247 is not implemented/deployed, this Hugin branch is not deployed, and this laptop's
-`m5-auth` helper reports no owner token in Keychain. The credential boundary was not bypassed.
+The first live Gate D run remains blocked on #247 and an owner key provisioned through `m5-auth`;
+neither boundary was bypassed. After those prerequisites and Hugin deployment, dry-run the ten-case
+Gate D manifest with two holdouts, then compare the current 13-turn champion against the identical
+turn-6 edit-deadline challenger. Keep the champion unless every protected paired gate passes.
 
-**Next:** review/merge PR #196; implement/review/deploy
-[gille-inference #247](https://github.com/Magnus-Gille/gille-inference/issues/247); provision the
-M5 owner key via `m5-auth` (Keychain, never a file); deploy Hugin; generate and dry-run the ten-case
-Gate D manifest with two predeclared holdouts; then run current 13-turn champion versus the identical
-turn-6 edit-deadline challenger. Collect product ratings and keep the champion unless every paired
-protected-check, coverage, and non-regression gate passes.
+---
 
 **Latest session:** 2026-07-13 (Claude) — **M5-harvest campaign (`m5h-2026-07`): 9 tickets, 10 PRs, ~92 graded delegations, shadow lane live**
 **Branch:** `main` @ `977e851` + this handoff; hugin deployed to Pi (health `ok`, polling, queue 0).

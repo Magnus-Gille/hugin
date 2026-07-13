@@ -33,6 +33,8 @@ import {
 } from "./provenance.js";
 
 const DEFAULT_BUDGET_CHARS = 8_000;
+export const MAX_CONTEXT_BUDGET_CHARS = 100_000;
+export const MAX_CONTEXT_REFS = 50;
 
 export type InjectionPolicy = "off" | "warn" | "block" | "fail";
 
@@ -121,10 +123,25 @@ export async function resolveContextRefs(
   munin: MuninClient,
   options: ResolveContextOptions = {},
 ): Promise<ContextResolution> {
-  const maxChars = budget ?? DEFAULT_BUDGET_CHARS;
+  const maxChars = Number.isSafeInteger(budget) && (budget ?? 0) > 0
+    ? Math.min(budget!, MAX_CONTEXT_BUDGET_CHARS)
+    : DEFAULT_BUDGET_CHARS;
   const policy = readPolicy(options.injectionPolicy);
   const externalPolicy = readExternalPolicy(options.externalPolicy);
-  const refsRequested = refList.map((r) => r.trim()).filter(Boolean);
+  const refsRequested: string[] = [];
+  let refsWereTruncated = false;
+  for (const rawRef of refList) {
+    const ref = rawRef.trim();
+    if (!ref) continue;
+    if (refsRequested.length >= MAX_CONTEXT_REFS) {
+      refsWereTruncated = true;
+      break;
+    }
+    refsRequested.push(ref);
+  }
+  if (refsWereTruncated) {
+    console.warn(`Context ref list capped at ${MAX_CONTEXT_REFS}; excess refs omitted`);
+  }
   const refsResolved: string[] = [];
   const refsMissing: string[] = [];
   const refsQuarantined: string[] = [];
@@ -274,7 +291,7 @@ export async function resolveContextRefs(
 
   const joined = sections.join("\n\n---\n\n");
   const totalChars = joined.length;
-  const truncated = totalChars > maxChars;
+  const truncated = refsWereTruncated || totalChars > maxChars;
   const content = truncated ? joined.slice(0, maxChars) + "\n\n[...truncated]" : joined;
 
   return {

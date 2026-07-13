@@ -49,6 +49,7 @@ describe("queryAllMuninEntries", () => {
 
     expect(result.results).toHaveLength(125);
     expect(result.truncated).toBe(false);
+    expect(result.budgetExhausted).toBe(false);
     expect(munin.calls.length).toBeGreaterThan(3);
     expect(munin.calls.every((call) => call.query === undefined)).toBe(true);
   });
@@ -134,5 +135,47 @@ describe("queryAllMuninEntries", () => {
       since: timestamp,
       until: timestamp,
     }));
+  });
+
+  it("stops at a caller-owned work budget and reports the partial history honestly", async () => {
+    const base = Date.UTC(2026, 6, 12, 12, 0, 0);
+    const rows = Array.from({ length: 300 }, (_, index) =>
+      makeTask(index, new Date(base + index).toISOString()),
+    );
+    const munin = new FilterOnlyMunin(rows);
+
+    const result = await queryAllMuninEntries(
+      munin as unknown as MuninClient,
+      {
+        tags: ["pending"],
+        namespace: "tasks/",
+        entry_type: "state",
+      },
+      { maxPages: 2, maxResults: 100 },
+    );
+
+    expect(result.results).toHaveLength(100);
+    expect(result.truncated).toBe(true);
+    expect(result.budgetExhausted).toBe(true);
+    expect(result.continuationUntil).toBeDefined();
+    // Two ordinary pages plus their exact-timestamp boundary probes.
+    expect(munin.calls).toHaveLength(4);
+
+    const older = await queryAllMuninEntries(
+      munin as unknown as MuninClient,
+      {
+        tags: ["pending"],
+        namespace: "tasks/",
+        entry_type: "state",
+        until: result.continuationUntil,
+      },
+      { maxPages: 2, maxResults: 100 },
+    );
+    expect(older.results.every((row) =>
+      row.updated_at <= result.continuationUntil!,
+    )).toBe(true);
+    expect(
+      older.results.some((row) => result.results.some((current) => current.id === row.id)),
+    ).toBe(false);
   });
 });

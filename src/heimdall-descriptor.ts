@@ -41,8 +41,6 @@ export const HEIMDALL_DESCRIPTOR = {
   ],
   alerts: { rules: [], active_count: 0, firing: [] },
   links: {
-    self: "/heimdall.json",
-    health: "/health",
     repo: "https://github.com/Magnus-Gille/hugin",
   },
   ui: { icon: "cpu", category: "infra" },
