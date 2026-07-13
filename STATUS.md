@@ -1,6 +1,49 @@
 # Hugin — Status
 
-**Latest session:** 2026-07-13 (Codex) — **legacy auth-expiry alert lifecycle migration complete locally; awaiting parent review/publish/deploy**
+**Latest session:** 2026-07-13 (Codex) — **repo-local deployment provenance hardening complete locally; awaiting parent review/publish/deploy**
+**Branch:** `codex/hugin-deploy-marker-hardening` from exact `origin/main@6c8428cf64d1fb0e9b33ac4875c524a094f47d6b` (merged auth lifecycle PR #198).
+
+## Latest — markerless failure boundary and exact local-commit deployment
+
+- Fleet validation found that `scripts/deploy-pi.sh` let `rsync --delete`
+  remove `.deployed-commit`, then later ran `git fetch && git reset` inside the
+  remote Hugin tree even though authoritative Grimnir deployments intentionally
+  leave that tree without `.git`. The service stayed healthy while deployment
+  provenance disappeared.
+- The repo-local deploy now accepts only a clean repository-root checkout with
+  an addressable full `HEAD` SHA. It rechecks cleanliness and the exact SHA
+  after the local build and again after rsync, so a build/source race cannot be
+  accepted as the named commit.
+- The previous marker (and abandoned temp marker) is removed as the first remote
+  mutation. Rsync excludes `.deployed-commit` in addition to preserving the
+  existing `.env`, `node_modules`, `.git`, tests, and macOS exclusions. The
+  obsolete remote Hugin `git fetch/reset` step is gone. Production dependencies
+  install with `npm ci --omit=dev`, so the shipped lockfile cannot be rewritten
+  after the local commit has been pinned.
+- Only after user-service restart/status and the loopback health check succeed
+  does one final remote command atomically write the exact local full SHA via a
+  temp file and rename. Any earlier failure remains markerless; no fallible
+  deployment operation follows the stamp.
+- The shell regression harness now covers unversioned/dirty sources, build and
+  rsync source drift, invalidation-before-sync ordering, real rsync marker
+  exclusion semantics, invalidation failure, health failure, markerless failure
+  paths, no remote-Hugin-Git dependency, and health-before-exact-SHA stamping.
+- Validation: `npm ci`; TypeScript build; standalone Gate D runner typecheck;
+  full suite (103 files / 1,729 tests); both CI shell suites; all Bash/Node
+  syntax; changed-script warning/error shellcheck and fleet-wide error-severity
+  shellcheck; `git diff --check`; full and production npm audit (0
+  vulnerabilities).
+
+**Next:** parent agent reviews and publishes the clean local commit, merges only
+with green CI, then deploys from an exact clean merged worktree. Verify the
+remote Hugin tree remains `.git`-absent, `.deployed-commit` equals the merged
+full SHA, the user service is active/enabled, and loopback health is green. No
+push, PR, deployment, live SSH, marker write, Munin write, or other production
+mutation occurred in this implementation session.
+
+---
+
+**Previous session:** 2026-07-13 (Codex) — **legacy auth-expiry alert lifecycle migration merged as PR #198 (`6c8428c`)**
 **Branch:** `codex/hugin-auth-alert-migration` from exact `origin/main@8b444adc3996a0e01095b5dc381a6ed9646de20c`.
 
 ## Latest — reconcile pre-resolution expiry alerts without weakening auth evidence
