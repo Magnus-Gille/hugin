@@ -7,6 +7,8 @@ import {
   type ProductTaskEvidence,
 } from "../src/learning-loop-health.js";
 import type { Ledger } from "../src/orchestrator/ledger-client.js";
+import { evaluateLearningExperiment } from "../src/learning/experiment-evaluator.js";
+import { makeExperimentInput } from "./fixtures/learning.js";
 
 const ledger = (rows: Partial<Ledger["report"][number]>[]): Ledger => ({
   report: rows.map((r) => ({
@@ -273,6 +275,42 @@ describe("computeProductPlane (#165 trial gate)", () => {
 });
 
 describe("buildLearningLoopPanels", () => {
+  it("surfaces the current experiment decision without claiming automatic promotion", () => {
+    const input = makeExperimentInput();
+    const evaluation = evaluateLearningExperiment({ observations: [], gates: input.gates });
+    const panels = buildLearningLoopPanels({
+      capability: computeCapabilityPlane(null),
+      product: computeProductPlane([]),
+      policy: deriveRoutePolicy([], computeCapabilityPlane(null)),
+      experiments: {
+        available: true,
+        states: [{
+          schemaVersion: 1,
+          experimentId: input.experiment_id,
+          scope: input.scope,
+          taskType: input.task_type,
+          ownerPrincipal: "codex",
+          hypothesis: input.hypothesis,
+          changeAxis: input.change_axis,
+          champion: input.champion,
+          challenger: input.challenger,
+          gates: input.gates,
+          status: "running",
+          revision: 1,
+          createdAt: evaluation.evaluatedAt,
+          updatedAt: evaluation.evaluatedAt,
+          observations: [],
+          evaluation,
+        }],
+      },
+    });
+    const panel = panels.find((candidate) => candidate.id === "hugin-learning-experiments")!;
+    expect(panel.kind).toBe("table");
+    expect(panel.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ Experiment: input.experiment_id, State: "running" }),
+    ]));
+  });
+
   it("keeps the two evidence planes separate rather than collapsing them into one verdict", () => {
     const panels = buildLearningLoopPanels({
       capability: computeCapabilityPlane(ledger([{ attempts: 20, passes: 8, fails: 2 }])),

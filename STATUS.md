@@ -1,5 +1,54 @@
 # Hugin — Status
 
+**Latest session (2026-07-13, Codex) — continuous Hugin/M5 improvement loop + Gate D adapter
+implemented locally.** Branch `codex/continuous-harness-learning-loop` from `main@d589449`;
+changes are currently uncommitted, not published, and not deployed.
+
+Hugin now has a durable, principal-isolated champion/challenger experiment ledger under
+`experiments/hugin/*`, exposed through five authenticated Broker/MCP operations: create, observe,
+rate, status, and explicit reviewed promotion. Automated observations may be enriched exactly once
+from `unrated` to a human/downstream product outcome; existing ratings cannot be overwritten.
+Experiments are content-blind but version logging, test
+harness/corpus/oracle/holdout, agent prompt, agent harness/budgets, model identity/configuration,
+and routing. Hugin recomputes configuration fingerprints and permits exactly one changed semantic
+axis per iteration. Evidence is idempotent, configuration-bound, matched by sample, and records
+independent verification, product usefulness, latency/cost/review time, time-to-edit,
+inspect/edit/check timing, test state, and failure signals.
+
+The pure evaluator requires matched/holdout evidence, independent-verifier and product-rating
+coverage, and paired scalar measurements. It rejects correctness/usefulness/rescue/infra/latency/
+cost regressions; a challenger must also clear its predeclared primary-improvement threshold.
+Judge-only evidence never counts as verified. A reviewed promotion advances a CAS-guarded per-scope
+champion pointer with an applied repo/config ref; future experiments must start from that exact
+fingerprint, and crash recovery handles a pointer write that lands before the experiment-state
+write. Heimdall now shows experiment state, sample maturity, normalized primary improvement, and
+the evidence-derived next action. Full design: `docs/continuous-learning-loop.md`.
+
+The Hugin-side M5 adapter/client and resumable `scripts/run-m5-code-loop-experiment.ts` runner are
+also present. The runner hashes every Gate D task/verifier asset, refuses config-fingerprint drift,
+requires M5 to report effective model/harness/caps, counterbalances arm order, applies each returned
+diff to a pristine local seed, runs Gate D's hidden-oracle/typecheck/anti-cheat `check.sh`, and sends
+only content-blind evidence to Hugin. Old M5 results remain recordable but edit timing stays
+explicitly unmeasured.
+
+Correction discovered during live preparation: there is no Wave 5 code-loop corpus, and
+gille-inference #201 is an unrelated chat-replay issue. The reproducible matched corpus is the
+existing ten-case Gate D battery. The owning M5 work (phase telemetry, immutable effective-execution
+metadata, and optional edit-deadline policy) is filed as gille-inference #247 and added to the
+Grimnir Roadmap with the exact wire contract.
+
+Validation: `npm run build`, standalone runner typecheck, focused integration/unit suite (103 tests
+after the last adapter hardening), full `npm test` (**101 files / 1,693 tests**), and
+`git diff --check` are green. No production state or M5 configuration was changed. A live run was
+not started: #247 is not implemented/deployed, this Hugin branch is not deployed, and this laptop's
+`m5-auth` helper reports no owner token in Keychain. The credential boundary was not bypassed.
+
+**Next:** publish/review/merge this Hugin branch; implement/review/deploy gille-inference #247;
+provision the M5 owner key via `m5-auth` (Keychain, never a file); deploy Hugin; generate and
+dry-run the ten-case Gate D manifest with two predeclared holdouts; then run current 13-turn champion
+versus the identical turn-6 edit-deadline challenger. Collect product ratings and keep the champion
+unless every paired protected-check, coverage, and non-regression gate passes.
+
 **Latest session:** 2026-07-13 (Claude) — **M5-harvest campaign (`m5h-2026-07`): 9 tickets, 10 PRs, ~92 graded delegations, shadow lane live**
 **Branch:** `main` @ `977e851` + this handoff; hugin deployed to Pi (health `ok`, polling, queue 0).
 

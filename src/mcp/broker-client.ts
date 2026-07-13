@@ -1,8 +1,8 @@
 /**
  * HTTP client for the Pi-side orchestrator broker.
  *
- * Used by the hugin-mcp server (laptop-side). Wraps the five
- * `/v1/delegate/*` endpoints with typed methods, bearer-token auth,
+ * Used by the hugin-mcp server (laptop-side). Wraps the delegation and
+ * learning-loop endpoints with typed methods, bearer-token auth,
  * and bounded timeouts.
  *
  * The broker is exposed only on the Tailscale interface (per
@@ -102,6 +102,26 @@ export class BrokerClient {
 
   async models(): Promise<unknown> {
     return this.get("/v1/delegate/models");
+  }
+
+  async experimentCreate(payload: Record<string, unknown>): Promise<unknown> {
+    return this.post("/v1/learning/experiments/create", payload);
+  }
+
+  async experimentObserve(payload: Record<string, unknown>): Promise<unknown> {
+    return this.post("/v1/learning/experiments/observe", payload);
+  }
+
+  async experimentRate(payload: Record<string, unknown>): Promise<unknown> {
+    return this.post("/v1/learning/experiments/rate", payload);
+  }
+
+  async experimentStatus(payload: Record<string, unknown>): Promise<unknown> {
+    return this.post("/v1/learning/experiments/status", payload);
+  }
+
+  async experimentPromote(payload: Record<string, unknown>): Promise<unknown> {
+    return this.post("/v1/learning/experiments/promote", payload);
   }
 
   private async post(path: string, body: unknown): Promise<unknown> {

@@ -113,20 +113,28 @@ hugin/
 │   ├── mcp-server.ts             # hugin-mcp stdio entrypoint (orchestrator-side, on the laptop)
 │   ├── mcp/                      # hugin-mcp internals (broker client + tool definitions)
 │   │   ├── broker-client.ts      # HTTP client for /v1/delegate/* (bearer auth, AbortController timeout)
-│   │   └── tools.ts              # 5 MCP tools (hugin_submit/await/rate/list/models) with envelope autofill
-│   └── broker/                   # MCP durable-delegation API (Tailscale-only HTTP, /v1/delegate/*)
-│       ├── server.ts             # Express app + opt-in startup (HUGIN_BROKER_KEYS)
-│       ├── handlers.ts           # submit/await/rate/list/models endpoint handlers
-│       ├── executor-capabilities.ts # Live executor truth shared by submit/models/worker
-│       ├── orch-worker.ts        # RETIRED historical orch-v1 worker; never started
-│       ├── openrouter-executor.ts # OpenRouter one-shot delegation runner
-│       ├── reconciliation.ts     # RETIRED historical journal reconciler; never started
-│       └── task-store.ts         # Munin operations: submit / read / two-phase complete
+│   │   └── tools.ts              # 5 delegation + 5 learning-loop MCP tools
+│   ├── broker/                   # MCP durable-delegation API (Tailscale-only HTTP, /v1/delegate/*)
+│   │   ├── server.ts             # Express app + opt-in startup (HUGIN_BROKER_KEYS)
+│   │   ├── handlers.ts           # submit/await/rate/list/models endpoint handlers
+│   │   ├── executor-capabilities.ts # Live executor truth shared by submit/models/worker
+│   │   ├── orch-worker.ts        # RETIRED historical orch-v1 worker; never started
+│   │   ├── openrouter-executor.ts # OpenRouter one-shot delegation runner
+│   │   ├── reconciliation.ts     # RETIRED historical journal reconciler; never started
+│   │   └── task-store.ts         # Munin operations: submit / read / two-phase complete
+│   └── learning/                 # Versioned champion/challenger experiments + monotonic promotion gate
+│       ├── experiment-schema.ts  # Content-blind config/run/evaluation contracts
+│       ├── experiment-evaluator.ts # Pure matched-pair promotion/rejection logic
+│       ├── experiment-store.ts   # Principal-isolated Munin state + CAS/idempotency
+│       ├── experiment-handlers.ts # Authenticated Broker learning endpoints
+│       ├── m5-code-loop-adapter.ts # Honest M5 result → content-blind observation mapping
+│       └── m5-code-loop-client.ts  # Owner-gated async code_loop JSON-RPC client
 ├── tests/
 │   ├── dispatcher.test.ts
 │   └── sdk-executor.test.ts
 └── scripts/
     ├── deploy-pi.sh
+    ├── run-m5-code-loop-experiment.ts # Resumable matched Gate D experiment runner
     ├── submit-daily-analysis.sh  # Submit daily journal analysis as ollama task
     ├── sync-claude-config.sh     # DEPRECATED — config now lives in the claude-config repo (bootstrap.sh)
     └── update-cli.sh             # Auto-update CLI tools (daily cron)

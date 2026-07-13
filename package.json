@@ -16,6 +16,7 @@
     "friction-report": "node scripts/friction-report.mjs",
     "build:pii-fixtures": "tsx scripts/build-pii-fixtures.ts",
     "eval:pii": "tsx scripts/run-pii-eval.ts",
+    "experiment:m5-code-loop": "tsx scripts/run-m5-code-loop-experiment.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
