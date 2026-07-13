@@ -5,7 +5,12 @@ import { describe, it, expect } from "vitest";
 
 // --- resolveContext unit tests ---
 
-import { resolveContext } from "../src/task-helpers.js";
+import {
+  MAX_TASK_TIMEOUT_MS,
+  parseBoundedPositiveInt,
+  resolveContext,
+  resolveTaskWorkingDirectory,
+} from "../src/task-helpers.js";
 
 type RuntimeCapability = "tools" | "code" | "structured-output";
 type TaskPermissionProfile = "read-only" | "trusted-code";
@@ -76,9 +81,7 @@ function parseTask(content: string, workspace = "/home/magnus/workspace") {
 
   if (!prompt || (!runtime && !isAutoRoute)) return null;
 
-  const resolvedDir = contextRaw
-    ? resolveContext(contextRaw)
-    : workingDir || workspace;
+  const resolvedDir = resolveTaskWorkingDirectory(contextRaw, workingDir, { workspace });
 
   const validCapabilities: RuntimeCapability[] = [];
   if (capabilitiesRaw) {
@@ -94,7 +97,7 @@ function parseTask(content: string, workspace = "/home/magnus/workspace") {
     runtime: runtime || "claude",  // placeholder for auto — overwritten by router
     workingDir: resolvedDir,
     context: contextRaw || undefined,
-    timeoutMs: timeoutStr ? parseInt(timeoutStr) : 300000,
+    timeoutMs: parseBoundedPositiveInt(timeoutStr, 300_000, MAX_TASK_TIMEOUT_MS),
     submittedBy: submittedBy || "unknown",
     submittedAt: submittedAt || new Date().toISOString(),
     replyTo: replyTo || undefined,
@@ -157,6 +160,33 @@ describe("resolveContext", () => {
   it("should reject relative paths as fallback", () => {
     expect(resolveContext("foo")).toBe("/home/magnus/workspace");
     expect(resolveContext("relative/path")).toBe("/home/magnus/workspace");
+  });
+
+  it("normalizes absolute paths before enforcing the home boundary", () => {
+    expect(resolveContext("/home/magnus/../../etc")).toBe("/home/magnus/workspace");
+    expect(resolveContext("/home/magnus/workspace/../scratch")).toBe(
+      "/home/magnus/scratch",
+    );
+  });
+
+  it("applies the context path policy to legacy Working dir values", () => {
+    expect(resolveTaskWorkingDirectory(undefined, "/etc")).toBe(
+      "/home/magnus/workspace",
+    );
+    expect(resolveTaskWorkingDirectory(undefined, "relative/path")).toBe(
+      "/home/magnus/workspace",
+    );
+    expect(resolveTaskWorkingDirectory(undefined, "/home/magnus/scratch/job")).toBe(
+      "/home/magnus/scratch/job",
+    );
+  });
+
+  it("clamps task resource integers and rejects partial/non-positive values", () => {
+    expect(parseBoundedPositiveInt("999999999", 300_000, MAX_TASK_TIMEOUT_MS)).toBe(
+      MAX_TASK_TIMEOUT_MS,
+    );
+    expect(parseBoundedPositiveInt("12ms", 300_000, MAX_TASK_TIMEOUT_MS)).toBe(300_000);
+    expect(parseBoundedPositiveInt("0", 300_000, MAX_TASK_TIMEOUT_MS)).toBe(300_000);
   });
 });
 

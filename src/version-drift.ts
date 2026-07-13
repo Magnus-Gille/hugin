@@ -53,6 +53,56 @@ export interface VersionDriftResult {
   message: string;
 }
 
+export const VERSION_DRIFT_DEDUP_KEY = "hugin-version-drift";
+
+export interface VersionDriftAlertLifecycle {
+  active: boolean;
+  /** True only for active state hydrated by a clean, baseline-ready restart. */
+  restartResolutionPending: boolean;
+}
+
+export const INITIAL_VERSION_DRIFT_ALERT_LIFECYCLE: VersionDriftAlertLifecycle = {
+  active: false,
+  restartResolutionPending: false,
+};
+
+export function hydrateVersionDriftAlertLifecycle(
+  persistedActive: boolean,
+  baselineCaptured: boolean,
+): VersionDriftAlertLifecycle {
+  return {
+    active: persistedActive,
+    restartResolutionPending: persistedActive && baselineCaptured,
+  };
+}
+
+/** A firing created now is never eligible for same-process resolution. */
+export function recordVersionDriftFiring(): VersionDriftAlertLifecycle {
+  return { active: true, restartResolutionPending: false };
+}
+
+/**
+ * A clean restart may resolve a previously delivered drift alert only when the
+ * new process successfully captured a fresh SDK baseline. A failed baseline is
+ * inconclusive and must leave Heimdall firing.
+ */
+export function versionDriftStartupResolution(
+  lifecycle: VersionDriftAlertLifecycle,
+): { state: "resolved"; dedup_key: typeof VERSION_DRIFT_DEDUP_KEY } | null {
+  if (!lifecycle.active || !lifecycle.restartResolutionPending) return null;
+  return { state: "resolved", dedup_key: VERSION_DRIFT_DEDUP_KEY };
+}
+
+/** Delivery and persistence both gate clearing; otherwise the next poll retries. */
+export function recordVersionDriftResolutionAttempt(
+  lifecycle: VersionDriftAlertLifecycle,
+  delivered: boolean,
+  persisted: boolean,
+): VersionDriftAlertLifecycle {
+  if (!delivered || !persisted) return lifecycle;
+  return INITIAL_VERSION_DRIFT_ALERT_LIFECYCLE;
+}
+
 const FIELD_LABELS: Array<{ field: keyof VersionSnapshot; label: string }> = [
   { field: "sdkVersion", label: "sdkVersion" },
   { field: "cliPath", label: "cliPath" },

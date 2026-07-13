@@ -42,6 +42,8 @@ export const RESULT_STRUCTURED_KEY = "result-structured";
 export const RESULT_ERROR_KEY = "result-error";
 /** Durable-handoff evidence for the #165 trial (#164). */
 export const AWAIT_OBSERVATION_KEY = "await-observation";
+const CANONICAL_HISTORY_SCAN_BUDGET = { maxPages: 20, maxResults: 1_000 } as const;
+const CANONICAL_HISTORY_READ_CONCURRENCY = 25;
 export interface TaskStoreConfig {
   munin: MuninClient;
 }
@@ -55,7 +57,7 @@ export interface CanonicalListRow {
 
 export interface CanonicalListResult {
   rows: CanonicalListRow[];
-  /** True when at least one Munin query hit its cap and may have omitted matches. */
+  /** True when a Munin ambiguity or the bounded history budget may omit matches. */
   truncated: boolean;
 }
 
@@ -255,8 +257,16 @@ export class BrokerTaskStore {
       ...(sinceTs ? { since: sinceTs } : {}),
     };
     const [tagged, homeserver] = await Promise.all([
-      queryAllMuninEntries(this.munin, { ...baseOpts, tags: ["broker:mcp-v2"] }),
-      queryAllMuninEntries(this.munin, { ...baseOpts, tags: ["runtime:homeserver"] }),
+      queryAllMuninEntries(
+        this.munin,
+        { ...baseOpts, tags: ["broker:mcp-v2"] },
+        CANONICAL_HISTORY_SCAN_BUDGET,
+      ),
+      queryAllMuninEntries(
+        this.munin,
+        { ...baseOpts, tags: ["runtime:homeserver"] },
+        CANONICAL_HISTORY_SCAN_BUDGET,
+      ),
     ]);
     const truncated = tagged.truncated || homeserver.truncated;
     const namespaces = new Set<string>();
@@ -265,9 +275,22 @@ export class BrokerTaskStore {
     }
 
     const namespaceList = [...namespaces];
-    const entries = await Promise.all(
-      namespaceList.map((namespace) => this.munin.read(namespace, STATUS_KEY)),
-    );
+    const entries = [];
+    for (
+      let offset = 0;
+      offset < namespaceList.length;
+      offset += CANONICAL_HISTORY_READ_CONCURRENCY
+    ) {
+      const chunk = namespaceList.slice(
+        offset,
+        offset + CANONICAL_HISTORY_READ_CONCURRENCY,
+      );
+      entries.push(
+        ...(await Promise.all(
+          chunk.map((namespace) => this.munin.read(namespace, STATUS_KEY)),
+        )),
+      );
+    }
 
     const rows = [];
     for (const entry of entries) {

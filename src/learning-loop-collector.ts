@@ -27,6 +27,7 @@ import {
   learningExperimentStateSchema,
   type LearningExperimentState,
 } from "./learning/experiment-schema.js";
+import { MUNIN_QUERY_MAX, queryAllMuninEntries } from "./munin-pagination.js";
 
 /** Dashboard-facing data: refresh a few times an hour, not every 60s poll. */
 export const DEFAULT_COLLECT_TTL_MS = 300_000;
@@ -226,25 +227,31 @@ export class LearningLoopCollector {
     // A FAILED query is not an empty corpus. If we cannot enumerate the tasks,
     // say the corpus is unavailable — never let it collapse into a confident
     // zero downstream.
+    const budget = {
+      maxPages: Math.max(1, Math.ceil(this.maxTasks / MUNIN_QUERY_MAX)),
+      maxResults: this.maxTasks,
+    };
     const [tagged, homeserver] = await Promise.all([
-      this.munin
-        .query({
-          query: "task",
+      queryAllMuninEntries(
+        this.munin,
+        {
           tags: ["broker:mcp-v2"],
           namespace: "tasks/",
           entry_type: "state",
-          limit: this.maxTasks,
-        })
+        },
+        budget,
+      )
         .then((r) => ({ ok: true as const, r }))
         .catch(() => ({ ok: false as const })),
-      this.munin
-        .query({
-          query: "task",
+      queryAllMuninEntries(
+        this.munin,
+        {
           tags: ["runtime:homeserver"],
           namespace: "tasks/",
           entry_type: "state",
-          limit: this.maxTasks,
-        })
+        },
+        budget,
+      )
         .then((r) => ({ ok: true as const, r }))
         .catch(() => ({ ok: false as const })),
     ]);
@@ -262,7 +269,12 @@ export class LearningLoopCollector {
     ];
     const namespaces = all.slice(0, this.maxTasks);
     // A cap that hides what it dropped turns a lower bound into a fact.
-    const truncated = all.length > namespaces.length || !tagged.ok || !homeserver.ok;
+    const truncated =
+      all.length > namespaces.length ||
+      !tagged.ok ||
+      !homeserver.ok ||
+      (tagged.ok && tagged.r.truncated) ||
+      (homeserver.ok && homeserver.r.truncated);
 
     const tasks: ProductTaskEvidence[] = [];
     let readFailures = 0;

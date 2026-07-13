@@ -24,6 +24,10 @@ export interface WorkspaceRoots {
   workspace?: string;
 }
 
+/** Hard dispatcher resource ceilings for ordinary (non-Broker) task fields. */
+export const MAX_TASK_TIMEOUT_MS = 43_200_000; // 12h
+export const MAX_TASK_OUTPUT_TOKENS = 32_768;
+
 /** Strip any trailing slashes so `${root}/` composition is unambiguous. */
 export function normalizeRoot(root: string): string {
   return root.replace(/\/+$/, "");
@@ -42,14 +46,14 @@ export function normalizeRoot(root: string): string {
  * the original hardcoded `/home/magnus/repos` + `/home/magnus/workspace`.
  */
 export function resolveContext(raw: string, roots: WorkspaceRoots = {}): string {
-  const reposRoot = normalizeRoot(roots.reposRoot ?? DEFAULT_REPOS_ROOT);
-  const workspace = roots.workspace ?? DEFAULT_WORKSPACE;
+  const reposRoot = path.resolve(normalizeRoot(roots.reposRoot ?? DEFAULT_REPOS_ROOT));
+  const workspace = path.resolve(roots.workspace ?? DEFAULT_WORKSPACE);
   const trimmed = raw.trim();
   if (trimmed.startsWith("repo:")) {
     const name = trimmed.slice(5);
-    const resolved = path.resolve(`${reposRoot}/${name}`);
+    const resolved = path.resolve(reposRoot, name);
     // Guard against traversal (e.g. repo:../../tmp) escaping the repos root.
-    if (!resolved.startsWith(`${reposRoot}/`)) {
+    if (!resolved.startsWith(`${reposRoot}${path.sep}`)) {
       return workspace;
     }
     return resolved;
@@ -58,15 +62,41 @@ export function resolveContext(raw: string, roots: WorkspaceRoots = {}): string 
     case "scratch": return "/home/magnus/scratch";
     case "files": return "/home/magnus/mimir";
     default: {
-      // Only allow absolute paths under /home/magnus/; reject others
-      if (trimmed.startsWith("/home/magnus/")) return trimmed;
-      if (trimmed.startsWith("/")) {
+      // Normalize before checking the prefix. A lexical prefix check alone
+      // accepts `/home/magnus/../../etc`, which later filesystem calls resolve
+      // outside the intended workspace boundary.
+      if (path.isAbsolute(trimmed)) {
+        const resolved = path.resolve(trimmed);
+        if (resolved.startsWith(`/home/magnus${path.sep}`)) return resolved;
         console.warn(`Context path outside /home/magnus/ rejected: ${trimmed}`);
         return workspace;
       }
       return workspace;
     }
   }
+}
+
+/** Apply the same path policy to both Context and the legacy Working dir field. */
+export function resolveTaskWorkingDirectory(
+  context: string | undefined,
+  workingDir: string | undefined,
+  roots: WorkspaceRoots = {},
+): string {
+  const fallback = path.resolve(roots.workspace ?? DEFAULT_WORKSPACE);
+  if (context) return resolveContext(context, roots);
+  if (workingDir) return resolveContext(workingDir, { ...roots, workspace: fallback });
+  return fallback;
+}
+
+/** Parse a positive integer and clamp it to a caller-owned hard ceiling. */
+export function parseBoundedPositiveInt(
+  raw: string | number | undefined,
+  fallback: number,
+  max: number,
+): number {
+  const parsed = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return fallback;
+  return Math.min(parsed, max);
 }
 
 export function getFoundBatchEntry(

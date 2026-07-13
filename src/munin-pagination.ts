@@ -14,10 +14,22 @@ export interface MuninFilterQueryOptions {
 export interface MuninPaginatedQueryResult {
   results: MuninQueryResult[];
   /**
-   * True only when an exact updated_at bucket itself reaches Munin's cap.
-   * Without a composite cursor, that bucket cannot be proven complete.
+   * True whenever the walk cannot prove the returned result set is complete,
+   * including exact-timestamp ambiguity, caller budget exhaustion, or a
+   * malformed page cursor. Use `budgetExhausted` for the caller-limit case.
    */
   truncated: boolean;
+  /** True when caller limits, rather than the corpus end, stopped the walk. */
+  budgetExhausted: boolean;
+  /** Cursor immediately before the oldest returned row, for a later sweep. */
+  continuationUntil?: string;
+}
+
+export interface MuninPaginationBudget {
+  /** Maximum ordinary pages to request. Exact-boundary probes are additional. */
+  maxPages?: number;
+  /** Maximum unique rows returned to the caller. */
+  maxResults?: number;
 }
 
 function normalizeIsoTimestamp(value: string | undefined): string | undefined {
@@ -54,13 +66,17 @@ function addResults(
 export async function queryAllMuninEntries(
   munin: Pick<MuninClient, "query">,
   options: MuninFilterQueryOptions,
+  budget: MuninPaginationBudget = {},
 ): Promise<MuninPaginatedQueryResult> {
   const since = normalizeIsoTimestamp(options.since);
   let until = normalizeIsoTimestamp(options.until);
   const unique = new Map<string, MuninQueryResult>();
   let truncated = false;
+  let budgetExhausted = false;
+  let pages = 0;
 
   while (true) {
+    pages += 1;
     const page = await munin.query({
       tags: options.tags,
       namespace: options.namespace,
@@ -93,6 +109,18 @@ export async function queryAllMuninEntries(
     addResults(unique, boundaryPage.results);
     if (boundaryPage.results.length >= MUNIN_QUERY_MAX) truncated = true;
 
+    if (
+      (budget.maxPages !== undefined && pages >= budget.maxPages) ||
+      (budget.maxResults !== undefined && unique.size >= budget.maxResults)
+    ) {
+      // A full page means another older page may exist. Stop honestly at the
+      // caller's work budget instead of allowing history/recovery surfaces to
+      // grow without bound.
+      truncated = true;
+      budgetExhausted = true;
+      break;
+    }
+
     const previousMillisecond = Date.parse(boundary) - 1;
     if (!Number.isFinite(previousMillisecond)) {
       truncated = true;
@@ -108,5 +136,32 @@ export async function queryAllMuninEntries(
     until = nextUntil;
   }
 
-  return { results: [...unique.values()], truncated };
+  const results = [...unique.values()].sort((a, b) => {
+    const byTime = (b.updated_at ?? "").localeCompare(a.updated_at ?? "");
+    return byTime || resultIdentity(a).localeCompare(resultIdentity(b));
+  });
+  if (budget.maxResults !== undefined && results.length > budget.maxResults) {
+    results.length = budget.maxResults;
+    truncated = true;
+    budgetExhausted = true;
+  }
+  let continuationUntil: string | undefined;
+  if (budgetExhausted) {
+    const oldestTimestamp = results
+      .map((entry) => Date.parse(entry.updated_at))
+      .filter(Number.isFinite)
+      .reduce<number | null>(
+        (oldest, value) => oldest === null || value < oldest ? value : oldest,
+        null,
+      );
+    if (oldestTimestamp !== null) {
+      continuationUntil = new Date(oldestTimestamp - 1).toISOString();
+    }
+  }
+  return {
+    results,
+    truncated,
+    budgetExhausted,
+    ...(continuationUntil ? { continuationUntil } : {}),
+  };
 }

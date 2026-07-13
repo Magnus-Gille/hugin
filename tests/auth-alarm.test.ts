@@ -3,6 +3,7 @@ import {
   AUTH_ALARM_DEDUP_KEY,
   AUTH_EXPIRY_DEDUP_KEY,
   INITIAL_AUTH_ALARM_STATE,
+  alertDeliveryCommitsTransition,
   decideAuthAlarm,
   type AuthAlarmState,
 } from "../src/auth-alarm.js";
@@ -60,7 +61,7 @@ describe("decideAuthAlarm — edge-triggered auth transitions", () => {
     expect(nextState.lastAuth).toBe("unauthorized");
   });
 
-  it("fires one recovery info alert on unauthorized → ok", () => {
+  it("resolves the firing auth alert on confirmed unauthorized → ok", () => {
     const prev: AuthAlarmState = { lastAuth: "unauthorized", expiryWarned: false };
     const { alerts, nextState } = decideAuthAlarm(
       prev,
@@ -68,8 +69,10 @@ describe("decideAuthAlarm — edge-triggered auth transitions", () => {
       opts,
     );
     expect(alerts).toHaveLength(1);
-    expect(alerts[0].severity).toBe("info");
-    expect(alerts[0].dedup_key).toBe(AUTH_ALARM_DEDUP_KEY);
+    expect(alerts[0]).toEqual({
+      state: "resolved",
+      dedup_key: AUTH_ALARM_DEDUP_KEY,
+    });
     expect(nextState.lastAuth).toBe("ok");
   });
 
@@ -109,15 +112,45 @@ describe("decideAuthAlarm — impending-expiry warning", () => {
     expect(alerts).toHaveLength(0);
   });
 
-  it("re-arms the warning when a fresh token pushes expiry beyond the window", () => {
+  it("resolves and re-arms the warning when expiry moves beyond the window", () => {
     const prev: AuthAlarmState = { lastAuth: "ok", expiryWarned: true };
     const { alerts, nextState } = decideAuthAlarm(
       prev,
       { auth: "ok", expiresAtMs: farExpiry },
       opts,
     );
-    expect(alerts).toHaveLength(0);
+    expect(alerts).toEqual([{
+      state: "resolved",
+      dedup_key: AUTH_EXPIRY_DEDUP_KEY,
+    }]);
     expect(nextState.expiryWarned).toBe(false);
+  });
+
+  it("resolves expiry only when refresh-token evidence proves hard expiry is not applicable", () => {
+    const prev: AuthAlarmState = { lastAuth: "ok", expiryWarned: true };
+    const { alerts, nextState } = decideAuthAlarm(
+      prev,
+      { auth: "unknown", expiresAtMs: null, expiryEvidence: "not-applicable" },
+      opts,
+    );
+    expect(alerts).toEqual([{
+      state: "resolved",
+      dedup_key: AUTH_EXPIRY_DEDUP_KEY,
+    }]);
+    expect(nextState.expiryWarned).toBe(false);
+    // Auth remained inconclusive; expiry evidence must not fake auth recovery.
+    expect(nextState.lastAuth).toBe("ok");
+  });
+
+  it("does not clear an active expiry warning when expiresAtMs:null is unknown", () => {
+    const prev: AuthAlarmState = { lastAuth: "ok", expiryWarned: true };
+    const { alerts, nextState } = decideAuthAlarm(
+      prev,
+      { auth: "ok", expiresAtMs: null, expiryEvidence: "unknown" },
+      opts,
+    );
+    expect(alerts).toEqual([]);
+    expect(nextState.expiryWarned).toBe(true);
   });
 
   it("does not warn when expiry is unknown (null)", () => {
@@ -139,5 +172,21 @@ describe("decideAuthAlarm — impending-expiry warning", () => {
       opts,
     );
     expect(alerts).toHaveLength(0);
+  });
+});
+
+describe("alert delivery gating", () => {
+  it("retries a resolution unless Ratatoskr confirms delivery", () => {
+    const resolution = { state: "resolved" as const, dedup_key: AUTH_ALARM_DEDUP_KEY };
+    expect(alertDeliveryCommitsTransition(resolution, "delivered")).toBe(true);
+    expect(alertDeliveryCommitsTransition(resolution, "skipped")).toBe(false);
+    expect(alertDeliveryCommitsTransition(resolution, "failed")).toBe(false);
+  });
+
+  it("preserves the existing log-only terminal behavior for firing alerts", () => {
+    const firing = { title: "Auth invalid", dedup_key: AUTH_ALARM_DEDUP_KEY };
+    expect(alertDeliveryCommitsTransition(firing, "delivered")).toBe(true);
+    expect(alertDeliveryCommitsTransition(firing, "skipped")).toBe(true);
+    expect(alertDeliveryCommitsTransition(firing, "failed")).toBe(false);
   });
 });

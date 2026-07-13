@@ -44,6 +44,7 @@ Content format:
 - **Context:** repo:heimdall
 - **Working dir:** /home/magnus/workspace
 - **Timeout:** 300000
+- **Max output tokens:** 4096
 - **Submitted by:** Codex-desktop
 - **Submitted at:** 2026-03-14T10:00:00Z
 - **Reply-to:** telegram:12345678
@@ -61,7 +62,7 @@ Content format:
 <the actual prompt for the AI runtime>
 ```
 
-**Context resolution:** `Context:` takes priority over `Working dir:` for determining the working directory. Supported aliases:
+**Context resolution:** `Context:` takes priority over `Working dir:` for determining the working directory. Both fields use the same path guard; relative paths and normalized paths outside `/home/magnus/` fall back to the configured workspace. Supported aliases:
 - `repo:<name>` → `<HUGIN_REPOS_ROOT>/<name>` (default `/home/magnus/repos/<name>`; see `HUGIN_REPOS_ROOT` in the env table — point it at an isolated tree to keep tasks off production checkouts, #139)
 - `scratch` → `/home/magnus/scratch` (non-code tasks)
 - `files` → `/home/magnus/mimir`
@@ -76,7 +77,9 @@ Content format:
 - `Reasoning:` — `true` to force `think:true` via native `/api/chat`, `false` to force `think:false`. Omit to auto: reasoning-model families (qwen3/3.5, deepseek-r1, magistral) default to `think:false` via `/api/chat`; other models use the OpenAI-compatible endpoint unchanged. `gpt-oss` uses level-based reasoning and is not auto-routed.
 - `Fallback:` — `claude` to fall back to claude on infra failures (host unreachable, 5xx); `none` (default) to fail without fallback. Semantic failure (model responds but poorly) is never retried — that's experiment data.
 - `Context-refs:` — comma-separated Munin references (`namespace/key`) to fetch and inject into the prompt. Hugin enforces Munin classification against the task/runtime trust boundary before injecting them.
-- `Context-budget:` — max characters for injected context (default 8000). Truncated from end if exceeded.
+- `Context-budget:` — max characters for injected context (default 8000, hard cap 100000). At most 50 refs are read; excess content/refs are reported as truncated.
+- `Max output tokens:` — hard generation cap for ollama and homeserver tasks (maximum 32768).
+- `Timeout:` — positive milliseconds, clamped to a 12-hour dispatcher ceiling (Broker envelopes retain their stricter 15-minute schema cap).
 
 **Type tags:** Tags matching `type:*` (e.g., `type:research`, `type:email`) are carried forward through the task lifecycle (pending → running → completed/failed).
 
