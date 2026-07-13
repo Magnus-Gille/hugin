@@ -1,7 +1,59 @@
 # Hugin — Status
 
-**Latest session:** 2026-07-12 (Codex: deploy source hardening, issue #187)
-**Branch:** `codex/hugin-187-node-modules-symlink` from `main@565f9e6`; PR pending.
+**Latest session:** 2026-07-13 (Claude) — **M5-harvest campaign (`m5h-2026-07`): 9 tickets, 10 PRs, ~92 graded delegations, shadow lane live**
+**Branch:** `main` @ `977e851` + this handoff; hugin deployed to Pi (health `ok`, polling, queue 0).
+
+## Latest — M5-harvest campaign (2026-07-12/13)
+
+**Goal:** solve real tickets slowly while routing every bounded sub-task through the graded broker
+loop (`hugin_submit` → `await` → self-verify → `hugin_rate`), to harvest per-task-type evidence of
+what the M5 can actually do. Vehicle: ticket-fleet headless sessions (one worktree per ticket, cap
+2–3), broker-only delegation (`mcp__m5__ask` deliberately NOT allowlisted — it has no rating path).
+New fleet scripts: `~/.claude/skills/ticket-fleet/scripts/{run,continue}-ticket-broker.sh`.
+
+**Shipped (all Codex/Sol cross-reviewed, all merged):** #179 (deploy-pi warning #153), #180
+(version-drift #123), #182 (hugin_list crowd-out #181), #185 (verifier-or-rubric warning #184);
+gille-inference #228 (id-addressable ledger #227), #230 (#200), #231 (#229), #232 (#119), #237
+(ledger evidence honesty #233), #238 (shadow lane #234, by Codex), #242 (taxonomy #198).
+
+**Harvest results (66-leaf two-plane join, ledger × product ratings):**
+- `mellum` did 52 leaves (30 verified pass, 1 fail, 21 unverified); `qwen3-coder-next-80b` did all 6
+  `rewrite` leaves; 8 leaves were frontier-escalated.
+- Reliable: `extract` (9/9 pass), `data-transform`, `claim-verify`, `unit-test-gen`.
+- Weak: `qa-factual`/`classify` produce *confident* wrong answers; `rewrite` always needs editing
+  (and it already runs on the 80b — that is a model ceiling, not a routing gap).
+- **45% of non-escalated leaves landed `unverified`** because acceptance defaulted to `l1_review`.
+  Attaching mechanical verifiers is the single biggest evidence lever → that is what #184/#185 and
+  the wave-3 appendix rules address.
+- M5's verifiers check *format, not truth* → capability-plane inflation on judgment types
+  (gi#233/#237 now label verifier kind and surface `unverifiedShare`/`formatOnlyShare`).
+
+**Shadow lane is LIVE (gi#234/#238):** deployed to the M5 and enabled with
+`HOMESERVER_SHADOW_LANE=on`, `HOMESERVER_SHADOW_LANE_TASK_TYPES=code-review`. Proven end to end:
+6 shadow rows in the first hour, including the **first graded local code-review evidence**
+(`mellum`, pass, score 1, via a `containsAll` verifier). Escalated tasks WITHOUT a verifier produce
+*ungraded* shadow rows — so code-review delegations should always carry one.
+
+**Bugs the campaign found in its own infrastructure:** #181 (list crowd-out — caused by the
+campaign's own rating writes; fixed+deployed), #183 (Munin pagination ceiling; Sol's two failure
+scenarios recorded as acceptance criteria), #187 (deploy symlink incident; fixed via #189),
+**#190 (NEW, open — dispatcher claim order starves older pending tasks under fleet load; a smoke
+task starved 17 min behind 12+ younger claims)**, #191 (mirror `draft`/`conversation` task types).
+
+**Coordination note:** Codex worked the same backlog in parallel and both agents solved #187
+independently (#188 vs #189). #189 merged; the fleet's #188 was correctly closed as superseded.
+**Lane assignment between Codex and the fleet is an open question for Magnus.**
+
+**Next:** (1) settle Codex-vs-fleet lanes; (2) redeploy the gateway for #242, then land #191;
+(3) fix #190; (4) wave 5 — gi#201 prompt is ready and unstarted; steer future waves at the 9 empty
+taxonomy cells (`sql`, `translate`, `reason-math`, `reason-hard`, `plan-decompose`, `triage`,
+`memory-decision`, `research-plan`, `gap-check`) and at the M5 **harness** lane (`pi`/opencode/
+`code_loop`), which this campaign never exercised — all 66 leaves were one-shot completions.
+
+---
+
+**Previous session:** 2026-07-12 (Codex: deploy source hardening, issue #187)
+**Branch:** `codex/hugin-187-node-modules-symlink` from `main@565f9e6`; merged as `977e851`.
 
 ## Latest — `node_modules` worktree symlinks rejected before deploy mutation (#187)
 
