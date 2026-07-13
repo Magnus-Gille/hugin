@@ -39,7 +39,26 @@ describe("M5CodeLoopClient", () => {
       fetchImpl: (async () => rpcResult({ refusal: "busy" }, true)) as typeof fetch,
     });
     await expect(client.start({ instruction: "fix", files: [{ path: "a", content: "b" }] }))
-      .rejects.toMatchObject({ name: "M5CodeLoopError", detail: { refusal: "busy" } });
+      .rejects.toMatchObject({
+        name: "M5CodeLoopError",
+        detail: { refusal: "busy" },
+        ambiguousOutcome: false,
+      });
+  });
+
+  it("marks transport failures as ambiguous for mutating calls", async () => {
+    const client = new M5CodeLoopClient({
+      endpoint: "http://m5.test:8080/mcp",
+      bearerToken: "x",
+      fetchImpl: (async () => {
+        throw new TypeError("connection reset");
+      }) as typeof fetch,
+    });
+    await expect(client.start({ instruction: "fix", files: [{ path: "a", content: "b" }] }))
+      .rejects.toMatchObject({
+        name: "M5CodeLoopError",
+        ambiguousOutcome: true,
+      });
   });
 
   it("rejects unsafe or wrong-path endpoints", () => {

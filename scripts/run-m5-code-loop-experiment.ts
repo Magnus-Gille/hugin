@@ -32,12 +32,14 @@ import {
   observationFromM5CodeLoop,
   type M5CodeLoopResult,
 } from "../src/learning/m5-code-loop-adapter.js";
+import { observeDurably } from "../src/learning/durable-observation.js";
 import {
   applyCodeLoopPromptPrefix,
   codeLoopPromptSha256,
 } from "../src/learning/m5-code-loop-prompt.js";
 import {
   M5CodeLoopClient,
+  M5CodeLoopError,
   type M5CodeLoopRequest,
 } from "../src/learning/m5-code-loop-client.js";
 
@@ -324,7 +326,19 @@ async function runArm(input: {
     caps: manifest.arms[arm].caps,
   };
   process.stdout.write(`[${sample.id}/${arm}] starting\n`);
-  const started = await m5.start(request);
+  let started: Awaited<ReturnType<M5CodeLoopClient["start"]>>;
+  try {
+    started = await m5.start(request);
+  } catch (error) {
+    if (error instanceof M5CodeLoopError && error.ambiguousOutcome) {
+      throw new Error(
+        `[${sample.id}/${arm}] M5 start outcome is ambiguous for run ${runId}; ` +
+        "do not blindly rerun. Reconcile the recent M5 work id before resuming.",
+        { cause: error },
+      );
+    }
+    throw error;
+  }
   const deadline = Date.now() + manifest.result_deadline_s * 1_000;
   for (;;) {
     await sleep(manifest.poll_ms);
@@ -355,7 +369,12 @@ async function runArm(input: {
     },
     externalVerification,
   });
-  await broker.experimentObserve(observation);
+  const persisted = await observeDurably(broker, observation);
+  if (persisted.reconciled) {
+    process.stdout.write(
+      `[${sample.id}/${arm}] observation reconciled after an ambiguous broker response\n`,
+    );
+  }
   process.stdout.write(
     `[${sample.id}/${arm}] ${observation.quality_outcome}; edit=${observation.edit_start_ms ?? "unmeasured"}ms; work=${result.work_id}\n`,
   );
