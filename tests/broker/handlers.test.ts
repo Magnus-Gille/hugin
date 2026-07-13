@@ -147,6 +147,20 @@ describe("buildBrokerApp", () => {
 });
 
 describe("POST /v1/delegate/submit", () => {
+  it.each(["draft", "conversation"])(
+    "accepts the additive M5 task type %s",
+    async (taskType) => {
+      const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(validRequest({ task_type: taskType })),
+      });
+
+      expect(res.status).toBe(202);
+      expect(harness.munin.writes[0]?.content).toContain(`\"task_type\": \"${taskType}\"`);
+    },
+  );
+
   it("accepts a valid envelope, returns 202 with task_id", async () => {
     const res = await fetch(`${harness.url}/v1/delegate/submit`, {
       method: "POST",

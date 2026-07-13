@@ -19,6 +19,7 @@ export const aliasSchema = z.enum([
 export type Alias = z.infer<typeof aliasSchema>;
 
 export const taskTypeSchema = z.enum([
+  "draft",
   "code-implement",
   "code-edit",
   "code-review",
@@ -42,6 +43,7 @@ export const taskTypeSchema = z.enum([
   "claim-verify",
   "gap-check",
   "synthesis",
+  "conversation",
   "other",
 ]);
 export type TaskType = z.infer<typeof taskTypeSchema>;
