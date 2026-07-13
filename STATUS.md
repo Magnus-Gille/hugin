@@ -1,51 +1,63 @@
 # Hugin — Status
 
-**Latest session:** 2026-07-13 (Codex) — **first live M5 learning iteration rejected safely; prompt-axis runner support validated locally**
-**Branch/worktree:** `codex/gate-d-prompt-prefix` in `/private/tmp/hugin-gate-d-prompt-prefix`, based on exact `origin/main@d5eb909267111590c7b4b2442794197334fbedb2` (#199).
+**Latest session:** 2026-07-13 (Codex) — **GitHub-independent overnight dev screen completed; evaluator and transport recovery hardened locally**
+**Branch/worktree:** `codex/gate-d-prompt-prefix` in `/private/tmp/hugin-gate-d-prompt-prefix`, with implementation through local-only `79db404` plus this STATUS handoff, on exact `origin/main@d5eb909267111590c7b4b2442794197334fbedb2` (#199). Implementation commits are `56ba7b0` (bound prompt prefixes) and `79db404` (durable observation recovery + numeric gate fix); neither is pushed.
 
-## Latest — evidence-driven iteration 1 and honest preparation for iteration 2
+## Latest — development prompt evidence plus two failures converted into harness improvements
 
-- Approved owner/principal credentials were provisioned directly into macOS
-  Keychain (`hs-m5/owner`, `hugin-broker/claude-code`) without printing or file
-  persistence. The first live experiment,
-  `gate-d-edit-deadline-v1-20260713`, completed all 10 matched Gate D pairs (20
-  `qwen3-coder-next-80b` code-loop executions), including two holdouts, with 100%
-  independent-verifier and product-rating coverage.
-- The turn-6 edit-deadline challenger improved mean edit-start from 13,325.5 ms
-  to 11,848.8 ms (11.08%, clearing the 10% target) and reduced mean latency from
-  35,315.7 ms to 26,931.9 ms. It nevertheless reduced quality/usefulness from
-  0.9 to 0.8 and raised rescue rate from 0.1 to 0.2. Hugin rejected it on all
-  three strict monotonic guards. The champion remains unchanged; no promotion
-  was attempted.
-- Re-fetched the three failed work results and reran the deterministic verifier.
-  Both sample-04 arms exhausted the 13-turn cap with an unresolved `formatJson`
-  TypeScript error; challenger sample 05 completed with an invalid Node
-  `assert` import. Gate D's external typecheck caught every failure.
-- The next one-axis hypothesis is a content-bound prompt prefix requiring a
-  clean pre-finish `tsc --noEmit` pass and correction of any errors. The runner
-  now supports local-only per-arm `prompt_prefix_file` content, hashes every
-  byte into the versioned prompt ref, preserves the previous passthrough prompt
-  byte-for-byte, and rejects fingerprint drift before creating an experiment or
-  calling M5. Focused tests, old-manifest compatibility dry-run, valid-prefix
-  dry-run, deliberate tamper rejection, standalone runner typecheck, TypeScript
-  build, and the full suite (104 files / 1,732 tests) pass.
-- A second paid run is intentionally not using the old ten cases: holdout 05
-  informed the new prompt, so those holdouts are contaminated. The M5-owning
-  repo forbids this Hugin agent from editing its corpus directly; routed
-  gille-inference issue #250 requests at least four fresh, model-unseen,
-  deterministic Gate D cases with exact acceptance criteria.
-- Independently verified merged #199 live: remote marker equals exact
-  `d5eb909267111590c7b4b2442794197334fbedb2`, remote `.git` is intentionally
-  absent, user service health is `ok`, polling is true, queue depth is 0, and
-  all three inference hosts are available. The earlier remote-Git preflight
-  branch is superseded and must not be published.
+- The production-scope experiment `gate-d-edit-deadline-v1-20260713` remains
+  safely rejected. Its turn-6 challenger improved edit-start by 11.08% but
+  reduced quality/usefulness from 0.9 to 0.8 and increased rescue from 0.1 to
+  0.2. The production champion remains unchanged and no promotion was attempted.
+- A separate, explicitly non-production experiment,
+  `gate-d-typecheck-prompt-dev-v1-20260713` (`scope: m5-code-edit-dev`), screened
+  the content-bound pre-finish TypeScript-check prefix on the already observed,
+  contaminated ten-case Gate D corpus. All 20 matched
+  `qwen3-coder-next-80b` arms completed with independent verification and
+  mechanical ratings. Challenger quality/usefulness was 10/10 versus champion
+  9/10; mean latency was 22,863.0 versus 36,969.9 ms and edit-start was 12,472.1
+  versus 15,801.9 ms. This is candidate-screening evidence only and must never
+  drive production promotion.
+- Hugin nevertheless recorded that dev experiment as `rejected`: exact +0.10
+  quality became `0.09999999999999998` under IEEE-754 and missed the configured
+  `0.1` threshold. Local commit `79db404` makes all evaluator boundary
+  comparisons tolerant only to a handful of machine epsilons and adds both an
+  exact-boundary promotion regression and a materially-below-threshold negative
+  regression. The already terminal dev experiment was not rewritten or promoted.
+- The lone champion failure (sample 09) exhausted the turn cap and left the word
+  `widget` in a comment; Gate D's structural oracle correctly rejected it. The
+  prompt asked for TypeScript verification, so this win does not prove the
+  prefix caused the improvement. In the decisive results M5 reported
+  `check.ran:false` even when the agent summary claimed TypeScript/tests passed;
+  Hugin currently cannot prove which agent-side check command actually ran.
+  Fresh unseen cases from gille-inference #250 and content-blind agent tool/check
+  execution telemetry are required before causal or promotion claims.
+- Two real transport failures sharpened the runner. An M5 start response was
+  lost after the work had completed; the job was identified as
+  `cl-20260713-33167799`, independently reverified, and recorded exactly once.
+  A later Broker observation response timed out after the final observation had
+  committed; durable status showed all 20 observations. `79db404` now reconciles
+  ambiguous observation writes by exact `run_id` + evidence before retrying and
+  marks mutating M5 transport failures as ambiguous. Because M5 start has no
+  client idempotency key/request fingerprint, the runner now stops with the
+  bound experiment run ID and explicitly forbids a blind rerun.
+- Prompt support in `56ba7b0` remains intact: local-only per-arm
+  `prompt_prefix_file`, exact prompt-byte SHA-256 binding, unchanged passthrough
+  compatibility, and fail-closed tamper detection. Dev artifacts are under
+  `/tmp/gate-d-typecheck-prompt-dev-v1/` while that temporary directory exists.
+- Final local verification: TypeScript build, manifest dry-run with exact corpus
+  `341cebdb...e8b3b`, `git diff --check`, focused recovery/evaluator/client tests,
+  and the full suite (105 files / 1,739 tests) pass. Production remains exact
+  `d5eb909267111590c7b4b2442794197334fbedb2`; no push, PR, merge, deploy, or
+  production champion mutation occurred. GitHub CLI authentication is still invalid.
 
-**Next:** obtain the fresh corpus through gille-inference #250, predeclare its
-holdouts before any model run, generate/dry-run the prompt-only manifest, then
-run and rate the matched experiment. Keep the champion unless every protected
-gate passes. The current Hugin runner changes remain local; GitHub CLI
-authentication is still invalid, so do not begin a publish flow until it is
-re-authenticated or an explicitly approved connector-only flow is chosen.
+**Next:** (1) have the gille-inference owner land #250's fresh, model-unseen
+deterministic cases; (2) add M5-side idempotent `client_run_id` + request binding
+and content-blind agent check-execution telemetry in the owning repo; (3) after
+GitHub authentication returns, publish the two local Hugin commits for
+independent review; (4) predeclare fresh holdouts, regenerate/dry-run a
+prompt-only manifest, and run a production-scope experiment exactly once. Keep
+the current champion unless every strict gate passes on uncontaminated evidence.
 
 ---
 
