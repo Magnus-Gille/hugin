@@ -1,8 +1,9 @@
 # Hugin — Status
 
 **Latest session (2026-07-13, Codex) — continuous Hugin/M5 improvement loop + Gate D adapter
-implemented locally.** Branch `codex/continuous-harness-learning-loop` from `main@d589449`;
-changes are currently uncommitted, not published, and not deployed.
+published for review.** Draft PR [#196](https://github.com/Magnus-Gille/hugin/pull/196) from
+`codex/continuous-harness-learning-loop`; implementation commit `916b689`, reconciled with
+`origin/main@8b1bfdd`. Not merged or deployed.
 
 Hugin now has a durable, principal-isolated champion/challenger experiment ledger under
 `experiments/hugin/*`, exposed through five authenticated Broker/MCP operations: create, observe,
@@ -37,17 +38,19 @@ existing ten-case Gate D battery. The owning M5 work (phase telemetry, immutable
 metadata, and optional edit-deadline policy) is filed as gille-inference #247 and added to the
 Grimnir Roadmap with the exact wire contract.
 
-Validation: `npm run build`, standalone runner typecheck, focused integration/unit suite (103 tests
-after the last adapter hardening), full `npm test` (**101 files / 1,693 tests**), and
-`git diff --check` are green. No production state or M5 configuration was changed. A live run was
+Validation after merging current `origin/main`: `npm run build`, standalone runner typecheck,
+focused integration/unit suite (103 tests after the last adapter hardening), full `npm test`
+(**102 files / 1,700 tests**), and `git diff --check` are green. No production state or M5
+configuration was changed. A live run was
 not started: #247 is not implemented/deployed, this Hugin branch is not deployed, and this laptop's
 `m5-auth` helper reports no owner token in Keychain. The credential boundary was not bypassed.
 
-**Next:** publish/review/merge this Hugin branch; implement/review/deploy gille-inference #247;
-provision the M5 owner key via `m5-auth` (Keychain, never a file); deploy Hugin; generate and
-dry-run the ten-case Gate D manifest with two predeclared holdouts; then run current 13-turn champion
-versus the identical turn-6 edit-deadline challenger. Collect product ratings and keep the champion
-unless every paired protected-check, coverage, and non-regression gate passes.
+**Next:** review/merge PR #196; implement/review/deploy
+[gille-inference #247](https://github.com/Magnus-Gille/gille-inference/issues/247); provision the
+M5 owner key via `m5-auth` (Keychain, never a file); deploy Hugin; generate and dry-run the ten-case
+Gate D manifest with two predeclared holdouts; then run current 13-turn champion versus the identical
+turn-6 edit-deadline challenger. Collect product ratings and keep the champion unless every paired
+protected-check, coverage, and non-regression gate passes.
 
 **Latest session:** 2026-07-13 (Claude) — **M5-harvest campaign (`m5h-2026-07`): 9 tickets, 10 PRs, ~92 graded delegations, shadow lane live**
 **Branch:** `main` @ `977e851` + this handoff; hugin deployed to Pi (health `ok`, polling, queue 0).
