@@ -149,7 +149,7 @@ assert_contains "$calls" "--exclude=tests/" "rsync retains the tests exclusion"
 assert_contains "$calls" "--exclude=.DS_Store" "rsync retains the .DS_Store exclusion"
 assert_contains "$calls" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "normal deployment invalidates the old marker before rsync"
 assert_order "$calls" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "rsync " "normal deployment invalidates the marker before rsync"
-assert_not_contains "$calls" "npm install --omit=dev" "rsync failure stops before later remote mutation"
+assert_not_contains "$calls" "npm ci --omit=dev" "rsync failure stops before later remote mutation"
 assert_not_contains "$calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "rsync failure remains markerless"
 
 # A deploy payload must be one clean, addressable local commit. Reject both a
@@ -199,7 +199,7 @@ export FAKE_RSYNC_RC=42
 assert_contains "$sync_dirty_output" "changed during sync" "post-sync failure explains source drift"
 sync_dirty_calls="$(cat "$CALL_LOG")"
 assert_contains "$sync_dirty_calls" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "sync-drift deployment invalidates the old marker"
-assert_not_contains "$sync_dirty_calls" "npm install --omit=dev" "source drift during rsync fails before remote install"
+assert_not_contains "$sync_dirty_calls" "npm ci --omit=dev" "source drift during rsync fails before remote install"
 assert_not_contains "$sync_dirty_calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "source drift during rsync remains markerless"
 
 # Prove the exclusion semantics themselves against a real rsync: even if the
@@ -243,6 +243,8 @@ assert_contains "$full_calls" "rm -f '/home/magnus/repos/hugin/.deployed-commit'
 assert_order "$full_calls" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "rsync " "marker invalidation precedes payload sync"
 assert_not_contains "$full_calls" "git fetch origin" "deployment never depends on remote Git fetch"
 assert_not_contains "$full_calls" "git reset" "deployment never depends on a remote Git checkout"
+assert_contains "$full_calls" "npm ci --omit=dev" "deployment installs the shipped lockfile deterministically"
+assert_not_contains "$full_calls" "npm install --omit=dev" "deployment never rewrites the shipped lockfile with npm install"
 assert_contains "$full_calls" "curl -fsS http://127.0.0.1:3032/health" "deployment retains the health acceptance gate"
 assert_contains "$full_calls" "$full_sha" "deployment stamps the exact local full SHA"
 assert_order "$full_calls" "curl -fsS http://127.0.0.1:3032/health" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "health acceptance precedes atomic marker stamp"

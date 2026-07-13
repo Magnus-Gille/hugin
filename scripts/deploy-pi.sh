@@ -102,7 +102,7 @@ if [ "$POST_SYNC_SHA" != "$DEPLOY_SHA" ]; then
 fi
 
 echo "==> Installing dependencies on Pi..."
-ssh "$REMOTE" "cd $REMOTE_DIR && npm install --omit=dev"
+ssh "$REMOTE" "cd $REMOTE_DIR && npm ci --omit=dev"
 
 echo "==> Removing legacy system-level service (one-time migration, idempotent)..."
 ssh "$REMOTE" "

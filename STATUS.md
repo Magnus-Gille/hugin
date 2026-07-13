@@ -17,7 +17,9 @@
 - The previous marker (and abandoned temp marker) is removed as the first remote
   mutation. Rsync excludes `.deployed-commit` in addition to preserving the
   existing `.env`, `node_modules`, `.git`, tests, and macOS exclusions. The
-  obsolete remote Hugin `git fetch/reset` step is gone.
+  obsolete remote Hugin `git fetch/reset` step is gone. Production dependencies
+  install with `npm ci --omit=dev`, so the shipped lockfile cannot be rewritten
+  after the local commit has been pinned.
 - Only after user-service restart/status and the loopback health check succeed
   does one final remote command atomically write the exact local full SHA via a
   temp file and rename. Any earlier failure remains markerless; no fallible
