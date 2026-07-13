@@ -53,6 +53,34 @@ describe("queryAllMuninEntries", () => {
     expect(munin.calls.every((call) => call.query === undefined)).toBe(true);
   });
 
+  it("recovers every row when a page boundary splits a sub-cap timestamp bucket", async () => {
+    const base = Date.UTC(2026, 6, 12, 12, 0, 0);
+    const boundary = new Date(base).toISOString();
+    const newer = Array.from({ length: 30 }, (_, index) =>
+      makeTask(index, new Date(base + index + 1).toISOString()),
+    );
+    const boundaryRows = Array.from({ length: 30 }, (_, index) =>
+      makeTask(30 + index, boundary),
+    );
+    const older = Array.from({ length: 10 }, (_, index) =>
+      makeTask(60 + index, new Date(base - index - 1).toISOString()),
+    );
+    const munin = new FilterOnlyMunin([...newer, ...boundaryRows, ...older]);
+
+    const result = await queryAllMuninEntries(munin as unknown as MuninClient, {
+      tags: ["pending"],
+      namespace: "tasks/",
+      entry_type: "state",
+    });
+
+    expect(result.results).toHaveLength(70);
+    expect(result.truncated).toBe(false);
+    expect(munin.calls).toContainEqual(expect.objectContaining({
+      since: boundary,
+      until: boundary,
+    }));
+  });
+
   it("keeps the oldest task claimable while newer tasks continuously refill the first page", async () => {
     const base = Date.UTC(2026, 6, 12, 12, 0, 0);
     const rows = Array.from({ length: 75 }, (_, index) =>
