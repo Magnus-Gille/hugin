@@ -57,6 +57,30 @@ describe("BrokerClient", () => {
     expect(init?.body).toBeUndefined();
   });
 
+  it("posts learning-loop operations to their authenticated endpoints", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ ok: true }));
+    const client = new BrokerClient({
+      baseUrl: "http://broker.test:3033",
+      bearerToken: "tk",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    await client.experimentCreate({ experiment_id: "exp-1" });
+    await client.experimentObserve({ experiment_id: "exp-1", run_id: "r1" });
+    await client.experimentRate({ experiment_id: "exp-1", run_id: "r1" });
+    await client.experimentStatus({ experiment_id: "exp-1" });
+    await client.experimentPromote({ experiment_id: "exp-1" });
+
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      "http://broker.test:3033/v1/learning/experiments/create",
+      "http://broker.test:3033/v1/learning/experiments/observe",
+      "http://broker.test:3033/v1/learning/experiments/rate",
+      "http://broker.test:3033/v1/learning/experiments/status",
+      "http://broker.test:3033/v1/learning/experiments/promote",
+    ]);
+    for (const [, init] of fetchImpl.mock.calls) expect(init?.method).toBe("POST");
+  });
+
   it("returns {} for 204 No Content", async () => {
     const fetchImpl = vi.fn(
       async () => new Response(null, { status: 204 }),

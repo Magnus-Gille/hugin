@@ -104,6 +104,7 @@ import {
   getPersistentStatusTags,
 } from "./task-status-tags.js";
 import { LearningLoopCollector } from "./learning-loop-collector.js";
+import { LearningExperimentStore } from "./learning/experiment-store.js";
 import { sanitizeProviderTokenCount } from "./m5-provenance.js";
 import {
   buildStructuredTaskResult,
@@ -585,6 +586,10 @@ const reaperMunin = createMuninClient();
 // queue behind — or be queued behind by — task-completion writes on the main
 // client's serial request slot.
 const orchVerdictMunin = createMuninClient();
+// Champion/challenger observations are operator-plane writes. Keep them off the
+// dispatcher's serial Munin request slot so an experiment upload cannot delay a
+// task claim, completion checkpoint, or lease renewal.
+const learningExperimentMunin = createMuninClient();
 
 // Verdict layer (docs/orchestrator-verdict-layer.md, V4/V7). Gated on a
 // single master switch (HUGIN_ORCH_VERDICT_STORE, default "on") — when
@@ -5861,6 +5866,7 @@ if (brokerEnv.enabled) {
   const brokerHome = path.join(HUGIN_HOME, "delegation-events.jsonl");
   const journal = new DelegationJournal({ path: brokerHome });
   const taskStore = new BrokerTaskStore(munin);
+  const learningStore = new LearningExperimentStore(learningExperimentMunin);
   const idempotency = new IdempotencyIndex();
   const homeserverReady = loadHomeserverGatewayConfig(process.env) !== null;
   const executorCapabilities = brokerExecutorCapabilities({
@@ -5870,6 +5876,7 @@ if (brokerEnv.enabled) {
     host: brokerEnv.host,
     port: brokerEnv.port,
     keys: brokerEnv.keys,
+    learningStore,
     deps: { taskStore, journal, idempotency, executorCapabilities },
   })
     .then((rb) => {

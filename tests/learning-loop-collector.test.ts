@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { LearningLoopCollector } from "../src/learning-loop-collector.js";
 import type { MuninClient } from "../src/munin-client.js";
 import type { Ledger, LedgerClientLike } from "../src/orchestrator/ledger-client.js";
+import { evaluateLearningExperiment } from "../src/learning/experiment-evaluator.js";
+import { makeExperimentInput } from "./fixtures/learning.js";
 
 const ENVELOPE = (submitter: string) =>
   `## Task\n\n### Broker envelope\n\`\`\`json\n${JSON.stringify({
@@ -36,6 +38,52 @@ const fakeLedgerClient = (ledger: Ledger | null): LedgerClientLike => ({
 });
 
 describe("LearningLoopCollector", () => {
+  it("collects versioned experiment decisions for the operator panel", async () => {
+    const input = makeExperimentInput();
+    const state = {
+      schemaVersion: 1 as const,
+      experimentId: input.experiment_id,
+      scope: input.scope,
+      taskType: input.task_type,
+      ownerPrincipal: "codex",
+      hypothesis: input.hypothesis,
+      changeAxis: input.change_axis,
+      champion: input.champion,
+      challenger: input.challenger,
+      gates: input.gates,
+      status: "running" as const,
+      revision: 1,
+      createdAt: "2026-07-13T12:00:00.000Z",
+      updatedAt: "2026-07-13T12:00:00.000Z",
+      observations: [],
+      evaluation: evaluateLearningExperiment({ observations: [], gates: input.gates }),
+    };
+    const munin = {
+      query: vi.fn(async (query: { tags?: string[] }) =>
+        query.tags?.includes("learning:experiment")
+          ? {
+              results: [{ namespace: "experiments/hugin/wave-six-abc", key: "state" }],
+              total: 1,
+            }
+          : { results: [], total: 0 },
+      ),
+      read: vi.fn(async (namespace: string, key: string) =>
+        namespace === "experiments/hugin/wave-six-abc" && key === "state"
+          ? { content: JSON.stringify(state), tags: ["learning:experiment"] }
+          : null,
+      ),
+    } as unknown as MuninClient;
+
+    const evidence = await new LearningLoopCollector({
+      munin,
+      ledgerClient: fakeLedgerClient(null),
+    }).refresh();
+
+    expect(evidence.experimentsAvailable).toBe(true);
+    expect(evidence.experiments).toHaveLength(1);
+    expect(evidence.experiments[0]!.experimentId).toBe("wave-six-edit-deadline");
+  });
+
   it("collects rating, durable-handoff and route-policy provenance for a broker task", async () => {
     const munin = fakeMunin({
       "tasks/mcp-m5-1/status": { content: ENVELOPE("claude-code"), tags: ["completed", "broker:mcp-v2"] },
@@ -204,8 +252,8 @@ describe("LearningLoopCollector", () => {
     collector.collect();
     collector.collect();
 
-    // Cached reads do no further corpus walks (one walk = two queries).
-    expect(munin.query).toHaveBeenCalledTimes(2);
+    // Cached reads do no further walks (two task queries + one experiment query).
+    expect(munin.query).toHaveBeenCalledTimes(3);
   });
 
   it("coalesces concurrent collections into a single corpus walk", async () => {
@@ -216,8 +264,8 @@ describe("LearningLoopCollector", () => {
 
     await Promise.all([collector.refresh(), collector.refresh(), collector.refresh()]);
 
-    // One corpus walk (two queries), not three.
-    expect(munin.query).toHaveBeenCalledTimes(2);
+    // One collection (two task queries + one experiment query), not three collections.
+    expect(munin.query).toHaveBeenCalledTimes(3);
   });
 
   it("survives a corrupt feedback document without losing the whole task", async () => {
