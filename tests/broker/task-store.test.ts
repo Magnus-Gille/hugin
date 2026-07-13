@@ -28,6 +28,9 @@ class FakeMunin {
   queries: Parameters<MuninClient["query"]>[0][] = [];
   readReturn: Record<string, unknown> = {};
   queryReturn: { results: unknown[]; total: number } = { results: [], total: 0 };
+  queryOverride?: (
+    opts: Parameters<MuninClient["query"]>[0],
+  ) => { results: unknown[]; total: number };
   /** Optional per-call override, keyed by the requested tags — lets a test
    * make the two tag-scoped queries in listCanonical diverge instead of
    * always sharing queryReturn. */
@@ -50,6 +53,7 @@ class FakeMunin {
   }
   async query(opts: Parameters<MuninClient["query"]>[0]) {
     this.queries.push(opts);
+    if (this.queryOverride) return this.queryOverride(opts);
     if (this.queryByTags) return this.queryByTags(opts.tags ?? []);
     return this.queryReturn;
   }
@@ -266,8 +270,53 @@ describe("BrokerTaskStore.listCanonical", () => {
 
     expect(munin.queries).toHaveLength(2);
     for (const query of munin.queries) {
-      expect(query).toHaveProperty("since", "2026-07-12T13:03:00Z");
+      expect(query).toHaveProperty("since", "2026-07-12T13:03:00.000Z");
     }
+  });
+
+  it("enumerates more than 100 namespaces before principal filtering", async () => {
+    const munin = new FakeMunin();
+    const rows = Array.from({ length: 130 }, (_, index) => {
+      const taskId = `principal-page-${index}`;
+      const timestamp = new Date(Date.UTC(2026, 6, 12, 12, 0, 0, index)).toISOString();
+      const taskEnvelope = envelope(taskId);
+      // The 65 target-principal tasks are oldest. A single newest-first page
+      // would contain only the other principal and falsely return zero rows.
+      taskEnvelope.broker_principal = index < 65 ? "claude-code" : "codex";
+      taskEnvelope.received_at = timestamp;
+      munin.readReturn[`tasks/${taskId}/status`] = {
+        content: serializeEnvelope(taskEnvelope),
+        tags: ["completed", "broker:mcp-v2", "runtime:homeserver"],
+      };
+      return {
+        id: `entry-${index}`,
+        namespace: `tasks/${taskId}`,
+        key: "status",
+        entry_type: "state",
+        content_preview: "task",
+        tags: ["completed", "broker:mcp-v2", "runtime:homeserver"],
+        created_at: timestamp,
+        updated_at: timestamp,
+      };
+    });
+    munin.queryOverride = (opts) => {
+      const filtered = rows
+        .filter((row) => (opts.tags ?? []).every((tag) => row.tags.includes(tag)))
+        .filter((row) => !opts.since || row.updated_at >= opts.since)
+        .filter((row) => !opts.until || row.updated_at <= opts.until)
+        .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+        .slice(0, opts.limit ?? 10);
+      return { results: filtered, total: filtered.length };
+    };
+
+    const result = await new BrokerTaskStore(munin as unknown as MuninClient)
+      .listCanonical("claude-code");
+
+    expect(result.rows).toHaveLength(65);
+    expect(result.rows.every((row) => row.task_id.startsWith("principal-page-"))).toBe(true);
+    expect(result.truncated).toBe(false);
+    expect(munin.queries.length).toBeGreaterThan(2);
+    expect(munin.queries.every((query) => query.query === undefined)).toBe(true);
   });
 
   // Codex review of #181/PR182: a caller-requested small output limit must

@@ -16,6 +16,7 @@ const OTHER_SECRET = "b".repeat(64);
 class FakeMunin {
   writes: Array<{ namespace: string; key: string; content: string; tags?: string[] }> = [];
   reads: Record<string, unknown> = {};
+  queryCalls = 0;
   queryReturn: { results: unknown[]; total: number } = { results: [], total: 0 };
   async write(
     namespace: string,
@@ -37,6 +38,7 @@ class FakeMunin {
     return this.reads[`${namespace}/${key}`] ?? null;
   }
   async query(): Promise<{ results: unknown[]; total: number }> {
+    this.queryCalls += 1;
     return this.queryReturn;
   }
 }
@@ -839,6 +841,16 @@ describe("POST /v1/delegate/rate", () => {
 });
 
 describe("GET /v1/delegate/list", () => {
+  it("rejects a malformed since_ts instead of applying inconsistent time filters", async () => {
+    const res = await fetch(
+      `${harness.url}/v1/delegate/list?since_ts=not-a-timestamp`,
+      { headers: { authorization: `Bearer ${SECRET}` } },
+    );
+
+    expect(res.status).toBe(400);
+    expect(harness.munin.queryCalls).toBe(0);
+  });
+
   it("returns empty rows when journal is empty", async () => {
     const res = await fetch(`${harness.url}/v1/delegate/list`, {
       headers: { authorization: `Bearer ${SECRET}` },
