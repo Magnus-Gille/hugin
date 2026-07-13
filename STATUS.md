@@ -1,6 +1,43 @@
 # Hugin — Status
 
-**Latest session:** 2026-07-13 (Codex) — **general hardening implementation complete locally; awaiting parent review/publish/deploy**
+**Latest session:** 2026-07-13 (Codex) — **legacy auth-expiry alert lifecycle migration complete locally; awaiting parent review/publish/deploy**
+**Branch:** `codex/hugin-auth-alert-migration` from exact `origin/main@8b444adc3996a0e01095b5dc381a6ed9646de20c`.
+
+## Latest — reconcile pre-resolution expiry alerts without weakening auth evidence
+
+- Production showed a pre-#197 split-brain state: the persisted producer state
+  was `{lastAuth:"ok",expiryWarned:false}`, while Heimdall still held the active
+  `hugin-claude-auth-expiry` dedup from 2026-07-03. #197 could resolve that key
+  only when `expiryWarned` was true, so fresh refresh-token
+  `expiryEvidence:"not-applicable"` could not reconcile the external stale alert.
+- `AuthAlarmState` now persists an expiry-alert lifecycle generation. A missing
+  Munin entry starts at the current generation and sends nothing; only an
+  existing pre-generation state hydrates as legacy. The next positively safe
+  expiry reading (`not-applicable`, or a known expiry beyond the warning window)
+  sends one idempotent resolved envelope even when the legacy boolean is false.
+- Unknown evidence and a known already-past expiry remain fail-open and do not
+  migrate state. A new firing warning can establish current lifecycle ownership;
+  an already-active legacy warning does not advance ownership without an
+  external transition.
+- The existing delivery gate remains load-bearing: a legacy resolution advances
+  and persists the generation only after Ratatoskr returns 2xx. Skipped/failed
+  resolutions leave the old state for an idempotent retry. No credential probe,
+  auth classification, transport timeout, or authorization behavior changed.
+- Validation: red/green focused suite (23 auth-alarm tests), TypeScript build,
+  standalone Gate D runner typecheck, full suite (103 files / 1,729 tests), both
+  CI shell suites, Bash/Node syntax, error-severity shellcheck, `git diff --check`,
+  and full plus production-only npm audit (0 vulnerabilities). Default shellcheck
+  still reports only pre-existing warning/info findings in untouched scripts.
+
+**Next:** parent agent reviews the clean local commit, publishes it as a PR,
+merges only with green CI, then deploys from an exact merged worktree and verifies
+that the producer-owned resolved envelope naturally clears the stale Heimdall
+dedup. No push, PR, deploy, alert send, Munin write, or other live mutation
+occurred in this implementation session.
+
+---
+
+**Previous session:** 2026-07-13 (Codex) — **general hardening implementation complete locally; awaiting parent review/publish/deploy**
 **Branch:** `codex/hugin-hardening-20260713` rebased onto `origin/main@bb66fcd` (includes merged starvation/pagination fix #193 and continuous M5 harness #196).
 
 ## Latest — bounded operations, honest alert lifecycle, and Daily Analysis reliability

@@ -29,6 +29,7 @@ import {
 import {
   decideAuthAlarm,
   alertDeliveryCommitsTransition,
+  hydratePersistedAuthAlarmState,
   INITIAL_AUTH_ALARM_STATE,
   type AlertEnvelope,
   type AlertDeliveryStatus,
@@ -3043,14 +3044,7 @@ async function hydrateAuthAlarmState(): Promise<void> {
   try {
     const entry = await reaperMunin.read(AUTH_ALARM_NS, "state");
     if (!entry) return;
-    const parsed = JSON.parse(entry.content) as Partial<AuthAlarmState>;
-    authAlarmState = {
-      lastAuth:
-        parsed.lastAuth === "ok" || parsed.lastAuth === "unauthorized"
-          ? parsed.lastAuth
-          : null,
-      expiryWarned: parsed.expiryWarned === true,
-    };
+    authAlarmState = hydratePersistedAuthAlarmState(JSON.parse(entry.content));
   } catch {
     // Keep INITIAL_AUTH_ALARM_STATE.
   }
@@ -3119,7 +3113,8 @@ async function applyAuthReadingLocked(reading: {
 
   const changed =
     nextState.lastAuth !== prevState.lastAuth ||
-    nextState.expiryWarned !== prevState.expiryWarned;
+    nextState.expiryWarned !== prevState.expiryWarned ||
+    nextState.expiryAlertLifecycleVersion !== prevState.expiryAlertLifecycleVersion;
   authAlarmState = nextState;
   if (changed) {
     await persistAuthAlarmState();
