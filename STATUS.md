@@ -1,5 +1,28 @@
 # Hugin — Status
 
+**Latest Codex session (2026-07-13) — sequence #190+#183 → #191 → #192 → gi#158 complete as
+reviewable drafts; gi#199/#156 re-scoped only.** Hugin PR
+[#193](https://github.com/Magnus-Gille/hugin/pull/193) adds full, boundary-honest Munin pagination
+and starvation-free oldest-first claiming; PR
+[#194](https://github.com/Magnus-Gille/hugin/pull/194) mirrors `draft` and `conversation` through the
+shared Broker/MCP taxonomy. Both full suites are green (1,662 and 1,661 tests respectively).
+
+Wave 5 ran six matched one-shot leaves and six official `code_loop` harness leaves across those
+Hugin tickets and gille-inference #158. Every one-shot was rated `redo` (three repo-hallucinated
+local diffs; three no-local-attempt frontier escalations). Harness result: one correct narrow
+single-file schema edit, five cap-exceeded/no-diff leaves; no multi-file success. Full evidence and
+work/task IDs: `docs/m5-harness-wave5-2026-07-13.md`. gille-inference draft PR
+[#246](https://github.com/Magnus-Gille/gille-inference/pull/246) implements #158 with 18 triage
+cases, 34 seeded review bugs + 6 clean controls, review recall/precision/confabulation evidence,
+and empty/truncation promotion gates; full 2,369-test suite green. gi#199 and gi#156 were edited on
+GitHub into narrow future audit/verification scopes; no code was built for either. No merge or
+deployment was performed.
+
+**Next:** review/CI/merge the three draft PRs. Deploy only from clean `main`; run one observed scout
+after gi#246 merges before admitting its ground-truth verifier to judgment-quality evidence.
+
+---
+
 **Latest session:** 2026-07-13 (Claude) — **M5-harvest campaign (`m5h-2026-07`): 9 tickets, 10 PRs, ~92 graded delegations, shadow lane live**
 **Branch:** `main` @ `977e851` + this handoff; hugin deployed to Pi (health `ok`, polling, queue 0).
 
