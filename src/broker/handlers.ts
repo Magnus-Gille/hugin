@@ -504,7 +504,8 @@ export function createListHandler(deps: BrokerHandlerDependencies) {
       if (parsed.alias && (row.alias ?? row.envelope?.alias_requested) !== parsed.alias) return false;
       if (parsed.since_ts) {
         const submittedAt = row.submitted_at ?? "";
-        if (submittedAt < parsed.since_ts) return false;
+        const submittedAtMs = Date.parse(submittedAt);
+        if (!Number.isFinite(submittedAtMs) || submittedAtMs < Date.parse(parsed.since_ts)) return false;
       }
       return true;
     });

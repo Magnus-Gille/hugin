@@ -26,6 +26,9 @@ import { delegationEnvelopeSchema, delegationRequestSchema } from "./types.js";
 import { hashPayload } from "./idempotency.js";
 import { deriveAwaitObservation } from "./await-observation.js";
 import type { AwaitEvent, AwaitObservation } from "./await-observation.js";
+import { queryAllMuninEntries } from "../munin-pagination.js";
+
+export { MUNIN_QUERY_MAX } from "../munin-pagination.js";
 
 export interface DelegationResultLike {
   task_id: string;
@@ -39,10 +42,6 @@ export const RESULT_STRUCTURED_KEY = "result-structured";
 export const RESULT_ERROR_KEY = "result-error";
 /** Durable-handoff evidence for the #165 trial (#164). */
 export const AWAIT_OBSERVATION_KEY = "await-observation";
-/** Munin's memory_query tool documents a hard server-side cap of 50 results
- * per call regardless of the requested `limit` — see listCanonical (#181). */
-export const MUNIN_QUERY_MAX = 50;
-
 export interface TaskStoreConfig {
   munin: MuninClient;
 }
@@ -242,33 +241,24 @@ export class BrokerTaskStore {
    * unique namespace's `status` entry directly rather than relying on it
    * having survived inside the raw query window.
    *
-   * Always queries Munin at its real per-query cap (`MUNIN_QUERY_MAX`),
-   * independent of how many rows the caller ultimately wants — the final
-   * row count is enforced downstream by the handler's own slice(). A caller-
-   * requested small output limit narrowing this raw candidate window would
-   * reintroduce the same crowding-out risk this fix closes, just triggered
-   * by `?limit=1` instead of a rating event (caught in review of #181).
+   * Candidate discovery uses the shared capped-window paginator (#183). It
+   * selects Munin's temporally ordered filter-only mode, walks backward by
+   * updated_at, and probes exact timestamp boundaries so more than 50 tasks
+   * (including tasks owned by another principal) cannot crowd out matches.
+   * A same-millisecond bucket of 50+ remains explicitly `truncated` because
+   * Munin has no `(updated_at,id)` cursor with which to prove it complete.
    */
   async listCanonical(principal: string, sinceTs?: string): Promise<CanonicalListResult> {
     const baseOpts = {
-      query: "task",
       namespace: "tasks/",
       entry_type: "state" as const,
-      limit: MUNIN_QUERY_MAX,
       ...(sinceTs ? { since: sinceTs } : {}),
     };
     const [tagged, homeserver] = await Promise.all([
-      this.munin.query({ ...baseOpts, tags: ["broker:mcp-v2"] }),
-      this.munin.query({ ...baseOpts, tags: ["runtime:homeserver"] }),
+      queryAllMuninEntries(this.munin, { ...baseOpts, tags: ["broker:mcp-v2"] }),
+      queryAllMuninEntries(this.munin, { ...baseOpts, tags: ["runtime:homeserver"] }),
     ]);
-    // Munin exposes no cursor/offset and its `total` is only the number of
-    // formatted rows returned, not a pre-limit count. A result set at the
-    // server cap is therefore indistinguishable from an exactly-full set.
-    // Mark it conservatively: a timestamp walk-back is not safe because the
-    // ranked query is not guaranteed to expose every omitted row in time order.
-    const truncated =
-      tagged.results.length >= MUNIN_QUERY_MAX ||
-      homeserver.results.length >= MUNIN_QUERY_MAX;
+    const truncated = tagged.truncated || homeserver.truncated;
     const namespaces = new Set<string>();
     for (const result of [...tagged.results, ...homeserver.results]) {
       if (typeof result.namespace === "string") namespaces.add(result.namespace);
