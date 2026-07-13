@@ -33,6 +33,10 @@ import {
   type M5CodeLoopResult,
 } from "../src/learning/m5-code-loop-adapter.js";
 import {
+  applyCodeLoopPromptPrefix,
+  codeLoopPromptSha256,
+} from "../src/learning/m5-code-loop-prompt.js";
+import {
   M5CodeLoopClient,
   type M5CodeLoopRequest,
 } from "../src/learning/m5-code-loop-client.js";
@@ -52,6 +56,12 @@ const capsSchema = z.object({
   }
 });
 
+const armSchema = z.object({
+  caps: capsSchema,
+  /** Local-only prompt content; Hugin stores only the bound prompt ref. */
+  prompt_prefix_file: z.string().min(1).optional(),
+}).strict();
+
 const sampleSchema = z.object({
   id: z.string().min(1).max(120),
   holdout: z.boolean(),
@@ -66,8 +76,8 @@ const manifestSchema = z.object({
   schema_version: z.literal(1),
   experiment: learningExperimentCreateSchema,
   arms: z.object({
-    champion: z.object({ caps: capsSchema }).strict(),
-    challenger: z.object({ caps: capsSchema }).strict(),
+    champion: armSchema,
+    challenger: armSchema,
   }).strict(),
   verifier: z.object({
     script: z.string().min(1),
@@ -299,13 +309,14 @@ async function runArm(input: {
   manifest: Manifest;
   sample: LoadedSample;
   arm: "champion" | "challenger";
+  promptPrefix: string | undefined;
   manifestDir: string;
 }): Promise<void> {
-  const { m5, broker, manifest, sample, arm, manifestDir } = input;
+  const { m5, broker, manifest, sample, arm, promptPrefix, manifestDir } = input;
   const config = manifest.experiment[arm];
   const runId = `${manifest.experiment.experiment_id}:${sample.id}:${arm}:${config.fingerprint.slice(0, 12)}`;
   const request: M5CodeLoopRequest = {
-    instruction: sample.instruction,
+    instruction: applyCodeLoopPromptPrefix(sample.instruction, promptPrefix),
     files: sample.files,
     check_cmd: sample.m5_check_cmd,
     protected: sample.protected,
@@ -357,6 +368,25 @@ async function main(): Promise<void> {
   const manifestDir = dirname(manifestPath);
   const manifest = manifestSchema.parse(JSON.parse(readFileSync(manifestPath, "utf8")));
   const samples = loadSamples(manifest, manifestDir);
+  const promptPrefixes = Object.fromEntries(
+    (["champion", "challenger"] as const).map((arm) => {
+      const path = manifest.arms[arm].prompt_prefix_file;
+      const prefix = path === undefined
+        ? undefined
+        : readFileSync(resolve(manifestDir, path), "utf8");
+      if (prefix !== undefined && prefix.length > 20_000) {
+        throw new Error(`${arm} prompt prefix exceeds 20,000 characters`);
+      }
+      const expected = codeLoopPromptSha256(prefix);
+      const declared = manifest.experiment[arm].prompt.sha256;
+      if (declared !== expected) {
+        throw new Error(
+          `${arm} prompt fingerprint mismatch: manifest=${declared} actual=${expected}`,
+        );
+      }
+      return [arm, prefix];
+    }),
+  ) as Record<"champion" | "challenger", string | undefined>;
   const verifierSha256 = createHash("sha256")
     .update(readFileSync(resolve(manifestDir, manifest.verifier.script)))
     .digest("hex");
@@ -408,7 +438,15 @@ async function main(): Promise<void> {
         process.stdout.write(`[${sample.id}/${arm}] already recorded; skipping\n`);
         continue;
       }
-      await runArm({ m5, broker, manifest, sample, arm, manifestDir });
+      await runArm({
+        m5,
+        broker,
+        manifest,
+        sample,
+        arm,
+        promptPrefix: promptPrefixes[arm],
+        manifestDir,
+      });
       recorded.add(runId);
     }
   }

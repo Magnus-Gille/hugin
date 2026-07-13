@@ -1,45 +1,51 @@
 # Hugin — Status
 
-**Latest session:** 2026-07-13 (Codex) — **repo-local deployment provenance hardening complete locally; awaiting parent review/publish/deploy**
-**Branch:** `codex/hugin-deploy-marker-hardening` from exact `origin/main@6c8428cf64d1fb0e9b33ac4875c524a094f47d6b` (merged auth lifecycle PR #198).
+**Latest session:** 2026-07-13 (Codex) — **first live M5 learning iteration rejected safely; prompt-axis runner support validated locally**
+**Branch/worktree:** `codex/gate-d-prompt-prefix` in `/private/tmp/hugin-gate-d-prompt-prefix`, based on exact `origin/main@d5eb909267111590c7b4b2442794197334fbedb2` (#199).
 
-## Latest — markerless failure boundary and exact local-commit deployment
+## Latest — evidence-driven iteration 1 and honest preparation for iteration 2
 
-- Fleet validation found that `scripts/deploy-pi.sh` let `rsync --delete`
-  remove `.deployed-commit`, then later ran `git fetch && git reset` inside the
-  remote Hugin tree even though authoritative Grimnir deployments intentionally
-  leave that tree without `.git`. The service stayed healthy while deployment
-  provenance disappeared.
-- The repo-local deploy now accepts only a clean repository-root checkout with
-  an addressable full `HEAD` SHA. It rechecks cleanliness and the exact SHA
-  after the local build and again after rsync, so a build/source race cannot be
-  accepted as the named commit.
-- The previous marker (and abandoned temp marker) is removed as the first remote
-  mutation. Rsync excludes `.deployed-commit` in addition to preserving the
-  existing `.env`, `node_modules`, `.git`, tests, and macOS exclusions. The
-  obsolete remote Hugin `git fetch/reset` step is gone. Production dependencies
-  install with `npm ci --omit=dev`, so the shipped lockfile cannot be rewritten
-  after the local commit has been pinned.
-- Only after user-service restart/status and the loopback health check succeed
-  does one final remote command atomically write the exact local full SHA via a
-  temp file and rename. Any earlier failure remains markerless; no fallible
-  deployment operation follows the stamp.
-- The shell regression harness now covers unversioned/dirty sources, build and
-  rsync source drift, invalidation-before-sync ordering, real rsync marker
-  exclusion semantics, invalidation failure, health failure, markerless failure
-  paths, no remote-Hugin-Git dependency, and health-before-exact-SHA stamping.
-- Validation: `npm ci`; TypeScript build; standalone Gate D runner typecheck;
-  full suite (103 files / 1,729 tests); both CI shell suites; all Bash/Node
-  syntax; changed-script warning/error shellcheck and fleet-wide error-severity
-  shellcheck; `git diff --check`; full and production npm audit (0
-  vulnerabilities).
+- Approved owner/principal credentials were provisioned directly into macOS
+  Keychain (`hs-m5/owner`, `hugin-broker/claude-code`) without printing or file
+  persistence. The first live experiment,
+  `gate-d-edit-deadline-v1-20260713`, completed all 10 matched Gate D pairs (20
+  `qwen3-coder-next-80b` code-loop executions), including two holdouts, with 100%
+  independent-verifier and product-rating coverage.
+- The turn-6 edit-deadline challenger improved mean edit-start from 13,325.5 ms
+  to 11,848.8 ms (11.08%, clearing the 10% target) and reduced mean latency from
+  35,315.7 ms to 26,931.9 ms. It nevertheless reduced quality/usefulness from
+  0.9 to 0.8 and raised rescue rate from 0.1 to 0.2. Hugin rejected it on all
+  three strict monotonic guards. The champion remains unchanged; no promotion
+  was attempted.
+- Re-fetched the three failed work results and reran the deterministic verifier.
+  Both sample-04 arms exhausted the 13-turn cap with an unresolved `formatJson`
+  TypeScript error; challenger sample 05 completed with an invalid Node
+  `assert` import. Gate D's external typecheck caught every failure.
+- The next one-axis hypothesis is a content-bound prompt prefix requiring a
+  clean pre-finish `tsc --noEmit` pass and correction of any errors. The runner
+  now supports local-only per-arm `prompt_prefix_file` content, hashes every
+  byte into the versioned prompt ref, preserves the previous passthrough prompt
+  byte-for-byte, and rejects fingerprint drift before creating an experiment or
+  calling M5. Focused tests, old-manifest compatibility dry-run, valid-prefix
+  dry-run, deliberate tamper rejection, standalone runner typecheck, TypeScript
+  build, and the full suite (104 files / 1,732 tests) pass.
+- A second paid run is intentionally not using the old ten cases: holdout 05
+  informed the new prompt, so those holdouts are contaminated. The M5-owning
+  repo forbids this Hugin agent from editing its corpus directly; routed
+  gille-inference issue #250 requests at least four fresh, model-unseen,
+  deterministic Gate D cases with exact acceptance criteria.
+- Independently verified merged #199 live: remote marker equals exact
+  `d5eb909267111590c7b4b2442794197334fbedb2`, remote `.git` is intentionally
+  absent, user service health is `ok`, polling is true, queue depth is 0, and
+  all three inference hosts are available. The earlier remote-Git preflight
+  branch is superseded and must not be published.
 
-**Next:** parent agent reviews and publishes the clean local commit, merges only
-with green CI, then deploys from an exact clean merged worktree. Verify the
-remote Hugin tree remains `.git`-absent, `.deployed-commit` equals the merged
-full SHA, the user service is active/enabled, and loopback health is green. No
-push, PR, deployment, live SSH, marker write, Munin write, or other production
-mutation occurred in this implementation session.
+**Next:** obtain the fresh corpus through gille-inference #250, predeclare its
+holdouts before any model run, generate/dry-run the prompt-only manifest, then
+run and rate the matched experiment. Keep the champion unless every protected
+gate passes. The current Hugin runner changes remain local; GitHub CLI
+authentication is still invalid, so do not begin a publish flow until it is
+re-authenticated or an explicitly approved connector-only flow is chosen.
 
 ---
 

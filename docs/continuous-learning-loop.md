@@ -144,6 +144,12 @@ sample's instruction/seed directory/check. Before any remote mutation it:
 5. runs matched pairs sequentially, counterbalancing which arm runs first;
 6. records only content-blind observations—never diffs, prompts, check output, or seed contents.
 
+An arm may declare a local-only `prompt_prefix_file`. The runner reads it once, verifies every byte
+against that arm's versioned `prompt.sha256`, and prepends it to each corpus instruction. Hugin still
+stores only the content hash and prompt version, so prompt-axis experiments remain reproducible and
+content-blind. Omitting the file preserves the original instruction byte-for-byte and validates the
+deployed passthrough prompt fingerprint.
+
 Credentials stay in environment variables. Use the Keychain helper and tailnet path; never put
 tokens in the manifest:
 
