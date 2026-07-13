@@ -170,6 +170,12 @@ MUNIN_API_KEY=<key> MUNIN_URL=http://localhost:3030 npm run dev
 
 Default host: `huginmunin.local` (or Tailscale IP `100.97.117.37` if mDNS unavailable).
 
+`deploy-pi.sh` accepts only a clean, addressable local Git commit. It deploys
+that local payload by rsync (the remote Hugin tree intentionally needs no
+`.git`), removes `.deployed-commit` before the first payload mutation, and
+atomically stamps the exact local full SHA only after service restart/status and
+the loopback health check succeed. Any failed acceptance remains markerless.
+
 The Pi needs a `.env` file at `/home/magnus/hugin/.env`:
 ```
 MUNIN_API_KEY=<same key Munin uses>
