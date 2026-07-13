@@ -18,6 +18,7 @@ import {
   type MuninReadResult,
 } from "./munin-client.js";
 import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveContext, normalizeRoot, DEFAULT_REPOS_ROOT } from "./task-helpers.js";
+import { queryAllMuninEntries } from "./munin-pagination.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
 import {
   classifyClaudeFailure,
@@ -3812,32 +3813,29 @@ async function emitHeartbeat(queueDepth: number, blockedTasks: number): Promise<
 
 // --- Poll loop ---
 
-/**
- * Given a batch of Munin query results, return the pending task with the
- * earliest created_at timestamp (FIFO ordering).  Only "status" entries are
- * considered — other keys are internal bookkeeping entries that the dispatcher
- * should not act on.
- *
- * ISO-8601 timestamps sort correctly as strings, so a plain lexicographic
- * compare is sufficient.
- */
+/** Enumerate the complete pending window and claim the oldest eligible task. */
 async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
-  const { results, total } = await munin.query({
-    query: "task",
-    tags: ["pending"],
-    namespace: "tasks/",
-    entry_type: "state",
-    limit: 10,
-  });
-
-  // Query running tasks to support group sequencing checks
-  const { results: runningResults } = await munin.query({
-    query: "task",
-    tags: ["running"],
-    namespace: "tasks/",
-    entry_type: "state",
-    limit: 50,
-  });
+  const [pendingPage, runningPage] = await Promise.all([
+    queryAllMuninEntries(munin, {
+      tags: ["pending"],
+      namespace: "tasks/",
+      entry_type: "state",
+    }),
+    // Query running tasks to support group sequencing checks.
+    queryAllMuninEntries(munin, {
+      tags: ["running"],
+      namespace: "tasks/",
+      entry_type: "state",
+    }),
+  ]);
+  const results = pendingPage.results;
+  const runningResults = runningPage.results;
+  if (pendingPage.truncated || runningPage.truncated) {
+    console.warn(
+      "Task queue enumeration contains a >=50-entry same-millisecond timestamp bucket; " +
+      "queue depth is a lower bound, but repeated claims remain starvation-free",
+    );
+  }
 
   // Orchestrator v1 tasks (broker-submitted, tagged "orch-v1") are dispatched
   // by the Pi-side broker, not by the legacy in-process poller. Filter them
@@ -3847,13 +3845,13 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   const dispatchableResults = results.filter(
     (r) => !r.tags.includes("orch-v1"),
   );
+  const queueDepth = results.filter((result) => result.key === "status").length;
 
   // Select the next eligible task respecting Group/Sequence ordering (FIFO within eligible set)
   const taskResult = selectNextTask(dispatchableResults, runningResults);
-  if (!taskResult) return { hadTask: false, queueDepth: 0 };
+  if (!taskResult) return { hadTask: false, queueDepth };
 
   const taskNs = taskResult.namespace;
-  const queueDepth = total;
   const entry = await munin.read(taskNs, "status");
   if (!entry) return { hadTask: false, queueDepth };
 

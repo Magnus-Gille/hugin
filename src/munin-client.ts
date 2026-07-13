@@ -325,19 +325,27 @@ export class MuninClient {
   }
 
   async query(opts: {
-    query: string;
+    /**
+     * Omit for filter-only browsing. Munin orders filter-only results by
+     * updated_at DESC, which is the ordering required by the capped-window
+     * paginator. Supplying a search query switches to relevance ordering.
+     */
+    query?: string;
     tags?: string[];
     namespace?: string;
     limit?: number;
     entry_type?: string;
     since?: string;
+    until?: string;
   }): Promise<{ results: MuninQueryResult[]; total: number }> {
-    const args: Record<string, unknown> = { query: opts.query };
+    const args: Record<string, unknown> = {};
+    if (opts.query) args.query = opts.query;
     if (opts.tags) args.tags = opts.tags;
     if (opts.namespace) args.namespace = opts.namespace;
     if (opts.limit) args.limit = opts.limit;
     if (opts.entry_type) args.entry_type = opts.entry_type;
     if (opts.since) args.since = opts.since;
+    if (opts.until) args.until = opts.until;
     return (await this.callTool("memory_query", args)) as {
       results: MuninQueryResult[];
       total: number;

@@ -204,7 +204,11 @@ export type SubmitResponse = z.infer<typeof submitResponseSchema>;
 
 export const listRequestSchema = z.object({
   limit: z.number().int().min(1).max(500).optional(),
-  since_ts: z.string().min(1).optional(),
+  // Pagination and the final historical-row filter both interpret this as an
+  // instant. Reject arbitrary non-empty strings up front so SQLite's lexical
+  // timestamp comparison and JavaScript's Date.parse cannot disagree about
+  // which rows belong in the response.
+  since_ts: z.string().datetime({ offset: true }).optional(),
   outcome: z.enum(["completed", "failed", "running", "any"]).optional(),
   alias: aliasSchema.optional(),
 });

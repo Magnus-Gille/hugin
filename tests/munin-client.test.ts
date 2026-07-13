@@ -121,6 +121,38 @@ describe("MuninClient", () => {
     });
   });
 
+  it("supports temporally bounded filter-only queries", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      rpcResponse({ results: [], total: 0 }),
+    );
+    const client = new MuninClient({
+      baseUrl: "http://munin.test",
+      apiKey: "test-key",
+      minRequestSpacingMs: 0,
+    });
+
+    await client.query({
+      tags: ["pending"],
+      namespace: "tasks/",
+      entry_type: "state",
+      since: "2026-07-12T12:00:00.000Z",
+      until: "2026-07-13T12:00:00.000Z",
+      limit: 50,
+    });
+
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const body = JSON.parse(String(request.body));
+    expect(body.params.arguments).toMatchObject({
+      tags: ["pending"],
+      namespace: "tasks/",
+      entry_type: "state",
+      since: "2026-07-12T12:00:00.000Z",
+      until: "2026-07-13T12:00:00.000Z",
+      limit: 50,
+    });
+    expect(body.params.arguments).not.toHaveProperty("query");
+  });
+
   it("passes classification through memory_write", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
