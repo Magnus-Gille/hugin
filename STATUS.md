@@ -1,7 +1,7 @@
 # Hugin — Status
 
 **Latest session:** 2026-07-14 (Codex) — **Harbor/M5 Linux acceptance completed; go for the offline evaluation lane**
-**Branch:** `codex/harbor-linux-acceptance` from merged `main@7916a17b1517a52ba2ff7cea84ba16afe164558b` (Harbor pilot PR [#201](https://github.com/Magnus-Gille/hugin/pull/201)); records the Linux acceptance and adds a fail-fast worker-dependency preflight.
+**Main:** `052dd71e94dfedc8561f6be960dc2aa0fada278e`; Harbor pilot PR [#201](https://github.com/Magnus-Gille/hugin/pull/201) and Linux acceptance/preflight PR [#202](https://github.com/Magnus-Gille/hugin/pull/202) are merged.
 
 ## Latest — Harbor 0.18.0 proof-of-fit with the existing M5 code_loop
 
@@ -68,10 +68,10 @@
   suite 106 files / 1,745 tests; both CI shell suites; JSON parse;
   `git diff --check`.
 
-**Next:** merge the narrow acceptance/preflight follow-up, then predeclare and
-run a larger matched Gate D corpus. Connect only reviewed, content-blind Harbor
-summaries to Hugin's existing learning experiment endpoints. Do not deploy
-Harbor in the dispatcher, publish the dataset, or enable automatic promotion.
+**Next:** predeclare and run a larger matched Gate D corpus. Connect only
+reviewed, content-blind Harbor summaries to Hugin's existing learning
+experiment endpoints. Do not deploy Harbor in the dispatcher, publish the
+dataset, or enable automatic promotion.
 
 ---
 
