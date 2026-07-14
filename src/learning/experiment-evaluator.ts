@@ -14,6 +14,23 @@ function mean(values: Array<number | undefined>): number | null {
   return measured.reduce((sum, value) => sum + value, 0) / measured.length;
 }
 
+/**
+ * Treat values separated only by IEEE-754 rounding noise as equal. Promotion
+ * gates still fail closed for any material shortfall: the tolerance is only a
+ * handful of machine epsilons at the magnitude being compared.
+ */
+function comparisonTolerance(left: number, right: number): number {
+  return Number.EPSILON * 8 * Math.max(1, Math.abs(left), Math.abs(right));
+}
+
+function materiallyLessThan(left: number, right: number): boolean {
+  return left < right - comparisonTolerance(left, right);
+}
+
+function materiallyGreaterThan(left: number, right: number): boolean {
+  return left > right + comparisonTolerance(left, right);
+}
+
 function isAuthoritative(observation: RecordedLearningObservation): boolean {
   return (
     observation.verifier.independent &&
@@ -182,16 +199,16 @@ function addCoverageRequirements(
   gates: LearningExperimentGates,
 ): void {
   if (
-    champion.verifiedCoverage < gates.minVerifiedCoverage ||
-    challenger.verifiedCoverage < gates.minVerifiedCoverage
+    materiallyLessThan(champion.verifiedCoverage, gates.minVerifiedCoverage) ||
+    materiallyLessThan(challenger.verifiedCoverage, gates.minVerifiedCoverage)
   ) {
     missing.push(
       `verified coverage must be >= ${gates.minVerifiedCoverage} on both arms`,
     );
   }
   if (
-    champion.ratedCoverage < gates.minRatedCoverage ||
-    challenger.ratedCoverage < gates.minRatedCoverage
+    materiallyLessThan(champion.ratedCoverage, gates.minRatedCoverage) ||
+    materiallyLessThan(challenger.ratedCoverage, gates.minRatedCoverage)
   ) {
     missing.push(`rated coverage must be >= ${gates.minRatedCoverage} on both arms`);
   }
@@ -206,32 +223,47 @@ function addGuardFailures(
   if (
     champion.qualityRate !== null &&
     challenger.qualityRate !== null &&
-    challenger.qualityRate + gates.maxQualityRegression < champion.qualityRate
+    materiallyLessThan(
+      challenger.qualityRate + gates.maxQualityRegression,
+      champion.qualityRate,
+    )
   ) {
     failures.push("quality regression exceeded the configured tolerance");
   }
   if (
     champion.usefulRate !== null &&
     challenger.usefulRate !== null &&
-    challenger.usefulRate + gates.maxUsefulRegression < champion.usefulRate
+    materiallyLessThan(
+      challenger.usefulRate + gates.maxUsefulRegression,
+      champion.usefulRate,
+    )
   ) {
     failures.push("useful-completion regression exceeded the configured tolerance");
   }
   if (
     champion.rescueRate !== null &&
     challenger.rescueRate !== null &&
-    challenger.rescueRate > champion.rescueRate + gates.maxRescueRateIncrease
+    materiallyGreaterThan(
+      challenger.rescueRate,
+      champion.rescueRate + gates.maxRescueRateIncrease,
+    )
   ) {
     failures.push("human rescue rate increased beyond the configured tolerance");
   }
-  if (challenger.infraRate > champion.infraRate + gates.maxInfraRateIncrease) {
+  if (materiallyGreaterThan(
+    challenger.infraRate,
+    champion.infraRate + gates.maxInfraRateIncrease,
+  )) {
     failures.push("infrastructure failure rate increased beyond the configured tolerance");
   }
   if (
     gates.maxLatencyRatio !== null &&
     champion.latencyMeanMs !== null &&
     challenger.latencyMeanMs !== null &&
-    challenger.latencyMeanMs > champion.latencyMeanMs * gates.maxLatencyRatio
+    materiallyGreaterThan(
+      challenger.latencyMeanMs,
+      champion.latencyMeanMs * gates.maxLatencyRatio,
+    )
   ) {
     failures.push("latency exceeded the configured ratio guard");
   }
@@ -239,7 +271,10 @@ function addGuardFailures(
     gates.maxCostRatio !== null &&
     champion.costMeanUsd !== null &&
     challenger.costMeanUsd !== null &&
-    challenger.costMeanUsd > champion.costMeanUsd * gates.maxCostRatio
+    materiallyGreaterThan(
+      challenger.costMeanUsd,
+      champion.costMeanUsd * gates.maxCostRatio,
+    )
   ) {
     failures.push("cost exceeded the configured ratio guard");
   }
@@ -362,7 +397,10 @@ export function evaluateLearningExperiment(input: {
     nextAction =
       `Keep the champion. The next experiment should address ${failureSignals[0]?.signal ?? "the failed guard"} ` +
       "and change only one declared axis.";
-  } else if (improvement === null || improvement < input.gates.minPrimaryImprovement) {
+  } else if (
+    improvement === null ||
+    materiallyLessThan(improvement, input.gates.minPrimaryImprovement)
+  ) {
     decision = "reject";
     reason =
       `The challenger did not clear the predeclared ${input.gates.primaryMetric} improvement threshold.`;

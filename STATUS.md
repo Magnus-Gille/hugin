@@ -1,45 +1,64 @@
 # Hugin — Status
 
-**Latest session:** 2026-07-13 (Codex) — **repo-local deployment provenance hardening complete locally; awaiting parent review/publish/deploy**
-**Branch:** `codex/hugin-deploy-marker-hardening` from exact `origin/main@6c8428cf64d1fb0e9b33ac4875c524a094f47d6b` (merged auth lifecycle PR #198).
+**Latest session:** 2026-07-13 (Codex) — **GitHub-independent overnight dev screen completed; evaluator and transport recovery hardened locally**
+**Branch/worktree:** `codex/gate-d-prompt-prefix` in `/private/tmp/hugin-gate-d-prompt-prefix`, based on exact `origin/main@d5eb909267111590c7b4b2442794197334fbedb2` (#199). Implementation commits `56ba7b0` (bound prompt prefixes) and `79db404` (durable observation recovery + numeric gate fix), plus the STATUS handoff, are published in draft PR [#200](https://github.com/Magnus-Gille/hugin/pull/200).
 
-## Latest — markerless failure boundary and exact local-commit deployment
+## Latest — development prompt evidence plus two failures converted into harness improvements
 
-- Fleet validation found that `scripts/deploy-pi.sh` let `rsync --delete`
-  remove `.deployed-commit`, then later ran `git fetch && git reset` inside the
-  remote Hugin tree even though authoritative Grimnir deployments intentionally
-  leave that tree without `.git`. The service stayed healthy while deployment
-  provenance disappeared.
-- The repo-local deploy now accepts only a clean repository-root checkout with
-  an addressable full `HEAD` SHA. It rechecks cleanliness and the exact SHA
-  after the local build and again after rsync, so a build/source race cannot be
-  accepted as the named commit.
-- The previous marker (and abandoned temp marker) is removed as the first remote
-  mutation. Rsync excludes `.deployed-commit` in addition to preserving the
-  existing `.env`, `node_modules`, `.git`, tests, and macOS exclusions. The
-  obsolete remote Hugin `git fetch/reset` step is gone. Production dependencies
-  install with `npm ci --omit=dev`, so the shipped lockfile cannot be rewritten
-  after the local commit has been pinned.
-- Only after user-service restart/status and the loopback health check succeed
-  does one final remote command atomically write the exact local full SHA via a
-  temp file and rename. Any earlier failure remains markerless; no fallible
-  deployment operation follows the stamp.
-- The shell regression harness now covers unversioned/dirty sources, build and
-  rsync source drift, invalidation-before-sync ordering, real rsync marker
-  exclusion semantics, invalidation failure, health failure, markerless failure
-  paths, no remote-Hugin-Git dependency, and health-before-exact-SHA stamping.
-- Validation: `npm ci`; TypeScript build; standalone Gate D runner typecheck;
-  full suite (103 files / 1,729 tests); both CI shell suites; all Bash/Node
-  syntax; changed-script warning/error shellcheck and fleet-wide error-severity
-  shellcheck; `git diff --check`; full and production npm audit (0
-  vulnerabilities).
+- The production-scope experiment `gate-d-edit-deadline-v1-20260713` remains
+  safely rejected. Its turn-6 challenger improved edit-start by 11.08% but
+  reduced quality/usefulness from 0.9 to 0.8 and increased rescue from 0.1 to
+  0.2. The production champion remains unchanged and no promotion was attempted.
+- A separate, explicitly non-production experiment,
+  `gate-d-typecheck-prompt-dev-v1-20260713` (`scope: m5-code-edit-dev`), screened
+  the content-bound pre-finish TypeScript-check prefix on the already observed,
+  contaminated ten-case Gate D corpus. All 20 matched
+  `qwen3-coder-next-80b` arms completed with independent verification and
+  mechanical ratings. Challenger quality/usefulness was 10/10 versus champion
+  9/10; mean latency was 22,863.0 versus 36,969.9 ms and edit-start was 12,472.1
+  versus 15,801.9 ms. This is candidate-screening evidence only and must never
+  drive production promotion.
+- Hugin nevertheless recorded that dev experiment as `rejected`: exact +0.10
+  quality became `0.09999999999999998` under IEEE-754 and missed the configured
+  `0.1` threshold. Local commit `79db404` makes all evaluator boundary
+  comparisons tolerant only to a handful of machine epsilons and adds both an
+  exact-boundary promotion regression and a materially-below-threshold negative
+  regression. The already terminal dev experiment was not rewritten or promoted.
+- The lone champion failure (sample 09) exhausted the turn cap and left the word
+  `widget` in a comment; Gate D's structural oracle correctly rejected it. The
+  prompt asked for TypeScript verification, so this win does not prove the
+  prefix caused the improvement. In the decisive results M5 reported
+  `check.ran:false` even when the agent summary claimed TypeScript/tests passed;
+  Hugin currently cannot prove which agent-side check command actually ran.
+  Fresh unseen cases from gille-inference #250 and content-blind agent tool/check
+  execution telemetry are required before causal or promotion claims.
+- Two real transport failures sharpened the runner. An M5 start response was
+  lost after the work had completed; the job was identified as
+  `cl-20260713-33167799`, independently reverified, and recorded exactly once.
+  A later Broker observation response timed out after the final observation had
+  committed; durable status showed all 20 observations. `79db404` now reconciles
+  ambiguous observation writes by exact `run_id` + evidence before retrying and
+  marks mutating M5 transport failures as ambiguous. Because M5 start has no
+  client idempotency key/request fingerprint, the runner now stops with the
+  bound experiment run ID and explicitly forbids a blind rerun.
+- Prompt support in `56ba7b0` remains intact: local-only per-arm
+  `prompt_prefix_file`, exact prompt-byte SHA-256 binding, unchanged passthrough
+  compatibility, and fail-closed tamper detection. Dev artifacts are under
+  `/tmp/gate-d-typecheck-prompt-dev-v1/` while that temporary directory exists.
+- Final local verification: TypeScript build, manifest dry-run with exact corpus
+  `341cebdb...e8b3b`, `git diff --check`, focused recovery/evaluator/client tests,
+  and the full suite (105 files / 1,739 tests) pass. Production remains exact
+  `d5eb909267111590c7b4b2442794197334fbedb2`. GitHub authentication is healthy;
+  draft PR #200 is open and its initial CI run is in progress. No merge, deploy,
+  or production champion mutation occurred.
 
-**Next:** parent agent reviews and publishes the clean local commit, merges only
-with green CI, then deploys from an exact clean merged worktree. Verify the
-remote Hugin tree remains `.git`-absent, `.deployed-commit` equals the merged
-full SHA, the user service is active/enabled, and loopback health is green. No
-push, PR, deployment, live SSH, marker write, Munin write, or other production
-mutation occurred in this implementation session.
+**Next:** (1) let draft PR #200 complete CI and obtain independent review; (2)
+have the gille-inference owner land #250's fresh, model-unseen deterministic
+cases; (3) add M5-side idempotent `client_run_id` + request binding and
+content-blind agent check-execution telemetry in the owning repo; (4) after
+both owning-repo changes merge, predeclare fresh holdouts, regenerate/dry-run a
+prompt-only manifest, and run a production-scope experiment exactly once. Keep
+the current champion unless every strict gate passes on uncontaminated evidence.
 
 ---
 

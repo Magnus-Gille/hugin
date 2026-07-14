@@ -144,6 +144,22 @@ sample's instruction/seed directory/check. Before any remote mutation it:
 5. runs matched pairs sequentially, counterbalancing which arm runs first;
 6. records only content-blind observations—never diffs, prompts, check output, or seed contents.
 
+Observation writes are reconciled after ambiguous Broker timeouts: the runner first reads the
+durable experiment state and retries only an identical, absent `run_id`. This avoids rerunning a
+paid M5 arm merely because Hugin committed the evidence but its HTTP response was lost.
+
+An ambiguous `code_loop_start` response is different because the current M5 protocol does not
+accept a client idempotency key or echo a request fingerprint. The runner stops with the exact
+experiment `run_id` and explicitly forbids a blind rerun. Reconcile the recent M5 work id first;
+long-term, the M5 owner should add an idempotent client run identifier plus request binding so this
+recovery can be automatic and fail-closed.
+
+An arm may declare a local-only `prompt_prefix_file`. The runner reads it once, verifies every byte
+against that arm's versioned `prompt.sha256`, and prepends it to each corpus instruction. Hugin still
+stores only the content hash and prompt version, so prompt-axis experiments remain reproducible and
+content-blind. Omitting the file preserves the original instruction byte-for-byte and validates the
+deployed passthrough prompt fingerprint.
+
 Credentials stay in environment variables. Use the Keychain helper and tailnet path; never put
 tokens in the manifest:
 

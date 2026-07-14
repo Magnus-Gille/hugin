@@ -89,6 +89,57 @@ describe("evaluateLearningExperiment", () => {
     expect(evaluation.failureSignals[0]).toMatchObject({ signal: "tests-failed" });
   });
 
+  it("accepts an exact decimal rate improvement at the configured threshold", () => {
+    const input = makeExperimentInput({
+      gates: {
+        ...makeExperimentInput().gates,
+        minMatchedPairs: 10,
+        primaryMetric: "quality-rate",
+        minPrimaryImprovement: 0.1,
+      },
+    });
+    const observations = Array.from({ length: 10 }, (_, index) => {
+      const sample = `case-${index + 1}`;
+      return [
+        recorded(makeObservation(sample, "champion", index === 0 ? {
+          quality_outcome: "fail",
+          product_outcome: "discarded",
+          failure_kind: "protected-check-failed",
+        } : {})),
+        recorded(makeObservation(sample, "challenger")),
+      ];
+    }).flat();
+
+    const evaluation = evaluateLearningExperiment({ observations, gates: input.gates });
+    expect(evaluation.primaryImprovement).toBeCloseTo(0.1, 15);
+    expect(evaluation.decision).toBe("promotion-ready");
+  });
+
+  it("still rejects a decimal rate improvement materially below the threshold", () => {
+    const input = makeExperimentInput({
+      gates: {
+        ...makeExperimentInput().gates,
+        minMatchedPairs: 10,
+        primaryMetric: "quality-rate",
+        minPrimaryImprovement: 0.100_001,
+      },
+    });
+    const observations = Array.from({ length: 10 }, (_, index) => {
+      const sample = `case-${index + 1}`;
+      return [
+        recorded(makeObservation(sample, "champion", index === 0 ? {
+          quality_outcome: "fail",
+          product_outcome: "discarded",
+          failure_kind: "protected-check-failed",
+        } : {})),
+        recorded(makeObservation(sample, "challenger")),
+      ];
+    }).flat();
+
+    const evaluation = evaluateLearningExperiment({ observations, gates: input.gates });
+    expect(evaluation.decision).toBe("reject");
+  });
+
   it("does not count a judge-only verdict as verified quality evidence", () => {
     const input = makeExperimentInput();
     const observations = ["case-1", "case-2"].flatMap((sample) => [

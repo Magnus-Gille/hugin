@@ -51,7 +51,12 @@ const statusSchema = z.object({
 }).strict();
 
 export class M5CodeLoopError extends Error {
-  constructor(message: string, public readonly detail?: unknown) {
+  constructor(
+    message: string,
+    public readonly detail?: unknown,
+    /** The remote side may have accepted the mutation even though no response arrived. */
+    public readonly ambiguousOutcome = false,
+  ) {
     super(message);
     this.name = "M5CodeLoopError";
   }
@@ -164,10 +169,16 @@ export class M5CodeLoopClient {
     } catch (err) {
       if (err instanceof M5CodeLoopError) throw err;
       if (err instanceof Error && err.name === "AbortError") {
-        throw new M5CodeLoopError(`M5 JSON-RPC timed out after ${this.timeoutMs}ms`);
+        throw new M5CodeLoopError(
+          `M5 JSON-RPC timed out after ${this.timeoutMs}ms`,
+          undefined,
+          true,
+        );
       }
       throw new M5CodeLoopError(
         `M5 JSON-RPC request failed: ${err instanceof Error ? err.message : String(err)}`,
+        undefined,
+        true,
       );
     } finally {
       clearTimeout(timer);
