@@ -116,6 +116,27 @@ export function customBasePreflightScript(): string {
   ].join(" && ");
 }
 
+export function sourceBaselinePreflightScript(): string {
+  return [
+    "test -x ./node_modules/.bin/tsx",
+    "test -x ./node_modules/.bin/tsc",
+    "node -e \"require('esbuild').transformSync('const x: number = 1', { loader: 'ts' })\"",
+    "./node_modules/.bin/tsc --version",
+  ].join(" && ");
+}
+
+function preflightSourceBaseline(sourceRepo: string): void {
+  try {
+    runChecked("bash", ["-c", sourceBaselinePreflightScript()], sourceRepo);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      "Gate D source dependencies are missing or incompatible with this Harbor worker. " +
+      `Run npm ci in ${sourceRepo} on the worker before starting the pilot. ${detail}`,
+    );
+  }
+}
+
 function preflightCustomBaseImage(baseImage: string | undefined): void {
   if (!baseImage || baseImage === HARBOR_PILOT_DEFAULT_BASE_IMAGE) return;
   runChecked("docker", [
@@ -321,6 +342,7 @@ async function main(): Promise<void> {
   }
   const networkMode: "no-network" | "public" = networkModeArg;
   const baseImage = valueAfter("--base-image");
+  preflightSourceBaseline(sourceRepo);
   const explicitOut = valueAfter("--out");
   const outputDir = explicitOut
     ? resolve(explicitOut)
