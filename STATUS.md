@@ -1,13 +1,30 @@
 # Hugin — Status
 
-**Latest session:** 2026-07-15 (Codex) — **reviewed M5 exposure contract restored after overlapping PR #212; awaiting final exact-head gate**
-**Branch/worktree:** `codex/hugin-exposure-integration-final` in
-`/private/tmp/hugin-exposure-integration-final`, based on current exact
-`origin/main@23ee47d46e8d71f0fa0997cdd639fd6be0a5af48`; the runtime deploy
-marker remains `ae92906` (PR #212), as recorded by STATUS-only PR #213.
+**Latest session:** 2026-07-15 (Codex) — **fail-closed cross-client exposure contract merged, deployed, and live**
+**Production/deployed:** `a03c829f766d51d15a628c694a69b7e33b96b777`
+via merged PR [#214](https://github.com/Magnus-Gille/hugin/pull/214). The
+owner-only lookup producer remains live from gille-inference
+`832e6c467f65aef3b5fa345f91d6f9b595466dc8`.
+**Status handoff:** `codex/hugin-exposure-final-status` in
+`/private/tmp/hugin-exposure-integration-final`, based on deployed merge
+`a03c829f766d51d15a628c694a69b7e33b96b777`.
 
 ## Latest — real daily task harvest now fails closed on global M5 freshness
 
+- PR #214 traceably replaced the overlapping PR #212 implementation with the
+  negotiated, independently reviewed tree. GitHub CI passed and the actual
+  squash merge—not a branch SHA—was deployed to Hugin-Munin.
+- Live acceptance passed: exact deploy marker; active Hugin service; active and
+  enabled daily factory timer; `/health` ok, polling, queue depth zero; private
+  manifest mode `0600`; schema v2; complete source history; 10 inspected tasks;
+  0 provisional / 1 regression / 9 quarantine; 9 `not-checked` ineligible
+  candidates plus 1 safely `incomplete`; zero eligible `not-checked` and zero
+  malformed provisional states.
+- A direct fixed-sentinel lookup under the deployed EnvironmentFile proved the
+  minted owner credential, exact fingerprint binding, a negative match,
+  complete live coverage, and all six required lanes. No secret, prompt, or
+  task-derived fingerprint was printed or persisted; acceptance exposed only
+  content-blind contract metadata.
 - Overlapping PR #212 merged and deployed while the negotiated implementation
   was under review. Its live `ae92906` factory queried all nine prompt-bearing
   sources before eligibility, including candidates later quarantined, and used
@@ -59,17 +76,19 @@ marker remains `ae92906` (PR #212), as recorded by STATUS-only PR #213.
   candidate construction now quarantines them as `not-checked`, before lookup,
   while the snapshot join keeps the timestamp check as defense in depth.
   Claude Opus returned no review text / an execution error and Fable reported
-  its monthly spend limit. Independent Codex approved the reviewed source tree;
-  the rebased exact head needs only a lightweight parity/status gate.
+  its monthly spend limit. Independent Codex approved the exact PR #214 source
+  tree and the rebased parity/status head with no findings.
 - Validation on the rebased exact head: TypeScript build; focused 3 files / 30
   tests; full suite 109 files / 1,796 tests; both CI shell suites; Bash syntax;
-  `git diff --check`; production dependency audit 0 vulnerabilities.
+  `git diff --check`; production dependency audit 0 vulnerabilities; GitHub CI
+  green on exact PR head.
 
-**Next:** complete the lightweight rebased-head gate, fix every verified
-finding, publish a ready PR, merge only after review/checks, deploy the
-merged commit to Hugin-Munin, and live-prove minted-owner lookup plus schema-v2
-factory/timer acceptance. No Harbor run, holdout freeze, learning import, route
-change, or promotion is authorized by this slice.
+**Next boundary:** automatic content-blind candidate harvest is live and needs
+no Magnus action. New eligible managed-repository tasks can become provisional
+only after the owner-wide freshness gate passes. The independent-verifier
+packager remains the next required slice before any holdout freeze or Harbor
+execution; it must re-query immediately before packaging and again before use.
+No Harbor run, model call, learning import, route change, or promotion occurred.
 
 ---
 
