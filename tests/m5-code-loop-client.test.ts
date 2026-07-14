@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { M5CodeLoopClient, M5CodeLoopError } from "../src/learning/m5-code-loop-client.js";
+import {
+  M5CodeLoopClient,
+  M5CodeLoopError,
+  m5ClientRunId,
+  startM5CodeLoopDurably,
+  type M5CodeLoopRequest,
+} from "../src/learning/m5-code-loop-client.js";
 
 function rpcResult(value: unknown, isError = false): Response {
   return new Response(JSON.stringify({
@@ -12,19 +18,39 @@ function rpcResult(value: unknown, isError = false): Response {
   }), { status: 200, headers: { "content-type": "application/json" } });
 }
 
+function startResult(overrides: Record<string, unknown> = {}) {
+  return {
+    work_id: "cl-1",
+    status: "running",
+    client_run_id: "hugin:run-1",
+    request_fingerprint: `sha256:${"a".repeat(64)}`,
+    recovered: false,
+    capabilities: {
+      start_idempotency: "client-run-id-v1",
+      agent_checks: "pi-bash-events-v2",
+    },
+    ...overrides,
+  };
+}
+
+function terminalResult() {
+  return {
+    status: "completed",
+    diff: "",
+    diff_truncated: false,
+    changed_files: [],
+    protected_violations: [],
+    summary: "",
+    check: { ran: false, exit_code: null, output_tail: "" },
+    usage: { turns: 1, wall_ms: 2, prompt_tokens: 3, completion_tokens: 4 },
+    work_id: "cl-1",
+    detail: "",
+  };
+}
+
 describe("M5CodeLoopClient", () => {
   it("calls the owner-gated tool without leaking the token into the body", async () => {
-    const fetchImpl = vi.fn(async () => rpcResult({
-      work_id: "cl-1",
-      status: "running",
-      client_run_id: "harbor:campaign:task:live",
-      request_fingerprint: `sha256:${"a".repeat(64)}`,
-      recovered: false,
-      capabilities: {
-        start_idempotency: "client-run-id-v1",
-        agent_checks: "pi-bash-events-v1",
-      },
-    }));
+    const fetchImpl = vi.fn(async () => rpcResult(startResult()));
     const client = new M5CodeLoopClient({
       endpoint: "http://m5.test:8080/mcp",
       bearerToken: "owner-secret",
@@ -32,15 +58,10 @@ describe("M5CodeLoopClient", () => {
     });
 
     expect(await client.start({
-      client_run_id: "harbor:campaign:task:live",
+      client_run_id: "hugin:run-1",
       instruction: "fix",
       files: [{ path: "a.ts", content: "x" }],
-    })).toMatchObject({
-      work_id: "cl-1",
-      status: "running",
-      client_run_id: "harbor:campaign:task:live",
-      recovered: false,
-    });
+    })).toEqual(startResult());
     const [, init] = fetchImpl.mock.calls[0]!;
     expect((init?.headers as Record<string, string>).authorization).toBe("Bearer owner-secret");
     expect(String(init?.body)).not.toContain("owner-secret");
@@ -48,7 +69,7 @@ describe("M5CodeLoopClient", () => {
       method: "tools/call",
       params: {
         name: "code_loop_start",
-        arguments: { client_run_id: "harbor:campaign:task:live" },
+        arguments: { client_run_id: "hugin:run-1" },
       },
     });
   });
@@ -80,6 +101,51 @@ describe("M5CodeLoopClient", () => {
         name: "M5CodeLoopError",
         ambiguousOutcome: true,
       });
+  });
+
+  it("parses a recovered terminal result without requiring a second result call", async () => {
+    const recovered = startResult({
+      status: "completed",
+      recovered: true,
+      result: terminalResult(),
+    });
+    const client = new M5CodeLoopClient({
+      endpoint: "http://m5.test:8080/mcp",
+      bearerToken: "x",
+      fetchImpl: (async () => rpcResult(recovered)) as typeof fetch,
+    });
+    expect((await client.start({
+      client_run_id: "hugin:run-1",
+      instruction: "fix",
+      files: [{ path: "a", content: "b" }],
+    })).result).toEqual(terminalResult());
+  });
+
+  it("retries the byte-identical durable request after ambiguity and an admission busy", async () => {
+    const request: M5CodeLoopRequest & { client_run_id: string } = {
+      client_run_id: "hugin:run-1",
+      instruction: "fix",
+      files: [{ path: "a", content: "b" }],
+    };
+    const start = vi.fn()
+      .mockRejectedValueOnce(new M5CodeLoopError("lost", undefined, true))
+      .mockRejectedValueOnce(new M5CodeLoopError("busy", { refusal: "busy" }))
+      .mockResolvedValueOnce(startResult());
+    const sleeps: number[] = [];
+    const recovered = await startM5CodeLoopDurably({ start }, request, {
+      sleep: async (ms) => { sleeps.push(ms); },
+    });
+    expect(recovered.work_id).toBe("cl-1");
+    expect(start).toHaveBeenCalledTimes(3);
+    expect(start.mock.calls.every(([actual]) => actual === request)).toBe(true);
+    expect(sleeps).toEqual([500, 1_000]);
+  });
+
+  it("derives a stable bounded client id without embedding the experiment run id", () => {
+    const runId = "experiment:sample:challenger:abcdef";
+    expect(m5ClientRunId(runId)).toMatch(/^hugin:[a-f0-9]{64}$/);
+    expect(m5ClientRunId(runId)).toBe(m5ClientRunId(runId));
+    expect(m5ClientRunId(runId)).not.toContain("sample");
   });
 
   it("rejects unsafe or wrong-path endpoints", () => {

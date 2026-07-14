@@ -60,6 +60,13 @@ function summarize(observations: RecordedLearningObservation[]): LearningArmSumm
   const infra = observations.filter(
     (observation) => observation.quality_outcome === "infra-error",
   ).length;
+  const agentCheckSamples = observations.filter(
+    (observation) =>
+      observation.agent_checks?.state === "attempted" &&
+      observation.agent_checks.attempts.some(
+        (attempt) => attempt.status === "passed" || attempt.status === "failed",
+      ),
+  ).length;
 
   return {
     samples,
@@ -83,6 +90,8 @@ function summarize(observations: RecordedLearningObservation[]): LearningArmSumm
     verifierScoreMean: mean(
       observations.map((observation) => observation.verifier_score),
     ),
+    agentCheckSamples,
+    agentCheckCoverage: samples > 0 ? agentCheckSamples / samples : 0,
   };
 }
 
@@ -185,6 +194,15 @@ function collectFailureSignals(
     if (observation.edit_start_ms === undefined && observation.phase_ms?.inspect !== undefined) {
       add("edit-start-unobserved");
     }
+    if (observation.agent_checks?.state === "none") add("agent-check-not-observed");
+    if (observation.agent_checks?.state === "unobservable") add("agent-check-unobservable");
+    if (observation.agent_checks?.state === "partial") add("agent-check-partial");
+    if (observation.agent_checks?.attempts.some((attempt) => attempt.status === "failed")) {
+      add("agent-check-failed");
+    }
+    if (observation.agent_checks?.attempts.some((attempt) => attempt.status === "execution-error")) {
+      add("agent-check-execution-error");
+    }
   }
 
   return [...counts.entries()]
@@ -211,6 +229,14 @@ function addCoverageRequirements(
     materiallyLessThan(challenger.ratedCoverage, gates.minRatedCoverage)
   ) {
     missing.push(`rated coverage must be >= ${gates.minRatedCoverage} on both arms`);
+  }
+  if (materiallyLessThan(
+    challenger.agentCheckCoverage,
+    gates.minChallengerAgentCheckCoverage,
+  )) {
+    missing.push(
+      `challenger agent-check coverage must be >= ${gates.minChallengerAgentCheckCoverage}`,
+    );
   }
 }
 

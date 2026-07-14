@@ -8,7 +8,6 @@
  *     npm run experiment:m5-code-loop -- ./wave.json
  */
 
-import { createHash } from "node:crypto";
 import {
   cpSync,
   lstatSync,
@@ -39,15 +38,15 @@ import {
 } from "../src/learning/m5-code-loop-prompt.js";
 import {
   M5CodeLoopClient,
-  M5CodeLoopError,
+  m5ClientRunId,
+  startM5CodeLoopDurably,
   type M5CodeLoopRequest,
-  type M5CodeLoopStart,
 } from "../src/learning/m5-code-loop-client.js";
 
-const V4_HARNESS_VERSION = "code-loop-pi-2026-07-14-v4";
-const V4_CAPABILITIES = {
+const DURABLE_HARNESS_VERSION = "code-loop-pi-2026-07-14-v5";
+const DURABLE_CAPABILITIES = {
   startIdempotency: "client-run-id-v1",
-  agentChecks: "pi-bash-events-v1",
+  agentChecks: "pi-bash-events-v2",
 } as const;
 
 const capsSchema = z.object({
@@ -122,11 +121,11 @@ const manifestSchema = z.object({
     if (config.editDeadlineTurn !== caps.edit_deadline_turn) {
       ctx.addIssue({ code: "custom", path: ["arms", arm, "caps", "edit_deadline_turn"], message: "edit deadline differs from the versioned harness config" });
     }
-    if (config.version !== V4_HARNESS_VERSION) {
+    if (config.version !== DURABLE_HARNESS_VERSION) {
       ctx.addIssue({
         code: "custom",
         path: ["experiment", arm, "harness", "version"],
-        message: `live experiments require ${V4_HARNESS_VERSION}`,
+        message: `live experiments require ${DURABLE_HARNESS_VERSION}`,
       });
     }
   }
@@ -296,38 +295,15 @@ function verifyGateD(
   }
 }
 
-function supportsDurableV4(tools: Array<Record<string, unknown>>): boolean {
+function supportsDurableEvidenceContract(tools: Array<Record<string, unknown>>): boolean {
   const start = tools.find((tool) => tool.name === "code_loop_start");
-  const serialized = JSON.stringify(start);
-  return !!start &&
-    serialized.includes("edit_deadline_turn") &&
-    serialized.includes("client_run_id");
+  if (!start) return false;
+  const wire = JSON.stringify(start);
+  return wire.includes("edit_deadline_turn") && wire.includes("client_run_id");
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
-}
-
-function clientRunId(runId: string): string {
-  return `hugin:${createHash("sha256").update(runId).digest("hex")}`;
-}
-
-async function startDurably(
-  m5: M5CodeLoopClient,
-  request: M5CodeLoopRequest,
-): Promise<M5CodeLoopStart> {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      return await m5.start(request);
-    } catch (error) {
-      const safelyRetryable =
-        error instanceof M5CodeLoopError &&
-        error.ambiguousOutcome &&
-        request.client_run_id !== undefined;
-      if (!safelyRetryable || attempt >= 3) throw error;
-      await sleep(attempt * 500);
-    }
-  }
 }
 
 async function readOrCreate(
@@ -356,9 +332,8 @@ async function runArm(input: {
   const { m5, broker, manifest, sample, arm, promptPrefix, manifestDir } = input;
   const config = manifest.experiment[arm];
   const runId = `${manifest.experiment.experiment_id}:${sample.id}:${arm}:${config.fingerprint.slice(0, 12)}`;
-  const durableClientRunId = clientRunId(runId);
-  const request: M5CodeLoopRequest = {
-    client_run_id: durableClientRunId,
+  const request: M5CodeLoopRequest & { client_run_id: string } = {
+    client_run_id: m5ClientRunId(runId),
     instruction: applyCodeLoopPromptPrefix(sample.instruction, promptPrefix),
     files: sample.files,
     check_cmd: sample.m5_check_cmd,
@@ -367,37 +342,19 @@ async function runArm(input: {
     caps: manifest.arms[arm].caps,
   };
   process.stdout.write(`[${sample.id}/${arm}] starting\n`);
-  let started: M5CodeLoopStart;
-  try {
-    started = await startDurably(m5, request);
-  } catch (error) {
-    if (error instanceof M5CodeLoopError && error.ambiguousOutcome) {
-      throw new Error(
-        `[${sample.id}/${arm}] M5 start remained unavailable after safe idempotent recovery ` +
-        `for run ${runId}; resume with the same manifest and client binding.`,
-        { cause: error },
-      );
-    }
-    throw error;
-  }
-  if (
-    started.client_run_id !== durableClientRunId ||
-    started.request_fingerprint === null
-  ) {
-    throw new Error(`[${sample.id}/${arm}] M5 omitted the durable start binding`);
-  }
+  const started = await startM5CodeLoopDurably(m5, request);
   const deadline = Date.now() + manifest.result_deadline_s * 1_000;
-  let runStatus = started.status;
-  while (runStatus === "running") {
+  let status = started.status;
+  while (status === "running") {
     await sleep(manifest.poll_ms);
-    runStatus = (await m5.status(started.work_id)).status;
-    if (runStatus === "running" && Date.now() >= deadline) {
+    status = (await m5.status(started.work_id)).status;
+    if (status === "running" && Date.now() >= deadline) {
       throw new Error(`[${sample.id}/${arm}] result deadline exceeded for ${started.work_id}`);
     }
   }
-  const result = await m5.result(started.work_id);
-  if (result.work_id !== started.work_id) {
-    throw new Error(`[${sample.id}/${arm}] M5 result belongs to a different work id`);
+  const result = started.result ?? await m5.result(started.work_id);
+  if (result.work_id !== started.work_id || result.status !== status) {
+    throw new Error(`[${sample.id}/${arm}] M5 result does not match the durable start binding`);
   }
   const externalVerification = verifyGateD(
     result,
@@ -416,10 +373,10 @@ async function runArm(input: {
       model: config.model.id,
       harnessVersion: config.harness.version,
       caps: manifest.arms[arm].caps,
-      capabilities: config.harness.version === V4_HARNESS_VERSION
-        ? V4_CAPABILITIES
-        : undefined,
+      capabilities: DURABLE_CAPABILITIES,
     },
+    clientRunId: started.client_run_id,
+    requestFingerprint: started.request_fingerprint,
     externalVerification,
   });
   const persisted = await observeDurably(broker, observation);
@@ -489,8 +446,11 @@ async function main(): Promise<void> {
     baseUrl: requiredEnv("HUGIN_BROKER_URL"),
     bearerToken: requiredEnv("HUGIN_BROKER_TOKEN"),
   });
-  if (!supportsDurableV4(await m5.toolDefinitions())) {
-    throw new Error("M5 code_loop does not advertise the durable v4 experiment contract");
+  if (!supportsDurableEvidenceContract(await m5.toolDefinitions())) {
+    throw new Error(
+      "M5 code_loop does not advertise durable client_run_id plus edit_deadline_turn; " +
+      "deploy the reviewed gille-inference contract before creating the experiment",
+    );
   }
 
   let state = await readOrCreate(broker, manifest.experiment);
