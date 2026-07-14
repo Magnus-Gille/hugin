@@ -2,9 +2,9 @@
 
 **Latest session:** 2026-07-15 (Codex) — **reviewed M5 exposure contract restored after overlapping PR #212; awaiting final exact-head gate**
 **Branch/worktree:** `codex/hugin-exposure-integration-final` in
-`/private/tmp/hugin-exposure-integration-final`, based on deployed exact
-`origin/main@23ee47d46e8d71f0fa0997cdd639fd6be0a5af48` (the STATUS-only
-follow-up PR #213 to runtime merge `ae92906`).
+`/private/tmp/hugin-exposure-integration-final`, based on current exact
+`origin/main@23ee47d46e8d71f0fa0997cdd639fd6be0a5af48`; the runtime deploy
+marker remains `ae92906` (PR #212), as recorded by STATUS-only PR #213.
 
 ## Latest — real daily task harvest now fails closed on global M5 freshness
 
@@ -17,8 +17,9 @@ follow-up PR #213 to runtime merge `ae92906`).
 - STATUS-only PR #213 truthfully recorded the exact `ae92906` deploy marker,
   active service/timer, healthy polling with queue depth zero, complete six-lane
   coverage, and the 0 provisional / 1 regression / 8 quarantine result. Its
-  privacy interpretation was wrong: all nine hashes were sent before those
-  eight candidates were found ineligible. This follow-up preserves the runtime
+  privacy interpretation was wrong: all nine lookups were unnecessary—eight
+  candidates were later quarantined, while the ninth was already a local
+  regression and also required no lookup. This follow-up preserves the runtime
   facts and corrects that conclusion.
 - The follow-up is deliberately traceable on top of PR #213: revert runtime
   merge `ae92906`, then replay the three reviewed implementation/hardening
