@@ -1,7 +1,7 @@
 # Hugin — Status
 
 **Latest session:** 2026-07-14 (Codex) — **fresh four-case Harbor campaign completed; official result no-go**
-**Branch:** `codex/harbor-gate-d-v2-result` from merged runner `main@ea3b7dd36d22307e5eac717208bb24539fdb5ad0`.
+**Main:** `465ad19e88c2d691447bce1d7644e3340db29515`; runner/declaration PR [#204](https://github.com/Magnus-Gille/hugin/pull/204) and no-go/fix PR [#205](https://github.com/Magnus-Gille/hugin/pull/205) are merged.
 
 ## Latest — v2 run preserved as no-go; verifier packaging fixed for next declaration
 
@@ -41,8 +41,7 @@
   no-go report; credential value/name scan clean; bridge/token absent;
   `git diff --check`.
 
-**Next:** validate/review this fix and evidence record, merge the follow-up PR,
-then add and predeclare genuinely fresh cases before another model-bearing
+**Next:** add and predeclare genuinely fresh cases before another model-bearing
 Harbor run. Do not import the v2 no-go report, reuse these cases as holdouts, or
 promote automatically.
 
