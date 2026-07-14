@@ -115,6 +115,7 @@ hugin/
 │   ├── ollama-executor.ts # Ollama executor (streaming, OpenAI-compatible API)
 │   ├── ollama-hosts.ts    # Lazy host resolution with negative caching
 │   ├── context-loader.ts  # Context-refs resolver (fetch Munin entries for prompt injection)
+│   ├── daily-exam-harvest-cli.ts # Production-built, read-only Munin sweep → mode-0600 candidate manifest
 │   ├── prompt-injection-scanner.ts # Regex scanner for adversarial patterns in context-ref content
 │   ├── exfiltration-scanner.ts   # Regex scanner for data-leak patterns in task output
 │   ├── provenance.ts               # External-vs-trusted provenance detection for context-refs
@@ -146,7 +147,6 @@ hugin/
 │   └── sdk-executor.test.ts
 └── scripts/
     ├── deploy-pi.sh
-    ├── harvest-daily-exam-candidates.ts # Read-only Munin sweep → mode-0600 candidate manifest
     ├── run-m5-code-loop-experiment.ts # Resumable matched Gate D experiment runner
     ├── submit-daily-analysis.sh  # Submit daily journal analysis as ollama task
     ├── sync-claude-config.sh     # DEPRECATED — config now lives in the claude-config repo (bootstrap.sh)
@@ -235,3 +235,10 @@ M5 `/delegate` leaf; the gateway owns model selection and capability evidence.
 The complete envelope is embedded in the task and revalidated at claim time.
 Historical v1 aliases and journal rows remain readable but are never advertised
 or executed. Readiness depends on a valid M5 gateway configuration.
+
+**Daily exam factory:** deployment enables
+`hugin-daily-exam-factory.timer` (05:30 daily, with jitter). Its compiled,
+read-only CLI inspects a rolling 48-hour Munin window and atomically replaces
+the private content-blind manifest at
+`~/.hugin/daily-exam-candidates/latest.json`. It does not run Harbor/models or
+write learning state.

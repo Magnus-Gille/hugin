@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest";
 import {
   parseArgs,
   writeManifestFile,
-} from "../scripts/harvest-daily-exam-candidates.js";
+} from "../src/daily-exam-harvest-cli.js";
 
 describe("daily exam factory CLI", () => {
   it("normalizes timestamps and keeps a bounded default", () => {
@@ -28,6 +28,18 @@ describe("daily exam factory CLI", () => {
       "--since", "2026-07-15T00:00:00Z",
       "--until", "2026-07-14T00:00:00Z",
     ])).toThrow("--since must not be later than --until");
+  });
+
+  it("computes a bounded rolling window for the daily systemd job", () => {
+    expect(parseArgs(
+      ["--lookback-hours", "48"],
+      Date.parse("2026-07-14T12:00:00.000Z"),
+    )).toEqual({
+      since: "2026-07-12T12:00:00.000Z",
+      limit: 500,
+    });
+    expect(() => parseArgs(["--since", "2026-07-14T00:00:00Z", "--lookback-hours", "48"]))
+      .toThrow("mutually exclusive");
   });
 
   it("rejects unbounded or unknown options", () => {
