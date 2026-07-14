@@ -103,6 +103,31 @@ describe("checkoutTaskBranch", () => {
     expect(checkoutCall.args).toEqual(["checkout", "-b", "hugin/task-123", "origin/main"]);
   });
 
+  it("pins origin/main before checkout when repository evidence is requested", async () => {
+    const base = "a".repeat(40);
+    spawnBehaviors = [
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 0, stdout: `${base}\n` },
+      { exitCode: 0 },
+    ];
+    const result = await checkoutTaskBranch(
+      "/home/magnus/repos/grimnir",
+      "task-pinned",
+      { fetchRetryDelaysMs: [0, 0], captureBaseCommit: true },
+    );
+    expect(result).toEqual({
+      action: "created",
+      branchName: "hugin/task-pinned",
+      baseCommit: base,
+    });
+    expect(spawnCalls[3].args).toEqual(["rev-parse", "origin/main"]);
+    expect(spawnCalls[4].args).toEqual([
+      "checkout", "-b", "hugin/task-pinned", "origin/main",
+    ]);
+  });
+
   it("honors a configured reposRoot: treats it as managed (#139)", async () => {
     spawnBehaviors = [
       { exitCode: 0 }, // git rev-parse --git-dir
@@ -315,6 +340,41 @@ describe("finalizeTaskBranch", () => {
     const pushCall = spawnCalls.find((c) => c.args.includes("push"));
     expect(pushCall?.args).toContain("-u");
     expect(pushCall?.args).toContain("hugin/task-xyz");
+  });
+
+  it("captures exact content-blind repository evidence when requested", async () => {
+    const base = "a".repeat(40);
+    const head = "b".repeat(40);
+    spawnBehaviors = [
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: "1\n" },
+      { exitCode: 0, stdout: `${head}\n` },
+      { exitCode: 0, stdout: "src/parser.ts\0tests/parser.test.ts\0" },
+      { exitCode: 0, stdout: "diff --git a/src/parser.ts b/src/parser.ts\n" },
+      { exitCode: 0, stdout: "git@github.com:Magnus-Gille/grimnir.git\n" },
+      { exitCode: 0 },
+      { exitCode: 0, stdout: "https://github.com/Magnus-Gille/grimnir/pull/8\n" },
+    ];
+    const result = await finalizeTaskBranch(
+      "/home/magnus/repos/grimnir",
+      "hugin/task-evidence",
+      "body",
+      allowedHosts,
+      { captureRepositoryChange: true, baseCommit: base },
+    );
+    expect(result.action).toBe("pr-created");
+    expect(result.repositoryChange).toEqual(expect.objectContaining({
+      baseCommit: base,
+      headCommit: head,
+      changedFiles: ["src/parser.ts", "tests/parser.test.ts"],
+      diffSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    }));
+    expect(spawnCalls[3].args).toEqual([
+      "diff", "--name-only", "-z", "--no-ext-diff", `${base}..${head}`,
+    ]);
+    expect(spawnCalls[4].args).toEqual([
+      "diff", "--binary", "--no-ext-diff", "--no-textconv", `${base}..${head}`,
+    ]);
   });
 
   it("returns push-failed when remote is not in egress allowlist", async () => {

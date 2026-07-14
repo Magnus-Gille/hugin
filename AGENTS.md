@@ -93,6 +93,14 @@ Content format:
 
 Results are written to the same namespace under key `result`.
 
+Current successful managed-repository tasks also bind an optional
+`repositoryChange` object into `result-structured`: the pre-agent `origin/main`
+commit, final task-branch commit, changed-file paths, and SHA-256 of the binary
+Git diff. The daily exam factory uses this content-blind evidence to classify
+Munin history as provisional holdout, regression, or quarantine candidates;
+it never runs or promotes a candidate by itself. See
+`docs/daily-exam-factory.md`.
+
 ## Project structure
 
 ```
@@ -130,6 +138,7 @@ hugin/
 │       ├── experiment-evaluator.ts # Pure matched-pair promotion/rejection logic
 │       ├── experiment-store.ts   # Principal-isolated Munin state + CAS/idempotency
 │       ├── experiment-handlers.ts # Authenticated Broker learning endpoints
+│       ├── daily-task-exam-factory.ts # Content-blind daily task → holdout/regression/quarantine candidates
 │       ├── m5-code-loop-adapter.ts # Honest M5 result → content-blind observation mapping
 │       └── m5-code-loop-client.ts  # Owner-gated async code_loop JSON-RPC client
 ├── tests/
@@ -137,6 +146,7 @@ hugin/
 │   └── sdk-executor.test.ts
 └── scripts/
     ├── deploy-pi.sh
+    ├── harvest-daily-exam-candidates.ts # Read-only Munin sweep → mode-0600 candidate manifest
     ├── run-m5-code-loop-experiment.ts # Resumable matched Gate D experiment runner
     ├── submit-daily-analysis.sh  # Submit daily journal analysis as ollama task
     ├── sync-claude-config.sh     # DEPRECATED — config now lives in the claude-config repo (bootstrap.sh)

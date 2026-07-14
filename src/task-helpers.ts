@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as path from "node:path";
 import type { MuninEntry, MuninQueryResult, MuninReadResult } from "./munin-client.js";
 
@@ -436,12 +437,15 @@ export interface TaskBranchOptions {
    * can never branch a production checkout.
    */
   reposRoot?: string;
+  /** Pin origin/main before the agent runs so later exam evidence cannot trust an agent-mutated ref. */
+  captureBaseCommit?: boolean;
 }
 
 export interface TaskBranchResult {
   /** skipped: not a managed git repo; created: branch ready; fetch-failed: network error, no branch */
   action: "skipped" | "created" | "fetch-failed";
   branchName?: string;
+  baseCommit?: string;
   error?: string;
 }
 
@@ -449,7 +453,28 @@ export interface BranchFinalizeResult {
   action: "skipped" | "no-changes" | "pr-created" | "push-failed";
   prUrl?: string;
   branchName?: string;
+  repositoryChange?: RepositoryChangeEvidence;
+  repositoryChangeError?: string;
   error?: string;
+}
+
+/**
+ * Content-blind binding for turning a completed managed-repository task into a
+ * reproducible evaluation candidate. The task prompt/result remain in Munin;
+ * this record only pins the exact before/after trees and their changed paths.
+ */
+export interface RepositoryChangeEvidence {
+  baseCommit: string;
+  headCommit: string;
+  changedFiles: string[];
+  diffSha256: string;
+}
+
+export interface BranchFinalizeOptions {
+  /** Capture exact before/after repository evidence for the daily exam factory. */
+  captureRepositoryChange?: boolean;
+  /** Pre-agent origin/main commit returned by checkoutTaskBranch. */
+  baseCommit?: string;
 }
 
 const DEFAULT_FETCH_RETRY_DELAYS_MS = [500, 2000];
@@ -565,6 +590,19 @@ export async function checkoutTaskBranch(
     };
   }
 
+  let baseCommit: string | undefined;
+  if (options.captureBaseCommit) {
+    const base = await runGitCapture(workingDir, ["rev-parse", "origin/main"]);
+    const candidate = base.stdout.toString("utf8").trim().toLowerCase();
+    if (!base.ok || !/^[0-9a-f]{40,64}$/.test(candidate)) {
+      return {
+        action: "fetch-failed",
+        error: `Failed to pin origin/main before task execution: ${base.stderr || "invalid commit id"}`,
+      };
+    }
+    baseCommit = candidate;
+  }
+
   const branchName = `hugin/${taskId}`;
 
   const checkoutOk = await new Promise<boolean>((resolve) => {
@@ -593,7 +631,7 @@ export async function checkoutTaskBranch(
   }
 
   console.log(`Pre-task: checked out branch ${branchName} from origin/main in ${workingDir}`);
-  return { action: "created", branchName };
+  return { action: "created", branchName, baseCommit };
 }
 
 /**
@@ -613,6 +651,7 @@ export async function finalizeTaskBranch(
   branchName: string,
   prBody: string,
   allowedEgressHosts: string[],
+  options: BranchFinalizeOptions = {},
 ): Promise<BranchFinalizeResult> {
   // Auto-commit uncommitted changes (task may have written files without committing)
   const isDirty = await new Promise<boolean>((resolve) => {
@@ -674,6 +713,22 @@ export async function finalizeTaskBranch(
     return { action: "no-changes" };
   }
 
+  let repositoryChange: RepositoryChangeEvidence | undefined;
+  let repositoryChangeError: string | undefined;
+  if (options.captureRepositoryChange) {
+    const captured = await captureRepositoryChange(workingDir, options.baseCommit);
+    repositoryChange = captured.evidence;
+    repositoryChangeError = captured.error;
+    if (repositoryChangeError) {
+      // Evidence capture must never discard a successful task or prevent its
+      // PR from being delivered. The harvester will quarantine this task until
+      // the missing binding is repaired independently.
+      console.warn(
+        `Post-task repository evidence unavailable for ${branchName}: ${repositoryChangeError}`,
+      );
+    }
+  }
+
   // Egress check
   const remoteUrl = await new Promise<string | null>((resolve) => {
     const child = spawn("git", ["remote", "get-url", "--push", "origin"], {
@@ -689,7 +744,13 @@ export async function finalizeTaskBranch(
 
   if (!remoteUrl || !isRemoteHostAllowed(remoteUrl, allowedEgressHosts)) {
     console.warn(`Post-task git push skipped in ${workingDir}: remote missing or not in egress allowlist`);
-    return { action: "push-failed", branchName, error: "Remote not allowed by egress policy" };
+    return {
+      action: "push-failed",
+      branchName,
+      repositoryChange,
+      repositoryChangeError,
+      error: "Remote not allowed by egress policy",
+    };
   }
 
   // Push branch
@@ -712,18 +773,109 @@ export async function finalizeTaskBranch(
   });
 
   if (!pushOk) {
-    return { action: "push-failed", branchName, error: "git push failed" };
+    return {
+      action: "push-failed",
+      branchName,
+      repositoryChange,
+      repositoryChangeError,
+      error: "git push failed",
+    };
   }
 
   // Open PR
   const taskId = branchName.replace(/^hugin\//, "");
   const prUrl = await createPullRequest(workingDir, branchName, taskId, prBody);
   if (!prUrl) {
-    return { action: "push-failed", branchName, error: "gh pr create failed" };
+    return {
+      action: "push-failed",
+      branchName,
+      repositoryChange,
+      repositoryChangeError,
+      error: "gh pr create failed",
+    };
   }
 
   console.log(`Post-task: PR created: ${prUrl}`);
-  return { action: "pr-created", prUrl, branchName };
+  return {
+    action: "pr-created",
+    prUrl,
+    branchName,
+    repositoryChange,
+    repositoryChangeError,
+  };
+}
+
+async function runGitCapture(
+  workingDir: string,
+  args: string[],
+): Promise<{ ok: boolean; stdout: Buffer; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn("git", args, {
+      cwd: workingDir,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, HOME: "/home/magnus" },
+    });
+    const stdout: Buffer[] = [];
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => stdout.push(Buffer.from(chunk)));
+    child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    child.on("close", (code) => resolve({
+      ok: code === 0,
+      stdout: Buffer.concat(stdout),
+      stderr: stderr.trim(),
+    }));
+    child.on("error", (err) => resolve({
+      ok: false,
+      stdout: Buffer.alloc(0),
+      stderr: err.message,
+    }));
+  });
+}
+
+async function captureRepositoryChange(
+  workingDir: string,
+  preTaskBaseCommit: string | undefined,
+): Promise<{ evidence?: RepositoryChangeEvidence; error?: string }> {
+  const baseCommit = preTaskBaseCommit?.trim().toLowerCase();
+  if (!baseCommit || !/^[0-9a-f]{40,64}$/.test(baseCommit)) {
+    return { error: "pre-task base commit is unavailable or invalid" };
+  }
+  const head = await runGitCapture(workingDir, ["rev-parse", "HEAD"]);
+  if (!head.ok) return { error: `git rev-parse HEAD failed: ${head.stderr || "unknown"}` };
+  const headCommit = head.stdout.toString("utf8").trim().toLowerCase();
+  if (!/^[0-9a-f]{40,64}$/.test(headCommit)) {
+    return { error: "git returned an invalid head commit id" };
+  }
+  if (baseCommit === headCommit) return { error: "base and head commits are identical" };
+
+  const range = `${baseCommit}..${headCommit}`;
+  const names = await runGitCapture(workingDir, [
+    "diff", "--name-only", "-z", "--no-ext-diff", range,
+  ]);
+  if (!names.ok) return { error: `git diff --name-only failed: ${names.stderr || "unknown"}` };
+  const changedFiles = names.stdout
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean);
+  if (changedFiles.length === 0) return { error: "commit range contains no changed files" };
+  if (changedFiles.some((file) => path.isAbsolute(file) || file.split("/").includes(".."))) {
+    return { error: "git returned an unsafe changed-file path" };
+  }
+
+  const diff = await runGitCapture(workingDir, [
+    "diff", "--binary", "--no-ext-diff", "--no-textconv", range,
+  ]);
+  if (!diff.ok) return { error: `git diff --binary failed: ${diff.stderr || "unknown"}` };
+  if (diff.stdout.length === 0) return { error: "commit range contains an empty diff" };
+
+  return {
+    evidence: {
+      baseCommit,
+      headCommit,
+      changedFiles,
+      diffSha256: createHash("sha256").update(diff.stdout).digest("hex"),
+    },
+  };
 }
 
 async function cleanupLocalBranch(workingDir: string, branchName: string): Promise<void> {

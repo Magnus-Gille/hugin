@@ -1,5 +1,37 @@
 # Hugin — Status
 
+**Latest session:** 2026-07-14 (Codex) — **daily-use exam factory implemented locally; CI-equivalent suite green**
+**Branch:** `codex/daily-exam-factory` from `main@509e9cd7d50f5ff1ace142f941033ba9bc348238`.
+
+## Latest — real Hugin code work can feed quarantined Harbor exam candidates
+
+- Successful managed-repository tasks now pin `origin/main` before the agent
+  runs, then bind the final commit, changed-file paths, and SHA-256 of the
+  binary/no-textconv Git diff into optional `result-structured.repositoryChange`.
+  An agent-mutated remote ref therefore cannot redefine the exam's before tree.
+- `npm run harvest:daily-exams` performs a read-only, paginated Munin sweep and
+  emits a mode-0600, content-blind manifest. It copies neither prompt/answer nor
+  diff/file contents and performs no model call, Harbor run, learning import,
+  route change, or promotion.
+- Candidates are separated into `provisional-holdout` (no Hugin-local M5
+  evidence), `regression` (M5 provenance exists), and `quarantine` (missing
+  reproducibility/privacy/completion/exposure evidence). Every usable candidate
+  still requires an independent verifier; private tasks are quarantined and
+  omit repository metadata.
+- "No Hugin-local M5 evidence" deliberately does not claim global freshness.
+  The owner-side, content-blind cross-client exposure lookup is routed to
+  [gille-inference#257](https://github.com/Magnus-Gille/gille-inference/issues/257).
+- Documentation: `docs/daily-exam-factory.md`. Validation: TypeScript build;
+  focused 4 files / 54 tests; full suite 108 files / 1,767 tests; both exact CI
+  shell suites; CLI help; `git diff --check`.
+
+**Next:** review and publish this branch, merge only with green GitHub CI, deploy
+the exact merged Hugin commit, then run the first read-only candidate sweep.
+Keep all holdouts provisional until gille-inference#257 provides complete
+cross-client exposure evidence and a reviewed independent verifier is attached.
+
+---
+
 **Latest session:** 2026-07-14 (Codex) — **fresh four-case Harbor campaign completed; official result no-go**
 **Main:** `465ad19e88c2d691447bce1d7644e3340db29515`; runner/declaration PR [#204](https://github.com/Magnus-Gille/hugin/pull/204) and no-go/fix PR [#205](https://github.com/Magnus-Gille/hugin/pull/205) are merged.
 
