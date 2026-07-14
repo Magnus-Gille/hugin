@@ -11,30 +11,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  lookupCrossClientExposure,
   parseArgs,
+  taskExposureFingerprintsForLookup,
   writeManifestFile,
 } from "../src/daily-exam-harvest-cli.js";
-import {
-  TASK_EXPOSURE_FINGERPRINT_VERSION,
-  TASK_EXPOSURE_REQUIRED_LANES,
-} from "../src/learning/task-exposure-client.js";
-import type { DailyTaskHarvestSource } from "../src/learning/daily-task-exam-factory.js";
+import { TASK_EXPOSURE_SMOKE_FINGERPRINT } from "../src/learning/m5-task-exposure.js";
 
 describe("daily exam factory CLI", () => {
-  const lookupSource: DailyTaskHarvestSource = {
-    status: {
-      id: "tasks/lookup/status",
-      namespace: "tasks/lookup",
-      key: "status",
-      content: "## Task: Lookup\n\n- **Submitted at:** 2026-07-14T10:00:00Z\n\n### Prompt\nExact private task text",
-      tags: ["completed"],
-      classification: "internal",
-      created_at: "2026-07-14T10:00:00.000Z",
-      updated_at: "2026-07-14T11:00:00.000Z",
-    },
-  };
-
   it("normalizes timestamps and keeps a bounded default", () => {
     expect(parseArgs(["--since", "2026-07-14T10:00:00+02:00"])).toEqual({
       since: "2026-07-14T08:00:00.000Z",
@@ -66,6 +49,19 @@ describe("daily exam factory CLI", () => {
     expect(() => parseArgs(["--publish", "yes"])).toThrow("unknown option");
   });
 
+  it("queries only unique provisional fingerprints and smokes an empty eligible day", () => {
+    const fingerprint = "a".repeat(64);
+    expect(taskExposureFingerprintsForLookup([
+      { lane: "provisional-holdout", crossClientExposure: { fingerprintSha256: fingerprint } },
+      { lane: "provisional-holdout", crossClientExposure: { fingerprintSha256: fingerprint } },
+      { lane: "quarantine", crossClientExposure: { fingerprintSha256: "b".repeat(64) } },
+      { lane: "regression", crossClientExposure: { fingerprintSha256: "c".repeat(64) } },
+    ])).toEqual([fingerprint]);
+    expect(taskExposureFingerprintsForLookup([
+      { lane: "quarantine", crossClientExposure: { fingerprintSha256: fingerprint } },
+    ])).toEqual([TASK_EXPOSURE_SMOKE_FINGERPRINT]);
+  });
+
   it("atomically writes mode-0600 output without following a destination symlink", () => {
     const dir = mkdtempSync(join(tmpdir(), "hugin-daily-exam-cli-"));
     try {
@@ -83,61 +79,5 @@ describe("daily exam factory CLI", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
-
-  it("looks up only the content-blind task fingerprint through the sovereign gateway", async () => {
-    const lookup = await lookupCrossClientExposure(
-      [lookupSource],
-      {
-        HOMESERVER_GATEWAY_URL: "http://100.76.72.59:8080",
-        HOMESERVER_GATEWAY_API_KEY: "owner-token",
-      },
-      (async (_url, init) => {
-        const body = JSON.parse(String(init?.body)) as {
-          fingerprint_version: string;
-          fingerprints: string[];
-        };
-        expect(body.fingerprint_version).toBe(TASK_EXPOSURE_FINGERPRINT_VERSION);
-        expect(body.fingerprints).toHaveLength(1);
-        expect(String(init?.body)).not.toContain("Exact private task text");
-        return new Response(JSON.stringify({
-          schema_version: 1,
-          fingerprint_version: TASK_EXPOSURE_FINGERPRINT_VERSION,
-          coverage: {
-            coverage_complete: true,
-            from: "2026-07-14T09:00:00.000Z",
-            through: "2026-07-14T12:00:00.000Z",
-            lanes: TASK_EXPOSURE_REQUIRED_LANES,
-            historical_backfill_complete: false,
-            historical_backfill_from: null,
-            historical_backfill_through: null,
-            historical_events_imported: 0,
-            historical_rows_skipped_inexact: 1,
-            incomplete_before: "2026-07-14T09:00:00.000Z",
-            incomplete_reasons: ["legacy history incomplete"],
-          },
-          results: [{
-            fingerprint_sha256: body.fingerprints[0],
-            seen: false,
-            first_seen_at: null,
-            last_seen_at: null,
-            lanes: [],
-            model_ids: [],
-            harness_ids: [],
-          }],
-        }), { status: 200 });
-      }) as typeof fetch,
-    );
-    expect(lookup).toMatchObject({ status: "queried" });
-  });
-
-  it("fails lookup configuration closed and skips only when no prompt can be fingerprinted", async () => {
-    expect(await lookupCrossClientExposure([lookupSource], {})).toEqual({
-      status: "unavailable",
-      failureKind: "configuration",
-    });
-    const withoutPrompt = structuredClone(lookupSource);
-    withoutPrompt.status.content = "## Task: no prompt section";
-    expect(await lookupCrossClientExposure([withoutPrompt], {})).toEqual({ status: "not-needed" });
   });
 });

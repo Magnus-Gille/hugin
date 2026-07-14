@@ -6,12 +6,13 @@ import {
   type StructuredTaskResult,
 } from "../task-result-schema.js";
 import {
+  REQUIRED_TASK_EXPOSURE_LANES,
   TASK_EXPOSURE_FINGERPRINT_VERSION,
-  TASK_EXPOSURE_REQUIRED_LANES,
-  type TaskExposureLookupEvidence,
-  type TaskExposureLookupFailureKind,
+  taskTextFingerprint,
+  type TaskExposureCoverage,
   type TaskExposureLookupResult,
-} from "./task-exposure-client.js";
+  type TaskExposureSnapshot,
+} from "./m5-task-exposure.js";
 
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 const gitCommitSchema = z.string().regex(/^[0-9a-f]{40,64}$/);
@@ -23,8 +24,8 @@ export const dailyExamCandidateSchema = z.object({
   source: z.object({
     taskNamespace: z.string().startsWith("tasks/"),
     taskId: z.string().min(1),
-    taskCreatedAt: isoTimestampSchema.optional(),
-    statusUpdatedAt: isoTimestampSchema,
+    taskCreatedAt: z.string(),
+    statusUpdatedAt: z.string().min(1),
     taskDocumentSha256: sha256Schema,
     promptSha256: sha256Schema.optional(),
     structuredResultSha256: sha256Schema.optional(),
@@ -45,135 +46,73 @@ export const dailyExamCandidateSchema = z.object({
     state: z.enum(["no-m5-evidence", "m5-exposed", "unknown"]),
     models: z.array(z.string().min(1)),
     evidence: z.array(z.string().min(1)),
-    crossClient: z.object({
-      fingerprintVersion: z.literal(TASK_EXPOSURE_FINGERPRINT_VERSION),
-      fingerprintSha256: sha256Schema,
-      seen: z.boolean(),
-      firstSeenAt: isoTimestampSchema.nullable(),
-      lastSeenAt: isoTimestampSchema.nullable(),
-      lanes: z.array(z.enum(TASK_EXPOSURE_REQUIRED_LANES)).max(TASK_EXPOSURE_REQUIRED_LANES.length),
-      modelIds: z.array(z.string().min(1).max(160)).max(1_000),
-      harnessIds: z.array(z.string().min(1).max(160)).max(1_000),
-    }).strict().superRefine((crossClient, ctx) => {
-      if (!crossClient.seen && (
-        crossClient.firstSeenAt !== null ||
-        crossClient.lastSeenAt !== null ||
-        crossClient.lanes.length > 0 ||
-        crossClient.modelIds.length > 0 ||
-        crossClient.harnessIds.length > 0
-      )) {
-        ctx.addIssue({ code: "custom", path: ["seen"], message: "unseen results cannot carry exposure metadata" });
-      }
-      if (crossClient.seen && (
-        crossClient.firstSeenAt === null ||
-        crossClient.lastSeenAt === null ||
-        crossClient.lanes.length === 0
-      )) {
-        ctx.addIssue({ code: "custom", path: ["seen"], message: "seen results require timestamps and lanes" });
-      }
-    }).optional(),
   }).strict(),
+  crossClientExposure: z.object({
+    fingerprintVersion: z.literal(TASK_EXPOSURE_FINGERPRINT_VERSION),
+    fingerprintSha256: sha256Schema.optional(),
+    state: z.enum(["not-checked", "seen", "unseen-covered", "incomplete", "error"]),
+    checkedAt: z.string().datetime({ offset: true }).optional(),
+    lookupSchemaVersion: z.literal(1).optional(),
+    coverage: z.object({
+      coverageComplete: z.boolean(),
+      from: z.string().datetime({ offset: true }),
+      through: z.string().datetime({ offset: true }),
+      lanes: z.array(z.string().min(1)),
+      historicalBackfillComplete: z.boolean(),
+      historicalBackfillFrom: z.string().datetime({ offset: true }).nullable(),
+      historicalBackfillThrough: z.string().datetime({ offset: true }).nullable(),
+      historicalEventsImported: z.number().int().nonnegative(),
+      historicalRowsSkippedInexact: z.number().int().nonnegative(),
+      incompleteBefore: z.string().datetime({ offset: true }),
+      incompleteReasons: z.array(z.string().min(1)),
+    }).strict().optional(),
+    match: z.object({
+      seen: z.boolean(),
+      firstSeenAt: z.string().datetime({ offset: true }).nullable(),
+      lastSeenAt: z.string().datetime({ offset: true }).nullable(),
+      lanes: z.array(z.string().min(1)),
+      modelIds: z.array(z.string().min(1)),
+      harnessIds: z.array(z.string().min(1)),
+    }).strict().optional(),
+    evidence: z.array(z.string().min(1)),
+  }).strict().superRefine((value, ctx) => {
+    const checked = value.state === "seen" || value.state === "unseen-covered" || value.state === "incomplete";
+    if (checked && (!value.checkedAt || value.lookupSchemaVersion !== 1 || !value.coverage || !value.match)) {
+      ctx.addIssue({ code: "custom", message: `${value.state} requires a complete lookup snapshot` });
+      return;
+    }
+    if (value.state === "seen" && value.match?.seen !== true) {
+      ctx.addIssue({ code: "custom", message: "seen requires a positive match" });
+    }
+    if ((value.state === "unseen-covered" || value.state === "incomplete") && value.match?.seen !== false) {
+      ctx.addIssue({ code: "custom", message: `${value.state} requires a negative match` });
+    }
+    if (value.state === "unseen-covered") {
+      if (value.coverage?.coverageComplete !== true) {
+        ctx.addIssue({ code: "custom", message: "unseen-covered requires complete coverage" });
+      }
+      for (const lane of REQUIRED_TASK_EXPOSURE_LANES) {
+        if (!value.coverage?.lanes.includes(lane)) {
+          ctx.addIssue({ code: "custom", message: `unseen-covered is missing lane ${lane}` });
+        }
+      }
+    }
+    if (value.state === "error" && !value.checkedAt) {
+      ctx.addIssue({ code: "custom", message: "error requires an attempted-at timestamp" });
+    }
+  }),
   lane: z.enum(["provisional-holdout", "regression", "quarantine"]),
   readiness: z.enum(["needs-independent-verifier", "quarantined"]),
   reasons: z.array(z.string().min(1)),
   contentPolicy: z.literal("content-blind-references-only"),
-}).strict().superRefine((value, ctx) => {
-  if (
-    value.exposure.crossClient &&
-    value.exposure.crossClient.fingerprintSha256 !== value.source.promptSha256
-  ) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["exposure", "crossClient", "fingerprintSha256"],
-      message: "cross-client result must bind to the candidate prompt fingerprint",
-    });
-  }
-  if (value.exposure.crossClient?.seen && value.exposure.state !== "m5-exposed") {
-    ctx.addIssue({
-      code: "custom",
-      path: ["exposure", "state"],
-      message: "a positive cross-client result must classify as M5-exposed",
-    });
-  }
-  if (value.lane === "provisional-holdout" && (
-    value.exposure.state !== "no-m5-evidence" ||
-    value.exposure.crossClient?.seen !== false
-  )) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["lane"],
-      message: "provisional holdouts require a bound negative cross-client result",
-    });
-  }
-  if (value.lane === "regression" && value.exposure.state !== "m5-exposed") {
-    ctx.addIssue({ code: "custom", path: ["lane"], message: "regressions require M5 exposure" });
-  }
-  if ((value.lane === "quarantine") !== (value.readiness === "quarantined")) {
-    ctx.addIssue({ code: "custom", path: ["readiness"], message: "quarantine lane/readiness must agree" });
-  }
-});
+}).strict();
 export type DailyExamCandidate = z.infer<typeof dailyExamCandidateSchema>;
-
-const dailyExamExposureCoverageSchema = z.object({
-  coverageComplete: z.boolean(),
-  from: z.string().refine((value) => !Number.isNaN(Date.parse(value))),
-  through: z.string().refine((value) => !Number.isNaN(Date.parse(value))),
-  lanes: z.array(z.enum(TASK_EXPOSURE_REQUIRED_LANES)).max(TASK_EXPOSURE_REQUIRED_LANES.length),
-  historicalBackfillComplete: z.literal(false),
-  incompleteBefore: z.string().min(1),
-  incompleteReasonCount: z.number().int().nonnegative(),
-}).strict().superRefine((value, ctx) => {
-  if (Date.parse(value.from) > Date.parse(value.through)) {
-    ctx.addIssue({ code: "custom", path: ["through"], message: "coverage window is inverted" });
-  }
-  if (new Set(value.lanes).size !== value.lanes.length) {
-    ctx.addIssue({ code: "custom", path: ["lanes"], message: "coverage lanes must be unique" });
-  }
-  if (Date.parse(value.incompleteBefore) !== Date.parse(value.from)) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["incompleteBefore"],
-      message: "incomplete-before boundary must match live coverage start",
-    });
-  }
-});
-
-const dailyExamExposureLookupSchema = z.object({
-  status: z.enum(["queried", "unavailable", "not-needed"]),
-  fingerprintVersion: z.literal(TASK_EXPOSURE_FINGERPRINT_VERSION),
-  queriedFingerprints: z.number().int().nonnegative(),
-  coverage: dailyExamExposureCoverageSchema.optional(),
-  failureKind: z.enum([
-    "configuration",
-    "authentication",
-    "transport",
-    "server",
-    "contract",
-  ]).optional(),
-}).strict().superRefine((value, ctx) => {
-  if (value.status === "queried" && (!value.coverage || value.queriedFingerprints < 1)) {
-    ctx.addIssue({ code: "custom", path: ["coverage"], message: "queried lookups require coverage" });
-  }
-  if (value.status === "unavailable" && !value.failureKind) {
-    ctx.addIssue({ code: "custom", path: ["failureKind"], message: "unavailable lookups require a failure kind" });
-  }
-  if (value.status === "not-needed" && value.queriedFingerprints !== 0) {
-    ctx.addIssue({ code: "custom", path: ["queriedFingerprints"], message: "not-needed lookups query nothing" });
-  }
-  if (value.status === "queried" && value.failureKind) {
-    ctx.addIssue({ code: "custom", path: ["failureKind"], message: "queried lookups cannot carry a failure" });
-  }
-  if (value.status !== "queried" && value.coverage) {
-    ctx.addIssue({ code: "custom", path: ["coverage"], message: "only queried lookups carry coverage" });
-  }
-});
 
 export const dailyExamManifestSchema = z.object({
   schemaVersion: z.literal(2),
   generatedAt: isoTimestampSchema,
   source: z.literal("hugin-munin-daily-tasks"),
   contentPolicy: z.literal("content-blind-references-only"),
-  exposureLookup: dailyExamExposureLookupSchema,
   historyComplete: z.boolean(),
   inspectedTasks: z.number().int().nonnegative(),
   counts: z.object({
@@ -182,54 +121,13 @@ export const dailyExamManifestSchema = z.object({
     quarantine: z.number().int().nonnegative(),
   }).strict(),
   candidates: z.array(dailyExamCandidateSchema),
-}).strict().superRefine((value, ctx) => {
-  if (value.inspectedTasks !== value.candidates.length) {
-    ctx.addIssue({ code: "custom", path: ["inspectedTasks"], message: "candidate count disagrees with inspected tasks" });
-  }
-  const actualCounts = {
-    provisionalHoldout: value.candidates.filter((candidate) => candidate.lane === "provisional-holdout").length,
-    regression: value.candidates.filter((candidate) => candidate.lane === "regression").length,
-    quarantine: value.candidates.filter((candidate) => candidate.lane === "quarantine").length,
-  };
-  for (const key of ["provisionalHoldout", "regression", "quarantine"] as const) {
-    if (value.counts[key] !== actualCounts[key]) {
-      ctx.addIssue({ code: "custom", path: ["counts", key], message: "manifest lane count is dishonest" });
-    }
-  }
-  if (new Set(value.candidates.map((candidate) => candidate.candidateId)).size !== value.candidates.length) {
-    ctx.addIssue({ code: "custom", path: ["candidates"], message: "candidate IDs must be unique" });
-  }
-  for (let index = 0; index < value.candidates.length; index += 1) {
-    const candidate = value.candidates[index]!;
-    if (candidate.lane !== "provisional-holdout") continue;
-    const coverage = value.exposureLookup.coverage;
-    const safeNegative =
-      value.exposureLookup.status === "queried" &&
-      coverage?.coverageComplete === true &&
-      TASK_EXPOSURE_REQUIRED_LANES.every((lane) => coverage.lanes.includes(lane)) &&
-      candidate.source.taskCreatedAt !== undefined &&
-      candidate.source.taskCreatedAt >= coverage.from &&
-      candidate.source.taskCreatedAt <= coverage.through;
-    if (!safeNegative) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["candidates", index, "lane"],
-        message: "provisional holdout is not bound to complete live cross-client coverage",
-      });
-    }
-  }
-});
+}).strict();
 export type DailyExamManifest = z.infer<typeof dailyExamManifestSchema>;
 
 export interface DailyTaskHarvestSource {
   status: MuninEntry;
   resultStructured?: MuninEntry | null;
 }
-
-export type DailyExamExposureLookupInput =
-  | { status: "queried"; evidence: TaskExposureLookupEvidence }
-  | { status: "unavailable"; failureKind: TaskExposureLookupFailureKind }
-  | { status: "not-needed" };
 
 function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
@@ -243,25 +141,6 @@ function field(content: string, label: string): string | undefined {
 function promptFromTask(content: string): string | undefined {
   const prompt = content.match(/###\s*Prompt\s*\n([\s\S]+)$/i)?.[1]?.trim();
   return prompt || undefined;
-}
-
-export function dailyTaskExposureFingerprint(source: DailyTaskHarvestSource): string | undefined {
-  const prompt = promptFromTask(source.status.content);
-  return prompt ? sha256(prompt) : undefined;
-}
-
-function normalizedIso(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? undefined : new Date(parsed).toISOString();
-}
-
-function taskCreatedAt(source: DailyTaskHarvestSource): string | undefined {
-  const candidates = [
-    normalizedIso(field(source.status.content, "Submitted at")),
-    normalizedIso(source.status.created_at),
-  ].filter((value): value is string => value !== undefined);
-  return candidates.sort()[0];
 }
 
 function contextAliasFromTask(content: string): string | undefined {
@@ -332,119 +211,6 @@ function exposureFor(result: StructuredTaskResult | undefined): DailyExamCandida
   return { state: "unknown", models: [...models].sort(), evidence: ["runtime-exposure-ambiguous"] };
 }
 
-function crossClientRecord(result: TaskExposureLookupResult) {
-  return {
-    fingerprintVersion: TASK_EXPOSURE_FINGERPRINT_VERSION,
-    fingerprintSha256: result.fingerprintSha256,
-    seen: result.seen,
-    firstSeenAt: result.firstSeenAt,
-    lastSeenAt: result.lastSeenAt,
-    lanes: result.lanes,
-    modelIds: result.modelIds,
-    harnessIds: result.harnessIds,
-  };
-}
-
-function resolveExposure(input: {
-  local: DailyExamCandidate["exposure"];
-  fingerprint?: string;
-  createdAt?: string;
-  lookup: DailyExamExposureLookupInput;
-  results: Map<string, TaskExposureLookupResult>;
-}): { exposure: DailyExamCandidate["exposure"]; reason?: string } {
-  const { local, fingerprint, createdAt, lookup, results } = input;
-  if (local.state === "m5-exposed") {
-    const result = fingerprint ? results.get(fingerprint) : undefined;
-    return {
-      exposure: result ? { ...local, crossClient: crossClientRecord(result) } : local,
-    };
-  }
-  if (local.state === "unknown") {
-    const result = fingerprint ? results.get(fingerprint) : undefined;
-    if (result?.seen) {
-      return {
-        exposure: {
-          state: "m5-exposed",
-          models: [...new Set([...local.models, ...result.modelIds])].sort(),
-          evidence: [...new Set([...local.evidence, "cross-client-registry-seen"])].sort(),
-          crossClient: crossClientRecord(result),
-        },
-      };
-    }
-    return {
-      exposure: result ? { ...local, crossClient: crossClientRecord(result) } : local,
-    };
-  }
-  if (!fingerprint) {
-    return {
-      exposure: { ...local, state: "unknown", evidence: [...local.evidence, "cross-client-fingerprint-unavailable"] },
-      reason: "cross-client-fingerprint-unavailable",
-    };
-  }
-  if (lookup.status !== "queried") {
-    return {
-      exposure: { ...local, state: "unknown", evidence: [...local.evidence, "cross-client-lookup-unavailable"] },
-      reason: "cross-client-exposure-lookup-unavailable",
-    };
-  }
-  const result = results.get(fingerprint);
-  if (!result) {
-    return {
-      exposure: { ...local, state: "unknown", evidence: [...local.evidence, "cross-client-result-missing"] },
-      reason: "cross-client-exposure-result-missing",
-    };
-  }
-  const crossClient = crossClientRecord(result);
-  if (result.seen) {
-    return {
-      exposure: {
-        state: "m5-exposed",
-        models: [...new Set([...local.models, ...result.modelIds])].sort(),
-        evidence: [...new Set([...local.evidence, "cross-client-registry-seen"])].sort(),
-        crossClient,
-      },
-    };
-  }
-  const coverage = lookup.evidence.coverage;
-  if (!coverage.coverageComplete) {
-    return {
-      exposure: { ...local, state: "unknown", evidence: [...local.evidence, "cross-client-coverage-incomplete"], crossClient },
-      reason: "cross-client-coverage-incomplete",
-    };
-  }
-  if (!TASK_EXPOSURE_REQUIRED_LANES.every((lane) => coverage.lanes.includes(lane))) {
-    return {
-      exposure: { ...local, state: "unknown", evidence: [...local.evidence, "cross-client-coverage-lanes-incomplete"], crossClient },
-      reason: "cross-client-coverage-lanes-incomplete",
-    };
-  }
-  if (!createdAt) {
-    return {
-      exposure: { ...local, state: "unknown", evidence: [...local.evidence, "task-created-at-unavailable"], crossClient },
-      reason: "task-created-at-unavailable",
-    };
-  }
-  if (createdAt < coverage.from) {
-    return {
-      exposure: { ...local, state: "unknown", evidence: [...local.evidence, "candidate-before-cross-client-coverage"], crossClient },
-      reason: "candidate-before-cross-client-coverage-window",
-    };
-  }
-  if (createdAt > coverage.through) {
-    return {
-      exposure: { ...local, state: "unknown", evidence: [...local.evidence, "candidate-after-cross-client-coverage"], crossClient },
-      reason: "candidate-after-cross-client-coverage-window",
-    };
-  }
-  return {
-    exposure: {
-      ...local,
-      evidence: [...new Set([...local.evidence, "cross-client-registry-unseen-complete"])].sort(),
-      crossClient,
-    },
-  };
-}
-
 function taskTypeFromTags(tags: readonly string[]): string | undefined {
   return tags
     .find((tag) => tag.startsWith("type:") && !tag.startsWith("type:task-result"))
@@ -453,32 +219,17 @@ function taskTypeFromTags(tags: readonly string[]): string | undefined {
 
 /**
  * Convert one completed daily task into content-blind exam-candidate metadata.
- * "No M5 evidence" becomes provisional only after a bound negative lookup in
- * the complete live cross-client coverage window. Missing or incomplete lookup
- * evidence fails closed to quarantine.
+ * "No M5 evidence" is intentionally only provisional: Hugin cannot prove the
+ * same prompt was not shown through another client, so a later exposure-ledger
+ * check remains mandatory before a candidate is sealed as a holdout.
  */
-export function buildDailyExamCandidate(
-  source: DailyTaskHarvestSource,
-  exposureLookup: DailyExamExposureLookupInput = { status: "unavailable", failureKind: "configuration" },
-): DailyExamCandidate {
+export function buildDailyExamCandidate(source: DailyTaskHarvestSource): DailyExamCandidate {
   const taskDocument = source.status.content;
   const prompt = promptFromTask(taskDocument);
+  const promptFingerprint = prompt ? taskTextFingerprint(prompt) : undefined;
   const resultContent = source.resultStructured?.content;
   const result = parseStructuredResult(resultContent);
-  const localExposure = exposureFor(result);
-  const promptFingerprint = prompt ? sha256(prompt) : undefined;
-  const createdAt = taskCreatedAt(source);
-  const lookupResults = exposureLookup.status === "queried"
-    ? new Map(exposureLookup.evidence.results.map((row) => [row.fingerprintSha256, row]))
-    : new Map<string, TaskExposureLookupResult>();
-  const resolvedExposure = resolveExposure({
-    local: localExposure,
-    fingerprint: promptFingerprint,
-    createdAt,
-    lookup: exposureLookup,
-    results: lookupResults,
-  });
-  const exposure = resolvedExposure.exposure;
+  const exposure = exposureFor(result);
   const contextAlias = contextAliasFromTask(taskDocument);
   const githubRepository = githubRepositoryFromPr(result?.prUrl);
   const change = result?.repositoryChange;
@@ -487,9 +238,13 @@ export function buildDailyExamCandidate(
   const sourceClassificationIsPrivate = Boolean(
     sourceClassification && !["public", "internal"].includes(sourceClassification),
   );
+  const taskCreatedAt = typeof source.status.created_at === "string"
+    ? source.status.created_at
+    : "";
   const reasons: string[] = [];
 
   if (!source.status.tags.includes("completed")) reasons.push("source-task-not-completed");
+  if (!isoTimestampSchema.safeParse(taskCreatedAt).success) reasons.push("task-created-at-invalid");
   if (!prompt) reasons.push("task-prompt-missing");
   if (!result) reasons.push("valid-result-structured-missing");
   if (result && (result.lifecycle !== "completed" || result.outcome !== "completed")) {
@@ -502,7 +257,6 @@ export function buildDailyExamCandidate(
   if (sensitivity === "private") reasons.push("private-task-not-eligible-for-automatic-packaging");
   if (sourceClassificationIsPrivate) reasons.push("source-classification-not-eligible-for-automatic-packaging");
   if (exposure.state === "unknown") reasons.push("m5-exposure-unknown");
-  if (resolvedExposure.reason) reasons.push(resolvedExposure.reason);
 
   const repository = sensitivity !== "private" && !sourceClassificationIsPrivate && change && result?.prUrl && githubRepository
     ? {
@@ -522,14 +276,14 @@ export function buildDailyExamCandidate(
   if (!quarantine) reasons.push(
     lane === "regression"
       ? "already-exposed-to-m5-use-only-as-regression"
-      : "cross-client-exposure-check-passed",
+      : "requires-cross-client-exposure-check-before-holdout-seal",
     "independent-verifier-required",
   );
 
   const identity = JSON.stringify({
     taskNamespace: source.status.namespace,
     taskDocumentSha256: sha256(taskDocument),
-    promptSha256: prompt ? sha256(prompt) : null,
+    promptSha256: promptFingerprint ?? null,
     baseCommit: change?.baseCommit ?? null,
     headCommit: change?.headCommit ?? null,
     diffSha256: change?.diffSha256 ?? null,
@@ -540,10 +294,10 @@ export function buildDailyExamCandidate(
     source: {
       taskNamespace: source.status.namespace,
       taskId: result?.taskId ?? source.status.namespace.replace(/^tasks\//, ""),
-      ...(createdAt ? { taskCreatedAt: createdAt } : {}),
+      taskCreatedAt,
       statusUpdatedAt: source.status.updated_at,
       taskDocumentSha256: sha256(taskDocument),
-      ...(prompt ? { promptSha256: sha256(prompt) } : {}),
+      ...(promptFingerprint ? { promptSha256: promptFingerprint } : {}),
       ...(resultContent ? { structuredResultSha256: sha256(resultContent) } : {}),
       ...(result?.runtime ? { runtime: result.runtime } : {}),
       ...(taskTypeFromTags(source.status.tags)
@@ -553,6 +307,18 @@ export function buildDailyExamCandidate(
     },
     repository,
     exposure,
+    crossClientExposure: {
+      fingerprintVersion: TASK_EXPOSURE_FINGERPRINT_VERSION,
+      ...(promptFingerprint ? { fingerprintSha256: promptFingerprint } : {}),
+      state: "not-checked",
+      evidence: [
+        lane === "provisional-holdout"
+          ? "cross-client-exposure-lookup-pending"
+          : lane === "regression"
+            ? "lookup-not-required-local-m5-exposure"
+            : "lookup-not-required-ineligible",
+      ],
+    },
     lane,
     readiness: quarantine ? "quarantined" : "needs-independent-verifier",
     reasons,
@@ -565,37 +331,15 @@ export function buildDailyExamManifest(input: {
   generatedAt: string;
   historyComplete: boolean;
   sources: DailyTaskHarvestSource[];
-  exposureLookup?: DailyExamExposureLookupInput;
 }): DailyExamManifest {
-  const exposureLookup = input.exposureLookup ?? { status: "unavailable", failureKind: "configuration" };
   const candidates = input.sources
-    .map((source) => buildDailyExamCandidate(source, exposureLookup))
+    .map(buildDailyExamCandidate)
     .sort((a, b) => a.candidateId.localeCompare(b.candidateId));
-  const lookupManifest = exposureLookup.status === "queried"
-    ? {
-        status: exposureLookup.status,
-        fingerprintVersion: TASK_EXPOSURE_FINGERPRINT_VERSION,
-        queriedFingerprints: exposureLookup.evidence.results.length,
-        coverage: exposureLookup.evidence.coverage,
-      }
-    : exposureLookup.status === "unavailable"
-      ? {
-          status: exposureLookup.status,
-          fingerprintVersion: TASK_EXPOSURE_FINGERPRINT_VERSION,
-          queriedFingerprints: 0,
-          failureKind: exposureLookup.failureKind,
-        }
-      : {
-          status: exposureLookup.status,
-          fingerprintVersion: TASK_EXPOSURE_FINGERPRINT_VERSION,
-          queriedFingerprints: 0,
-        };
   return dailyExamManifestSchema.parse({
     schemaVersion: 2,
     generatedAt: input.generatedAt,
     source: "hugin-munin-daily-tasks",
     contentPolicy: "content-blind-references-only",
-    exposureLookup: lookupManifest,
     historyComplete: input.historyComplete,
     inspectedTasks: input.sources.length,
     counts: {
@@ -605,4 +349,186 @@ export function buildDailyExamManifest(input: {
     },
     candidates,
   });
+}
+
+function manifestCoverage(coverage: TaskExposureCoverage): NonNullable<DailyExamCandidate["crossClientExposure"]["coverage"]> {
+  return {
+    coverageComplete: coverage.coverage_complete,
+    from: coverage.from,
+    through: coverage.through,
+    lanes: coverage.lanes,
+    historicalBackfillComplete: coverage.historical_backfill_complete,
+    historicalBackfillFrom: coverage.historical_backfill_from,
+    historicalBackfillThrough: coverage.historical_backfill_through,
+    historicalEventsImported: coverage.historical_events_imported,
+    historicalRowsSkippedInexact: coverage.historical_rows_skipped_inexact,
+    incompleteBefore: coverage.incomplete_before,
+    incompleteReasons: coverage.incomplete_reasons,
+  };
+}
+
+function manifestMatch(result: TaskExposureLookupResult): NonNullable<DailyExamCandidate["crossClientExposure"]["match"]> {
+  return {
+    seen: result.seen,
+    firstSeenAt: result.first_seen_at,
+    lastSeenAt: result.last_seen_at,
+    lanes: result.lanes,
+    modelIds: result.model_ids,
+    harnessIds: result.harness_ids,
+  };
+}
+
+function removeReasons(candidate: DailyExamCandidate, ...reasons: string[]): void {
+  const remove = new Set(reasons);
+  candidate.reasons = candidate.reasons.filter((reason) => !remove.has(reason));
+}
+
+function addReason(candidate: DailyExamCandidate, reason: string): void {
+  if (!candidate.reasons.includes(reason)) candidate.reasons.push(reason);
+}
+
+function quarantine(candidate: DailyExamCandidate, reason: string): void {
+  if (candidate.lane === "provisional-holdout") {
+    candidate.lane = "quarantine";
+    candidate.readiness = "quarantined";
+    removeReasons(candidate, "independent-verifier-required");
+  }
+  addReason(candidate, reason);
+}
+
+function applySnapshot(candidate: DailyExamCandidate, snapshot: TaskExposureSnapshot): void {
+  const fingerprintSha256 = candidate.crossClientExposure.fingerprintSha256;
+  candidate.crossClientExposure = {
+    fingerprintVersion: TASK_EXPOSURE_FINGERPRINT_VERSION,
+    ...(fingerprintSha256 ? { fingerprintSha256 } : {}),
+    checkedAt: snapshot.checkedAt,
+    lookupSchemaVersion: 1,
+    coverage: manifestCoverage(snapshot.coverage),
+    match: manifestMatch(snapshot.result),
+    state: snapshot.result.seen ? "seen" : "incomplete",
+    evidence: [],
+  };
+  removeReasons(candidate, "requires-cross-client-exposure-check-before-holdout-seal");
+
+  // Positive evidence is useful regardless of negative-coverage completeness.
+  if (snapshot.result.seen) {
+    candidate.crossClientExposure.evidence = ["m5-lookup-seen"];
+    if (candidate.lane === "provisional-holdout") {
+      candidate.lane = "regression";
+      addReason(candidate, "cross-client-exposure-seen-use-only-as-regression");
+    }
+    return;
+  }
+
+  const createdAtIsIso = isoTimestampSchema.safeParse(candidate.source.taskCreatedAt).success;
+  const createdMs = Date.parse(candidate.source.taskCreatedAt);
+  const fromMs = Date.parse(snapshot.coverage.from);
+  const throughMs = Date.parse(snapshot.coverage.through);
+  const missingLanes = REQUIRED_TASK_EXPOSURE_LANES.filter(
+    (lane) => !snapshot.coverage.lanes.includes(lane),
+  );
+  if (!createdAtIsIso || !Number.isFinite(createdMs)) {
+    candidate.crossClientExposure.evidence = ["task-created-at-invalid"];
+    quarantine(candidate, "task-created-at-invalid");
+  } else if (!Number.isFinite(fromMs) || !Number.isFinite(throughMs) || fromMs > throughMs) {
+    candidate.crossClientExposure.evidence = ["cross-client-coverage-invalid"];
+    quarantine(candidate, "cross-client-coverage-invalid");
+  } else if (!snapshot.coverage.coverage_complete) {
+    candidate.crossClientExposure.evidence = ["cross-client-coverage-incomplete"];
+    quarantine(candidate, "cross-client-coverage-incomplete");
+  } else if (createdMs < fromMs) {
+    candidate.crossClientExposure.evidence = ["task-created-before-cross-client-coverage"];
+    quarantine(candidate, "task-created-before-cross-client-coverage");
+  } else if (createdMs > throughMs) {
+    candidate.crossClientExposure.evidence = ["task-created-after-cross-client-coverage"];
+    quarantine(candidate, "task-created-after-cross-client-coverage");
+  } else if (missingLanes.length > 0) {
+    candidate.crossClientExposure.evidence = [
+      "cross-client-coverage-lanes-missing",
+      ...missingLanes.map((lane) => `missing-lane:${lane}`),
+    ];
+    quarantine(candidate, "cross-client-coverage-lanes-missing");
+  } else {
+    candidate.crossClientExposure.state = "unseen-covered";
+    candidate.crossClientExposure.evidence = [
+      "m5-lookup-unseen",
+      "coverage-complete",
+      "task-created-within-coverage-window",
+      "required-lanes-covered",
+      "snapshot-requires-recheck-before-harbor",
+    ];
+  }
+}
+
+function recalculateCounts(manifest: DailyExamManifest): void {
+  manifest.counts = {
+    provisionalHoldout: manifest.candidates.filter((candidate) => candidate.lane === "provisional-holdout").length,
+    regression: manifest.candidates.filter((candidate) => candidate.lane === "regression").length,
+    quarantine: manifest.candidates.filter((candidate) => candidate.lane === "quarantine").length,
+  };
+}
+
+/**
+ * Join the owner-only M5 lookup into the content-blind manifest. This only
+ * clears cross-client freshness at one point in time; it never seals or runs a
+ * holdout. A future packager must repeat the lookup immediately before use.
+ */
+export function applyCrossClientExposure(
+  sourceManifest: DailyExamManifest,
+  lookup: {
+    snapshots?: ReadonlyMap<string, TaskExposureSnapshot>;
+    error?: { code: string; checkedAt: string };
+  },
+): DailyExamManifest {
+  const manifest = dailyExamManifestSchema.parse(structuredClone(sourceManifest));
+  for (const candidate of manifest.candidates) {
+    if (candidate.lane !== "provisional-holdout") continue;
+    const fingerprint = candidate.crossClientExposure.fingerprintSha256;
+    if (!fingerprint) continue;
+    if (lookup.error) {
+      candidate.crossClientExposure = {
+        fingerprintVersion: TASK_EXPOSURE_FINGERPRINT_VERSION,
+        fingerprintSha256: fingerprint,
+        state: "error",
+        checkedAt: lookup.error.checkedAt,
+        evidence: [`lookup-error:${lookup.error.code}`],
+      };
+      quarantine(candidate, "cross-client-exposure-lookup-error");
+      continue;
+    }
+    const snapshot = lookup.snapshots?.get(fingerprint);
+    if (!snapshot || snapshot.result.fingerprint_sha256 !== fingerprint) {
+      candidate.crossClientExposure = {
+        fingerprintVersion: TASK_EXPOSURE_FINGERPRINT_VERSION,
+        fingerprintSha256: fingerprint,
+        state: "error",
+        checkedAt: manifest.generatedAt,
+        evidence: [snapshot ? "lookup-result-fingerprint-mismatch" : "lookup-result-missing"],
+      };
+      quarantine(candidate, "cross-client-exposure-lookup-error");
+      continue;
+    }
+    applySnapshot(candidate, snapshot);
+  }
+
+  const candidatesByFingerprint = new Map<string, DailyExamCandidate[]>();
+  for (const candidate of manifest.candidates) {
+    const fingerprint = candidate.crossClientExposure.fingerprintSha256;
+    if (fingerprint) {
+      const group = candidatesByFingerprint.get(fingerprint) ?? [];
+      group.push(candidate);
+      candidatesByFingerprint.set(fingerprint, group);
+    }
+  }
+  for (const group of candidatesByFingerprint.values()) {
+    if (group.length < 2) continue;
+    for (const duplicate of group) {
+      quarantine(duplicate, "duplicate-prompt-in-daily-manifest");
+      if (!duplicate.crossClientExposure.evidence.includes("duplicate-prompt-in-daily-manifest")) {
+        duplicate.crossClientExposure.evidence.push("duplicate-prompt-in-daily-manifest");
+      }
+    }
+  }
+  recalculateCounts(manifest);
+  return dailyExamManifestSchema.parse(manifest);
 }

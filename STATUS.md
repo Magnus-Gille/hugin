@@ -1,38 +1,116 @@
 # Hugin — Status
 
-**Latest session:** 2026-07-14/15 (Codex) — **cross-client M5 exposure lookup merged and live**
-**Production/deployed:** `ae92906a61731d49fdfce87bbd77b20d1a1cff80` via merged PR [#212](https://github.com/Magnus-Gille/hugin/pull/212). Durable M5 check evidence from PR [#210](https://github.com/Magnus-Gille/hugin/pull/210) remains active; the matching producer is gille-inference `286f46b4181ccd31a7ebcb8c3e10b6194aaa6d01` and the owner lookup is live from gille-inference `832e6c467f65aef3b5fa345f91d6f9b595466dc8`.
+**Latest session:** 2026-07-15 (Codex) — **reviewed M5 exposure contract restored after overlapping PR #212; awaiting final exact-head gate**
+**Branch/worktree:** `codex/hugin-exposure-integration-final` in
+`/private/tmp/hugin-exposure-integration-final`, based on current exact
+`origin/main@23ee47d46e8d71f0fa0997cdd639fd6be0a5af48`; the runtime deploy
+marker remains `ae92906` (PR #212), as recorded by STATUS-only PR #213.
 
-## Latest — daily candidates now fail closed against owner-wide M5 exposure
+## Latest — real daily task harvest now fails closed on global M5 freshness
 
-- The daily exam factory hashes each unique prompt locally and submits only
-  `trim-utf8-sha256-v1` fingerprints to the owner-authorized M5 lookup in
-  batches of 100. It follows no redirects, bounds response size and time, and
-  never writes prompt text or task content into the private manifest.
-- Manifest schema v2 binds every candidate to the lookup result and exact
-  six-lane coverage statement. Any positive cross-client match is a regression;
-  a negative result may be provisional only when coverage is complete and the
-  candidate was created and submitted inside the covered interval. Missing,
-  malformed, incomplete, unavailable, or out-of-window evidence is quarantined.
-- Native Codex review found and fixed redirect credential leakage, free-form
-  remote-reason persistence, weak interval/order binding, and permissive schema
-  edges. Claude/Opus review was unavailable because execution policy blocks
-  disclosure of private repository diffs. GitHub CI, TypeScript build, 109 test
-  files / 1,787 tests, both shell suites, bash syntax, and `git diff --check`
-  passed on the exact feature head.
-- Deployment acceptance and independent checks passed: exact SHA marker,
-  active service and daily timer, loopback health green, and schema-v2 output.
-  The live sweep queried 9 fingerprints with complete coverage from
-  `2026-07-14T22:07:01.667Z` across all six lanes. It produced 0 provisional
-  holdouts, 1 regression, and 8 quarantined candidates. All 9 were owner-bound
-  negatives; only one was wholly inside the coverage window, so the older eight
-  correctly remained quarantined.
-- No model call, Harbor run/import, routing change, or promotion occurred.
+- Overlapping PR #212 merged and deployed while the negotiated implementation
+  was under review. Its live `ae92906` factory queried all nine prompt-bearing
+  sources before eligibility, including candidates later quarantined, and used
+  a divergent per-candidate schema without duplicate quarantine or the empty-day
+  owner-auth smoke. Service, timer, and health were green, but that tree was not
+  accepted as the integration contract.
+- STATUS-only PR #213 truthfully recorded the exact `ae92906` deploy marker,
+  active service/timer, healthy polling with queue depth zero, complete six-lane
+  coverage, and the 0 provisional / 1 regression / 8 quarantine result. Its
+  privacy interpretation was wrong: all nine lookups were unnecessary—eight
+  candidates were later quarantined, while the ninth was already a local
+  regression and also required no lookup. This follow-up preserves the runtime
+  facts and corrects that conclusion.
+- The follow-up is deliberately traceable on top of PR #213: revert runtime
+  merge `ae92906`, then replay the three reviewed implementation/hardening
+  commits. Its complete source, docs, and tests tree is byte-equivalent to
+  reviewed `11953e` except for this overlap/deployment handoff in `STATUS.md`;
+  no third architecture was invented.
 
-**Next:** build the deterministic independent-verifier packager, recheck owner
-exposure immediately before sealing, and let new post-coverage managed-repo
-tasks accumulate eligible evidence. Any model-bearing Harbor campaign still
-needs a fresh pre-inference declaration and separate review.
+- The daily factory now emits strict schema-v2 manifests with the original
+  Munin `taskCreatedAt` and an orthogonal `crossClientExposure` snapshot. It
+  uses the exact `trim-utf8-sha256-v1` contract and the deployed owner-only
+  `/admin/task-exposures/lookup`; schema-v1 files are legacy/non-runnable.
+- A negative match clears only the cross-client freshness prerequisite when
+  capture is complete, `taskCreatedAt` is inside the inclusive coverage window,
+  and all six gateway lanes are present. Positive matches become regression
+  candidates regardless of negative-coverage completeness. Every auth,
+  network, schema, version, timestamp, lane, or cardinality ambiguity is
+  quarantined.
+- Only provisional candidate hashes leave Hugin. Requests are deduplicated and
+  batched to 100; private/quarantined/local-regression hashes are not sent.
+  Empty days use one fixed non-task smoke digest so dead minted-owner auth
+  cannot look green. For duplicate prompts, every provisional occurrence is
+  quarantined and every occurrence is labeled; candidates already in regression
+  or quarantine keep that safer lane.
+- The snapshot records `checkedAt` plus `coverage.through` but is explicitly not
+  a seal. Any future Harbor packager/runner must re-query immediately before
+  freezing and again before execution. The factory still does not run Harbor or
+  a model, import learning evidence, change routing, or promote anything.
+- Deployment acceptance now requires schema v2 and proves every remaining
+  `provisional-holdout` is `unseen-covered`. Lookup failure first atomically
+  writes a safe quarantined manifest, then fails the oneshot/deployment gate so
+  a stale successful snapshot cannot survive silently.
+- Native Codex review found and fixed redirect leakage, snapshot-to-candidate
+  binding, mixed-lane duplicate handling, idempotent audit evidence, and
+  fail-closed runtime normalization for missing/non-string Munin creation
+  timestamps. Independent re-review then found that invalid timestamps were
+  quarantined only after their task-derived hashes entered the M5 request;
+  candidate construction now quarantines them as `not-checked`, before lookup,
+  while the snapshot join keeps the timestamp check as defense in depth.
+  Claude Opus returned no review text / an execution error and Fable reported
+  its monthly spend limit. Independent Codex approved the reviewed source tree;
+  the rebased exact head needs only a lightweight parity/status gate.
+- Validation on the rebased exact head: TypeScript build; focused 3 files / 30
+  tests; full suite 109 files / 1,796 tests; both CI shell suites; Bash syntax;
+  `git diff --check`; production dependency audit 0 vulnerabilities.
+
+**Next:** complete the lightweight rebased-head gate, fix every verified
+finding, publish a ready PR, merge only after review/checks, deploy the
+merged commit to Hugin-Munin, and live-prove minted-owner lookup plus schema-v2
+factory/timer acceptance. No Harbor run, holdout freeze, learning import, route
+change, or promotion is authorized by this slice.
+
+---
+
+**Latest session:** 2026-07-14/15 (Codex) — **durable M5 check-evidence contract merged and live**
+**Production/deployed:** `da50c804ae0c92c1ae7f311afd048dec1af80b5b` via merged PR [#210](https://github.com/Magnus-Gille/hugin/pull/210). The matching M5 producer is deployed from gille-inference merge `286f46b4181ccd31a7ebcb8c3e10b6194aaa6d01`.
+
+## Latest — Hugin can safely learn from fully bound M5 agent-check evidence
+
+- Hugin now refuses paid experiment/Harbor starts unless M5 advertises the
+  exact `code-loop-pi-2026-07-14-v6` / `pi-bash-events-v3` / schema 3 contract
+  and its tool schema contains durable `client_run_id` plus
+  `edit_deadline_turn` inputs.
+- Ambiguous mutating starts retry only the byte-identical request under the
+  same bounded caller ID. Recovered work/result IDs, request fingerprints,
+  effective execution, and agent-check evidence are cross-bound before Hugin
+  writes an observation. Read-only transport failures are not mislabeled as
+  ambiguous mutations.
+- Agent-side checks preserve passed/failed/execution-error attempts and keep
+  `none`, `unobservable`, and `partial` coverage distinct. A new optional,
+  default-off challenger coverage gate counts only fully observed real check
+  attempts, so partial event streams cannot manufacture attribution.
+- The consumed Harbor Gate D v2 declaration and official no-go result remain
+  unchanged. The active runner now requires an explicit fresh reviewed
+  declaration and the deployed v6/v3 producer; no model run, Harbor import,
+  route change, or promotion occurred in this release.
+- Native Codex review found and fixed structural contract-preflight,
+  declaration-reuse, and transport-classification gaps. External Claude/Opus
+  review was unavailable because execution policy blocks disclosure of private
+  repository diffs. Exact-head validation passed GitHub CI, TypeScript build,
+  108 test files / 1,778 tests, both shell suites, Python syntax, historical
+  JSON parsing, and `git diff --check`.
+- Deployment acceptance and independent post-deploy checks passed: exact SHA
+  marker, active Hugin service and daily-exam timer, loopback health green with
+  queue depth zero, and the v6/v3 contract present in the deployed bundle. The
+  first current 48-hour harvest now contains 1 provisional-holdout candidate,
+  1 regression candidate, and 20 quarantined candidates.
+
+**Next:** package independent verifiers and complete the content-blind
+cross-client exposure lookup in gille-inference#257 before sealing any daily
+candidate as a holdout. Any future model-bearing Harbor campaign needs a new
+pre-inference declaration and separate review.
 
 ---
 
