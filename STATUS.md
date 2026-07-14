@@ -1,7 +1,7 @@
 # Hugin — Status
 
 **Latest session:** 2026-07-13 (Codex) — **GitHub-independent overnight dev screen completed; evaluator and transport recovery hardened locally**
-**Branch/worktree:** `codex/gate-d-prompt-prefix` in `/private/tmp/hugin-gate-d-prompt-prefix`, with implementation through local-only `79db404` plus this STATUS handoff, on exact `origin/main@d5eb909267111590c7b4b2442794197334fbedb2` (#199). Implementation commits are `56ba7b0` (bound prompt prefixes) and `79db404` (durable observation recovery + numeric gate fix); neither is pushed.
+**Branch/worktree:** `codex/gate-d-prompt-prefix` in `/private/tmp/hugin-gate-d-prompt-prefix`, based on exact `origin/main@d5eb909267111590c7b4b2442794197334fbedb2` (#199). Implementation commits `56ba7b0` (bound prompt prefixes) and `79db404` (durable observation recovery + numeric gate fix), plus the STATUS handoff, are published in draft PR [#200](https://github.com/Magnus-Gille/hugin/pull/200).
 
 ## Latest — development prompt evidence plus two failures converted into harness improvements
 
@@ -48,14 +48,15 @@
 - Final local verification: TypeScript build, manifest dry-run with exact corpus
   `341cebdb...e8b3b`, `git diff --check`, focused recovery/evaluator/client tests,
   and the full suite (105 files / 1,739 tests) pass. Production remains exact
-  `d5eb909267111590c7b4b2442794197334fbedb2`; no push, PR, merge, deploy, or
-  production champion mutation occurred. GitHub CLI authentication is still invalid.
+  `d5eb909267111590c7b4b2442794197334fbedb2`. GitHub authentication is healthy;
+  draft PR #200 is open and its initial CI run is in progress. No merge, deploy,
+  or production champion mutation occurred.
 
-**Next:** (1) have the gille-inference owner land #250's fresh, model-unseen
-deterministic cases; (2) add M5-side idempotent `client_run_id` + request binding
-and content-blind agent check-execution telemetry in the owning repo; (3) after
-GitHub authentication returns, publish the two local Hugin commits for
-independent review; (4) predeclare fresh holdouts, regenerate/dry-run a
+**Next:** (1) let draft PR #200 complete CI and obtain independent review; (2)
+have the gille-inference owner land #250's fresh, model-unseen deterministic
+cases; (3) add M5-side idempotent `client_run_id` + request binding and
+content-blind agent check-execution telemetry in the owning repo; (4) after
+both owning-repo changes merge, predeclare fresh holdouts, regenerate/dry-run a
 prompt-only manifest, and run a production-scope experiment exactly once. Keep
 the current champion unless every strict gate passes on uncontaminated evidence.
 
