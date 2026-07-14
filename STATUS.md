@@ -1,5 +1,46 @@
 # Hugin — Status
 
+**Latest session:** 2026-07-14/15 (Codex) — **durable M5 check-evidence contract merged and live**
+**Production/deployed:** `da50c804ae0c92c1ae7f311afd048dec1af80b5b` via merged PR [#210](https://github.com/Magnus-Gille/hugin/pull/210). The matching M5 producer is deployed from gille-inference merge `286f46b4181ccd31a7ebcb8c3e10b6194aaa6d01`.
+
+## Latest — Hugin can safely learn from fully bound M5 agent-check evidence
+
+- Hugin now refuses paid experiment/Harbor starts unless M5 advertises the
+  exact `code-loop-pi-2026-07-14-v6` / `pi-bash-events-v3` / schema 3 contract
+  and its tool schema contains durable `client_run_id` plus
+  `edit_deadline_turn` inputs.
+- Ambiguous mutating starts retry only the byte-identical request under the
+  same bounded caller ID. Recovered work/result IDs, request fingerprints,
+  effective execution, and agent-check evidence are cross-bound before Hugin
+  writes an observation. Read-only transport failures are not mislabeled as
+  ambiguous mutations.
+- Agent-side checks preserve passed/failed/execution-error attempts and keep
+  `none`, `unobservable`, and `partial` coverage distinct. A new optional,
+  default-off challenger coverage gate counts only fully observed real check
+  attempts, so partial event streams cannot manufacture attribution.
+- The consumed Harbor Gate D v2 declaration and official no-go result remain
+  unchanged. The active runner now requires an explicit fresh reviewed
+  declaration and the deployed v6/v3 producer; no model run, Harbor import,
+  route change, or promotion occurred in this release.
+- Native Codex review found and fixed structural contract-preflight,
+  declaration-reuse, and transport-classification gaps. External Claude/Opus
+  review was unavailable because execution policy blocks disclosure of private
+  repository diffs. Exact-head validation passed GitHub CI, TypeScript build,
+  108 test files / 1,778 tests, both shell suites, Python syntax, historical
+  JSON parsing, and `git diff --check`.
+- Deployment acceptance and independent post-deploy checks passed: exact SHA
+  marker, active Hugin service and daily-exam timer, loopback health green with
+  queue depth zero, and the v6/v3 contract present in the deployed bundle. The
+  first current 48-hour harvest now contains 1 provisional-holdout candidate,
+  1 regression candidate, and 20 quarantined candidates.
+
+**Next:** package independent verifiers and complete the content-blind
+cross-client exposure lookup in gille-inference#257 before sealing any daily
+candidate as a holdout. Any future model-bearing Harbor campaign needs a new
+pre-inference declaration and separate review.
+
+---
+
 **Latest session:** 2026-07-14 (Codex) — **automatic daily-use exam candidate factory live and accepted**
 **Production/deployed:** `81624bb6972c902d6c194eb27be36778bfd6dcba` via merged PRs [#207](https://github.com/Magnus-Gille/hugin/pull/207) and [#208](https://github.com/Magnus-Gille/hugin/pull/208).
 
