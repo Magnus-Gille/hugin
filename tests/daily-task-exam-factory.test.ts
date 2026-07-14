@@ -312,11 +312,10 @@ describe("daily task exam factory", () => {
       historyComplete: true,
       sources: [invalidSource],
     });
-    const digest = invalid.candidates[0]!.source.promptSha256!;
-    const candidate = applyCrossClientExposure(invalid, {
-      snapshots: new Map([[digest, snapshot(digest)]]),
-    }).candidates[0]!;
+    const candidate = invalid.candidates[0]!;
     expect(candidate.lane).toBe("quarantine");
+    expect(candidate.crossClientExposure.state).toBe("not-checked");
+    expect(candidate.crossClientExposure.evidence).toEqual(["lookup-not-required-ineligible"]);
     expect(candidate.reasons).toContain("task-created-at-invalid");
 
     const missingSource = source("claude");
@@ -326,10 +325,11 @@ describe("daily task exam factory", () => {
       historyComplete: true,
       sources: [missingSource],
     });
-    const missingDigest = missing.candidates[0]!.source.promptSha256!;
-    expect(applyCrossClientExposure(missing, {
-      snapshots: new Map([[missingDigest, snapshot(missingDigest)]]),
-    }).candidates[0]!.reasons).toContain("task-created-at-invalid");
+    expect(missing.candidates[0]).toEqual(expect.objectContaining({
+      lane: "quarantine",
+      crossClientExposure: expect.objectContaining({ state: "not-checked" }),
+    }));
+    expect(missing.candidates[0]!.reasons).toContain("task-created-at-invalid");
 
     for (const invalidCreatedAt of [undefined, 42]) {
       const invalidSource = source("claude");
@@ -339,11 +339,25 @@ describe("daily task exam factory", () => {
         historyComplete: true,
         sources: [invalidSource],
       });
-      const invalidDigest = invalid.candidates[0]!.source.promptSha256!;
-      expect(applyCrossClientExposure(invalid, {
-        snapshots: new Map([[invalidDigest, snapshot(invalidDigest)]]),
-      }).candidates[0]!.reasons).toContain("task-created-at-invalid");
+      expect(invalid.candidates[0]).toEqual(expect.objectContaining({
+        lane: "quarantine",
+        crossClientExposure: expect.objectContaining({ state: "not-checked" }),
+      }));
+      expect(invalid.candidates[0]!.reasons).toContain("task-created-at-invalid");
     }
+
+    const tampered = buildDailyExamManifest({
+      generatedAt: "2026-07-14T12:00:00.000Z",
+      historyComplete: true,
+      sources: [source("claude")],
+    });
+    tampered.candidates[0]!.source.taskCreatedAt = "not-a-date";
+    const tamperedDigest = tampered.candidates[0]!.source.promptSha256!;
+    const defended = applyCrossClientExposure(tampered, {
+      snapshots: new Map([[tamperedDigest, snapshot(tamperedDigest)]]),
+    }).candidates[0]!;
+    expect(defended.lane).toBe("quarantine");
+    expect(defended.reasons).toContain("task-created-at-invalid");
   });
 
   it("quarantines a snapshot map whose value is bound to another fingerprint", () => {

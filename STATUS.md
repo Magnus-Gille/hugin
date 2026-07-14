@@ -32,8 +32,13 @@
 - Native Codex review found and fixed redirect leakage, snapshot-to-candidate
   binding, mixed-lane duplicate handling, idempotent audit evidence, and
   fail-closed runtime normalization for missing/non-string Munin creation
-  timestamps. Claude Opus returned no review text and Fable reported its
-  monthly spend limit, so an independent Codex exact-head gate remains next.
+  timestamps. Independent re-review then found that invalid timestamps were
+  quarantined only after their task-derived hashes entered the M5 request;
+  candidate construction now quarantines them as `not-checked`, before lookup,
+  while the snapshot join keeps the timestamp check as defense in depth.
+  Claude Opus returned no review text / an execution error and Fable reported
+  its monthly spend limit, so a fresh independent Codex exact-head gate remains
+  next.
 - Validation on the rebased exact head: TypeScript build; focused 3 files / 30
   tests; full suite 109 files / 1,796 tests; both CI shell suites; Bash syntax;
   `git diff --check`; production dependency audit 0 vulnerabilities.

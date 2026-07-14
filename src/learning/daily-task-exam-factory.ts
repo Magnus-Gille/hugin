@@ -238,9 +238,13 @@ export function buildDailyExamCandidate(source: DailyTaskHarvestSource): DailyEx
   const sourceClassificationIsPrivate = Boolean(
     sourceClassification && !["public", "internal"].includes(sourceClassification),
   );
+  const taskCreatedAt = typeof source.status.created_at === "string"
+    ? source.status.created_at
+    : "";
   const reasons: string[] = [];
 
   if (!source.status.tags.includes("completed")) reasons.push("source-task-not-completed");
+  if (!isoTimestampSchema.safeParse(taskCreatedAt).success) reasons.push("task-created-at-invalid");
   if (!prompt) reasons.push("task-prompt-missing");
   if (!result) reasons.push("valid-result-structured-missing");
   if (result && (result.lifecycle !== "completed" || result.outcome !== "completed")) {
@@ -290,9 +294,7 @@ export function buildDailyExamCandidate(source: DailyTaskHarvestSource): DailyEx
     source: {
       taskNamespace: source.status.namespace,
       taskId: result?.taskId ?? source.status.namespace.replace(/^tasks\//, ""),
-      taskCreatedAt: typeof source.status.created_at === "string"
-        ? source.status.created_at
-        : "",
+      taskCreatedAt,
       statusUpdatedAt: source.status.updated_at,
       taskDocumentSha256: sha256(taskDocument),
       ...(promptFingerprint ? { promptSha256: promptFingerprint } : {}),
