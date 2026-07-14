@@ -1,11 +1,30 @@
 # Hugin — Status
 
-**Latest session:** 2026-07-15 (Codex) — **M5 cross-client exposure join implemented; awaiting exact-head review and release**
-**Branch/worktree:** `codex/hugin-cross-client-exposure` in
-`/private/tmp/hugin-exposure-freshness`, based on exact
-`origin/main@d9be41fa3b7c9852bb895690db963f53b687dc72`.
+**Latest session:** 2026-07-15 (Codex) — **reviewed M5 exposure contract restored after overlapping PR #212; awaiting final exact-head gate**
+**Branch/worktree:** `codex/hugin-exposure-integration-final` in
+`/private/tmp/hugin-exposure-integration-final`, based on deployed exact
+`origin/main@23ee47d46e8d71f0fa0997cdd639fd6be0a5af48` (the STATUS-only
+follow-up PR #213 to runtime merge `ae92906`).
 
 ## Latest — real daily task harvest now fails closed on global M5 freshness
+
+- Overlapping PR #212 merged and deployed while the negotiated implementation
+  was under review. Its live `ae92906` factory queried all nine prompt-bearing
+  sources before eligibility, including candidates later quarantined, and used
+  a divergent per-candidate schema without duplicate quarantine or the empty-day
+  owner-auth smoke. Service, timer, and health were green, but that tree was not
+  accepted as the integration contract.
+- STATUS-only PR #213 truthfully recorded the exact `ae92906` deploy marker,
+  active service/timer, healthy polling with queue depth zero, complete six-lane
+  coverage, and the 0 provisional / 1 regression / 8 quarantine result. Its
+  privacy interpretation was wrong: all nine hashes were sent before those
+  eight candidates were found ineligible. This follow-up preserves the runtime
+  facts and corrects that conclusion.
+- The follow-up is deliberately traceable on top of PR #213: revert runtime
+  merge `ae92906`, then replay the three reviewed implementation/hardening
+  commits. Its complete source, docs, and tests tree is byte-equivalent to
+  reviewed `11953e` except for this overlap/deployment handoff in `STATUS.md`;
+  no third architecture was invented.
 
 - The daily factory now emits strict schema-v2 manifests with the original
   Munin `taskCreatedAt` and an orthogonal `crossClientExposure` snapshot. It
@@ -37,13 +56,13 @@
   candidate construction now quarantines them as `not-checked`, before lookup,
   while the snapshot join keeps the timestamp check as defense in depth.
   Claude Opus returned no review text / an execution error and Fable reported
-  its monthly spend limit, so a fresh independent Codex exact-head gate remains
-  next.
+  its monthly spend limit. Independent Codex approved the reviewed source tree;
+  the rebased exact head needs only a lightweight parity/status gate.
 - Validation on the rebased exact head: TypeScript build; focused 3 files / 30
   tests; full suite 109 files / 1,796 tests; both CI shell suites; Bash syntax;
   `git diff --check`; production dependency audit 0 vulnerabilities.
 
-**Next:** complete the independent Codex exact-head gate, fix every verified
+**Next:** complete the lightweight rebased-head gate, fix every verified
 finding, publish a ready PR, merge only after review/checks, deploy the
 merged commit to Hugin-Munin, and live-prove minted-owner lookup plus schema-v2
 factory/timer acceptance. No Harbor run, holdout freeze, learning import, route
