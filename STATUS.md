@@ -22,8 +22,9 @@ owner-only lookup producer remains live from gille-inference
   malformed provisional states.
 - A direct fixed-sentinel lookup under the deployed EnvironmentFile proved the
   minted owner credential, exact fingerprint binding, a negative match,
-  complete live coverage, and all six required lanes. No secret, prompt, task
-  hash, or response content was printed or persisted by the acceptance check.
+  complete live coverage, and all six required lanes. No secret, prompt, or
+  task-derived fingerprint was printed or persisted; acceptance exposed only
+  content-blind contract metadata.
 - Overlapping PR #212 merged and deployed while the negotiated implementation
   was under review. Its live `ae92906` factory queried all nine prompt-bearing
   sources before eligibility, including candidates later quarantined, and used
