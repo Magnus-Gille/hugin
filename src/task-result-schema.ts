@@ -289,6 +289,36 @@ export type TaskSubmissionProvenance = z.infer<
   typeof taskSubmissionProvenanceSchema
 >;
 
+// Exact, content-blind repository binding for completed managed-checkout work.
+// This is deliberately optional for historical/non-code tasks and contains no
+// prompt, answer, diff, credential, or file contents. It lets the offline exam
+// factory reconstruct the exact before/after trees from Git without trusting
+// an agent's prose claim that it edited or tested something.
+export const repositoryChangeEvidenceSchema = z.object({
+  baseCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+  headCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+  changedFiles: z.array(z.string().min(1)).min(1).max(10_000),
+  diffSha256: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict().superRefine((value, ctx) => {
+  if (value.baseCommit === value.headCommit) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["headCommit"],
+      message: "head commit must differ from base commit",
+    });
+  }
+  value.changedFiles.forEach((file, index) => {
+    if (file.startsWith("/") || file.split("/").includes("..") || file.includes("\0")) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["changedFiles", index],
+        message: "changed file must be a safe repository-relative path",
+      });
+    }
+  });
+});
+export type RepositoryChangeEvidence = z.infer<typeof repositoryChangeEvidenceSchema>;
+
 export const structuredTaskResultSchema = z.object({
   schemaVersion: z.literal(1),
   taskId: z.string().min(1),
@@ -316,6 +346,7 @@ export const structuredTaskResultSchema = z.object({
   bodyText: z.string(),
   errorMessage: z.string().min(1).optional(),
   prUrl: z.string().url().optional(),
+  repositoryChange: repositoryChangeEvidenceSchema.optional(),
   runtimeMetadata: taskExecutionRuntimeMetadataSchema.optional(),
   pipeline: taskExecutionPipelineContextSchema.optional(),
   approval: taskExecutionApprovalMetadataSchema.optional(),

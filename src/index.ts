@@ -4404,6 +4404,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     if (task.runtime !== "homeserver") {
       branchResult = await checkoutTaskBranch(task.workingDir, taskId, {
         reposRoot: config.reposRoot,
+        captureBaseCommit: true,
       });
       if (branchResult.action === "fetch-failed") {
         console.warn(`Pre-task branch checkout failed for ${taskNs} (non-fatal, proceeding without branch): ${branchResult.error}`);
@@ -4978,6 +4979,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
     // Post-task: finalize branch — auto-commit leftovers, push, open PR (#47)
     let prUrl: string | undefined;
+    let repositoryChange: StructuredTaskResult["repositoryChange"];
     if (ok && !isCancelled && branchResult.action === "created" && branchResult.branchName) {
       const prBody = [
         `Automated changes from Hugin task \`${taskId}\`.`,
@@ -4993,7 +4995,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         branchResult.branchName,
         prBody,
         egressPolicy.allowedHosts,
+        {
+          captureRepositoryChange: true,
+          baseCommit: branchResult.baseCommit,
+        },
       );
+      repositoryChange = finalizeResult.repositoryChange;
       if (finalizeResult.action === "pr-created" && finalizeResult.prUrl) {
         prUrl = finalizeResult.prUrl;
         await munin.log(taskNs, `PR created: ${prUrl}`);
@@ -5565,6 +5572,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             sequence: task.sequence,
             costUsd: costUsd ?? undefined,
             prUrl,
+            repositoryChange,
             bodyKind: structuredBodyKind,
             bodyText: structuredBodyText,
             errorMessage: ok
