@@ -52,6 +52,39 @@ export const m5CodeLoopTelemetrySchema = z.object({
   }
 });
 
+const m5CodeLoopAgentChecksSchema = z.object({
+  schema_version: z.literal(1),
+  source: z.literal("pi-bash-events"),
+  state: z.enum(["none", "attempted"]),
+  work_id: z.string().min(1).max(200),
+  attempts: z.array(z.object({
+    order: z.number().int().positive(),
+    kind: z.enum(["typescript", "test", "lint", "build", "validation"]),
+    command_fingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    started_ms: z.number().int().nonnegative(),
+    ended_ms: z.number().int().nonnegative(),
+    status: z.enum(["passed", "failed", "execution-error"]),
+    exit_code: z.number().int().nullable(),
+  }).strict()).max(1_000),
+}).strict().superRefine((value, ctx) => {
+  if ((value.state === "none") !== (value.attempts.length === 0)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["state"],
+      message: "agent check state must agree with the attempt list",
+    });
+  }
+  for (const [index, attempt] of value.attempts.entries()) {
+    if (attempt.ended_ms < attempt.started_ms) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["attempts", index, "ended_ms"],
+        message: "agent check cannot end before it starts",
+      });
+    }
+  }
+});
+
 export const m5CodeLoopResultSchema = z.object({
   status: codeLoopStatusSchema,
   diff: z.string(),
@@ -84,8 +117,13 @@ export const m5CodeLoopResultSchema = z.object({
       completion_tokens: z.number().int().positive(),
       edit_deadline_turn: z.number().int().positive().optional(),
     }).strict(),
+    capabilities: z.object({
+      start_idempotency: z.literal("client-run-id-v1"),
+      agent_checks: z.literal("pi-bash-events-v1"),
+    }).strict().optional(),
   }).strict().optional(),
   telemetry: m5CodeLoopTelemetrySchema.optional(),
+  agent_checks: m5CodeLoopAgentChecksSchema.optional(),
 }).strict();
 export type M5CodeLoopResult = z.infer<typeof m5CodeLoopResultSchema>;
 
@@ -106,6 +144,10 @@ export interface M5CodeLoopObservationContext {
       turns: number;
       completion_tokens: number;
       edit_deadline_turn?: number;
+    };
+    capabilities?: {
+      startIdempotency: "client-run-id-v1";
+      agentChecks: "pi-bash-events-v1";
     };
   };
   externalVerification?: {
@@ -174,6 +216,24 @@ export function assertM5CodeLoopExecutionBinding(
   for (const field of fields) {
     if (actual[field] !== expected.caps[field]) {
       throw new Error(`M5 effective cap ${field} does not match the declared experiment arm`);
+    }
+  }
+  if (expected.capabilities) {
+    const actualCapabilities = result.execution.capabilities;
+    if (!actualCapabilities) {
+      throw new Error("M5 result omitted the declared execution capabilities");
+    }
+    if (actualCapabilities.start_idempotency !== expected.capabilities.startIdempotency) {
+      throw new Error("M5 start idempotency capability does not match the declared experiment");
+    }
+    if (actualCapabilities.agent_checks !== expected.capabilities.agentChecks) {
+      throw new Error("M5 agent-check capability does not match the declared experiment");
+    }
+    if (!result.agent_checks) {
+      throw new Error("M5 result omitted declared agent-side check evidence");
+    }
+    if (result.agent_checks.work_id !== result.work_id) {
+      throw new Error("M5 agent-side check evidence belongs to a different work id");
     }
   }
 }

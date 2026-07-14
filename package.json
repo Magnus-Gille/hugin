@@ -18,6 +18,7 @@
     "eval:pii": "tsx scripts/run-pii-eval.ts",
     "experiment:m5-code-loop": "tsx scripts/run-m5-code-loop-experiment.ts",
     "pilot:harbor": "tsx scripts/harbor_pilot/run-pilot.ts",
+    "pilot:harbor:import": "tsx scripts/harbor_pilot/import-learning-report.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

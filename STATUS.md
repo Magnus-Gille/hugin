@@ -1,5 +1,45 @@
 # Hugin — Status
 
+**Latest session:** 2026-07-14 (Codex) — **M5 v4 live; Harbor r2 campaign implemented and predeclared, not yet run**
+**Branch:** `codex/harbor-gate-d-v2` from `main@57e1affbcda0c2a202ba14bccb04a67d95b7f48e`.
+
+## Latest — durable four-case Harbor campaign ready for review
+
+- gille-inference PRs #253/#254 are merged and exact `main@a9b92211` is now
+  deployed on M5. Post-restart acceptance passed: gateway/M5/Orin health,
+  owner-only `tools/list`, `client-run-id-v1`, v4 harness
+  `code-loop-pi-2026-07-14-v4`, pre-inference invalid-request refusal, and a
+  checksum rsync zero-delta check. No Gate D r2 model call was made.
+- The Harbor runner now targets fresh cases 11–14, with cases 11/12 selected as
+  holdouts by the predeclared lowest-task-ID-SHA-256 rule. The exact source
+  commit, task/holdout set, corpus/verifier hashes, model, caps, no-network
+  policy, and image digest are frozen in
+  `docs/research/harbor-gate-d-v2-declaration-2026-07-14.json` with model call
+  count zero.
+- Every direct and Harbor live M5 call carries a deterministic
+  `client_run_id`. Hugin validates the echoed request fingerprint, v4 execution
+  binding, and `pi-bash-events-v1` evidence; a lost start response is retried
+  only under the identical durable binding. The general matched-experiment
+  runner uses the same recovery contract.
+- The post-run importer defaults to dry-run, requires a clean Linux/no-network
+  `go` report at the pinned image digest, independently validates host/replay
+  parity and live bindings, and emits only content-blind observations to an
+  isolated pilot scope. It never calls promotion.
+- Validation: model-free generation against exact gille `a9b92211` reproduced
+  corpus `02ab9ee7...ef4ac` and verifier `bda62f9f...eb77b`; TypeScript build;
+  focused 24 tests including an intentionally lost/recovered start and an
+  explicit start/result work-ID mismatch rejection; full suite 106 files /
+  1,751 tests outside the port-restricted sandbox; both CI shell
+  suites; Python compile; declaration JSON parse; `git diff --check`.
+
+**Next:** review and merge this declaration/runner PR before any r2 inference.
+Then run the frozen campaign once in the accepted Linux/no-network Harbor
+worker, review/dry-run/commit only its content-blind parity import, and record
+the result in a follow-up PR. Keep Harbor out of dispatcher production and do
+not promote automatically.
+
+---
+
 **Latest session:** 2026-07-14 (Codex) — **Harbor/M5 Linux acceptance completed; go for the offline evaluation lane**
 **Main:** `052dd71e94dfedc8561f6be960dc2aa0fada278e`; Harbor pilot PR [#201](https://github.com/Magnus-Gille/hugin/pull/201) and Linux acceptance/preflight PR [#202](https://github.com/Magnus-Gille/hugin/pull/202) are merged.
 

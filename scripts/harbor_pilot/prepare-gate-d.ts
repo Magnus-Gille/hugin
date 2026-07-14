@@ -14,12 +14,21 @@ import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 
-export const HARBOR_PILOT_VERSION = "harbor-0.18.0-gate-d-v1";
-export const HARBOR_PILOT_DEFAULT_BASE_IMAGE = "node:22.17.0-bookworm-slim";
+export const HARBOR_PILOT_VERSION = "harbor-0.18.0-gate-d-v2";
+export const HARBOR_PILOT_CAMPAIGN_ID = "gate-d-fresh-v2-20260714";
+export const HARBOR_PILOT_DEFAULT_BASE_IMAGE =
+  "node:22.17.0-bookworm-slim@sha256:b04ce4ae4e95b522112c2e5c52f781471a5cbc3b594527bcddedee9bc48c03a0";
 export const HARBOR_PILOT_TASK_IDS = [
-  "01-make-failing-test-pass",
-  "04-add-cli-flag",
+  "11-node-path-containment",
+  "12-add-csv-cli-format",
+  "13-type-safe-slug-tests",
+  "14-shared-handle-validation",
 ] as const;
+export const HARBOR_PILOT_HOLDOUT_IDS = [
+  "11-node-path-containment",
+  "12-add-csv-cli-format",
+] as const;
+export const HARBOR_PILOT_HOLDOUT_REVISION = "sha256-lowest-two-of-four-v1";
 
 const metaSchema = z.object({
   id: z.string().min(1),
@@ -28,6 +37,34 @@ const metaSchema = z.object({
 
 function sha256File(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function fileBindings(rootInput: string): Array<{ path: string; sha256: string }> {
+  const root = resolve(rootInput);
+  const output: Array<{ path: string; sha256: string }> = [];
+  const walk = (dir: string): void => {
+    for (const name of readdirSync(dir).sort()) {
+      const path = join(dir, name);
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) throw new Error(`Harbor pilot source contains a symlink: ${path}`);
+      if (stat.isDirectory()) walk(path);
+      else if (stat.isFile()) output.push({ path: relative(root, path), sha256: sha256File(path) });
+    }
+  };
+  walk(root);
+  return output;
+}
+
+function sha256Json(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function clientRunId(campaignId: string, taskId: string, lane: "baseline" | "live"): string {
+  const value = `harbor:${campaignId}:${taskId}:${lane}`;
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(value)) {
+    throw new Error(`campaign/task combination cannot form a safe M5 client_run_id: ${taskId}`);
+  }
+  return value;
 }
 
 function assertNoSymlinks(rootInput: string): void {
@@ -58,6 +95,8 @@ function taskToml(input: {
   sourceCommit: string;
   instructionSha256: string;
   metaSha256: string;
+  campaignId: string;
+  holdout: boolean;
   networkMode: "no-network" | "public";
 }): string {
   return `schema_version = "1.3"
@@ -68,7 +107,9 @@ exclude = ["node_modules", ".git", ".harbor-pilot.json"]
 
 [metadata]
 pilot_version = ${JSON.stringify(HARBOR_PILOT_VERSION)}
+campaign_id = ${JSON.stringify(input.campaignId)}
 gate_d_id = ${JSON.stringify(input.taskId)}
+holdout = ${input.holdout}
 source_commit = ${JSON.stringify(input.sourceCommit)}
 instruction_sha256 = ${JSON.stringify(input.instructionSha256)}
 meta_sha256 = ${JSON.stringify(input.metaSha256)}
@@ -174,7 +215,13 @@ export interface PreparedHarborPilot {
   outputDir: string;
   tasksDir: string;
   sourceCommit: string;
+  campaignId: string;
   taskIds: string[];
+  holdoutIds: string[];
+  holdoutRevision: string;
+  corpusSha256: string;
+  verifierSha256: string;
+  harborVerifierSha256: string;
   networkMode: "no-network" | "public";
   baseImage: string;
 }
@@ -183,16 +230,41 @@ export function prepareGateDHarborPilot(input: {
   sourceRepo: string;
   outputDir: string;
   taskIds?: readonly string[];
+  holdoutIds?: readonly string[];
+  campaignId?: string;
   networkMode?: "no-network" | "public";
   baseImage?: string;
 }): PreparedHarborPilot {
   const sourceRepo = resolve(input.sourceRepo);
   const outputDir = resolve(input.outputDir);
   const taskIds = [...(input.taskIds ?? HARBOR_PILOT_TASK_IDS)];
+  const holdoutIds = input.holdoutIds
+    ? [...input.holdoutIds]
+    : [...HARBOR_PILOT_HOLDOUT_IDS].filter((taskId) => taskIds.includes(taskId));
+  const holdouts = new Set(holdoutIds);
+  const isDefaultHoldoutSet =
+    taskIds.length === HARBOR_PILOT_TASK_IDS.length &&
+    taskIds.every((taskId, index) => taskId === HARBOR_PILOT_TASK_IDS[index]) &&
+    holdoutIds.length === HARBOR_PILOT_HOLDOUT_IDS.length &&
+    holdoutIds.every((taskId, index) => taskId === HARBOR_PILOT_HOLDOUT_IDS[index]);
+  const holdoutRevision = isDefaultHoldoutSet
+    ? HARBOR_PILOT_HOLDOUT_REVISION
+    : `explicit-${sha256Json([...holdoutIds].sort()).slice(0, 16)}-v1`;
+  const campaignId = input.campaignId ?? HARBOR_PILOT_CAMPAIGN_ID;
   const networkMode = input.networkMode ?? "no-network";
   const baseImage = input.baseImage ?? HARBOR_PILOT_DEFAULT_BASE_IMAGE;
   const sourceGateD = join(sourceRepo, "gate-d");
   const checkPath = join(sourceGateD, "check.sh");
+
+  if (!/^[a-z0-9][a-z0-9-]{1,47}$/.test(campaignId)) {
+    throw new Error("Harbor campaign id must be a 2-48 character lowercase slug");
+  }
+  if (new Set(taskIds).size !== taskIds.length) throw new Error("duplicate Gate D task id");
+  if (new Set(holdoutIds).size !== holdoutIds.length) throw new Error("duplicate Harbor holdout id");
+  const unknownHoldouts = holdoutIds.filter((taskId) => !taskIds.includes(taskId));
+  if (unknownHoldouts.length > 0) {
+    throw new Error(`Harbor holdout is not in the task set: ${unknownHoldouts.join(", ")}`);
+  }
 
   const dirty = gitOutput(sourceRepo, ["status", "--short"]);
   if (dirty) {
@@ -202,6 +274,7 @@ export function prepareGateDHarborPilot(input: {
   mkdirSync(outputDir, { recursive: false });
   const tasksDir = join(outputDir, "tasks");
   mkdirSync(tasksDir);
+  const taskBindings: Array<Record<string, unknown>> = [];
 
   for (const taskId of taskIds) {
     if (!/^[a-z0-9][a-z0-9-]{0,119}$/.test(taskId)) {
@@ -224,20 +297,39 @@ export function prepareGateDHarborPilot(input: {
     mkdirSync(testsTaskDir, { recursive: true });
 
     const instruction = readFileSync(instructionPath, "utf8");
+    const holdout = holdouts.has(taskId);
+    const instructionSha256 = sha256File(instructionPath);
+    const metaSha256 = sha256File(metaPath);
+    const sourceFiles = fileBindings(sourceTask);
+    taskBindings.push({
+      task_id: taskId,
+      holdout,
+      instruction_sha256: instructionSha256,
+      meta_sha256: metaSha256,
+      source_files: sourceFiles,
+    });
     writeFileSync(join(taskDir, "instruction.md"), instruction);
     writeFileSync(join(taskDir, "task.toml"), taskToml({
       taskId,
       sourceCommit,
-      instructionSha256: sha256File(instructionPath),
-      metaSha256: sha256File(metaPath),
+      instructionSha256,
+      metaSha256,
+      campaignId,
+      holdout,
       networkMode,
     }));
     writeFileSync(join(environmentDir, "Dockerfile"), dockerfile(baseImage));
     writeFileSync(join(environmentDir, "control.json"), `${JSON.stringify({
       schema_version: 1,
       pilot_version: HARBOR_PILOT_VERSION,
+      campaign_id: campaignId,
       task_id: taskId,
+      holdout,
       protected: meta.oracleFiles,
+      client_run_ids: {
+        baseline: clientRunId(campaignId, taskId, "baseline"),
+        live: clientRunId(campaignId, taskId, "live"),
+      },
     }, null, 2)}\n`);
     cpSync(seedPath, join(environmentDir, "repo"), { recursive: true });
 
@@ -259,18 +351,53 @@ export function prepareGateDHarborPilot(input: {
     }
   }
 
+  const verifierSha256 = sha256File(checkPath);
+  const corpusSha256 = sha256Json({
+    source_commit: sourceCommit,
+    holdout_revision: holdoutRevision,
+    verifier_sha256: verifierSha256,
+    tasks: taskBindings,
+  });
+  const harborVerifierSha256 = sha256Json({
+    pilot_version: HARBOR_PILOT_VERSION,
+    base_image: baseImage,
+    verifier_dockerfile: verifierDockerfile(baseImage),
+    verifier_script: verifierScript,
+    gate_d_check_sha256: verifierSha256,
+  });
+
   writeFileSync(join(outputDir, "manifest.json"), `${JSON.stringify({
     schema_version: 1,
     pilot_version: HARBOR_PILOT_VERSION,
     harbor_version: "0.18.0",
     source_repo: basename(sourceRepo),
     source_commit: sourceCommit,
+    campaign_id: campaignId,
     task_ids: taskIds,
+    holdout_ids: holdoutIds,
+    holdout_revision: holdoutRevision,
+    corpus_sha256: corpusSha256,
+    verifier_sha256: verifierSha256,
+    harbor_verifier_sha256: harborVerifierSha256,
+    task_bindings: taskBindings,
     network_mode: networkMode,
     base_image: baseImage,
   }, null, 2)}\n`);
 
-  return { outputDir, tasksDir, sourceCommit, taskIds, networkMode, baseImage };
+  return {
+    outputDir,
+    tasksDir,
+    sourceCommit,
+    campaignId,
+    taskIds,
+    holdoutIds,
+    holdoutRevision,
+    corpusSha256,
+    verifierSha256,
+    harborVerifierSha256,
+    networkMode,
+    baseImage,
+  };
 }
 
 async function main(): Promise<void> {
