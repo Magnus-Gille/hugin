@@ -1,7 +1,7 @@
 # Hugin — Status
 
-**Latest session:** 2026-07-14 (Codex) — **daily-use factory merged/deployed; production runner fix validated locally**
-**Main/deployed:** `413c7f4ab610c0ebcdf2c5dcaa7fdd2a4a5f62f1` via merged PR [#207](https://github.com/Magnus-Gille/hugin/pull/207). Fix branch: `codex/daily-exam-factory-runner`.
+**Latest session:** 2026-07-14 (Codex) — **automatic daily-use exam candidate factory live and accepted**
+**Production/deployed:** `81624bb6972c902d6c194eb27be36778bfd6dcba` via merged PRs [#207](https://github.com/Magnus-Gille/hugin/pull/207) and [#208](https://github.com/Magnus-Gille/hugin/pull/208).
 
 ## Latest — real Hugin code work can feed quarantined Harbor exam candidates
 
@@ -29,11 +29,18 @@
   values. The focused fix moves the CLI under `src/` so `tsc` ships runnable JS,
   adds a sandboxed 05:30 systemd timer with a rolling 48-hour window, and makes
   a content-blind sweep a deployment acceptance gate using `EnvironmentFile=`.
+- The corrected deployment passed the real factory gate: 32 tasks inspected,
+  complete 48-hour history, all 32 quarantined, zero provisional holdouts and
+  zero regressions. Every historical row lacked exact repository-change, GitHub
+  PR, and portable repo-context bindings, as expected for tasks completed before
+  #207. The private manifest is mode `0600`; the timer is active for 05:30 daily
+  with jitter. Future successful managed-repository tasks now collect the exact
+  evidence automatically.
 
-**Next:** publish the production-runner fix, merge only with green GitHub CI,
-deploy the exact merged commit, and require the first read-only sweep to pass.
-Keep all holdouts provisional until gille-inference#257 provides complete
-cross-client exposure evidence and a reviewed independent verifier is attached.
+**Next:** let the daily harvester accumulate evidence without user work. Build
+the independent-verifier packager and complete gille-inference#257 before any
+candidate may become a sealed holdout. No Harbor run, learning import, route
+change, or promotion is automatic.
 
 ---
 
