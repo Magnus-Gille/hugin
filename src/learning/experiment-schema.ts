@@ -12,6 +12,8 @@ import { z } from "zod";
 import { taskTypeSchema } from "../broker/types.js";
 
 export const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+export const prefixedSha256Schema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
+export const clientRunIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
 const versionSchema = z.string().min(1).max(120);
 const slugSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{1,79}$/);
 
@@ -166,6 +168,8 @@ export const learningExperimentGatesSchema = z.object({
   minHoldoutPairs: z.number().int().min(1).max(100).default(2),
   minVerifiedCoverage: z.number().min(0).max(1).default(0.8),
   minRatedCoverage: z.number().min(0).max(1).default(0.5),
+  /** Optional fail-closed attribution gate for genuine, fully observed agent-side checks. */
+  minChallengerAgentCheckCoverage: z.number().min(0).max(1).default(0),
   maxQualityRegression: z.number().min(0).max(1).default(0),
   maxUsefulRegression: z.number().min(0).max(1).default(0),
   maxRescueRateIncrease: z.number().min(0).max(1).default(0),
@@ -234,6 +238,50 @@ export const learningVerifierSchema = z.object({
   version: versionSchema.optional(),
 }).strict();
 
+export const learningAgentCheckAttemptSchema = z.object({
+  order: z.number().int().positive(),
+  kind: z.enum(["typescript", "test", "lint", "build", "validation"]),
+  command_fingerprint: prefixedSha256Schema,
+  started_ms: z.number().int().nonnegative(),
+  ended_ms: z.number().int().nonnegative(),
+  status: z.enum(["passed", "failed", "execution-error"]),
+  exit_code: z.number().int().nullable(),
+}).strict().superRefine((value, ctx) => {
+  if (value.ended_ms < value.started_ms) {
+    ctx.addIssue({ code: "custom", path: ["ended_ms"], message: "check ended before it started" });
+  }
+  if (value.status === "failed" && (value.exit_code === null || value.exit_code <= 0)) {
+    ctx.addIssue({ code: "custom", path: ["exit_code"], message: "failed checks require a positive exit code" });
+  }
+  if (value.status !== "failed" && value.exit_code !== null) {
+    ctx.addIssue({ code: "custom", path: ["exit_code"], message: "only failed checks carry a numeric exit code" });
+  }
+});
+
+export const learningAgentChecksSchema = z.object({
+  schema_version: z.literal(3),
+  source: z.literal("pi-bash-events"),
+  state: z.enum(["none", "attempted", "unobservable", "partial"]),
+  unparseable_lines: z.number().int().nonnegative(),
+  coverage_loss_events: z.number().int().nonnegative(),
+  work_id: z.string().min(1).max(200),
+  attempts: z.array(learningAgentCheckAttemptSchema).max(1_000),
+}).strict().superRefine((value, ctx) => {
+  const hasAttempts = value.attempts.length > 0;
+  if ((value.state === "attempted" || value.state === "partial") !== hasAttempts) {
+    ctx.addIssue({ code: "custom", path: ["attempts"], message: "agent-check state disagrees with attempts" });
+  }
+  const hasCoverageLoss = value.unparseable_lines > 0 || value.coverage_loss_events > 0;
+  if ((value.state === "unobservable" || value.state === "partial") !== hasCoverageLoss) {
+    ctx.addIssue({ code: "custom", path: ["state"], message: "agent-check state disagrees with event coverage" });
+  }
+  for (let index = 0; index < value.attempts.length; index += 1) {
+    if (value.attempts[index]?.order !== index + 1) {
+      ctx.addIssue({ code: "custom", path: ["attempts", index, "order"], message: "check order must be contiguous" });
+    }
+  }
+});
+
 export const learningObservationInputShape = {
   experiment_id: slugSchema,
   run_id: z.string().min(1).max(200),
@@ -262,17 +310,48 @@ export const learningObservationInputShape = {
   task_id: z.string().min(1).max(200).optional(),
   ledger_id: z.string().min(1).max(200).optional(),
   work_id: z.string().min(1).max(200).optional(),
+  client_run_id: clientRunIdSchema.optional(),
+  request_fingerprint: prefixedSha256Schema.optional(),
+  agent_checks: learningAgentChecksSchema.optional(),
 };
 
-export const learningObservationSchema = z.object(learningObservationInputShape).strict();
+function validateObservationBindings(
+  value: {
+    work_id?: string;
+    client_run_id?: string;
+    request_fingerprint?: string;
+    agent_checks?: z.infer<typeof learningAgentChecksSchema>;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  if ((value.client_run_id === undefined) !== (value.request_fingerprint === undefined)) {
+    ctx.addIssue({
+      code: "custom",
+      path: [value.client_run_id === undefined ? "client_run_id" : "request_fingerprint"],
+      message: "durable observations require both client run id and request fingerprint",
+    });
+  }
+  if (value.agent_checks && value.agent_checks.work_id !== value.work_id) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["agent_checks", "work_id"],
+      message: "agent-check evidence must match the observation work id",
+    });
+  }
+}
+
+export const learningObservationSchema = z.object(learningObservationInputShape)
+  .strict()
+  .superRefine(validateObservationBindings);
 export type LearningObservationInput = z.infer<typeof learningObservationSchema>;
 
-export const recordedLearningObservationSchema = learningObservationSchema.extend({
+export const recordedLearningObservationSchema = z.object({
+  ...learningObservationInputShape,
   recorded_at: z.string().min(1),
   recorded_by: z.string().min(1),
   product_rated_at: z.string().min(1).optional(),
   product_rated_by: z.string().min(1).optional(),
-}).strict();
+}).strict().superRefine(validateObservationBindings);
 export type RecordedLearningObservation = z.infer<typeof recordedLearningObservationSchema>;
 
 const ratedProductOutcomeSchema = z.enum([
@@ -319,6 +398,8 @@ export const learningArmSummarySchema = z.object({
   editStartMeanMs: z.number().nonnegative().nullable(),
   observabilityCoverageMean: z.number().min(0).max(1).nullable(),
   verifierScoreMean: z.number().min(0).max(1).nullable(),
+  agentCheckSamples: z.number().int().nonnegative().default(0),
+  agentCheckCoverage: z.number().min(0).max(1).default(0),
 }).strict();
 export type LearningArmSummary = z.infer<typeof learningArmSummarySchema>;
 

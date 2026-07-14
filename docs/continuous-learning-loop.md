@@ -139,7 +139,9 @@ sample's instruction/seed directory/check. Before any remote mutation it:
 1. validates exactly one changed configuration axis;
 2. hashes every instruction, seed file, check command, holdout flag, and protected path and compares
    the result with the declared corpus SHA-256;
-3. verifies that M5 advertises #247's `edit_deadline_turn` contract;
+3. verifies that M5 advertises the exact
+   `code-loop-pi-2026-07-14-v6` / `pi-bash-events-v3` / schema 3 producer contract,
+   including `edit_deadline_turn` and durable `client_run_id` starts;
 4. idempotently creates or resumes the Hugin experiment;
 5. runs matched pairs sequentially, counterbalancing which arm runs first;
 6. records only content-blind observations—never diffs, prompts, check output, or seed contents.
@@ -148,12 +150,18 @@ Observation writes are reconciled after ambiguous Broker timeouts: the runner fi
 durable experiment state and retries only an identical, absent `run_id`. This avoids rerunning a
 paid M5 arm merely because Hugin committed the evidence but its HTTP response was lost.
 
-Every `code_loop_start` now carries a deterministic, content-blind `client_run_id` derived from the
-experiment run ID. M5 v4 durably binds that identifier to the canonical request fingerprint before
-execution. A lost start response is retried only with the identical request and therefore recovers
-the original work rather than starting a duplicate paid run. A different request under the same ID
-is an explicit conflict. The runner also binds `client-run-id-v1` and `pi-bash-events-v1` in the
-effective result before accepting an observation.
+Each arm derives a bounded content-blind `client_run_id` from the immutable experiment `run_id`.
+M5 binds that caller id to a canonical request fingerprint before execution. A lost start response
+is retried with the exact same request and id; M5 returns the original running or terminal work
+instead of starting another paid run. Hugin persists the echoed caller id and request fingerprint
+with the observation, and can consume a recovered terminal result directly after a restart.
+
+The v3 result also records immutable content-blind agent-side check events: check kind, command
+fingerprint, timing, pass/fail/execution-error, ordering, and event-stream coverage. It never trusts
+the model summary. Unparseable NDJSON and refused or uncorrelated check candidates are counted
+separately; `none`, `unobservable`, and `partial` remain distinct. Experiments that need to
+attribute an improvement to genuine agent-side checking should predeclare
+`gates.minChallengerAgentCheckCoverage`; its default is zero for backward compatibility.
 
 An arm may declare a local-only `prompt_prefix_file`. The runner reads it once, verifies every byte
 against that arm's versioned `prompt.sha256`, and prepends it to each corpus instruction. Hugin still
@@ -170,7 +178,7 @@ HUGIN_BROKER_URL=http://huginmunin.<tailnet>.ts.net:3035 \
 HUGIN_BROKER_TOKEN=<keychain-or-env-token> \
 npm run experiment:m5-code-loop -- /path/to/gate-d-wave.json --dry-run
 
-# Remove --dry-run only after the declared M5 harness version is live and preflighted.
+# Remove --dry-run only after the matching gille-inference and Hugin contracts are deployed.
 ```
 
 After mechanical collection, rate each run through `hugin_experiment_rate`. Do not promote while

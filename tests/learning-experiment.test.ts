@@ -73,6 +73,73 @@ describe("evaluateLearningExperiment", () => {
     expect(evaluation.guardFailures).toEqual([]);
   });
 
+  it("fails attribution closed when predeclared challenger agent-check coverage is missing", () => {
+    const input = makeExperimentInput({
+      gates: {
+        ...makeExperimentInput().gates,
+        minChallengerAgentCheckCoverage: 1,
+      },
+    });
+    const observedCheck = (sample: string) => ({
+      work_id: `work-${sample}`,
+      agent_checks: {
+        schema_version: 3 as const,
+        source: "pi-bash-events" as const,
+        state: "attempted" as const,
+        unparseable_lines: 0,
+        coverage_loss_events: 0,
+        work_id: `work-${sample}`,
+        attempts: [{
+          order: 1,
+          kind: "test" as const,
+          command_fingerprint: `sha256:${"a".repeat(64)}`,
+          started_ms: 10,
+          ended_ms: 20,
+          status: "passed" as const,
+          exit_code: null,
+        }],
+      },
+    });
+    const observations = ["case-1", "case-2"].flatMap((sample) => [
+      recorded(makeObservation(sample, "champion")),
+      recorded(makeObservation(sample, "challenger", sample === "case-1"
+        ? observedCheck(sample)
+        : {
+            work_id: `work-${sample}`,
+            agent_checks: {
+              schema_version: 3,
+              source: "pi-bash-events",
+              state: "attempted",
+              unparseable_lines: 0,
+              coverage_loss_events: 0,
+              work_id: `work-${sample}`,
+              attempts: [{
+                order: 1,
+                kind: "test",
+                command_fingerprint: `sha256:${"b".repeat(64)}`,
+                started_ms: 10,
+                ended_ms: 20,
+                status: "execution-error",
+                exit_code: null,
+              }],
+            },
+          })),
+    ]);
+    const gathering = evaluateLearningExperiment({ observations, gates: input.gates });
+    expect(gathering.decision).toBe("gathering");
+    expect(gathering.challenger.agentCheckCoverage).toBe(0.5);
+    expect(gathering.missingRequirements.join(" ")).toMatch(/agent-check coverage/);
+    expect(gathering.failureSignals).toContainEqual({ signal: "agent-check-execution-error", count: 1 });
+
+    const complete = observations.map((observation) =>
+      observation.arm === "challenger" && observation.sample_id === "case-2"
+        ? recorded(makeObservation("case-2", "challenger", observedCheck("case-2")))
+        : observation
+    );
+    expect(evaluateLearningExperiment({ observations: complete, gates: input.gates }).decision)
+      .toBe("promotion-ready");
+  });
+
   it("rejects a faster challenger when correctness regresses", () => {
     const input = makeExperimentInput();
     const observations = ["case-1", "case-2"].flatMap((sample) => [

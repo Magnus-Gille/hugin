@@ -100,7 +100,13 @@ That declaration is now consumed by the recorded no-go run. The verifier
 packaging fix deliberately changes the generated verifier/corpus hashes, so the
 old declaration fails binding before inference and must not be reused.
 
-## Run
+## Future fresh campaign
+
+The v2 declaration above was consumed by the completed historical pilot and is
+immutable. Do not rerun it. The active runner requires an explicit, newly
+reviewed declaration and accepts only the deployed
+`code-loop-pi-2026-07-14-v6` / `pi-bash-events-v3` / schema 3 producer contract.
+The following is a template for a separately declared future campaign.
 
 Create an isolated environment and install the pin:
 
@@ -120,8 +126,8 @@ HARBOR_BIN=/private/tmp/hugin-harbor-pilot/venv/bin/harbor \
   HARBOR_TELEMETRY=off \
   npm run pilot:harbor -- \
   --source-repo /Users/magnus/repos/gille-inference \
-  --campaign-id gate-d-fresh-v2-20260714 \
-  --declaration docs/research/harbor-gate-d-v2-declaration-2026-07-14.json \
+  --campaign-id <new-campaign-id> \
+  --declaration <new-reviewed-declaration.json> \
   --task-ids 11-node-path-containment,12-add-csv-cli-format,13-type-safe-slug-tests,14-shared-handle-validation \
   --holdout-ids 11-node-path-containment,12-add-csv-cli-format \
   --network-mode no-network
@@ -157,10 +163,10 @@ observations:
 npm run pilot:harbor:import -- /path/to/pilot-report.json
 ```
 
-`--commit` is the only mutating mode. It creates or resumes the isolated
-`m5-code-edit-harbor-pilot` experiment and appends idempotent host/replay
-observations. It never imports prompts, diffs, verifier logs, or trajectories,
-and never calls the promotion endpoint.
+`--commit` is the only mutating mode. It creates or resumes an isolated
+`harbor-<campaign-id>` experiment in the `m5-code-edit-harbor-pilot` scope and
+appends idempotent host/replay observations. It never imports prompts, diffs,
+verifier logs, or trajectories, and never calls the promotion endpoint.
 
 ## Fresh four-case outcome (2026-07-14)
 

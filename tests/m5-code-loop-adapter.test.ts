@@ -63,6 +63,54 @@ describe("M5 code-loop experiment adapter", () => {
     expect(JSON.stringify(observation)).not.toContain("done");
   });
 
+  it("persists durable binding and immutable content-blind agent-check evidence", () => {
+    const evidence = {
+      schema_version: 3 as const,
+      source: "pi-bash-events" as const,
+      state: "attempted" as const,
+      unparseable_lines: 0,
+      coverage_loss_events: 0,
+      work_id: "cl-20260713-abcdef12",
+      attempts: [{
+        order: 1,
+        kind: "test" as const,
+        command_fingerprint: `sha256:${"b".repeat(64)}`,
+        started_ms: 100,
+        ended_ms: 300,
+        status: "passed" as const,
+        exit_code: null,
+      }],
+    };
+    const observation = observationFromM5CodeLoop(result({ agent_checks: evidence }), {
+      ...context,
+      clientRunId: "hugin:run-1",
+      requestFingerprint: `sha256:${"c".repeat(64)}`,
+    });
+    expect(observation).toMatchObject({
+      client_run_id: "hugin:run-1",
+      request_fingerprint: `sha256:${"c".repeat(64)}`,
+      agent_checks: evidence,
+    });
+    expect(JSON.stringify(observation.agent_checks)).not.toContain("npm test");
+  });
+
+  it("keeps refused or uncorrelated check events distinct from affirmative no-check evidence", () => {
+    const evidence = {
+      schema_version: 3 as const,
+      source: "pi-bash-events" as const,
+      state: "unobservable" as const,
+      unparseable_lines: 0,
+      coverage_loss_events: 1,
+      work_id: "cl-20260713-abcdef12",
+      attempts: [],
+    };
+    expect(observationFromM5CodeLoop(result({ agent_checks: evidence }), context).agent_checks)
+      .toEqual(evidence);
+    expect(() => observationFromM5CodeLoop(result({
+      agent_checks: { ...evidence, state: "none" },
+    }), context)).toThrow(/event coverage/);
+  });
+
   it("keeps old gateway results honest by leaving edit timing unmeasured", () => {
     const observation = observationFromM5CodeLoop(result(), context);
     expect(observation.edited).toBe(true);
@@ -145,17 +193,17 @@ describe("M5 code-loop experiment adapter", () => {
     }).configuration_fingerprint).toBe("a".repeat(64));
   });
 
-  it("binds v4 capability evidence and refuses a prose-only result", () => {
+  it("binds v5 capability evidence and refuses a prose-only result", () => {
     const caps = { wall_s: 600, turns: 13, completion_tokens: 60_000 };
     const execution = {
       schema_version: 1 as const,
       model: "qwen3-coder-next-80b",
       engine: "pi",
-      harness_version: "code-loop-pi-2026-07-14-v4",
+      harness_version: "code-loop-pi-2026-07-14-v6",
       effective_caps: caps,
       capabilities: {
-        start_idempotency: "client-run-id-v1",
-        agent_checks: "pi-bash-events-v1",
+        start_idempotency: "client-run-id-v1" as const,
+        agent_checks: "pi-bash-events-v3" as const,
       },
     };
     const expectedExecution = {
@@ -164,19 +212,21 @@ describe("M5 code-loop experiment adapter", () => {
       caps,
       capabilities: {
         startIdempotency: "client-run-id-v1" as const,
-        agentChecks: "pi-bash-events-v1" as const,
+        agentChecks: "pi-bash-events-v3" as const,
       },
     };
     expect(() => observationFromM5CodeLoop(result({ execution }), {
       ...context,
       expectedExecution,
-    })).toThrow(/agent-side check evidence/);
+    })).toThrow(/omitted declared agent-side check evidence/);
     expect(observationFromM5CodeLoop(result({
       execution,
       agent_checks: {
-        schema_version: 1,
+        schema_version: 3,
         source: "pi-bash-events",
         state: "none",
+        unparseable_lines: 0,
+        coverage_loss_events: 0,
         work_id: "cl-20260713-abcdef12",
         attempts: [],
       },

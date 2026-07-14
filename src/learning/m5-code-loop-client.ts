@@ -1,5 +1,6 @@
 /** Minimal owner-authenticated JSON-RPC client for M5's async code_loop tools. */
 
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   m5CodeLoopResultSchema,
@@ -30,9 +31,28 @@ export interface M5CodeLoopRequest {
   };
 }
 
-const codeLoopCapabilitiesSchema = z.object({
+export const M5_CODE_LOOP_TOOL_CONTRACT_ADVERTISEMENT =
+  "contract[harness=code-loop-pi-2026-07-14-v6;agent_checks=pi-bash-events-v3;schema=3;max_attempts=1000]";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Fail before a paid start unless tools/list advertises the exact producer contract we parse. */
+export function supportsM5CodeLoopContract(tools: Array<Record<string, unknown>>): boolean {
+  const start = tools.find((tool) => tool.name === "code_loop_start");
+  if (!start || typeof start.description !== "string") return false;
+  if (!isRecord(start.inputSchema) || !isRecord(start.inputSchema.properties)) return false;
+  const properties = start.inputSchema.properties;
+  if (!Object.hasOwn(properties, "client_run_id") || !isRecord(properties.caps)) return false;
+  if (!isRecord(properties.caps.properties)) return false;
+  return start.description.includes(M5_CODE_LOOP_TOOL_CONTRACT_ADVERTISEMENT) &&
+    Object.hasOwn(properties.caps.properties, "edit_deadline_turn");
+}
+
+export const codeLoopCapabilitiesSchema = z.object({
   start_idempotency: z.literal("client-run-id-v1"),
-  agent_checks: z.literal("pi-bash-events-v1"),
+  agent_checks: z.literal("pi-bash-events-v3"),
 }).strict();
 
 const jobStatusSchema = z.enum([
@@ -47,13 +67,24 @@ const jobStatusSchema = z.enum([
 const startSchema = z.object({
   work_id: z.string().min(1),
   status: jobStatusSchema,
-  client_run_id: z.string().min(1).nullable(),
+  client_run_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/).nullable(),
   request_fingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/).nullable(),
   recovered: z.boolean(),
   capabilities: codeLoopCapabilitiesSchema,
   result: m5CodeLoopResultSchema.optional(),
-}).strict();
+}).strict().superRefine((value, ctx) => {
+  if (value.result && value.result.work_id !== value.work_id) {
+    ctx.addIssue({ code: "custom", path: ["result", "work_id"], message: "recovered result belongs to another work id" });
+  }
+  if (value.result && value.result.status !== value.status) {
+    ctx.addIssue({ code: "custom", path: ["result", "status"], message: "recovered result status disagrees with start status" });
+  }
+});
 export type M5CodeLoopStart = z.infer<typeof startSchema>;
+export type DurableM5CodeLoopStart = M5CodeLoopStart & {
+  client_run_id: string;
+  request_fingerprint: string;
+};
 
 const statusSchema = z.object({
   status: jobStatusSchema,
@@ -103,9 +134,19 @@ export class M5CodeLoopClient {
   }
 
   async start(request: M5CodeLoopRequest): Promise<M5CodeLoopStart> {
-    return startSchema.parse(
-      await this.call("code_loop_start", { ...request }),
-    );
+    const raw = await this.call("code_loop_start", { ...request }, true);
+    const parsed = startSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw new M5CodeLoopError(
+        "M5 code_loop_start returned an invalid durable-start contract",
+        parsed.error.flatten(),
+        // The mutating call reached M5 and returned a tool result. Even when that result is
+        // malformed, the run may already have been accepted; retry only through the same
+        // client_run_id so response-shape faults cannot strand paid work.
+        true,
+      );
+    }
+    return parsed.data;
   }
 
   async status(workId: string): Promise<z.infer<typeof statusSchema>> {
@@ -126,14 +167,18 @@ export class M5CodeLoopClient {
     return (response as { tools: Array<Record<string, unknown>> }).tools;
   }
 
-  private async call(name: string, args: Record<string, unknown>): Promise<unknown> {
-    const response = await this.rpc("tools/call", { name, arguments: args });
+  private async call(
+    name: string,
+    args: Record<string, unknown>,
+    mutating = false,
+  ): Promise<unknown> {
+    const response = await this.rpc("tools/call", { name, arguments: args }, mutating);
     if (!response || typeof response !== "object") {
-      throw new M5CodeLoopError(`M5 ${name} returned an invalid result`);
+      throw new M5CodeLoopError(`M5 ${name} returned an invalid result`, undefined, mutating);
     }
     const result = response as { isError?: unknown; content?: unknown };
     if (!Array.isArray(result.content)) {
-      throw new M5CodeLoopError(`M5 ${name} returned no content`);
+      throw new M5CodeLoopError(`M5 ${name} returned no content`, undefined, mutating);
     }
     const text = result.content.find(
       (item): item is { type: "text"; text: string } =>
@@ -141,12 +186,14 @@ export class M5CodeLoopClient {
         (item as { type?: unknown }).type === "text" &&
         typeof (item as { text?: unknown }).text === "string",
     )?.text;
-    if (text === undefined) throw new M5CodeLoopError(`M5 ${name} returned no text content`);
+    if (text === undefined) {
+      throw new M5CodeLoopError(`M5 ${name} returned no text content`, undefined, mutating);
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
     } catch {
-      throw new M5CodeLoopError(`M5 ${name} returned non-JSON text`);
+      throw new M5CodeLoopError(`M5 ${name} returned non-JSON text`, undefined, mutating);
     }
     if (result.isError === true) {
       throw new M5CodeLoopError(`M5 ${name} refused or failed`, parsed);
@@ -154,7 +201,11 @@ export class M5CodeLoopClient {
     return parsed;
   }
 
-  private async rpc(method: string, params: Record<string, unknown>): Promise<unknown> {
+  private async rpc(
+    method: string,
+    params: Record<string, unknown>,
+    mutating = false,
+  ): Promise<unknown> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -169,7 +220,11 @@ export class M5CodeLoopClient {
         signal: controller.signal,
       });
       if (!response.ok) {
-        throw new M5CodeLoopError(`M5 JSON-RPC returned HTTP ${response.status}`);
+        throw new M5CodeLoopError(
+          `M5 JSON-RPC returned HTTP ${response.status}`,
+          undefined,
+          mutating && response.status >= 500,
+        );
       }
       const body = await response.json() as {
         error?: { code?: unknown; message?: unknown };
@@ -187,16 +242,69 @@ export class M5CodeLoopClient {
         throw new M5CodeLoopError(
           `M5 JSON-RPC timed out after ${this.timeoutMs}ms`,
           undefined,
-          true,
+          mutating,
         );
       }
       throw new M5CodeLoopError(
         `M5 JSON-RPC request failed: ${err instanceof Error ? err.message : String(err)}`,
         undefined,
-        true,
+        mutating,
       );
     } finally {
       clearTimeout(timer);
     }
   }
+}
+
+/** Stable, content-blind caller id for one immutable Hugin experiment run. */
+export function m5ClientRunId(runId: string): string {
+  return `hugin:${createHash("sha256").update(runId, "utf8").digest("hex")}`;
+}
+
+export async function startM5CodeLoopDurably(
+  client: Pick<M5CodeLoopClient, "start">,
+  request: M5CodeLoopRequest & { client_run_id: string },
+  options: {
+    maxAttempts?: number;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<DurableM5CodeLoopStart> {
+  // A lost response can race the original request while it is still waiting on M5's 60 s GPU
+  // admission. Twelve bounded retries cover the remaining half of that window after the client's
+  // default 30 s timeout without ever changing the caller id or request bytes.
+  const maxAttempts = options.maxAttempts ?? 12;
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 20) {
+    throw new Error("durable M5 start attempts must be an integer from 1 to 20");
+  }
+  const pause = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let sawAmbiguousOutcome = false;
+  let lastError: unknown = new Error("durable M5 start did not run");
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const started = await client.start(request);
+      if (started.client_run_id !== request.client_run_id || started.request_fingerprint === null) {
+        throw new M5CodeLoopError(
+          "M5 did not echo the durable caller id and canonical request fingerprint",
+          undefined,
+          // The mutating call returned after it may have committed the paid run. A schema-valid
+          // but incomplete/wrong binding is no safer than a malformed response: recover only by
+          // retrying the exact request under the same caller id.
+          true,
+        );
+      }
+      return started as DurableM5CodeLoopStart;
+    } catch (err) {
+      lastError = err;
+      const refusal = err instanceof M5CodeLoopError && err.detail && typeof err.detail === "object"
+        ? (err.detail as { refusal?: unknown }).refusal
+        : undefined;
+      const retryable = err instanceof M5CodeLoopError && (
+        err.ambiguousOutcome || (sawAmbiguousOutcome && refusal === "busy")
+      );
+      if (err instanceof M5CodeLoopError && err.ambiguousOutcome) sawAmbiguousOutcome = true;
+      if (!retryable || attempt === maxAttempts) throw err;
+      await pause(attempt * 500);
+    }
+  }
+  throw lastError;
 }
