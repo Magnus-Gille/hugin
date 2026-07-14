@@ -104,6 +104,20 @@ describe("M5CodeLoopClient", () => {
       });
   });
 
+  it("does not label read-only transport failures as ambiguous mutations", async () => {
+    const client = new M5CodeLoopClient({
+      endpoint: "http://m5.test:8080/mcp",
+      bearerToken: "x",
+      fetchImpl: (async () => {
+        throw new TypeError("connection reset");
+      }) as typeof fetch,
+    });
+    await expect(client.status("cl-1")).rejects.toMatchObject({
+      name: "M5CodeLoopError",
+      ambiguousOutcome: false,
+    });
+  });
+
   it("marks an invalid start envelope ambiguous after the mutating call reached M5", async () => {
     const client = new M5CodeLoopClient({
       endpoint: "http://m5.test:8080/mcp",

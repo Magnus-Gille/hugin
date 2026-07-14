@@ -163,10 +163,10 @@ observations:
 npm run pilot:harbor:import -- /path/to/pilot-report.json
 ```
 
-`--commit` is the only mutating mode. It creates or resumes the isolated
-`m5-code-edit-harbor-pilot` experiment and appends idempotent host/replay
-observations. It never imports prompts, diffs, verifier logs, or trajectories,
-and never calls the promotion endpoint.
+`--commit` is the only mutating mode. It creates or resumes an isolated
+`harbor-<campaign-id>` experiment in the `m5-code-edit-harbor-pilot` scope and
+appends idempotent host/replay observations. It never imports prompts, diffs,
+verifier logs, or trajectories, and never calls the promotion endpoint.
 
 ## Fresh four-case outcome (2026-07-14)
 

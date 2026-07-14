@@ -242,13 +242,13 @@ export class M5CodeLoopClient {
         throw new M5CodeLoopError(
           `M5 JSON-RPC timed out after ${this.timeoutMs}ms`,
           undefined,
-          true,
+          mutating,
         );
       }
       throw new M5CodeLoopError(
         `M5 JSON-RPC request failed: ${err instanceof Error ? err.message : String(err)}`,
         undefined,
-        true,
+        mutating,
       );
     } finally {
       clearTimeout(timer);
