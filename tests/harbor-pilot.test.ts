@@ -14,7 +14,10 @@ import {
   HARBOR_PILOT_VERSION,
   prepareGateDHarborPilot,
 } from "../scripts/harbor_pilot/prepare-gate-d.js";
-import { summarizeHarborJob } from "../scripts/harbor_pilot/run-pilot.js";
+import {
+  customBasePreflightScript,
+  summarizeHarborJob,
+} from "../scripts/harbor_pilot/run-pilot.js";
 
 const roots: string[] = [];
 
@@ -62,6 +65,15 @@ function fakeGateDRepo(root: string): string {
 }
 
 describe("Harbor Gate D pilot", () => {
+  it("preflights the tools the task and verifier actually execute", () => {
+    const script = customBasePreflightScript();
+    expect(script).toContain("command -v bash");
+    expect(script).toContain("command -v diff");
+    expect(script).toContain("command -v grep");
+    expect(script).toContain("@types/node/package.json");
+    expect(script).not.toContain("command -v git");
+  });
+
   it("generates a content-pinned task with a separate no-network verifier", () => {
     const root = tempRoot();
     const repo = fakeGateDRepo(root);

@@ -29,7 +29,7 @@ with `--network-mode no-network` before the condition can be cleared.
 
 If Docker Desktop's registry proxy is unavailable, the task generator accepts
 `--base-image <local-image>`. Such an image must already provide `python3`,
-Node 22, and the pinned TypeScript/tsx/Node type packages at
+Node 22, bash/diff/grep, and the pinned TypeScript/tsx/Node type packages at
 `/opt/gate-d/node_modules`. `offline-base.Dockerfile` defines the local fallback
 used by the initial macOS pilot. Its nonstandard base is recorded in the report
 and is another condition to remove in the Linux rerun.

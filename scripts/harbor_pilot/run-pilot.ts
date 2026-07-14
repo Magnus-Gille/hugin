@@ -103,6 +103,19 @@ function runChecked(command: string, args: string[], cwd: string): string {
   return result.stdout.trim();
 }
 
+export function customBasePreflightScript(): string {
+  return [
+    "command -v node",
+    "command -v python3",
+    "command -v bash",
+    "command -v diff",
+    "command -v grep",
+    "command -v tsc",
+    "command -v tsx",
+    "test -f /opt/gate-d/node_modules/@types/node/package.json",
+  ].join(" && ");
+}
+
 function preflightCustomBaseImage(baseImage: string | undefined): void {
   if (!baseImage || baseImage === HARBOR_PILOT_DEFAULT_BASE_IMAGE) return;
   runChecked("docker", [
@@ -111,14 +124,7 @@ function preflightCustomBaseImage(baseImage: string | undefined): void {
     baseImage,
     "sh",
     "-lc",
-    [
-      "command -v node",
-      "command -v python3",
-      "command -v git",
-      "command -v tsc",
-      "command -v tsx",
-      "test -f /opt/gate-d/node_modules/@types/node/package.json",
-    ].join(" && "),
+    customBasePreflightScript(),
   ], REPO_ROOT);
 }
 
