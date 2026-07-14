@@ -1,7 +1,7 @@
 # Hugin — Status
 
-**Latest session:** 2026-07-14 (Codex) — **daily-use exam factory implemented locally; CI-equivalent suite green**
-**Branch:** `codex/daily-exam-factory` from `main@509e9cd7d50f5ff1ace142f941033ba9bc348238`.
+**Latest session:** 2026-07-14 (Codex) — **daily-use factory merged/deployed; production runner fix validated locally**
+**Main/deployed:** `413c7f4ab610c0ebcdf2c5dcaa7fdd2a4a5f62f1` via merged PR [#207](https://github.com/Magnus-Gille/hugin/pull/207). Fix branch: `codex/daily-exam-factory-runner`.
 
 ## Latest — real Hugin code work can feed quarantined Harbor exam candidates
 
@@ -22,11 +22,16 @@
   The owner-side, content-blind cross-client exposure lookup is routed to
   [gille-inference#257](https://github.com/Magnus-Gille/gille-inference/issues/257).
 - Documentation: `docs/daily-exam-factory.md`. Validation: TypeScript build;
-  focused 4 files / 54 tests; full suite 108 files / 1,767 tests; both exact CI
+  focused 4 files / 55 tests; full suite 108 files / 1,768 tests; both exact CI
   shell suites; CLI help; `git diff --check`.
+- The first post-deploy sweep correctly exposed that production omits the `tsx`
+  dev dependency; sourcing all of `.env` also attempted to execute non-shell
+  values. The focused fix moves the CLI under `src/` so `tsc` ships runnable JS,
+  adds a sandboxed 05:30 systemd timer with a rolling 48-hour window, and makes
+  a content-blind sweep a deployment acceptance gate using `EnvironmentFile=`.
 
-**Next:** review and publish this branch, merge only with green GitHub CI, deploy
-the exact merged Hugin commit, then run the first read-only candidate sweep.
+**Next:** publish the production-runner fix, merge only with green GitHub CI,
+deploy the exact merged commit, and require the first read-only sweep to pass.
 Keep all holdouts provisional until gille-inference#257 provides complete
 cross-client exposure evidence and a reviewed independent verifier is attached.
 

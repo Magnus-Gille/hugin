@@ -12,12 +12,12 @@ import {
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { MuninClient, type MuninEntry } from "../src/munin-client.js";
-import { queryAllMuninEntries } from "../src/munin-pagination.js";
+import { MuninClient, type MuninEntry } from "./munin-client.js";
+import { queryAllMuninEntries } from "./munin-pagination.js";
 import {
   buildDailyExamManifest,
   type DailyTaskHarvestSource,
-} from "../src/learning/daily-task-exam-factory.js";
+} from "./learning/daily-task-exam-factory.js";
 
 interface CliOptions {
   since?: string;
@@ -36,6 +36,7 @@ function usage(): string {
     "",
     "Options:",
     "  --since <ISO>    Only inspect tasks updated at/after this timestamp",
+    "  --lookback-hours <N>  Inspect a rolling window ending now (1..8760)",
     "  --until <ISO>    Only inspect tasks updated at/before this timestamp",
     "  --limit <N>      Maximum task status rows to inspect (default 500)",
     "  --output <path>  Write mode-0600 JSON here instead of stdout",
@@ -49,8 +50,9 @@ function normalizedTimestamp(value: string, flag: string): string {
   return new Date(parsed).toISOString();
 }
 
-export function parseArgs(argv: string[]): CliOptions {
+export function parseArgs(argv: string[], nowMs = Date.now()): CliOptions {
   const options: CliOptions = { limit: 500 };
+  let lookbackHours: number | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
     if (arg === "--help") {
@@ -60,6 +62,13 @@ export function parseArgs(argv: string[]): CliOptions {
     const value = argv[index + 1];
     if (!value) throw new Error(`${arg} requires a value`);
     if (arg === "--since") options.since = normalizedTimestamp(value, arg);
+    else if (arg === "--lookback-hours") {
+      const hours = Number(value);
+      if (!Number.isInteger(hours) || hours < 1 || hours > 8_760) {
+        throw new Error("--lookback-hours must be an integer from 1 to 8760");
+      }
+      lookbackHours = hours;
+    }
     else if (arg === "--until") options.until = normalizedTimestamp(value, arg);
     else if (arg === "--output") options.output = resolve(value);
     else if (arg === "--limit") {
@@ -72,6 +81,12 @@ export function parseArgs(argv: string[]): CliOptions {
       throw new Error(`unknown option: ${arg}`);
     }
     index += 1;
+  }
+  if (options.since && lookbackHours !== undefined) {
+    throw new Error("--since and --lookback-hours are mutually exclusive");
+  }
+  if (lookbackHours !== undefined) {
+    options.since = new Date(nowMs - lookbackHours * 60 * 60 * 1_000).toISOString();
   }
   if (options.since && options.until && options.since > options.until) {
     throw new Error("--since must not be later than --until");

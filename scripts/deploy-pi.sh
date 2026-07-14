@@ -117,12 +117,15 @@ ssh "$REMOTE" "
   fi
 "
 
-echo "==> Installing user-level systemd service..."
+echo "==> Installing user-level systemd services..."
 ssh "$REMOTE" "
-  mkdir -p ~/.config/systemd/user
+  mkdir -p ~/.config/systemd/user ~/.hugin/daily-exam-candidates
   cp $REMOTE_DIR/hugin.service ~/.config/systemd/user/hugin.service
+  cp $REMOTE_DIR/systemd/hugin-daily-exam-factory.service ~/.config/systemd/user/hugin-daily-exam-factory.service
+  cp $REMOTE_DIR/systemd/hugin-daily-exam-factory.timer ~/.config/systemd/user/hugin-daily-exam-factory.timer
   XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
   XDG_RUNTIME_DIR=/run/user/1000 systemctl --user enable hugin.service
+  XDG_RUNTIME_DIR=/run/user/1000 systemctl --user enable --now hugin-daily-exam-factory.timer
   loginctl enable-linger magnus 2>/dev/null || true
 "
 
@@ -231,6 +234,13 @@ ssh "$REMOTE" "XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart hugin.ser
 
 echo "==> Health check..."
 ssh "$REMOTE" "curl -fsS http://127.0.0.1:3032/health"
+
+echo "==> Daily exam factory acceptance..."
+ssh "$REMOTE" "
+  XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start hugin-daily-exam-factory.service
+  test -s /home/$DEPLOY_USER/.hugin/daily-exam-candidates/latest.json
+  /usr/bin/node -e 'const m=JSON.parse(require(\"node:fs\").readFileSync(process.argv[1],\"utf8\")); process.stdout.write(JSON.stringify({generatedAt:m.generatedAt,inspectedTasks:m.inspectedTasks,historyComplete:m.historyComplete,counts:m.counts})+\"\\n\")' /home/$DEPLOY_USER/.hugin/daily-exam-candidates/latest.json
+"
 
 echo ""
 echo "Acceptance gates passed; finalizing deployment."

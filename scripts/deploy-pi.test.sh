@@ -246,8 +246,11 @@ assert_not_contains "$full_calls" "git reset" "deployment never depends on a rem
 assert_contains "$full_calls" "npm ci --omit=dev" "deployment installs the shipped lockfile deterministically"
 assert_not_contains "$full_calls" "npm install --omit=dev" "deployment never rewrites the shipped lockfile with npm install"
 assert_contains "$full_calls" "curl -fsS http://127.0.0.1:3032/health" "deployment retains the health acceptance gate"
+assert_contains "$full_calls" "enable --now hugin-daily-exam-factory.timer" "deployment enables the automatic daily factory"
+assert_contains "$full_calls" "start hugin-daily-exam-factory.service" "deployment runs a factory acceptance sweep"
 assert_contains "$full_calls" "$full_sha" "deployment stamps the exact local full SHA"
 assert_order "$full_calls" "curl -fsS http://127.0.0.1:3032/health" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "health acceptance precedes atomic marker stamp"
+assert_order "$full_calls" "start hugin-daily-exam-factory.service" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "factory acceptance precedes atomic marker stamp"
 
 # If the marker cannot be invalidated, the script must not begin payload sync.
 : >"$CALL_LOG"
@@ -276,6 +279,22 @@ export FAKE_SSH_FAIL_MATCH=""
 health_fail_calls="$(cat "$CALL_LOG")"
 assert_contains "$health_fail_calls" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "failed deployment first invalidates the old marker"
 assert_not_contains "$health_fail_calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "failed health acceptance remains markerless"
+
+# The automatic factory is part of production acceptance: a broken compiled
+# runner, unit sandbox, Munin credential, or manifest write must also leave the
+# deployed revision markerless.
+: >"$CALL_LOG"
+export FAKE_SSH_FAIL_MATCH="start hugin-daily-exam-factory.service"
+export FAKE_SSH_FAIL_RC=72
+set +e
+(cd "$FULL_SOURCE" && bash "$DEPLOY_SCRIPT" testhost >/dev/null 2>&1)
+factory_fail_rc=$?
+set -e
+export FAKE_SSH_FAIL_MATCH=""
+[[ "$factory_fail_rc" -ne 0 ]] || fail "failed factory acceptance must fail deployment"
+factory_fail_calls="$(cat "$CALL_LOG")"
+assert_contains "$factory_fail_calls" "start hugin-daily-exam-factory.service" "factory failure reaches the new acceptance gate"
+assert_not_contains "$factory_fail_calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "failed factory acceptance remains markerless"
 
 if [[ "$failures" -gt 0 ]]; then
   echo "$failures assertion(s) failed" >&2

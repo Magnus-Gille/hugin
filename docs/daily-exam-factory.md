@@ -47,6 +47,12 @@ The output file is created mode `0600`. Omit `--output` to write JSON to stdout.
 The command reports `historyComplete:false` whenever Munin pagination or the
 caller limit prevents it from proving that the selected history is complete.
 
+Production runs the same compiled CLI from
+`hugin-daily-exam-factory.timer` once per day. It inspects a rolling 48-hour
+window and atomically replaces the private manifest at
+`~/.hugin/daily-exam-candidates/latest.json`. Deployment installs the timer and
+runs one acceptance sweep; the timer never invokes Harbor or a model.
+
 ## Safety boundary and next stage
 
 The factory does not:
