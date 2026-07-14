@@ -1,7 +1,7 @@
 # Hugin — Status
 
 **Latest session:** 2026-07-14 (Codex) — **Harbor/M5 Gate D proof-of-fit completed; conditional-go for an offline evaluation lane**
-**Branch:** `agent/harbor-gate-d-pilot` from `main@d5eb909267111590c7b4b2442794197334fbedb2`; Harbor pilot implementation and evidence are ready for independent review.
+**Branch:** `agent/harbor-gate-d-pilot` rebased onto `main@71e796384b177cfb53bc19e7c451f9101bc16a18`; Harbor pilot implementation and evidence passed independent Claude review in PR [#201](https://github.com/Magnus-Gille/hugin/pull/201) and await green CI/merge.
 
 ## Latest — Harbor 0.18.0 proof-of-fit with the existing M5 code_loop
 
@@ -26,6 +26,12 @@
   preflights every custom image before live M5 work. Corrected replay then passed
   2/2. The superseding content-blind record is
   `docs/research/harbor-gate-d-pilot-2026-07-14.json`.
+- Claude Code's headless multi-agent review verified one nit: the custom-image
+  preflight required container-side Git even though the adapter applies patches
+  host-side and the documented offline image correctly omitted Git. The
+  requirement was removed, the actual task/verifier tools are now checked, and
+  a regression test plus a run against the pinned image passed. Claude refuted
+  its only other candidate finding.
 - Recommendation is conditional-go only for an offline evaluation/control
   plane. Harbor does not replace Hugin dispatch, Broker/Munin lifecycle, M5
   model routing, or the existing reviewed learning promotion gate. The macOS
@@ -43,15 +49,15 @@
   remained clean at exact commit `d2d2541dd01519ddf50a9bbba8903d02fcea5284`.
 - Validation: corrected Harbor exact replay 2/2; corrected live-artifact regrade
   1/2 with zero infrastructure exceptions; TypeScript build; standalone strict
-  typecheck of all pilot TS scripts; Python bytecode compile; focused 11 tests;
-  full suite 104 files / 1,733 tests; `git diff --check`.
+  typecheck of all pilot TS scripts; Python bytecode compile; focused 12 tests;
+  rebased full suite 106 files / 1,744 tests; both CI shell suites;
+  `git diff --check`.
 
 **Next:** run the same content pin on a Linux Harbor worker with enforced
 `no-network` and the standard image. If parity stays exact, add a larger
 predeclared Gate D corpus and connect reviewed, content-blind Harbor summaries
 to Hugin's existing learning experiment endpoints. Do not deploy Harbor in the
-dispatcher, publish the dataset, enable automatic promotion, or commit/push the
-pilot without review.
+dispatcher, publish the dataset, or enable automatic promotion.
 
 ---
 
