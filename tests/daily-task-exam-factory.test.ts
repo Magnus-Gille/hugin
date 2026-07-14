@@ -3,14 +3,7 @@ import type { MuninEntry } from "../src/munin-client.js";
 import {
   buildDailyExamCandidate,
   buildDailyExamManifest,
-  dailyExamManifestSchema,
-  dailyTaskExposureFingerprint,
-  type DailyExamExposureLookupInput,
 } from "../src/learning/daily-task-exam-factory.js";
-import {
-  TASK_EXPOSURE_FINGERPRINT_VERSION,
-  TASK_EXPOSURE_REQUIRED_LANES,
-} from "../src/learning/task-exposure-client.js";
 import { buildStructuredTaskResult } from "../src/task-result-schema.js";
 
 const BASE = "a".repeat(40);
@@ -95,47 +88,9 @@ function source(runtime: "claude" | "homeserver" = "claude") {
   };
 }
 
-function lookupFor(
-  task = source("claude"),
-  input: {
-    seen?: boolean;
-    coverageComplete?: boolean;
-    from?: string;
-    through?: string;
-    lanes?: string[];
-  } = {},
-): DailyExamExposureLookupInput {
-  const fingerprint = dailyTaskExposureFingerprint(task)!;
-  const seen = input.seen ?? false;
-  return {
-    status: "queried",
-    evidence: {
-      coverage: {
-        coverageComplete: input.coverageComplete ?? true,
-        from: input.from ?? "2026-07-14T09:00:00.000Z",
-        through: input.through ?? "2026-07-14T12:00:00.000Z",
-        lanes: (input.lanes ?? [...TASK_EXPOSURE_REQUIRED_LANES]) as typeof TASK_EXPOSURE_REQUIRED_LANES[number][],
-        historicalBackfillComplete: false,
-        incompleteBefore: input.from ?? "2026-07-14T09:00:00.000Z",
-        incompleteReasonCount: 1,
-      },
-      results: [{
-        fingerprintSha256: fingerprint,
-        seen,
-        firstSeenAt: seen ? "2026-07-14T10:30:00.000Z" : null,
-        lastSeenAt: seen ? "2026-07-14T10:30:00.000Z" : null,
-        lanes: seen ? ["chat"] : [],
-        modelIds: seen ? ["qwen3-coder-next-80b"] : [],
-        harnessIds: seen ? ["openai-chat"] : [],
-      }],
-    },
-  };
-}
-
 describe("daily task exam factory", () => {
   it("turns cloud-completed repository work into a provisional, content-blind holdout candidate", () => {
-    const cloud = source("claude");
-    const candidate = buildDailyExamCandidate(cloud, lookupFor(cloud));
+    const candidate = buildDailyExamCandidate(source("claude"));
     expect(candidate.lane).toBe("provisional-holdout");
     expect(candidate.readiness).toBe("needs-independent-verifier");
     expect(candidate.exposure.state).toBe("no-m5-evidence");
@@ -149,33 +104,7 @@ describe("daily task exam factory", () => {
     const serialized = JSON.stringify(candidate);
     expect(serialized).not.toContain("Fix the parser");
     expect(serialized).not.toContain("Sensitive answer text");
-    expect(candidate.exposure.crossClient).toEqual(expect.objectContaining({
-      fingerprintVersion: TASK_EXPOSURE_FINGERPRINT_VERSION,
-      seen: false,
-    }));
-    expect(candidate.reasons).toContain("cross-client-exposure-check-passed");
-  });
-
-  it("routes a cross-client positive to regression even when Hugin ran it in cloud", () => {
-    const cloud = source("claude");
-    const candidate = buildDailyExamCandidate(cloud, lookupFor(cloud, { seen: true }));
-    expect(candidate.lane).toBe("regression");
-    expect(candidate.exposure.state).toBe("m5-exposed");
-    expect(candidate.exposure.models).toContain("qwen3-coder-next-80b");
-    expect(candidate.exposure.evidence).toContain("cross-client-registry-seen");
-  });
-
-  it("fails unseen candidates closed outside complete all-lane coverage", () => {
-    const cloud = source("claude");
-    expect(buildDailyExamCandidate(cloud, lookupFor(cloud, { coverageComplete: false })))
-      .toMatchObject({ lane: "quarantine", readiness: "quarantined" });
-    expect(buildDailyExamCandidate(cloud, lookupFor(cloud, { from: "2026-07-14T10:30:00.000Z" })).reasons)
-      .toContain("candidate-before-cross-client-coverage-window");
-    expect(buildDailyExamCandidate(cloud, lookupFor(cloud, {
-      lanes: TASK_EXPOSURE_REQUIRED_LANES.filter((lane) => lane !== "code-loop"),
-    })).reasons).toContain("cross-client-coverage-lanes-incomplete");
-    expect(buildDailyExamCandidate(cloud).reasons)
-      .toContain("cross-client-exposure-lookup-unavailable");
+    expect(candidate.reasons).toContain("requires-cross-client-exposure-check-before-holdout-seal");
   });
 
   it("routes a task already seen by M5 to regression rather than a holdout", () => {
@@ -204,15 +133,6 @@ describe("daily task exam factory", () => {
     expect(candidate.lane).toBe("quarantine");
     expect(candidate.exposure.state).toBe("unknown");
     expect(candidate.reasons).toContain("valid-result-structured-missing");
-  });
-
-  it("keeps malformed results quarantined while preserving a positive registry match", () => {
-    const malformed = source("claude");
-    malformed.resultStructured.content = "not json";
-    const candidate = buildDailyExamCandidate(malformed, lookupFor(malformed, { seen: true }));
-    expect(candidate.lane).toBe("quarantine");
-    expect(candidate.exposure.state).toBe("m5-exposed");
-    expect(candidate.exposure.crossClient?.seen).toBe(true);
   });
 
   it("omits repository metadata when quarantining a private task", () => {
@@ -255,17 +175,8 @@ describe("daily task exam factory", () => {
       generatedAt: "2026-07-14T12:00:00.000Z",
       historyComplete: false,
       sources: [cloud, m5],
-      exposureLookup: lookupFor(cloud),
     });
     expect(manifest.historyComplete).toBe(false);
     expect(manifest.counts).toEqual({ provisionalHoldout: 1, regression: 1, quarantine: 0 });
-    expect(manifest.exposureLookup).toMatchObject({
-      status: "queried",
-      fingerprintVersion: TASK_EXPOSURE_FINGERPRINT_VERSION,
-      queriedFingerprints: 1,
-    });
-    const forged = structuredClone(manifest);
-    forged.exposureLookup.coverage!.coverageComplete = false;
-    expect(dailyExamManifestSchema.safeParse(forged).success).toBe(false);
   });
 });

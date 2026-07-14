@@ -248,7 +248,6 @@ assert_not_contains "$full_calls" "npm install --omit=dev" "deployment never rew
 assert_contains "$full_calls" "curl -fsS http://127.0.0.1:3032/health" "deployment retains the health acceptance gate"
 assert_contains "$full_calls" "enable --now hugin-daily-exam-factory.timer" "deployment enables the automatic daily factory"
 assert_contains "$full_calls" "start hugin-daily-exam-factory.service" "deployment runs a factory acceptance sweep"
-assert_contains "$full_calls" "exposureLookup?.status" "deployment validates cross-client lookup availability"
 assert_contains "$full_calls" "$full_sha" "deployment stamps the exact local full SHA"
 assert_order "$full_calls" "curl -fsS http://127.0.0.1:3032/health" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "health acceptance precedes atomic marker stamp"
 assert_order "$full_calls" "start hugin-daily-exam-factory.service" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "factory acceptance precedes atomic marker stamp"

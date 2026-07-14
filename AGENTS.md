@@ -140,7 +140,6 @@ hugin/
 │       ├── experiment-store.ts   # Principal-isolated Munin state + CAS/idempotency
 │       ├── experiment-handlers.ts # Authenticated Broker learning endpoints
 │       ├── daily-task-exam-factory.ts # Content-blind daily task → holdout/regression/quarantine candidates
-│       ├── task-exposure-client.ts # Owner-authenticated, content-blind M5 freshness lookup
 │       ├── m5-code-loop-adapter.ts # Honest M5 result → content-blind observation mapping
 │       └── m5-code-loop-client.ts  # Owner-gated async code_loop JSON-RPC client
 ├── tests/
@@ -209,9 +208,6 @@ MUNIN_API_KEY=<same key Munin uses>
 | `OLLAMA_PI_URL` | `http://127.0.0.1:11434` | Ollama endpoint on Pi (local) |
 | `OLLAMA_LAPTOP_URL` | — | Ollama endpoint on laptop (via Tailscale, empty = disabled) |
 | `OLLAMA_DEFAULT_MODEL` | `qwen2.5:3b` | Default model for ollama tasks without explicit Model field |
-| `HOMESERVER_GATEWAY_URL` | — | Sovereign M5 gateway root URL. Also used by the daily exam factory for the read-only cross-client exposure lookup. |
-| `HOMESERVER_GATEWAY_API_KEY` | — | Gateway bearer token. The daily exam factory may use it for exposure lookup when it is a minted owner credential. |
-| `M5_TASK_EXPOSURE_API_KEY` | — | Optional dedicated minted owner credential for the read-only task-exposure lookup; takes precedence over `HOMESERVER_GATEWAY_API_KEY`. |
 | `HUGIN_INJECTION_POLICY` | `warn` | Prompt-injection policy for context-refs: `off` (no scan), `warn` (prepend warning banner), `block` (quarantine high-severity refs, task continues), `fail` (reject task). See `docs/security/prompt-injection-scanner.md`. |
 | `HUGIN_EXFIL_POLICY` | `warn` | Exfiltration scanner policy for task results: `off` / `warn` / `flag` / `redact`. See `docs/security/exfiltration-scanner.md`. |
 | `HUGIN_EXTERNAL_POLICY` | `warn` | Provenance policy for externally sourced context-refs (entries tagged `source:external` or under `signals/`): `allow` / `warn` / `block` / `fail`. See `docs/security/provenance-enforcement.md`. |

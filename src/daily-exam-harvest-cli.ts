@@ -16,15 +16,8 @@ import { MuninClient, type MuninEntry } from "./munin-client.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
 import {
   buildDailyExamManifest,
-  dailyTaskExposureFingerprint,
-  type DailyExamExposureLookupInput,
   type DailyTaskHarvestSource,
 } from "./learning/daily-task-exam-factory.js";
-import {
-  TaskExposureClient,
-  TaskExposureLookupError,
-} from "./learning/task-exposure-client.js";
-import { resolveGatewayRootUrl } from "./orchestrator/provider-config.js";
 
 interface CliOptions {
   since?: string;
@@ -37,9 +30,9 @@ function usage(): string {
   return [
     "Usage: npm run harvest:daily-exams -- [options]",
     "",
-    "Read completed Hugin tasks from Munin, query M5 with content-blind prompt",
-    "fingerprints, and emit a quarantined exam-candidate manifest. This command",
-    "never runs a model, writes Munin/M5, or imports/promotes learning evidence.",
+    "Read completed Hugin tasks from Munin and emit a content-blind, quarantined",
+    "exam-candidate manifest. This command never runs a model, writes Munin, or",
+    "imports/promotes learning evidence.",
     "",
     "Options:",
     "  --since <ISO>    Only inspect tasks updated at/after this timestamp",
@@ -165,42 +158,6 @@ async function loadSources(
   return { sources, historyComplete: !queried.truncated };
 }
 
-export async function lookupCrossClientExposure(
-  sources: DailyTaskHarvestSource[],
-  env: NodeJS.ProcessEnv = process.env,
-  fetchImpl: typeof fetch = fetch,
-): Promise<DailyExamExposureLookupInput> {
-  const fingerprints = [...new Set(
-    sources
-      .map(dailyTaskExposureFingerprint)
-      .filter((fingerprint): fingerprint is string => fingerprint !== undefined),
-  )].sort();
-  if (fingerprints.length === 0) return { status: "not-needed" };
-
-  const gateway = resolveGatewayRootUrl(env, "HOMESERVER_GATEWAY_URL");
-  const bearerToken = (
-    env.M5_TASK_EXPOSURE_API_KEY?.trim() ||
-    env.HOMESERVER_GATEWAY_API_KEY?.trim() ||
-    ""
-  );
-  if (!gateway.ok || bearerToken === "") {
-    return { status: "unavailable", failureKind: "configuration" };
-  }
-  try {
-    const client = new TaskExposureClient({
-      baseUrl: gateway.baseUrl,
-      bearerToken,
-      fetchImpl,
-    });
-    return { status: "queried", evidence: await client.lookup(fingerprints) };
-  } catch (error) {
-    return {
-      status: "unavailable",
-      failureKind: error instanceof TaskExposureLookupError ? error.kind : "contract",
-    };
-  }
-}
-
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const options = parseArgs(argv);
   const apiKey = process.env.MUNIN_API_KEY?.trim();
@@ -210,18 +167,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     apiKey,
   });
   const loaded = await loadSources(munin, options);
-  const exposureLookup = await lookupCrossClientExposure(loaded.sources);
-  if (exposureLookup.status === "unavailable") {
-    process.stderr.write(
-      `Cross-client exposure lookup unavailable (${exposureLookup.failureKind}); ` +
-      "eligible negative candidates will be quarantined\n",
-    );
-  }
   const manifest = buildDailyExamManifest({
     generatedAt: new Date().toISOString(),
     historyComplete: loaded.historyComplete,
     sources: loaded.sources,
-    exposureLookup,
   });
   const json = `${JSON.stringify(manifest, null, 2)}\n`;
   if (options.output) {
