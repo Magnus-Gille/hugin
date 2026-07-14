@@ -1,42 +1,50 @@
 # Hugin — Status
 
-**Latest session:** 2026-07-14 (Codex) — **M5 v4 live; Harbor r2 campaign implemented and predeclared, not yet run**
-**Branch:** `codex/harbor-gate-d-v2` from `main@57e1affbcda0c2a202ba14bccb04a67d95b7f48e`.
+**Latest session:** 2026-07-14 (Codex) — **fresh four-case Harbor campaign completed; official result no-go**
+**Branch:** `codex/harbor-gate-d-v2-result` from merged runner `main@ea3b7dd36d22307e5eac717208bb24539fdb5ad0`.
 
-## Latest — durable four-case Harbor campaign ready for review
+## Latest — v2 run preserved as no-go; verifier packaging fixed for next declaration
 
-- gille-inference PRs #253/#254 are merged and exact `main@a9b92211` is now
-  deployed on M5. Post-restart acceptance passed: gateway/M5/Orin health,
-  owner-only `tools/list`, `client-run-id-v1`, v4 harness
-  `code-loop-pi-2026-07-14-v4`, pre-inference invalid-request refusal, and a
-  checksum rsync zero-delta check. No Gate D r2 model call was made.
-- The Harbor runner now targets fresh cases 11–14, with cases 11/12 selected as
-  holdouts by the predeclared lowest-task-ID-SHA-256 rule. The exact source
-  commit, task/holdout set, corpus/verifier hashes, model, caps, no-network
-  policy, and image digest are frozen in
-  `docs/research/harbor-gate-d-v2-declaration-2026-07-14.json` with model call
-  count zero.
-- Every direct and Harbor live M5 call carries a deterministic
-  `client_run_id`. Hugin validates the echoed request fingerprint, v4 execution
-  binding, and `pi-bash-events-v1` evidence; a lost start response is retried
-  only under the identical durable binding. The general matched-experiment
-  runner uses the same recovery contract.
-- The post-run importer defaults to dry-run, requires a clean Linux/no-network
-  `go` report at the pinned image digest, independently validates host/replay
-  parity and live bindings, and emits only content-blind observations to an
-  isolated pilot scope. It never calls promotion.
-- Validation: model-free generation against exact gille `a9b92211` reproduced
-  corpus `02ab9ee7...ef4ac` and verifier `bda62f9f...eb77b`; TypeScript build;
-  focused 24 tests including an intentionally lost/recovered start and an
-  explicit start/result work-ID mismatch rejection; full suite 106 files /
-  1,751 tests outside the port-restricted sandbox; both CI shell
-  suites; Python compile; declaration JSON parse; `git diff --check`.
+- The predeclared cases 11–14 ran on exact gille-inference `a9b92211` with
+  cases 11/12 held out. Eight new model calls occurred: four host baselines and
+  four independent Harbor live samples. A corrected worker invocation recovered
+  the original four baseline work IDs through `client-run-id-v1`; it did not
+  repeat their inference.
+- The M5 owner credential never entered the Docker-socket worker. Magnus
+  explicitly approved a temporary split-capability bridge: the host held the
+  owner token without Docker access; the worker received a random token limited
+  to the eight declared client IDs, unchanged retries, exact caps, and their
+  status/result reads. A forbidden tool was rejected. The bridge is stopped,
+  its mode-0600 token is deleted, and no listener remains.
+- The first worker path used `/output` inside nested Docker and failed before
+  every Harbor agent. Re-running with an identical host/container
+  `/private/tmp/...` path recovered all baselines for free and completed all
+  live trials with zero Harbor exceptions.
+- Official result: **no-go**. Host baselines were 3/4 (11 fail; 12–14 pass),
+  but replay was 1/4 parity because the generated verifier copied `check.sh`
+  without its fresh `check-ts-contract.mjs` dependency. Live-adapter bindings
+  completed 4/4; its declared rewards are not adopted because the same verifier
+  package was incomplete. No learning import or promotion was attempted.
+- A separate no-network, no-credential, no-Docker-socket model-free regrade of
+  the exact recorded artifacts reproduced host replay parity 4/4 and graded the
+  live artifacts 3/4 (11–13 pass; 14 fail). This diagnoses the packaging bug but
+  does **not** supersede the predeclared no-go report.
+- The packager now copies every top-level `check-*.mjs` verifier support file,
+  binds their hashes into both host and Harbor verifier digests, and restores a
+  `/tests/node_modules` link so the ESM helpers resolve pinned TypeScript. An
+  end-to-end no-network Harbor replay of the four recorded diffs then produced
+  the exact expected 0/1/1/1 rewards, all diff/work IDs matched, and zero
+  exceptions or model calls. The content-blind record is
+  `docs/research/harbor-gate-d-v2-result-2026-07-14.json`.
+- Validation: TypeScript build; focused 3 files / 26 tests; full suite 106 files
+  / 1,753 tests; both CI shell suites; JSON parse; importer rejects the official
+  no-go report; credential value/name scan clean; bridge/token absent;
+  `git diff --check`.
 
-**Next:** review and merge this declaration/runner PR before any r2 inference.
-Then run the frozen campaign once in the accepted Linux/no-network Harbor
-worker, review/dry-run/commit only its content-blind parity import, and record
-the result in a follow-up PR. Keep Harbor out of dispatcher production and do
-not promote automatically.
+**Next:** validate/review this fix and evidence record, merge the follow-up PR,
+then add and predeclare genuinely fresh cases before another model-bearing
+Harbor run. Do not import the v2 no-go report, reuse these cases as holdouts, or
+promote automatically.
 
 ---
 
