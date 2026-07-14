@@ -318,6 +318,48 @@ describe("daily task exam factory", () => {
     }).candidates[0]!;
     expect(candidate.lane).toBe("quarantine");
     expect(candidate.reasons).toContain("task-created-at-invalid");
+
+    const missingSource = source("claude");
+    missingSource.status.created_at = "";
+    const missing = buildDailyExamManifest({
+      generatedAt: "2026-07-14T12:00:00.000Z",
+      historyComplete: true,
+      sources: [missingSource],
+    });
+    const missingDigest = missing.candidates[0]!.source.promptSha256!;
+    expect(applyCrossClientExposure(missing, {
+      snapshots: new Map([[missingDigest, snapshot(missingDigest)]]),
+    }).candidates[0]!.reasons).toContain("task-created-at-invalid");
+
+    for (const invalidCreatedAt of [undefined, 42]) {
+      const invalidSource = source("claude");
+      (invalidSource.status as unknown as { created_at: unknown }).created_at = invalidCreatedAt;
+      const invalid = buildDailyExamManifest({
+        generatedAt: "2026-07-14T12:00:00.000Z",
+        historyComplete: true,
+        sources: [invalidSource],
+      });
+      const invalidDigest = invalid.candidates[0]!.source.promptSha256!;
+      expect(applyCrossClientExposure(invalid, {
+        snapshots: new Map([[invalidDigest, snapshot(invalidDigest)]]),
+      }).candidates[0]!.reasons).toContain("task-created-at-invalid");
+    }
+  });
+
+  it("quarantines a snapshot map whose value is bound to another fingerprint", () => {
+    const manifest = buildDailyExamManifest({
+      generatedAt: "2026-07-14T12:00:00.000Z",
+      historyComplete: true,
+      sources: [source("claude")],
+    });
+    const digest = manifest.candidates[0]!.source.promptSha256!;
+    const mismatched = snapshot("d".repeat(64));
+    const candidate = applyCrossClientExposure(manifest, {
+      snapshots: new Map([[digest, mismatched]]),
+    }).candidates[0]!;
+    expect(candidate.lane).toBe("quarantine");
+    expect(candidate.crossClientExposure.evidence)
+      .toContain("lookup-result-fingerprint-mismatch");
   });
 
   it("deduplicates identical prompts before lookup and quarantines every duplicate candidate", () => {
@@ -384,5 +426,38 @@ describe("daily task exam factory", () => {
       ]));
     expect(finalized.candidates.map((candidate) => candidate.lane).sort())
       .toEqual(["quarantine", "regression"]);
+  });
+
+  it("quarantines a covered candidate when any same-manifest candidate has the same prompt", () => {
+    const covered = source("claude");
+    const local = source("homeserver");
+    local.status.namespace = "tasks/daily-local-duplicate";
+    local.status.id = "tasks/daily-local-duplicate/status";
+    local.resultStructured.namespace = "tasks/daily-local-duplicate";
+    local.resultStructured.id = "tasks/daily-local-duplicate/result-structured";
+    const localResult = JSON.parse(local.resultStructured.content) as Record<string, unknown>;
+    localResult.taskId = "daily-local-duplicate";
+    localResult.taskNamespace = "tasks/daily-local-duplicate";
+    local.resultStructured.content = JSON.stringify(localResult);
+    const manifest = buildDailyExamManifest({
+      generatedAt: "2026-07-14T12:00:00.000Z",
+      historyComplete: true,
+      sources: [covered, local],
+    });
+    const candidate = manifest.candidates.find((item) => item.lane === "provisional-holdout")!;
+    const digest = candidate.source.promptSha256!;
+    const finalized = applyCrossClientExposure(manifest, {
+      snapshots: new Map([[digest, snapshot(digest)]]),
+    });
+    expect(finalized.candidates.find((item) => item.source.taskId === "daily-1")?.lane)
+      .toBe("quarantine");
+    expect(finalized.candidates.every((item) =>
+      item.reasons.includes("duplicate-prompt-in-daily-manifest"))).toBe(true);
+
+    const reapplied = applyCrossClientExposure(finalized, { snapshots: new Map() });
+    expect(reapplied.candidates.every((item) =>
+      item.crossClientExposure.evidence.filter(
+        (entry) => entry === "duplicate-prompt-in-daily-manifest",
+      ).length === 1)).toBe(true);
   });
 });

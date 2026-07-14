@@ -98,6 +98,7 @@ describe("M5 task exposure lookup", () => {
     expect(fetchImpl.mock.calls[0]?.[1]?.headers).toEqual(expect.objectContaining({
       authorization: "Bearer owner-token",
     }));
+    expect(fetchImpl.mock.calls[0]?.[1]?.redirect).toBe("error");
   });
 
   it("accepts a positive match even when coverage is incomplete", async () => {

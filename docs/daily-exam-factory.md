@@ -78,8 +78,10 @@ invalid, pre-window, post-window, or incomplete evidence always fails closed.
 Only provisional-holdout candidates are queried; private/already-quarantined
 tasks and locally proven regressions do not send their prompt-derived hashes to
 M5. Identical provisional fingerprints are sent to M5 only once. If multiple
-otherwise fresh tasks in one manifest share the prompt, **all** are quarantined
-as duplicates because none can be claimed as an independent sample.
+tasks in one manifest share the prompt, every provisional occurrence is
+quarantined and every occurrence is labeled as a duplicate—even when a twin was
+already private, quarantined, or regression-only—because none can be claimed as
+an independent sample.
 When a sweep has no provisional candidate, it still sends one fixed,
 non-task-derived SHA-256 smoke fingerprint and discards the match. This proves
 the minted-owner endpoint, authentication, and response schema instead of

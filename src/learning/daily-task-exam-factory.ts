@@ -24,7 +24,7 @@ export const dailyExamCandidateSchema = z.object({
   source: z.object({
     taskNamespace: z.string().startsWith("tasks/"),
     taskId: z.string().min(1),
-    taskCreatedAt: z.string().min(1),
+    taskCreatedAt: z.string(),
     statusUpdatedAt: z.string().min(1),
     taskDocumentSha256: sha256Schema,
     promptSha256: sha256Schema.optional(),
@@ -290,7 +290,9 @@ export function buildDailyExamCandidate(source: DailyTaskHarvestSource): DailyEx
     source: {
       taskNamespace: source.status.namespace,
       taskId: result?.taskId ?? source.status.namespace.replace(/^tasks\//, ""),
-      taskCreatedAt: source.status.created_at,
+      taskCreatedAt: typeof source.status.created_at === "string"
+        ? source.status.created_at
+        : "",
       statusUpdatedAt: source.status.updated_at,
       taskDocumentSha256: sha256(taskDocument),
       ...(promptFingerprint ? { promptSha256: promptFingerprint } : {}),
@@ -493,13 +495,13 @@ export function applyCrossClientExposure(
       continue;
     }
     const snapshot = lookup.snapshots?.get(fingerprint);
-    if (!snapshot) {
+    if (!snapshot || snapshot.result.fingerprint_sha256 !== fingerprint) {
       candidate.crossClientExposure = {
         fingerprintVersion: TASK_EXPOSURE_FINGERPRINT_VERSION,
         fingerprintSha256: fingerprint,
         state: "error",
         checkedAt: manifest.generatedAt,
-        evidence: ["lookup-result-missing"],
+        evidence: [snapshot ? "lookup-result-fingerprint-mismatch" : "lookup-result-missing"],
       };
       quarantine(candidate, "cross-client-exposure-lookup-error");
       continue;
@@ -507,20 +509,22 @@ export function applyCrossClientExposure(
     applySnapshot(candidate, snapshot);
   }
 
-  const unseenByFingerprint = new Map<string, DailyExamCandidate[]>();
+  const candidatesByFingerprint = new Map<string, DailyExamCandidate[]>();
   for (const candidate of manifest.candidates) {
     const fingerprint = candidate.crossClientExposure.fingerprintSha256;
-    if (fingerprint && candidate.lane === "provisional-holdout" && candidate.crossClientExposure.state === "unseen-covered") {
-      const group = unseenByFingerprint.get(fingerprint) ?? [];
+    if (fingerprint) {
+      const group = candidatesByFingerprint.get(fingerprint) ?? [];
       group.push(candidate);
-      unseenByFingerprint.set(fingerprint, group);
+      candidatesByFingerprint.set(fingerprint, group);
     }
   }
-  for (const group of unseenByFingerprint.values()) {
+  for (const group of candidatesByFingerprint.values()) {
     if (group.length < 2) continue;
     for (const duplicate of group) {
       quarantine(duplicate, "duplicate-prompt-in-daily-manifest");
-      duplicate.crossClientExposure.evidence.push("duplicate-prompt-in-daily-manifest");
+      if (!duplicate.crossClientExposure.evidence.includes("duplicate-prompt-in-daily-manifest")) {
+        duplicate.crossClientExposure.evidence.push("duplicate-prompt-in-daily-manifest");
+      }
     }
   }
   recalculateCounts(manifest);

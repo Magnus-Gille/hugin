@@ -29,12 +29,17 @@
   `provisional-holdout` is `unseen-covered`. Lookup failure first atomically
   writes a safe quarantined manifest, then fails the oneshot/deployment gate so
   a stale successful snapshot cannot survive silently.
-- Validation on the rebased exact head: TypeScript build; focused 3 files / 28
-  tests; full suite 109 files / 1,794 tests; both CI shell suites; Bash syntax;
+- Native Codex review found and fixed redirect leakage, snapshot-to-candidate
+  binding, mixed-lane duplicate handling, idempotent audit evidence, and
+  fail-closed runtime normalization for missing/non-string Munin creation
+  timestamps. Claude Opus returned no review text and Fable reported its
+  monthly spend limit, so an independent Codex exact-head gate remains next.
+- Validation on the rebased exact head: TypeScript build; focused 3 files / 30
+  tests; full suite 109 files / 1,796 tests; both CI shell suites; Bash syntax;
   `git diff --check`; production dependency audit 0 vulnerabilities.
 
-**Next:** obtain Claude Fable/Opus or direct Codex exact-head review, fix every
-verified finding, publish a ready PR, merge only after review/checks, deploy the
+**Next:** complete the independent Codex exact-head gate, fix every verified
+finding, publish a ready PR, merge only after review/checks, deploy the
 merged commit to Hugin-Munin, and live-prove minted-owner lookup plus schema-v2
 factory/timer acceptance. No Harbor run, holdout freeze, learning import, route
 change, or promotion is authorized by this slice.

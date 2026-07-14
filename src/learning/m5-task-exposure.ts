@@ -119,6 +119,7 @@ async function lookupBatch(input: {
         fingerprint_version: TASK_EXPOSURE_FINGERPRINT_VERSION,
         fingerprints: input.fingerprints,
       }),
+      redirect: "error",
       signal: controller.signal,
     });
   } catch (error) {
