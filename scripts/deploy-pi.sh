@@ -239,7 +239,7 @@ echo "==> Daily exam factory acceptance..."
 ssh "$REMOTE" "
   XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start hugin-daily-exam-factory.service
   test -s /home/$DEPLOY_USER/.hugin/daily-exam-candidates/latest.json
-  /usr/bin/node -e 'const m=JSON.parse(require(\"node:fs\").readFileSync(process.argv[1],\"utf8\")); process.stdout.write(JSON.stringify({generatedAt:m.generatedAt,inspectedTasks:m.inspectedTasks,historyComplete:m.historyComplete,counts:m.counts})+\"\\n\")' /home/$DEPLOY_USER/.hugin/daily-exam-candidates/latest.json
+  /usr/bin/node -e 'const m=JSON.parse(require(\"node:fs\").readFileSync(process.argv[1],\"utf8\")); if(m.exposureLookup?.status===\"unavailable\") throw new Error(\"cross-client exposure lookup unavailable: \"+(m.exposureLookup.failureKind??\"unknown\")); process.stdout.write(JSON.stringify({generatedAt:m.generatedAt,inspectedTasks:m.inspectedTasks,historyComplete:m.historyComplete,exposureLookup:{status:m.exposureLookup?.status,queriedFingerprints:m.exposureLookup?.queriedFingerprints,coverageComplete:m.exposureLookup?.coverage?.coverageComplete},counts:m.counts})+\"\\n\")' /home/$DEPLOY_USER/.hugin/daily-exam-candidates/latest.json
 "
 
 echo ""
