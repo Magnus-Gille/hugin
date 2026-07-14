@@ -39,7 +39,9 @@ follow-up PR #213 to runtime merge `ae92906`).
 - Only provisional candidate hashes leave Hugin. Requests are deduplicated and
   batched to 100; private/quarantined/local-regression hashes are not sent.
   Empty days use one fixed non-task smoke digest so dead minted-owner auth
-  cannot look green. Duplicate prompt candidates are all quarantined.
+  cannot look green. For duplicate prompts, every provisional occurrence is
+  quarantined and every occurrence is labeled; candidates already in regression
+  or quarantine keep that safer lane.
 - The snapshot records `checkedAt` plus `coverage.through` but is explicitly not
   a seal. Any future Harbor packager/runner must re-query immediately before
   freezing and again before execution. The factory still does not run Harbor or
