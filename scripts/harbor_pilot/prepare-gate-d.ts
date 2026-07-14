@@ -59,6 +59,22 @@ function sha256Json(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+function verifierSupportBindings(
+  gateDRoot: string,
+): Array<{ path: string; sha256: string }> {
+  return readdirSync(gateDRoot)
+    .filter((name) => /^check-[a-z0-9-]+\.mjs$/.test(name))
+    .sort()
+    .map((name) => {
+      const path = join(gateDRoot, name);
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new Error(`unsafe Gate D verifier support file: ${path}`);
+      }
+      return { path: name, sha256: sha256File(path) };
+    });
+}
+
 function clientRunId(campaignId: string, taskId: string, lane: "baseline" | "live"): string {
   const value = `harbor:${campaignId}:${taskId}:${lane}`;
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(value)) {
@@ -197,6 +213,11 @@ mkdir -p /logs/verifier
 if [ ! -e /app/node_modules ]; then
   ln -s /opt/gate-d/node_modules /app/node_modules
 fi
+# The copied verifier helpers import TypeScript as ESM. Node resolves that
+# dependency relative to /tests, not the artifact mounted at /app.
+if [ ! -e /tests/node_modules ]; then
+  ln -s /opt/gate-d/node_modules /tests/node_modules
+fi
 set +e
 bash /tests/gate-d-check.sh /tests/task /app > /logs/verifier/gate-d-check.log 2>&1
 status=$?
@@ -255,6 +276,7 @@ export function prepareGateDHarborPilot(input: {
   const baseImage = input.baseImage ?? HARBOR_PILOT_DEFAULT_BASE_IMAGE;
   const sourceGateD = join(sourceRepo, "gate-d");
   const checkPath = join(sourceGateD, "check.sh");
+  const verifierSupport = verifierSupportBindings(sourceGateD);
 
   if (!/^[a-z0-9][a-z0-9-]{1,47}$/.test(campaignId)) {
     throw new Error("Harbor campaign id must be a 2-48 character lowercase slug");
@@ -337,6 +359,9 @@ export function prepareGateDHarborPilot(input: {
     writeFileSync(join(testsDir, "Dockerfile"), verifierDockerfile(baseImage));
     writeFileSync(join(testsDir, "test.sh"), verifierScript, { mode: 0o755 });
     cpSync(checkPath, join(testsDir, "gate-d-check.sh"));
+    for (const support of verifierSupport) {
+      cpSync(join(sourceGateD, support.path), join(testsDir, support.path));
+    }
     cpSync(metaPath, join(testsTaskDir, "meta.json"));
     cpSync(seedPath, join(testsTaskDir, "repo"), { recursive: true });
     const hiddenOracle = (meta as { hiddenOracle?: unknown }).hiddenOracle;
@@ -351,7 +376,11 @@ export function prepareGateDHarborPilot(input: {
     }
   }
 
-  const verifierSha256 = sha256File(checkPath);
+  const gateDCheckSha256 = sha256File(checkPath);
+  const verifierSha256 = sha256Json({
+    check_sh_sha256: gateDCheckSha256,
+    support: verifierSupport,
+  });
   const corpusSha256 = sha256Json({
     source_commit: sourceCommit,
     holdout_revision: holdoutRevision,
@@ -363,7 +392,8 @@ export function prepareGateDHarborPilot(input: {
     base_image: baseImage,
     verifier_dockerfile: verifierDockerfile(baseImage),
     verifier_script: verifierScript,
-    gate_d_check_sha256: verifierSha256,
+    gate_d_check_sha256: gateDCheckSha256,
+    verifier_support: verifierSupport,
   });
 
   writeFileSync(join(outputDir, "manifest.json"), `${JSON.stringify({
@@ -378,6 +408,7 @@ export function prepareGateDHarborPilot(input: {
     holdout_revision: holdoutRevision,
     corpus_sha256: corpusSha256,
     verifier_sha256: verifierSha256,
+    verifier_support: verifierSupport,
     harbor_verifier_sha256: harborVerifierSha256,
     task_bindings: taskBindings,
     network_mode: networkMode,

@@ -96,6 +96,9 @@ as matched quality observations.
 The r2 task set, holdouts, source commit, corpus/verifier hashes, model, harness,
 caps, network policy, and image digest were frozen before inference in
 [`harbor-gate-d-v2-declaration-2026-07-14.json`](research/harbor-gate-d-v2-declaration-2026-07-14.json).
+That declaration is now consumed by the recorded no-go run. The verifier
+packaging fix deliberately changes the generated verifier/corpus hashes, so the
+old declaration fails binding before inference and must not be reused.
 
 ## Run
 
@@ -123,6 +126,11 @@ HARBOR_BIN=/private/tmp/hugin-harbor-pilot/venv/bin/harbor \
   --holdout-ids 11-node-path-containment,12-add-csv-cli-format \
   --network-mode no-network
 ```
+
+When Harbor itself runs inside a container against the host Docker socket, the
+pilot output directory must be mounted at the **same absolute path** inside the
+worker. Nested Docker Compose passes that path to the host daemon; a worker-only
+alias such as `/output` is not a host-shared path and fails before agent setup.
 
 The final `pilot-report.json` contains:
 
@@ -153,6 +161,33 @@ npm run pilot:harbor:import -- /path/to/pilot-report.json
 `m5-code-edit-harbor-pilot` experiment and appends idempotent host/replay
 observations. It never imports prompts, diffs, verifier logs, or trajectories,
 and never calls the promotion endpoint.
+
+## Fresh four-case outcome (2026-07-14)
+
+The content-blind record is
+[`harbor-gate-d-v2-result-2026-07-14.json`](research/harbor-gate-d-v2-result-2026-07-14.json).
+The predeclared run made eight new M5 calls: four direct baselines and four
+independent Harbor live samples. Durable IDs recovered the baselines during a
+worker-path correction without repeating inference. The temporary credential
+bridge kept the owner token outside the Docker-socket worker, rejected an
+undeclared tool, and was stopped with its worker token deleted after the run.
+
+The official recommendation is **no-go**. Host baselines passed 3/4, but the
+declared Harbor verifier package copied `check.sh` without the new
+`check-ts-contract.mjs` helper used by the fresh structural checks. Replay
+therefore disagreed on three passing baselines even though all diff, work, and
+client-ID bindings matched. The learning importer correctly remains unused.
+
+A no-network model-free regrade of the exact recorded artifacts, using the full
+source verifier suite, restored replay parity 4/4 and graded live artifacts 3/4
+(tasks 11–13 pass; task 14 fails). That establishes the packaging diagnosis but
+does not retroactively change the pre-inference verifier digest or supersede the
+official no-go. The generator now copies every top-level `check-*.mjs` support
+file, binds those files into both verifier digests, and links the pinned
+dependencies under `/tests/node_modules` so the helpers' ESM imports resolve.
+An end-to-end model-free Harbor replay after the fix reproduced the exact host
+0/1/1/1 decisions, with matching diff/work IDs and zero exceptions. Another
+model-bearing run requires a new declaration and genuinely fresh cases.
 
 ## Initial pilot outcome (2026-07-14)
 

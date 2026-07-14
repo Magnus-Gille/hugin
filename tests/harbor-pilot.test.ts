@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -50,10 +51,12 @@ function git(repo: string, args: string[]): void {
   if (result.status !== 0) throw new Error(result.stderr);
 }
 
-function fakeGateDRepo(root: string): string {
+function fakeGateDRepo(root: string, helperContent = "export const marker = 'one';\n"): string {
   const repo = join(root, "gille-inference");
   mkdirSync(repo);
   write(join(repo, "gate-d", "check.sh"), "#!/usr/bin/env bash\nexit 0\n");
+  write(join(repo, "gate-d", "check-test-assertions.mjs"), "export const assertions = true;\n");
+  write(join(repo, "gate-d", "check-ts-contract.mjs"), helperContent);
   const task = join(repo, "gate-d", "tasks", "01-make-failing-test-pass");
   write(join(task, "INSTRUCTION.md"), "Make the test pass.\n");
   write(join(task, "meta.json"), `${JSON.stringify({
@@ -129,15 +132,57 @@ describe("Harbor Gate D pilot", () => {
       corpus_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       verifier_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       harbor_verifier_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      verifier_support: [
+        { path: "check-test-assertions.mjs", sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+        { path: "check-ts-contract.mjs", sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+      ],
     });
     expect(readFileSync(join(task, "tests", "test.sh"), "utf8"))
       .toContain("ln -s /opt/gate-d/node_modules /app/node_modules");
+    expect(readFileSync(join(task, "tests", "test.sh"), "utf8"))
+      .toContain("ln -s /opt/gate-d/node_modules /tests/node_modules");
     expect(readFileSync(join(task, "tests", "test.sh"), "utf8"))
       .toContain("gate_d_all_gates");
     expect(readFileSync(join(task, "tests", "Dockerfile"), "utf8"))
       .toContain("COPY . /tests/");
     expect(readFileSync(join(task, "tests", "Dockerfile"), "utf8"))
       .toContain("@types/node@22.13.0");
+    expect(readFileSync(join(task, "tests", "check-test-assertions.mjs"), "utf8"))
+      .toContain("assertions");
+    expect(readFileSync(join(task, "tests", "check-ts-contract.mjs"), "utf8"))
+      .toContain("marker");
+  });
+
+  it("binds verifier support content into the host and Harbor verifier digests", () => {
+    const firstRoot = tempRoot();
+    const first = prepareGateDHarborPilot({
+      sourceRepo: fakeGateDRepo(firstRoot, "export const marker = 'one';\n"),
+      outputDir: join(firstRoot, "prepared"),
+      taskIds: ["01-make-failing-test-pass"],
+    });
+    const secondRoot = tempRoot();
+    const second = prepareGateDHarborPilot({
+      sourceRepo: fakeGateDRepo(secondRoot, "export const marker = 'two';\n"),
+      outputDir: join(secondRoot, "prepared"),
+      taskIds: ["01-make-failing-test-pass"],
+    });
+
+    expect(first.verifierSha256).not.toBe(second.verifierSha256);
+    expect(first.harborVerifierSha256).not.toBe(second.harborVerifierSha256);
+  });
+
+  it("rejects a verifier support symlink before packaging", () => {
+    const root = tempRoot();
+    const repo = fakeGateDRepo(root);
+    const support = join(repo, "gate-d", "check-ts-contract.mjs");
+    rmSync(support);
+    symlinkSync("../check.sh", support);
+
+    expect(() => prepareGateDHarborPilot({
+      sourceRepo: repo,
+      outputDir: join(root, "prepared"),
+      taskIds: ["01-make-failing-test-pass"],
+    })).toThrow(/unsafe Gate D verifier support file/);
   });
 
   it("refuses a dirty source corpus", () => {

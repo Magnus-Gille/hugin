@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "status": "completed-no-go",
+  "campaign_id": "gate-d-fresh-v2-20260714",
+  "pilot_version": "harbor-0.18.0-gate-d-v2",
+  "harbor_version": "0.18.0",
+  "runner_commit": "ea3b7dd36d22307e5eac717208bb24539fdb5ad0",
+  "source_commit": "a9b92211d18a039a5893c4bdb3a51e177b3efaa9",
+  "declaration_sha256": "03f2d76fd1693a3b7c5d112106621609722573c075f96b9a7434bbba951be4a5",
+  "official_report_sha256": "27da7331ab5f4c3adfd8d5bdff0016b4eb937702d671a9713ba9954fef703a42",
+  "model_free_regrade_sha256": "7c378a9c90e5ca211a4d390d88ead0ac6d1ead4467c374a199db8ab4a3d290a7",
+  "environment": {
+    "worker": "Linux ARM64 container against Docker Desktop LinuxKit",
+    "network_mode": "no-network",
+    "base_image": "node:22.17.0-bookworm-slim@sha256:b04ce4ae4e95b522112c2e5c52f781471a5cbc3b594527bcddedee9bc48c03a0",
+    "harbor_concurrency": 1,
+    "credential_boundary": "bounded temporary bridge; owner token stayed outside Docker-socket worker",
+    "bridge_stopped": true,
+    "temporary_worker_token_deleted": true
+  },
+  "execution_accounting": {
+    "declared_logical_model_calls": 8,
+    "new_baseline_model_calls": 4,
+    "recovered_baseline_starts": 4,
+    "duplicate_baseline_model_calls": 0,
+    "new_live_model_calls": 4,
+    "total_new_model_calls": 8,
+    "first_worker_attempt": {
+      "report_sha256": "edbd253970369edeade3d26b245cfad1135996c57cc08c174206f4aa1defc0de",
+      "new_baseline_model_calls": 4,
+      "new_live_model_calls": 0,
+      "failure": "nested Docker could not resolve the worker-only /output mount path"
+    },
+    "corrected_worker_attempt": {
+      "baseline_starts_recovered": 4,
+      "new_live_model_calls": 4,
+      "host_container_output_path_identical": true
+    }
+  },
+  "official_report": {
+    "recommendation": "no-go",
+    "baseline_decisions_verified": true,
+    "exact_replay_parity": false,
+    "live_adapter_completed": true,
+    "baseline": [
+      { "task_id": "11-node-path-containment", "holdout": true, "passed": false, "status": "completed", "diff_sha256": "7a596bb98251be25a21a81edf3e89476e707eed22d69b9d3e0b66f3aed7443fb" },
+      { "task_id": "12-add-csv-cli-format", "holdout": true, "passed": true, "status": "cap-exceeded", "diff_sha256": "1d79e8a5a6f49ec8323465d15453fda9fab230e8369ced4773e1c7814b7e51d0" },
+      { "task_id": "13-type-safe-slug-tests", "holdout": false, "passed": true, "status": "completed", "diff_sha256": "c94b9af2bea8c30eaf7e11b6629ce59f38fecfdeab503e70edc2652bf181368b" },
+      { "task_id": "14-shared-handle-validation", "holdout": false, "passed": true, "status": "completed", "diff_sha256": "6e0de2415527c8e4ee0643f2c36aaeab9e474a5de1826f3af7c82e94b6229798" }
+    ],
+    "reported_replay_passes": [
+      { "task_id": "11-node-path-containment", "passed": false },
+      { "task_id": "12-add-csv-cli-format", "passed": false },
+      { "task_id": "13-type-safe-slug-tests", "passed": false },
+      { "task_id": "14-shared-handle-validation", "passed": false }
+    ],
+    "reported_live_passes": [
+      { "task_id": "11-node-path-containment", "passed": true },
+      { "task_id": "12-add-csv-cli-format", "passed": false },
+      { "task_id": "13-type-safe-slug-tests", "passed": false },
+      { "task_id": "14-shared-handle-validation", "passed": false }
+    ]
+  },
+  "diagnosis": {
+    "failure_kind": "verifier-packaging",
+    "detail": "The generated Harbor verifier copied gate-d/check.sh but omitted its check-*.mjs support files; after copying them, their ESM imports also required the pinned dependency link at /tests/node_modules.",
+    "why_official_no_go_stands": "Adding the missing helper changes the predeclared verifier package and its digest after inference.",
+    "importer_rejected_no_go": true,
+    "learning_ledger_write_attempted": false,
+    "promotion_attempted": false
+  },
+  "model_free_post_run_regrade": {
+    "supersedes_official_report": false,
+    "additional_model_calls": 0,
+    "replay_exact_host_parity": true,
+    "replay": [
+      { "task_id": "11-node-path-containment", "passed": false, "artifact_sha256": "79e7d0fcca84a4c540c10eb2291bd43b6728469a27c800eaef4e66906ca28d00" },
+      { "task_id": "12-add-csv-cli-format", "passed": true, "artifact_sha256": "8373b97e7241e3134050b39085f9322482486dfce2e933f96d5253373b32a982" },
+      { "task_id": "13-type-safe-slug-tests", "passed": true, "artifact_sha256": "2a86636164f74869fd2a82e40a2b698baf0207a1dd20e0cbdb8b4fed39bdb2cd" },
+      { "task_id": "14-shared-handle-validation", "passed": true, "artifact_sha256": "05f0b79101369b9622da55efdcd84981d6eecaa134ef450a27572f796aa7cc60" }
+    ],
+    "live": [
+      { "task_id": "11-node-path-containment", "passed": true, "artifact_sha256": "89b7cac4c4158f73bffc7ecc7f24a83d023cf1431da0d4945043066955c3f521" },
+      { "task_id": "12-add-csv-cli-format", "passed": true, "artifact_sha256": "11262ef714d129014eb513a86c3f754c96e018daa57e820418a5d367ebe67e13" },
+      { "task_id": "13-type-safe-slug-tests", "passed": true, "artifact_sha256": "0e170314c75beb9e1851d197adee9c89afcc29c9cf33bdd6f636415b2f8e6309" },
+      { "task_id": "14-shared-handle-validation", "passed": false, "artifact_sha256": "76bc9a2fa9b27a144f332707754cff288926265b6e33778a8960225f86e8c22f" }
+    ]
+  },
+  "packaging_fix_validation": {
+    "additional_model_calls": 0,
+    "network_mode": "no-network",
+    "harbor_exceptions": 0,
+    "generated_manifest_sha256": "6010590e4a96812a4656358750abf8048324d1d78d4f280dab9a88eb80050516",
+    "host_verifier_sha256": "16056622617cb5bcd3fdfaa9decf1d5dfd27ccff745f82b3ac10bf1871c99507",
+    "harbor_verifier_sha256": "baf5c06a3d449f3baa74a4fbb14baf7bae35e1e577daff329a91b93e2c06cf8f",
+    "harbor_job_result_sha256": "7fae7614e2c9a2461fdad3106dbe0dd70d031967e15b5948e3a3a31ba81d4922",
+    "exact_replay_parity": true,
+    "results": [
+      { "task_id": "11-node-path-containment", "passed": false, "diff_sha256": "7a596bb98251be25a21a81edf3e89476e707eed22d69b9d3e0b66f3aed7443fb" },
+      { "task_id": "12-add-csv-cli-format", "passed": true, "diff_sha256": "1d79e8a5a6f49ec8323465d15453fda9fab230e8369ced4773e1c7814b7e51d0" },
+      { "task_id": "13-type-safe-slug-tests", "passed": true, "diff_sha256": "c94b9af2bea8c30eaf7e11b6629ce59f38fecfdeab503e70edc2652bf181368b" },
+      { "task_id": "14-shared-handle-validation", "passed": true, "diff_sha256": "6e0de2415527c8e4ee0643f2c36aaeab9e474a5de1826f3af7c82e94b6229798" }
+    ]
+  },
+  "decision": {
+    "import_into_learning_ledger": false,
+    "promote": false,
+    "next": "Land verifier-support binding/copy fix, then predeclare a new fresh corpus before any further model-bearing Harbor run."
+  }
+}
