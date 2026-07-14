@@ -16,6 +16,7 @@ import {
 } from "../scripts/harbor_pilot/prepare-gate-d.js";
 import {
   customBasePreflightScript,
+  sourceBaselinePreflightScript,
   summarizeHarborJob,
 } from "../scripts/harbor_pilot/run-pilot.js";
 
@@ -72,6 +73,15 @@ describe("Harbor Gate D pilot", () => {
     expect(script).toContain("command -v grep");
     expect(script).toContain("@types/node/package.json");
     expect(script).not.toContain("command -v git");
+  });
+
+  it("preflights worker-native Gate D dependencies before live calls", () => {
+    const script = sourceBaselinePreflightScript();
+    expect(script).toContain("test -x ./node_modules/.bin/tsx");
+    expect(script).toContain("test -x ./node_modules/.bin/tsc");
+    expect(script).toContain("require('esbuild').transformSync");
+    expect(script).toContain("./node_modules/.bin/tsc --version");
+    expect(script).not.toContain("npx");
   });
 
   it("generates a content-pinned task with a separate no-network verifier", () => {

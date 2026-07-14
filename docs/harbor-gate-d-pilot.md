@@ -17,7 +17,11 @@ to Harbor Hub, or write observations to Munin.
 
 The corpus remains owned by `gille-inference`. The runner requires that source
 checkout to be clean, records its exact commit, and generates ephemeral Harbor
-tasks under the selected output directory.
+tasks under the selected output directory. The source checkout's `node_modules`
+must be installed on the Harbor worker itself (`npm ci`); the direct baseline
+uses those dependencies and now checks source-local `tsx`/`tsc`, executes an
+`esbuild` TypeScript transform, and runs `tsc --version` as a fail-fast
+platform-compatibility preflight before making any M5 call.
 
 Harbor 0.18.0's Docker provider rejects `no-network` on Docker Desktop for
 macOS because its egress-control implementation cannot enforce that policy on
@@ -151,6 +155,31 @@ fit is proven, but this macOS run used public container networking and a custom
 native-arm64 base because Docker Desktop's registry path stalled. Require a
 pinned Linux rerun with no network and the standard base before regular or
 automated evaluation use. Do not integrate Harbor into production dispatch.
+
+## Linux acceptance outcome (2026-07-14)
+
+The content-blind acceptance record is
+[`docs/research/harbor-gate-d-linux-acceptance-2026-07-14.json`](research/harbor-gate-d-linux-acceptance-2026-07-14.json).
+Harbor ran inside a disposable Linux worker against Docker Desktop's LinuxKit
+ARM64 daemon. All generated task, agent, and separate-verifier policies were
+`no-network`, and both task/verifier Dockerfiles used the standard
+`node:22.17.0-bookworm-slim` image at digest
+`sha256:b04ce4ae4e95b522112c2e5c52f781471a5cbc3b594527bcddedee9bc48c03a0`.
+
+The first direct-baseline grading attempt was invalid because the Linux worker
+linked the laptop checkout's Darwin `esbuild` binary. Harbor itself correctly
+graded the exact replays 2/2. A model-free correction re-applied the already
+recorded diffs and the original Gate D verifier after a clean Linux-native
+`npm ci`; both passed, both diff hashes remained identical, and no M5 call was
+repeated. The runner now detects this dependency mismatch before live work.
+
+Final acceptance: exact replay parity 2/2, diff-hash parity 2/2, live adapter
+completion 2/2, live verifier passes 2/2, zero Harbor exceptions, and zero
+credential indicators in generated task/job output. The mechanical
+recommendation is therefore **go** for the explicitly offline evaluation lane.
+This clears the environment condition only; the two-task sample is still far
+too small for capability-rate claims. Next expand to a predeclared matched
+corpus and keep routing/promotion review in Hugin rather than Harbor.
 
 ## License and cost
 

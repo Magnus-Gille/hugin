@@ -1,7 +1,7 @@
 # Hugin — Status
 
-**Latest session:** 2026-07-14 (Codex) — **Harbor/M5 Gate D proof-of-fit completed; conditional-go for an offline evaluation lane**
-**Branch:** `agent/harbor-gate-d-pilot` rebased onto `main@71e796384b177cfb53bc19e7c451f9101bc16a18`; Harbor pilot implementation and evidence passed independent Claude review in PR [#201](https://github.com/Magnus-Gille/hugin/pull/201) and await green CI/merge.
+**Latest session:** 2026-07-14 (Codex) — **Harbor/M5 Linux acceptance completed; go for the offline evaluation lane**
+**Branch:** `codex/harbor-linux-acceptance` from merged `main@7916a17b1517a52ba2ff7cea84ba16afe164558b` (Harbor pilot PR [#201](https://github.com/Magnus-Gille/hugin/pull/201)); records the Linux acceptance and adds a fail-fast worker-dependency preflight.
 
 ## Latest — Harbor 0.18.0 proof-of-fit with the existing M5 code_loop
 
@@ -32,14 +32,28 @@
   requirement was removed, the actual task/verifier tools are now checked, and
   a regression test plus a run against the pinned image passed. Claude refuted
   its only other candidate finding.
-- Recommendation is conditional-go only for an offline evaluation/control
-  plane. Harbor does not replace Hugin dispatch, Broker/Munin lifecycle, M5
-  model routing, or the existing reviewed learning promotion gate. The macOS
-  run used public container networking (Harbor 0.18 cannot enforce no-network
-  there) and a custom native-arm64 base after Docker Desktop registry pulls
-  stalled. Repeat the same source/pin on Linux with no-network plus the standard
-  base, then expand to a predeclared matched corpus before estimating capability
-  rates.
+- PR #201 passed Claude's headless review plus GitHub CI and was squash-merged
+  as `7916a17`. The frozen corpus was then repeated in a disposable Linux ARM64
+  Harbor worker against Docker Desktop's LinuxKit daemon with all task, agent,
+  and verifier policies set to `no-network` and the standard
+  `node:22.17.0-bookworm-slim` image at digest `b04ce4ae...03a0`.
+- The Linux run's first host-baseline grade incorrectly linked the laptop
+  checkout's Darwin `esbuild`, while Harbor's isolated replay passed 2/2. A
+  model-free correction installed dependencies natively, re-applied the same
+  recorded diffs, and ran the original verifier: both baselines passed, both
+  hashes were unchanged, exact Harbor parity was 2/2, and no M5 calls were
+  repeated. The pilot now checks source-local `tsx`/`tsc`, runs a real `esbuild`
+  transform, and invokes `tsc --version` as a fail-fast platform check before
+  any live M5 call.
+- Both independent Linux live-adapter trials passed their separate verifiers,
+  all effective model/harness/caps matched, and Harbor reported zero exceptions.
+  The superseding content-blind record is
+  `docs/research/harbor-gate-d-linux-acceptance-2026-07-14.json`.
+- Recommendation is now go only for the explicit offline evaluation/control
+  plane. Harbor still does not replace Hugin dispatch, Broker/Munin lifecycle,
+  M5 model routing, or the reviewed learning promotion gate. Two tasks prove
+  the execution boundary, not a capability rate; expand to a predeclared
+  matched corpus before routing conclusions.
 - Harbor core and the installed wheel declare Apache-2.0. This local run made no
   Hub upload and Harbor reported $0.00 model API cost; electricity, hardware,
   operator time, Docker licensing, and any optional cloud sandbox/model costs
@@ -47,17 +61,17 @@
 - Security checks found zero M5 credential-prefix matches and zero
   `M5_API_KEY` names in generated task/job outputs. The Gate D source checkout
   remained clean at exact commit `d2d2541dd01519ddf50a9bbba8903d02fcea5284`.
-- Validation: corrected Harbor exact replay 2/2; corrected live-artifact regrade
-  1/2 with zero infrastructure exceptions; TypeScript build; standalone strict
-  typecheck of all pilot TS scripts; Python bytecode compile; focused 12 tests;
-  rebased full suite 106 files / 1,744 tests; both CI shell suites;
+- Validation: Linux corrected baseline 2/2; exact Harbor replay and diff parity
+  2/2; Linux live artifacts 2/2; zero infrastructure exceptions; credential
+  scan clean; cross-platform preflight reproduced red on Darwin dependencies and
+  green after Linux-native `npm ci`; TypeScript build; focused 6 tests; full
+  suite 106 files / 1,745 tests; both CI shell suites; JSON parse;
   `git diff --check`.
 
-**Next:** run the same content pin on a Linux Harbor worker with enforced
-`no-network` and the standard image. If parity stays exact, add a larger
-predeclared Gate D corpus and connect reviewed, content-blind Harbor summaries
-to Hugin's existing learning experiment endpoints. Do not deploy Harbor in the
-dispatcher, publish the dataset, or enable automatic promotion.
+**Next:** merge the narrow acceptance/preflight follow-up, then predeclare and
+run a larger matched Gate D corpus. Connect only reviewed, content-blind Harbor
+summaries to Hugin's existing learning experiment endpoints. Do not deploy
+Harbor in the dispatcher, publish the dataset, or enable automatic promotion.
 
 ---
 
