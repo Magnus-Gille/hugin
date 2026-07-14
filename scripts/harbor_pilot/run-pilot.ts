@@ -37,11 +37,11 @@ import {
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "../..");
 const MODEL = "qwen3-coder-next-80b";
-const HARNESS_VERSION = "code-loop-pi-2026-07-14-v4";
+const HARNESS_VERSION = "code-loop-pi-2026-07-14-v6";
 const CAPS = { wall_s: 600, turns: 13, completion_tokens: 60_000 } as const;
 const EXPECTED_CAPABILITIES = {
   startIdempotency: "client-run-id-v1",
-  agentChecks: "pi-bash-events-v1",
+  agentChecks: "pi-bash-events-v3",
 } as const;
 
 const controlSchema = z.object({
@@ -49,8 +49,8 @@ const controlSchema = z.object({
   holdout: z.boolean(),
   protected: z.array(z.string().min(1)),
   client_run_ids: z.object({
-    baseline: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
-    live: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+    baseline: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+    live: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
   }).strict(),
 }).passthrough();
 const gitCommitSchema = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
@@ -77,7 +77,7 @@ const declarationSchema = z.object({
   }).strict(),
   required_capabilities: z.object({
     start_idempotency: z.literal("client-run-id-v1"),
-    agent_checks: z.literal("pi-bash-events-v1"),
+    agent_checks: z.literal("pi-bash-events-v3"),
   }).strict(),
   network_mode: z.literal("no-network"),
   base_image: z.string().min(1),
@@ -473,10 +473,11 @@ async function main(): Promise<void> {
   const taskIds = csvAfter("--task-ids") ?? [...HARBOR_PILOT_TASK_IDS];
   const holdoutIds = csvAfter("--holdout-ids") ?? [...HARBOR_PILOT_HOLDOUT_IDS];
   const campaignId = valueAfter("--campaign-id") ?? HARBOR_PILOT_CAMPAIGN_ID;
-  const declarationPath = resolve(
-    valueAfter("--declaration") ??
-    join(REPO_ROOT, "docs/research/harbor-gate-d-v2-declaration-2026-07-14.json"),
-  );
+  const declarationArg = valueAfter("--declaration");
+  if (!declarationArg) {
+    throw new Error("--declaration is required; the consumed Gate D v2 declaration must not be reused");
+  }
+  const declarationPath = resolve(declarationArg);
   if (taskIds.length < 4) throw new Error("the larger-corpus pilot requires at least four tasks");
   if (holdoutIds.length < 2) throw new Error("the larger-corpus pilot requires at least two predeclared holdouts");
   const networkModeArg = valueAfter("--network-mode") ?? (process.platform === "darwin" ? "public" : "no-network");
@@ -606,15 +607,17 @@ async function main(): Promise<void> {
       /^sha256:[a-f0-9]{64}$/.test(row.requestFingerprint) &&
       row.holdout === prepared.holdoutIds.includes(row.taskId) &&
       startCapabilities?.start_idempotency === "client-run-id-v1" &&
-      startCapabilities.agent_checks === "pi-bash-events-v1" &&
+      startCapabilities.agent_checks === "pi-bash-events-v3" &&
       execution?.model === MODEL &&
       execution.harness_version === HARNESS_VERSION &&
       effectiveCaps?.wall_s === CAPS.wall_s &&
       effectiveCaps.turns === CAPS.turns &&
       effectiveCaps.completion_tokens === CAPS.completion_tokens &&
       executionCapabilities?.start_idempotency === "client-run-id-v1" &&
-      executionCapabilities.agent_checks === "pi-bash-events-v1" &&
+      executionCapabilities.agent_checks === "pi-bash-events-v3" &&
+      agentChecks?.schema_version === 3 &&
       agentChecks?.source === "pi-bash-events" &&
+      typeof agentChecks.coverage_loss_events === "number" &&
       agentChecks.work_id === row.workId;
   });
   const environmentConditionsMet =

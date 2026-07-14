@@ -40,13 +40,14 @@ import {
   M5CodeLoopClient,
   m5ClientRunId,
   startM5CodeLoopDurably,
+  supportsM5CodeLoopContract,
   type M5CodeLoopRequest,
 } from "../src/learning/m5-code-loop-client.js";
 
-const DURABLE_HARNESS_VERSION = "code-loop-pi-2026-07-14-v5";
+const DURABLE_HARNESS_VERSION = "code-loop-pi-2026-07-14-v6";
 const DURABLE_CAPABILITIES = {
   startIdempotency: "client-run-id-v1",
-  agentChecks: "pi-bash-events-v2",
+  agentChecks: "pi-bash-events-v3",
 } as const;
 
 const capsSchema = z.object({
@@ -295,13 +296,6 @@ function verifyGateD(
   }
 }
 
-function supportsDurableEvidenceContract(tools: Array<Record<string, unknown>>): boolean {
-  const start = tools.find((tool) => tool.name === "code_loop_start");
-  if (!start) return false;
-  const wire = JSON.stringify(start);
-  return wire.includes("edit_deadline_turn") && wire.includes("client_run_id");
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
@@ -446,9 +440,9 @@ async function main(): Promise<void> {
     baseUrl: requiredEnv("HUGIN_BROKER_URL"),
     bearerToken: requiredEnv("HUGIN_BROKER_TOKEN"),
   });
-  if (!supportsDurableEvidenceContract(await m5.toolDefinitions())) {
+  if (!supportsM5CodeLoopContract(await m5.toolDefinitions())) {
     throw new Error(
-      "M5 code_loop does not advertise durable client_run_id plus edit_deadline_turn; " +
+      "M5 code_loop does not advertise the exact durable v6/v3 evidence contract; " +
       "deploy the reviewed gille-inference contract before creating the experiment",
     );
   }

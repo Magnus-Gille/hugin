@@ -31,9 +31,28 @@ export interface M5CodeLoopRequest {
   };
 }
 
+export const M5_CODE_LOOP_TOOL_CONTRACT_ADVERTISEMENT =
+  "contract[harness=code-loop-pi-2026-07-14-v6;agent_checks=pi-bash-events-v3;schema=3;max_attempts=1000]";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Fail before a paid start unless tools/list advertises the exact producer contract we parse. */
+export function supportsM5CodeLoopContract(tools: Array<Record<string, unknown>>): boolean {
+  const start = tools.find((tool) => tool.name === "code_loop_start");
+  if (!start || typeof start.description !== "string") return false;
+  if (!isRecord(start.inputSchema) || !isRecord(start.inputSchema.properties)) return false;
+  const properties = start.inputSchema.properties;
+  if (!Object.hasOwn(properties, "client_run_id") || !isRecord(properties.caps)) return false;
+  if (!isRecord(properties.caps.properties)) return false;
+  return start.description.includes(M5_CODE_LOOP_TOOL_CONTRACT_ADVERTISEMENT) &&
+    Object.hasOwn(properties.caps.properties, "edit_deadline_turn");
+}
+
 export const codeLoopCapabilitiesSchema = z.object({
   start_idempotency: z.literal("client-run-id-v1"),
-  agent_checks: z.literal("pi-bash-events-v2"),
+  agent_checks: z.literal("pi-bash-events-v3"),
 }).strict();
 
 const jobStatusSchema = z.enum([
@@ -121,6 +140,10 @@ export class M5CodeLoopClient {
       throw new M5CodeLoopError(
         "M5 code_loop_start returned an invalid durable-start contract",
         parsed.error.flatten(),
+        // The mutating call reached M5 and returned a tool result. Even when that result is
+        // malformed, the run may already have been accepted; retry only through the same
+        // client_run_id so response-shape faults cannot strand paid work.
+        true,
       );
     }
     return parsed.data;
@@ -262,6 +285,11 @@ export async function startM5CodeLoopDurably(
       if (started.client_run_id !== request.client_run_id || started.request_fingerprint === null) {
         throw new M5CodeLoopError(
           "M5 did not echo the durable caller id and canonical request fingerprint",
+          undefined,
+          // The mutating call returned after it may have committed the paid run. A schema-valid
+          // but incomplete/wrong binding is no safer than a malformed response: recover only by
+          // retrying the exact request under the same caller id.
+          true,
         );
       }
       return started as DurableM5CodeLoopStart;

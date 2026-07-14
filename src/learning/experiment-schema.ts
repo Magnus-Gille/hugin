@@ -259,10 +259,11 @@ export const learningAgentCheckAttemptSchema = z.object({
 });
 
 export const learningAgentChecksSchema = z.object({
-  schema_version: z.literal(2),
+  schema_version: z.literal(3),
   source: z.literal("pi-bash-events"),
   state: z.enum(["none", "attempted", "unobservable", "partial"]),
   unparseable_lines: z.number().int().nonnegative(),
+  coverage_loss_events: z.number().int().nonnegative(),
   work_id: z.string().min(1).max(200),
   attempts: z.array(learningAgentCheckAttemptSchema).max(1_000),
 }).strict().superRefine((value, ctx) => {
@@ -270,9 +271,9 @@ export const learningAgentChecksSchema = z.object({
   if ((value.state === "attempted" || value.state === "partial") !== hasAttempts) {
     ctx.addIssue({ code: "custom", path: ["attempts"], message: "agent-check state disagrees with attempts" });
   }
-  const hasParseLoss = value.unparseable_lines > 0;
-  if ((value.state === "unobservable" || value.state === "partial") !== hasParseLoss) {
-    ctx.addIssue({ code: "custom", path: ["unparseable_lines"], message: "agent-check state disagrees with parse coverage" });
+  const hasCoverageLoss = value.unparseable_lines > 0 || value.coverage_loss_events > 0;
+  if ((value.state === "unobservable" || value.state === "partial") !== hasCoverageLoss) {
+    ctx.addIssue({ code: "custom", path: ["state"], message: "agent-check state disagrees with event coverage" });
   }
   for (let index = 0; index < value.attempts.length; index += 1) {
     if (value.attempts[index]?.order !== index + 1) {

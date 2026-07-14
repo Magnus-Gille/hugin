@@ -4,6 +4,7 @@ import {
   M5CodeLoopError,
   m5ClientRunId,
   startM5CodeLoopDurably,
+  supportsM5CodeLoopContract,
   type M5CodeLoopRequest,
 } from "../src/learning/m5-code-loop-client.js";
 
@@ -27,7 +28,7 @@ function startResult(overrides: Record<string, unknown> = {}) {
     recovered: false,
     capabilities: {
       start_idempotency: "client-run-id-v1",
-      agent_checks: "pi-bash-events-v2",
+      agent_checks: "pi-bash-events-v3",
     },
     ...overrides,
   };
@@ -103,6 +104,50 @@ describe("M5CodeLoopClient", () => {
       });
   });
 
+  it("marks an invalid start envelope ambiguous after the mutating call reached M5", async () => {
+    const client = new M5CodeLoopClient({
+      endpoint: "http://m5.test:8080/mcp",
+      bearerToken: "x",
+      fetchImpl: (async () => rpcResult(startResult({
+        capabilities: {
+          start_idempotency: "client-run-id-v1",
+          agent_checks: "pi-bash-events-v2",
+        },
+      }))) as typeof fetch,
+    });
+    await expect(client.start({
+      client_run_id: "hugin:run-1",
+      instruction: "fix",
+      files: [{ path: "a", content: "b" }],
+    })).rejects.toMatchObject({
+      name: "M5CodeLoopError",
+      ambiguousOutcome: true,
+    });
+  });
+
+  it("recovers a schema-valid start that omitted its durable binding", async () => {
+    let calls = 0;
+    const request: M5CodeLoopRequest & { client_run_id: string } = {
+      client_run_id: "hugin:run-1",
+      instruction: "fix",
+      files: [{ path: "a", content: "b" }],
+    };
+    const client = {
+      start: async () => {
+        calls += 1;
+        return calls === 1
+          ? startResult({ client_run_id: null, request_fingerprint: null })
+          : startResult({ recovered: true });
+      },
+    };
+    const result = await startM5CodeLoopDurably(client, request, {
+      maxAttempts: 2,
+      sleep: async () => {},
+    });
+    expect(calls).toBe(2);
+    expect(result).toMatchObject({ client_run_id: request.client_run_id, recovered: true });
+  });
+
   it("parses a recovered terminal result without requiring a second result call", async () => {
     const recovered = startResult({
       status: "completed",
@@ -146,6 +191,18 @@ describe("M5CodeLoopClient", () => {
     expect(m5ClientRunId(runId)).toMatch(/^hugin:[a-f0-9]{64}$/);
     expect(m5ClientRunId(runId)).toBe(m5ClientRunId(runId));
     expect(m5ClientRunId(runId)).not.toContain("sample");
+  });
+
+  it("preflights the exact advertised producer contract before a paid start", () => {
+    const tool = {
+      name: "code_loop_start",
+      description: "Start work. contract[harness=code-loop-pi-2026-07-14-v6;agent_checks=pi-bash-events-v3;schema=3;max_attempts=1000]",
+      inputSchema: { properties: { client_run_id: {}, caps: { properties: { edit_deadline_turn: {} } } } },
+    };
+    expect(supportsM5CodeLoopContract([tool])).toBe(true);
+    expect(supportsM5CodeLoopContract([{ ...tool, description: tool.description.replace("v3", "v2") }])).toBe(false);
+    expect(supportsM5CodeLoopContract([{ ...tool, inputSchema: { properties: { caps: { properties: { edit_deadline_turn: {} } } } } }])).toBe(false);
+    expect(supportsM5CodeLoopContract([{ ...tool, inputSchema: { properties: { client_run_id: {} } } }])).toBe(false);
   });
 
   it("rejects unsafe or wrong-path endpoints", () => {

@@ -27,7 +27,7 @@ class M5CodeLoopAgent(BaseAgent):
         self,
         logs_dir: Path,
         model_name: str | None = None,
-        expected_harness_version: str = "code-loop-pi-2026-07-14-v4",
+        expected_harness_version: str = "code-loop-pi-2026-07-14-v6",
         wall_s: int | str = 600,
         turns: int | str = 13,
         completion_tokens: int | str = 60_000,
@@ -76,7 +76,7 @@ class M5CodeLoopAgent(BaseAgent):
 
     @override
     def version(self) -> str:
-        return "0.2.0-harbor-0.18.0"
+        return "0.3.0-harbor-0.18.0"
 
     @override
     async def setup(self, environment: BaseEnvironment) -> None:
@@ -270,7 +270,7 @@ class M5CodeLoopAgent(BaseAgent):
                     "caps": self.caps,
                     "capabilities": {
                         "startIdempotency": "client-run-id-v1",
-                        "agentChecks": "pi-bash-events-v1",
+                        "agentChecks": "pi-bash-events-v3",
                     },
                 },
                 "pollMs": self.poll_ms,

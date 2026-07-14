@@ -83,10 +83,11 @@ describe("evaluateLearningExperiment", () => {
     const observedCheck = (sample: string) => ({
       work_id: `work-${sample}`,
       agent_checks: {
-        schema_version: 2 as const,
+        schema_version: 3 as const,
         source: "pi-bash-events" as const,
         state: "attempted" as const,
         unparseable_lines: 0,
+        coverage_loss_events: 0,
         work_id: `work-${sample}`,
         attempts: [{
           order: 1,
@@ -106,10 +107,11 @@ describe("evaluateLearningExperiment", () => {
         : {
             work_id: `work-${sample}`,
             agent_checks: {
-              schema_version: 2,
+              schema_version: 3,
               source: "pi-bash-events",
               state: "attempted",
               unparseable_lines: 0,
+              coverage_loss_events: 0,
               work_id: `work-${sample}`,
               attempts: [{
                 order: 1,

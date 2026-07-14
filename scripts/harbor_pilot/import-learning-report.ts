@@ -15,6 +15,7 @@ import { BrokerClient, BrokerHttpError } from "../../src/mcp/broker-client.js";
 import { observeDurably } from "../../src/learning/durable-observation.js";
 import {
   computeConfigurationFingerprint,
+  learningAgentChecksSchema,
   learningExperimentCreateSchema,
   learningExperimentStateSchema,
   learningObservationSchema,
@@ -56,15 +57,15 @@ const liveSchema = z.object({
   holdout: z.boolean(),
   reward: z.union([z.literal(0), z.literal(1)]),
   workId: z.string().min(1),
-  clientRunId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+  clientRunId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
   requestFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/),
   startCapabilities: z.object({
     start_idempotency: z.literal("client-run-id-v1"),
-    agent_checks: z.literal("pi-bash-events-v1"),
+    agent_checks: z.literal("pi-bash-events-v3"),
   }).passthrough(),
   execution: z.object({
     model: z.string().min(1),
-    harness_version: z.literal("code-loop-pi-2026-07-14-v4"),
+    harness_version: z.literal("code-loop-pi-2026-07-14-v6"),
     effective_caps: z.object({
       wall_s: z.number().int().positive(),
       turns: z.number().int().positive(),
@@ -72,13 +73,10 @@ const liveSchema = z.object({
     }).passthrough(),
     capabilities: z.object({
       start_idempotency: z.literal("client-run-id-v1"),
-      agent_checks: z.literal("pi-bash-events-v1"),
+      agent_checks: z.literal("pi-bash-events-v3"),
     }).passthrough(),
   }).passthrough(),
-  agentChecks: z.object({
-    source: z.literal("pi-bash-events"),
-    work_id: z.string().min(1),
-  }).passthrough(),
+  agentChecks: learningAgentChecksSchema,
   exceptionType: z.null(),
 }).passthrough();
 const reportSchema = z.object({
@@ -101,7 +99,7 @@ const reportSchema = z.object({
     completion_tokens: z.number().int().positive(),
   }).strict(),
   model: z.string().min(1).max(120),
-  harness_version: z.literal("code-loop-pi-2026-07-14-v4"),
+  harness_version: z.literal("code-loop-pi-2026-07-14-v6"),
   network_mode: z.literal("no-network"),
   network_isolation_met: z.literal(true),
   base_image: z.literal("node:22.17.0-bookworm-slim@sha256:b04ce4ae4e95b522112c2e5c52f781471a5cbc3b594527bcddedee9bc48c03a0"),
@@ -217,7 +215,7 @@ function configuration(
     harness: {
       id: "pi-code-loop",
       version: report.harness_version,
-      configSha256: sha256({ caps: report.caps, capabilities: ["client-run-id-v1", "pi-bash-events-v1"] }),
+      configSha256: sha256({ caps: report.caps, capabilities: ["client-run-id-v1", "pi-bash-events-v3"] }),
       maxTurns: report.caps.turns,
       timeoutMs: report.caps.wall_s * 1_000,
       contextStrategy: "inline-seed-v1",
@@ -231,11 +229,11 @@ function configuration(
         contextWindow: 131_072,
         maxOutputTokens: report.caps.completion_tokens,
         templateVersion: "m5-live-2026-07-14",
-        extraConfigSha256: sha256("client-run-id-v1+pi-bash-events-v1"),
+        extraConfigSha256: sha256("client-run-id-v1+pi-bash-events-v3"),
       },
     },
     logging: {
-      schemaVersion: "code-loop-result-v4",
+      schemaVersion: "code-loop-result-v6",
       requiredFieldsSha256: sha256("execution+telemetry+agent_checks+durable-start"),
     },
     testHarness: kind === "host"

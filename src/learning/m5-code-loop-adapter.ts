@@ -91,7 +91,7 @@ export const m5CodeLoopResultSchema = z.object({
     }).strict(),
     capabilities: z.object({
       start_idempotency: z.literal("client-run-id-v1"),
-      agent_checks: z.literal("pi-bash-events-v2"),
+      agent_checks: z.literal("pi-bash-events-v3"),
     }).strict().optional(),
   }).strict().optional(),
   telemetry: m5CodeLoopTelemetrySchema.optional(),
@@ -125,7 +125,7 @@ export interface M5CodeLoopObservationContext {
     };
     capabilities?: {
       startIdempotency: "client-run-id-v1";
-      agentChecks: "pi-bash-events-v2";
+      agentChecks: "pi-bash-events-v3";
     };
   };
   externalVerification?: {

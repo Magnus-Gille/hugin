@@ -65,10 +65,11 @@ describe("M5 code-loop experiment adapter", () => {
 
   it("persists durable binding and immutable content-blind agent-check evidence", () => {
     const evidence = {
-      schema_version: 2 as const,
+      schema_version: 3 as const,
       source: "pi-bash-events" as const,
       state: "attempted" as const,
       unparseable_lines: 0,
+      coverage_loss_events: 0,
       work_id: "cl-20260713-abcdef12",
       attempts: [{
         order: 1,
@@ -91,6 +92,23 @@ describe("M5 code-loop experiment adapter", () => {
       agent_checks: evidence,
     });
     expect(JSON.stringify(observation.agent_checks)).not.toContain("npm test");
+  });
+
+  it("keeps refused or uncorrelated check events distinct from affirmative no-check evidence", () => {
+    const evidence = {
+      schema_version: 3 as const,
+      source: "pi-bash-events" as const,
+      state: "unobservable" as const,
+      unparseable_lines: 0,
+      coverage_loss_events: 1,
+      work_id: "cl-20260713-abcdef12",
+      attempts: [],
+    };
+    expect(observationFromM5CodeLoop(result({ agent_checks: evidence }), context).agent_checks)
+      .toEqual(evidence);
+    expect(() => observationFromM5CodeLoop(result({
+      agent_checks: { ...evidence, state: "none" },
+    }), context)).toThrow(/event coverage/);
   });
 
   it("keeps old gateway results honest by leaving edit timing unmeasured", () => {
@@ -181,11 +199,11 @@ describe("M5 code-loop experiment adapter", () => {
       schema_version: 1 as const,
       model: "qwen3-coder-next-80b",
       engine: "pi",
-      harness_version: "code-loop-pi-2026-07-14-v5",
+      harness_version: "code-loop-pi-2026-07-14-v6",
       effective_caps: caps,
       capabilities: {
         start_idempotency: "client-run-id-v1" as const,
-        agent_checks: "pi-bash-events-v2" as const,
+        agent_checks: "pi-bash-events-v3" as const,
       },
     };
     const expectedExecution = {
@@ -194,7 +212,7 @@ describe("M5 code-loop experiment adapter", () => {
       caps,
       capabilities: {
         startIdempotency: "client-run-id-v1" as const,
-        agentChecks: "pi-bash-events-v2" as const,
+        agentChecks: "pi-bash-events-v3" as const,
       },
     };
     expect(() => observationFromM5CodeLoop(result({ execution }), {
@@ -204,10 +222,11 @@ describe("M5 code-loop experiment adapter", () => {
     expect(observationFromM5CodeLoop(result({
       execution,
       agent_checks: {
-        schema_version: 2,
+        schema_version: 3,
         source: "pi-bash-events",
         state: "none",
         unparseable_lines: 0,
+        coverage_loss_events: 0,
         work_id: "cl-20260713-abcdef12",
         attempts: [],
       },

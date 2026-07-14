@@ -139,7 +139,9 @@ sample's instruction/seed directory/check. Before any remote mutation it:
 1. validates exactly one changed configuration axis;
 2. hashes every instruction, seed file, check command, holdout flag, and protected path and compares
    the result with the declared corpus SHA-256;
-3. verifies that M5 advertises `edit_deadline_turn` plus durable `client_run_id` starts;
+3. verifies that M5 advertises the exact
+   `code-loop-pi-2026-07-14-v6` / `pi-bash-events-v3` / schema 3 producer contract,
+   including `edit_deadline_turn` and durable `client_run_id` starts;
 4. idempotently creates or resumes the Hugin experiment;
 5. runs matched pairs sequentially, counterbalancing which arm runs first;
 6. records only content-blind observations—never diffs, prompts, check output, or seed contents.
@@ -154,9 +156,10 @@ is retried with the exact same request and id; M5 returns the original running o
 instead of starting another paid run. Hugin persists the echoed caller id and request fingerprint
 with the observation, and can consume a recovered terminal result directly after a restart.
 
-The v2 result also records immutable content-blind agent-side check events: check kind, command
+The v3 result also records immutable content-blind agent-side check events: check kind, command
 fingerprint, timing, pass/fail/execution-error, ordering, and event-stream coverage. It never trusts
-the model summary. `none`, `unobservable`, and `partial` remain distinct. Experiments that need to
+the model summary. Unparseable NDJSON and refused or uncorrelated check candidates are counted
+separately; `none`, `unobservable`, and `partial` remain distinct. Experiments that need to
 attribute an improvement to genuine agent-side checking should predeclare
 `gates.minChallengerAgentCheckCoverage`; its default is zero for backward compatibility.
 

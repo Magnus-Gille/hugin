@@ -27,6 +27,16 @@ import {
 } from "../scripts/harbor_pilot/run-pilot.js";
 
 const roots: string[] = [];
+const advertisedCodeLoopStart = {
+  name: "code_loop_start",
+  description: "Start work. contract[harness=code-loop-pi-2026-07-14-v6;agent_checks=pi-bash-events-v3;schema=3;max_attempts=1000]",
+  inputSchema: {
+    properties: {
+      client_run_id: {},
+      caps: { properties: { edit_deadline_turn: {} } },
+    },
+  },
+};
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -221,11 +231,11 @@ describe("Harbor Gate D pilot", () => {
       verifier_sha256: prepared.verifierSha256,
       harbor_verifier_sha256: prepared.harborVerifierSha256,
       model: "qwen3-coder-next-80b",
-      harness_version: "code-loop-pi-2026-07-14-v4",
+      harness_version: "code-loop-pi-2026-07-14-v6",
       caps: { wall_s: 600, turns: 13, completion_tokens: 60_000 },
       required_capabilities: {
         start_idempotency: "client-run-id-v1",
-        agent_checks: "pi-bash-events-v1",
+        agent_checks: "pi-bash-events-v3",
       },
       network_mode: "no-network",
       base_image: prepared.baseImage,
@@ -310,11 +320,11 @@ describe("Harbor Gate D pilot", () => {
         schema_version: 1,
         model: "qwen3-coder-next-80b",
         engine: "pi",
-        harness_version: "code-loop-pi-2026-07-14-v4",
+        harness_version: "code-loop-pi-2026-07-14-v6",
         effective_caps: caps,
         capabilities: {
           start_idempotency: "client-run-id-v1",
-          agent_checks: "pi-bash-events-v1",
+          agent_checks: "pi-bash-events-v3",
         },
       },
       telemetry: {
@@ -324,9 +334,11 @@ describe("Harbor Gate D pilot", () => {
         observability_coverage: 0.5,
       },
       agent_checks: {
-        schema_version: 1,
+        schema_version: 3,
         source: "pi-bash-events",
         state: "none",
+        unparseable_lines: 0,
+        coverage_loss_events: 0,
         work_id: "cl-durable",
         attempts: [],
       },
@@ -342,7 +354,7 @@ describe("Harbor Gate D pilot", () => {
         return new Response(JSON.stringify({
           jsonrpc: "2.0",
           id: body.id,
-          result: { tools: [{ name: "code_loop_start", inputSchema: { properties: { client_run_id: {} } } }] },
+          result: { tools: [advertisedCodeLoopStart] },
         }));
       }
       const tool = body.params.name;
@@ -361,7 +373,7 @@ describe("Harbor Gate D pilot", () => {
               recovered: true,
               capabilities: {
                 start_idempotency: "client-run-id-v1",
-                agent_checks: "pi-bash-events-v1",
+                agent_checks: "pi-bash-events-v3",
               },
               result,
             }) }],
@@ -390,11 +402,11 @@ describe("Harbor Gate D pilot", () => {
       },
       expected: {
         model: "qwen3-coder-next-80b",
-        harnessVersion: "code-loop-pi-2026-07-14-v4",
+        harnessVersion: "code-loop-pi-2026-07-14-v6",
         caps,
         capabilities: {
           startIdempotency: "client-run-id-v1",
-          agentChecks: "pi-bash-events-v1",
+          agentChecks: "pi-bash-events-v3",
         },
       },
       pollMs: 250,
@@ -424,7 +436,7 @@ describe("Harbor Gate D pilot", () => {
         return new Response(JSON.stringify({
           jsonrpc: "2.0",
           id: body.id,
-          result: { tools: [{ name: "code_loop_start", inputSchema: { properties: { client_run_id: {} } } }] },
+          result: { tools: [advertisedCodeLoopStart] },
         }));
       }
       const tool = body.params.name;
@@ -437,7 +449,7 @@ describe("Harbor Gate D pilot", () => {
             recovered: false,
             capabilities: {
               start_idempotency: "client-run-id-v1",
-              agent_checks: "pi-bash-events-v1",
+              agent_checks: "pi-bash-events-v3",
             },
           }
         : {
@@ -455,17 +467,19 @@ describe("Harbor Gate D pilot", () => {
               schema_version: 1,
               model: "qwen3-coder-next-80b",
               engine: "pi",
-              harness_version: "code-loop-pi-2026-07-14-v4",
+              harness_version: "code-loop-pi-2026-07-14-v6",
               effective_caps: caps,
               capabilities: {
                 start_idempotency: "client-run-id-v1",
-                agent_checks: "pi-bash-events-v1",
+                agent_checks: "pi-bash-events-v3",
               },
             },
             agent_checks: {
-              schema_version: 1,
+              schema_version: 3,
               source: "pi-bash-events",
               state: "none",
+              unparseable_lines: 0,
+              coverage_loss_events: 0,
               work_id: "cl-other",
               attempts: [],
             },
@@ -489,16 +503,16 @@ describe("Harbor Gate D pilot", () => {
       },
       expected: {
         model: "qwen3-coder-next-80b",
-        harnessVersion: "code-loop-pi-2026-07-14-v4",
+        harnessVersion: "code-loop-pi-2026-07-14-v6",
         caps,
         capabilities: {
           startIdempotency: "client-run-id-v1",
-          agentChecks: "pi-bash-events-v1",
+          agentChecks: "pi-bash-events-v3",
         },
       },
       pollMs: 250,
       resultDeadlineS: 60,
-    })).rejects.toThrow(/different work id/);
+    })).rejects.toThrow(/durable start binding/);
   });
 
   it("summarizes Harbor rewards without importing prompts, diffs, or verifier logs", () => {
@@ -579,18 +593,26 @@ describe("Harbor Gate D pilot", () => {
       requestFingerprint: `sha256:${String(index).padStart(64, "0")}`,
       startCapabilities: {
         start_idempotency: "client-run-id-v1",
-        agent_checks: "pi-bash-events-v1",
+        agent_checks: "pi-bash-events-v3",
       },
       execution: {
         model: "qwen3-coder-next-80b",
-        harness_version: "code-loop-pi-2026-07-14-v4",
+        harness_version: "code-loop-pi-2026-07-14-v6",
         effective_caps: { wall_s: 600, turns: 13, completion_tokens: 60_000 },
         capabilities: {
           start_idempotency: "client-run-id-v1",
-          agent_checks: "pi-bash-events-v1",
+          agent_checks: "pi-bash-events-v3",
         },
       },
-      agentChecks: { source: "pi-bash-events", work_id: `cl-live-${index}` },
+      agentChecks: {
+        schema_version: 3,
+        source: "pi-bash-events",
+        state: "none",
+        unparseable_lines: 0,
+        coverage_loss_events: 0,
+        work_id: `cl-live-${index}`,
+        attempts: [],
+      },
       exceptionType: null,
     }));
     const payload = harborLearningImportFromReport({
@@ -609,7 +631,7 @@ describe("Harbor Gate D pilot", () => {
       harbor_verifier_sha256: "d".repeat(64),
       caps: { wall_s: 600, turns: 13, completion_tokens: 60_000 },
       model: "qwen3-coder-next-80b",
-      harness_version: "code-loop-pi-2026-07-14-v4",
+      harness_version: "code-loop-pi-2026-07-14-v6",
       network_mode: "no-network",
       network_isolation_met: true,
       base_image: "node:22.17.0-bookworm-slim@sha256:b04ce4ae4e95b522112c2e5c52f781471a5cbc3b594527bcddedee9bc48c03a0",
