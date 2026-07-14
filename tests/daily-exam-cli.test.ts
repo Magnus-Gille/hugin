@@ -12,8 +12,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   parseArgs,
+  taskExposureFingerprintsForLookup,
   writeManifestFile,
 } from "../src/daily-exam-harvest-cli.js";
+import { TASK_EXPOSURE_SMOKE_FINGERPRINT } from "../src/learning/m5-task-exposure.js";
 
 describe("daily exam factory CLI", () => {
   it("normalizes timestamps and keeps a bounded default", () => {
@@ -45,6 +47,19 @@ describe("daily exam factory CLI", () => {
   it("rejects unbounded or unknown options", () => {
     expect(() => parseArgs(["--limit", "10001"])).toThrow("--limit");
     expect(() => parseArgs(["--publish", "yes"])).toThrow("unknown option");
+  });
+
+  it("queries only unique provisional fingerprints and smokes an empty eligible day", () => {
+    const fingerprint = "a".repeat(64);
+    expect(taskExposureFingerprintsForLookup([
+      { lane: "provisional-holdout", crossClientExposure: { fingerprintSha256: fingerprint } },
+      { lane: "provisional-holdout", crossClientExposure: { fingerprintSha256: fingerprint } },
+      { lane: "quarantine", crossClientExposure: { fingerprintSha256: "b".repeat(64) } },
+      { lane: "regression", crossClientExposure: { fingerprintSha256: "c".repeat(64) } },
+    ])).toEqual([fingerprint]);
+    expect(taskExposureFingerprintsForLookup([
+      { lane: "quarantine", crossClientExposure: { fingerprintSha256: fingerprint } },
+    ])).toEqual([TASK_EXPOSURE_SMOKE_FINGERPRINT]);
   });
 
   it("atomically writes mode-0600 output without following a destination symlink", () => {

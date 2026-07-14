@@ -1,5 +1,5 @@
 [Unit]
-Description=Hugin daily-use exam candidate factory (read-only Munin sweep)
+Description=Hugin daily-use exam candidate factory (read-only Munin + M5 exposure join)
 After=network-online.target munin-memory.service
 Wants=network-online.target
 

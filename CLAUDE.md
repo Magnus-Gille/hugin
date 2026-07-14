@@ -136,6 +136,20 @@ maps to the `build` agent with `edit`/`bash` allowed.
 
 **M5 execution provenance (issue #163):** every M5 `/delegate` call — whether it arrives via the canonical #167 Broker leaf (`runtime:homeserver`) or as an orchestrator fan-out worker leaf — records the same canonical trace: `ledgerId` (the join key to M5's authoritative evidence row), effective `nodeId`/`modelId`, `taskType`, verification `outcome`/`score`, `verifier` identity + `verifierNotes`, `delegated`/`escalated` + `decisionReason`, route-policy `policyMode`/`policyAction`/`policyReason`, `priceCatalogVersion`, and `costTraceId`. It surfaces at `runtimeMetadata.delegation` for the direct path and per-leaf at `orchestratorOutcomes[].delegation` for fan-out. `src/m5-provenance.ts` is the **only** sanctioned producer: the gateway body is untrusted input, so it validates enums/bounds and DROPS anything out of contract rather than throwing — a malformed gateway value must never sink the `result-structured` write of an already-paid run (`buildStructuredTaskResult` calls `.parse()`). This is a **trace, not a verdict**: M5 remains the sole capability-evidence authority and Hugin never duplicates its judgements into a Hugin-owned capability store. Retrieving the row *by* `ledgerId` currently needs an id-addressable read on the gateway — filed as gille-inference#227.
 
+## Daily-use exam factory
+
+Production runs `hugin-daily-exam-factory.timer` at 05:30 daily with jitter.
+Its compiled, read-only CLI scans a rolling 48-hour Munin window, joins exact
+`trim-utf8-sha256-v1` task fingerprints to M5's minted-owner
+`/admin/task-exposures/lookup`, and atomically replaces the private mode-0600
+schema-v2 manifest at `~/.hugin/daily-exam-candidates/latest.json`. Freshness
+requires an unseen result, `taskCreatedAt` inside the inclusive complete
+coverage window, and all six gateway lanes. Every auth/network/schema/window
+ambiguity is quarantined. This snapshot is not a seal: any future Harbor
+packager/runner must re-query immediately before freeze and execution. The
+timer never runs Harbor/models or writes learning state. Full contract:
+`docs/daily-exam-factory.md`.
+
 ## Learning-loop health (issue #164)
 
 `GET /heimdall.json` serves live **typed** panels (`stat`/`table`/`status`) that Heimdall renders with zero Heimdall-side code — so this surface is Hugin-owned end to end, unlike the `plugin`/`view` panels which need a matching renderer in the heimdall repo.

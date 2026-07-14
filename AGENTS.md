@@ -238,7 +238,12 @@ or executed. Readiness depends on a valid M5 gateway configuration.
 
 **Daily exam factory:** deployment enables
 `hugin-daily-exam-factory.timer` (05:30 daily, with jitter). Its compiled,
-read-only CLI inspects a rolling 48-hour Munin window and atomically replaces
-the private content-blind manifest at
-`~/.hugin/daily-exam-candidates/latest.json`. It does not run Harbor/models or
-write learning state.
+read-only CLI inspects a rolling 48-hour Munin window, joins exact
+`trim-utf8-sha256-v1` prompt fingerprints to M5's minted-owner
+`/admin/task-exposures/lookup`, and atomically replaces the private
+content-blind schema-v2 manifest at
+`~/.hugin/daily-exam-candidates/latest.json`. Only an unseen task created inside
+complete coverage for all six gateway lanes gets `unseen-covered`; every
+lookup/auth/schema/window ambiguity is quarantined. The snapshot is never a
+seal: any future Harbor packager/runner must re-query immediately before freeze
+and execution. The timer does not run Harbor/models or write learning state.

@@ -15,9 +15,15 @@ import { pathToFileURL } from "node:url";
 import { MuninClient, type MuninEntry } from "./munin-client.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
 import {
+  applyCrossClientExposure,
   buildDailyExamManifest,
   type DailyTaskHarvestSource,
 } from "./learning/daily-task-exam-factory.js";
+import {
+  lookupTaskExposureSnapshots,
+  TASK_EXPOSURE_SMOKE_FINGERPRINT,
+  TaskExposureLookupError,
+} from "./learning/m5-task-exposure.js";
 
 interface CliOptions {
   since?: string;
@@ -31,8 +37,8 @@ function usage(): string {
     "Usage: npm run harvest:daily-exams -- [options]",
     "",
     "Read completed Hugin tasks from Munin and emit a content-blind, quarantined",
-    "exam-candidate manifest. This command never runs a model, writes Munin, or",
-    "imports/promotes learning evidence.",
+    "exam-candidate manifest joined to the owner-only M5 exposure snapshot. This",
+    "command never runs a model, writes Munin, or imports/promotes learning evidence.",
     "",
     "Options:",
     "  --since <ISO>    Only inspect tasks updated at/after this timestamp",
@@ -118,6 +124,17 @@ export function writeManifestFile(outputPath: string, json: string): void {
   }
 }
 
+export function taskExposureFingerprintsForLookup(candidates: Array<{
+  lane: string;
+  crossClientExposure: { fingerprintSha256?: string };
+}>): string[] {
+  const eligible = [...new Set(candidates.flatMap((candidate) =>
+    candidate.lane === "provisional-holdout" && candidate.crossClientExposure.fingerprintSha256
+      ? [candidate.crossClientExposure.fingerprintSha256]
+      : []))];
+  return eligible.length > 0 ? eligible : [TASK_EXPOSURE_SMOKE_FINGERPRINT];
+}
+
 async function loadSources(
   munin: MuninClient,
   options: CliOptions,
@@ -167,11 +184,32 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     apiKey,
   });
   const loaded = await loadSources(munin, options);
-  const manifest = buildDailyExamManifest({
-    generatedAt: new Date().toISOString(),
+  const generatedAt = new Date().toISOString();
+  const provisionalManifest = buildDailyExamManifest({
+    generatedAt,
     historyComplete: loaded.historyComplete,
     sources: loaded.sources,
   });
+  // Even an empty eligible day proves the minted-owner endpoint/auth/schema
+  // with a fixed non-task digest. Its result is intentionally discarded.
+  const lookupFingerprints = taskExposureFingerprintsForLookup(provisionalManifest.candidates);
+  let lookupFailure: TaskExposureLookupError | undefined;
+  let manifest;
+  try {
+    const snapshots = await lookupTaskExposureSnapshots({
+      gatewayBaseUrl: process.env.HOMESERVER_GATEWAY_URL?.trim() ?? "",
+      apiKey: process.env.HOMESERVER_GATEWAY_API_KEY?.trim() ?? "",
+      fingerprints: lookupFingerprints,
+    });
+    manifest = applyCrossClientExposure(provisionalManifest, { snapshots });
+  } catch (error) {
+    lookupFailure = error instanceof TaskExposureLookupError
+      ? error
+      : new TaskExposureLookupError("unexpected-error");
+    manifest = applyCrossClientExposure(provisionalManifest, {
+      error: { code: lookupFailure.code, checkedAt: new Date().toISOString() },
+    });
+  }
   const json = `${JSON.stringify(manifest, null, 2)}\n`;
   if (options.output) {
     writeManifestFile(options.output, json);
@@ -181,6 +219,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   } else {
     process.stdout.write(json);
   }
+  // Persist the safe quarantine manifest before failing the oneshot service.
+  // This prevents a stale successful snapshot from surviving an auth/network
+  // fault while deployment/systemd still receive a non-zero acceptance signal.
+  if (lookupFailure) throw lookupFailure;
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : "";
