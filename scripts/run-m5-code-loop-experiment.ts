@@ -41,7 +41,14 @@ import {
   M5CodeLoopClient,
   M5CodeLoopError,
   type M5CodeLoopRequest,
+  type M5CodeLoopStart,
 } from "../src/learning/m5-code-loop-client.js";
+
+const V4_HARNESS_VERSION = "code-loop-pi-2026-07-14-v4";
+const V4_CAPABILITIES = {
+  startIdempotency: "client-run-id-v1",
+  agentChecks: "pi-bash-events-v1",
+} as const;
 
 const capsSchema = z.object({
   wall_s: z.number().int().positive().max(900),
@@ -114,6 +121,13 @@ const manifestSchema = z.object({
     }
     if (config.editDeadlineTurn !== caps.edit_deadline_turn) {
       ctx.addIssue({ code: "custom", path: ["arms", arm, "caps", "edit_deadline_turn"], message: "edit deadline differs from the versioned harness config" });
+    }
+    if (config.version !== V4_HARNESS_VERSION) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["experiment", arm, "harness", "version"],
+        message: `live experiments require ${V4_HARNESS_VERSION}`,
+      });
     }
   }
 });
@@ -282,13 +296,38 @@ function verifyGateD(
   }
 }
 
-function supportsIssue247(tools: Array<Record<string, unknown>>): boolean {
+function supportsDurableV4(tools: Array<Record<string, unknown>>): boolean {
   const start = tools.find((tool) => tool.name === "code_loop_start");
-  return !!start && JSON.stringify(start).includes("edit_deadline_turn");
+  const serialized = JSON.stringify(start);
+  return !!start &&
+    serialized.includes("edit_deadline_turn") &&
+    serialized.includes("client_run_id");
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function clientRunId(runId: string): string {
+  return `hugin:${createHash("sha256").update(runId).digest("hex")}`;
+}
+
+async function startDurably(
+  m5: M5CodeLoopClient,
+  request: M5CodeLoopRequest,
+): Promise<M5CodeLoopStart> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await m5.start(request);
+    } catch (error) {
+      const safelyRetryable =
+        error instanceof M5CodeLoopError &&
+        error.ambiguousOutcome &&
+        request.client_run_id !== undefined;
+      if (!safelyRetryable || attempt >= 3) throw error;
+      await sleep(attempt * 500);
+    }
+  }
 }
 
 async function readOrCreate(
@@ -317,7 +356,9 @@ async function runArm(input: {
   const { m5, broker, manifest, sample, arm, promptPrefix, manifestDir } = input;
   const config = manifest.experiment[arm];
   const runId = `${manifest.experiment.experiment_id}:${sample.id}:${arm}:${config.fingerprint.slice(0, 12)}`;
+  const durableClientRunId = clientRunId(runId);
   const request: M5CodeLoopRequest = {
+    client_run_id: durableClientRunId,
     instruction: applyCodeLoopPromptPrefix(sample.instruction, promptPrefix),
     files: sample.files,
     check_cmd: sample.m5_check_cmd,
@@ -326,29 +367,38 @@ async function runArm(input: {
     caps: manifest.arms[arm].caps,
   };
   process.stdout.write(`[${sample.id}/${arm}] starting\n`);
-  let started: Awaited<ReturnType<M5CodeLoopClient["start"]>>;
+  let started: M5CodeLoopStart;
   try {
-    started = await m5.start(request);
+    started = await startDurably(m5, request);
   } catch (error) {
     if (error instanceof M5CodeLoopError && error.ambiguousOutcome) {
       throw new Error(
-        `[${sample.id}/${arm}] M5 start outcome is ambiguous for run ${runId}; ` +
-        "do not blindly rerun. Reconcile the recent M5 work id before resuming.",
+        `[${sample.id}/${arm}] M5 start remained unavailable after safe idempotent recovery ` +
+        `for run ${runId}; resume with the same manifest and client binding.`,
         { cause: error },
       );
     }
     throw error;
   }
+  if (
+    started.client_run_id !== durableClientRunId ||
+    started.request_fingerprint === null
+  ) {
+    throw new Error(`[${sample.id}/${arm}] M5 omitted the durable start binding`);
+  }
   const deadline = Date.now() + manifest.result_deadline_s * 1_000;
-  for (;;) {
+  let runStatus = started.status;
+  while (runStatus === "running") {
     await sleep(manifest.poll_ms);
-    const status = await m5.status(started.work_id);
-    if (status.status !== "running") break;
-    if (Date.now() >= deadline) {
+    runStatus = (await m5.status(started.work_id)).status;
+    if (runStatus === "running" && Date.now() >= deadline) {
       throw new Error(`[${sample.id}/${arm}] result deadline exceeded for ${started.work_id}`);
     }
   }
   const result = await m5.result(started.work_id);
+  if (result.work_id !== started.work_id) {
+    throw new Error(`[${sample.id}/${arm}] M5 result belongs to a different work id`);
+  }
   const externalVerification = verifyGateD(
     result,
     sample,
@@ -366,6 +416,9 @@ async function runArm(input: {
       model: config.model.id,
       harnessVersion: config.harness.version,
       caps: manifest.arms[arm].caps,
+      capabilities: config.harness.version === V4_HARNESS_VERSION
+        ? V4_CAPABILITIES
+        : undefined,
     },
     externalVerification,
   });
@@ -436,8 +489,8 @@ async function main(): Promise<void> {
     baseUrl: requiredEnv("HUGIN_BROKER_URL"),
     bearerToken: requiredEnv("HUGIN_BROKER_TOKEN"),
   });
-  if (!supportsIssue247(await m5.toolDefinitions())) {
-    throw new Error("M5 code_loop does not advertise edit_deadline_turn; deploy gille-inference #247 before creating the experiment");
+  if (!supportsDurableV4(await m5.toolDefinitions())) {
+    throw new Error("M5 code_loop does not advertise the durable v4 experiment contract");
   }
 
   let state = await readOrCreate(broker, manifest.experiment);

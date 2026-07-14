@@ -11,7 +11,9 @@ import {
 } from "../../src/learning/m5-code-loop-adapter.js";
 import {
   M5CodeLoopClient,
+  M5CodeLoopError,
   type M5CodeLoopRequest,
+  type M5CodeLoopStart,
 } from "../../src/learning/m5-code-loop-client.js";
 
 const capsSchema = z.object({
@@ -30,6 +32,7 @@ const capsSchema = z.object({
 });
 
 const requestSchema = z.object({
+  client_run_id: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/).optional(),
   instruction: z.string().min(1),
   files: z.array(z.object({
     path: z.string().min(1),
@@ -47,6 +50,10 @@ const inputSchema = z.object({
     model: z.string().min(1),
     harnessVersion: z.string().min(1),
     caps: capsSchema,
+    capabilities: z.object({
+      startIdempotency: z.literal("client-run-id-v1"),
+      agentChecks: z.literal("pi-bash-events-v1"),
+    }).strict().optional(),
   }).strict(),
   pollMs: z.number().int().min(250).max(30_000).default(5_000),
   resultDeadlineS: z.number().int().min(60).max(3_600).default(900),
@@ -54,6 +61,13 @@ const inputSchema = z.object({
 }).strict();
 
 export type HarborCodeLoopOnceInput = z.infer<typeof inputSchema>;
+export interface HarborCodeLoopOnceOutput {
+  result: M5CodeLoopResult;
+  start: null | Pick<
+    M5CodeLoopStart,
+    "work_id" | "status" | "client_run_id" | "request_fingerprint" | "recovered" | "capabilities"
+  >;
+}
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -83,13 +97,34 @@ function supportsRequestedContract(
 ): boolean {
   const start = tools.find((tool) => tool.name === "code_loop_start");
   if (!start) return false;
+  if (request.client_run_id !== undefined && !JSON.stringify(start).includes("client_run_id")) {
+    return false;
+  }
   if (request.caps?.edit_deadline_turn === undefined) return true;
   return JSON.stringify(start).includes("edit_deadline_turn");
 }
 
+async function startDurably(
+  client: M5CodeLoopClient,
+  request: M5CodeLoopRequest,
+): Promise<M5CodeLoopStart> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await client.start(request);
+    } catch (err) {
+      const safelyRetryable =
+        request.client_run_id !== undefined &&
+        err instanceof M5CodeLoopError &&
+        err.ambiguousOutcome;
+      if (!safelyRetryable || attempt >= 3) throw err;
+      await sleep(attempt * 500);
+    }
+  }
+}
+
 export async function runCodeLoopOnce(
   rawInput: HarborCodeLoopOnceInput,
-): Promise<M5CodeLoopResult> {
+): Promise<HarborCodeLoopOnceOutput> {
   const input = inputSchema.parse(rawInput);
   let result: M5CodeLoopResult;
 
@@ -97,7 +132,12 @@ export async function runCodeLoopOnce(
     result = m5CodeLoopResultSchema.parse(
       JSON.parse(readFileSync(resolve(input.replayPath), "utf8")),
     );
+    assertM5CodeLoopExecutionBinding(result, input.expected);
+    return { result, start: null };
   } else {
+    if (!input.request.client_run_id) {
+      throw new Error("live Harbor code_loop requests require client_run_id");
+    }
     const client = new M5CodeLoopClient({
       endpoint: m5McpEndpoint(),
       bearerToken: requiredEnv("M5_API_KEY"),
@@ -107,21 +147,39 @@ export async function runCodeLoopOnce(
       throw new Error("M5 does not advertise the requested code_loop contract");
     }
 
-    const started = await client.start(input.request);
+    const started = await startDurably(client, input.request);
+    if (started.client_run_id !== input.request.client_run_id) {
+      throw new Error("M5 did not echo the declared client_run_id");
+    }
+    if (!started.request_fingerprint) {
+      throw new Error("M5 omitted the durable request fingerprint");
+    }
     const deadline = Date.now() + input.resultDeadlineS * 1_000;
-    for (;;) {
+    let status = started.status;
+    while (status === "running") {
       await sleep(input.pollMs);
-      const status = await client.status(started.work_id);
-      if (status.status !== "running") break;
-      if (Date.now() >= deadline) {
+      status = (await client.status(started.work_id)).status;
+      if (status === "running" && Date.now() >= deadline) {
         throw new Error(`M5 result deadline exceeded for ${started.work_id}`);
       }
     }
     result = await client.result(started.work_id);
+    if (result.work_id !== started.work_id) {
+      throw new Error("M5 result belongs to a different work id than the durable start");
+    }
+    assertM5CodeLoopExecutionBinding(result, input.expected);
+    return {
+      result,
+      start: {
+        work_id: started.work_id,
+        status: started.status,
+        client_run_id: started.client_run_id,
+        request_fingerprint: started.request_fingerprint,
+        recovered: started.recovered,
+        capabilities: started.capabilities,
+      },
+    };
   }
-
-  assertM5CodeLoopExecutionBinding(result, input.expected);
-  return result;
 }
 
 async function main(): Promise<void> {
@@ -130,8 +188,8 @@ async function main(): Promise<void> {
     throw new Error("usage: m5-code-loop-once.ts <input.json> <output.json>");
   }
   const input = inputSchema.parse(JSON.parse(readFileSync(resolve(inputArg), "utf8")));
-  const result = await runCodeLoopOnce(input);
-  writeFileSync(resolve(outputArg), `${JSON.stringify(result)}\n`, { mode: 0o600 });
+  const output = await runCodeLoopOnce(input);
+  writeFileSync(resolve(outputArg), `${JSON.stringify(output)}\n`, { mode: 0o600 });
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : "";

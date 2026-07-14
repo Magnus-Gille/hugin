@@ -148,11 +148,12 @@ Observation writes are reconciled after ambiguous Broker timeouts: the runner fi
 durable experiment state and retries only an identical, absent `run_id`. This avoids rerunning a
 paid M5 arm merely because Hugin committed the evidence but its HTTP response was lost.
 
-An ambiguous `code_loop_start` response is different because the current M5 protocol does not
-accept a client idempotency key or echo a request fingerprint. The runner stops with the exact
-experiment `run_id` and explicitly forbids a blind rerun. Reconcile the recent M5 work id first;
-long-term, the M5 owner should add an idempotent client run identifier plus request binding so this
-recovery can be automatic and fail-closed.
+Every `code_loop_start` now carries a deterministic, content-blind `client_run_id` derived from the
+experiment run ID. M5 v4 durably binds that identifier to the canonical request fingerprint before
+execution. A lost start response is retried only with the identical request and therefore recovers
+the original work rather than starting a duplicate paid run. A different request under the same ID
+is an explicit conflict. The runner also binds `client-run-id-v1` and `pi-bash-events-v1` in the
+effective result before accepting an observation.
 
 An arm may declare a local-only `prompt_prefix_file`. The runner reads it once, verifies every byte
 against that arm's versioned `prompt.sha256`, and prepends it to each corpus instruction. Hugin still
@@ -169,7 +170,7 @@ HUGIN_BROKER_URL=http://huginmunin.<tailnet>.ts.net:3035 \
 HUGIN_BROKER_TOKEN=<keychain-or-env-token> \
 npm run experiment:m5-code-loop -- /path/to/gate-d-wave.json --dry-run
 
-# Remove --dry-run only after gille-inference #247 and this Hugin branch are deployed.
+# Remove --dry-run only after the declared M5 harness version is live and preflighted.
 ```
 
 After mechanical collection, rate each run through `hugin_experiment_rate`. Do not promote while

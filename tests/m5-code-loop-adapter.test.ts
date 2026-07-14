@@ -145,6 +145,47 @@ describe("M5 code-loop experiment adapter", () => {
     }).configuration_fingerprint).toBe("a".repeat(64));
   });
 
+  it("binds v4 capability evidence and refuses a prose-only result", () => {
+    const caps = { wall_s: 600, turns: 13, completion_tokens: 60_000 };
+    const execution = {
+      schema_version: 1 as const,
+      model: "qwen3-coder-next-80b",
+      engine: "pi",
+      harness_version: "code-loop-pi-2026-07-14-v4",
+      effective_caps: caps,
+      capabilities: {
+        start_idempotency: "client-run-id-v1",
+        agent_checks: "pi-bash-events-v1",
+      },
+    };
+    const expectedExecution = {
+      model: execution.model,
+      harnessVersion: execution.harness_version,
+      caps,
+      capabilities: {
+        startIdempotency: "client-run-id-v1" as const,
+        agentChecks: "pi-bash-events-v1" as const,
+      },
+    };
+    expect(() => observationFromM5CodeLoop(result({ execution }), {
+      ...context,
+      expectedExecution,
+    })).toThrow(/agent-side check evidence/);
+    expect(observationFromM5CodeLoop(result({
+      execution,
+      agent_checks: {
+        schema_version: 1,
+        source: "pi-bash-events",
+        state: "none",
+        work_id: "cl-20260713-abcdef12",
+        attempts: [],
+      },
+    }), {
+      ...context,
+      expectedExecution,
+    }).configuration_fingerprint).toBe("a".repeat(64));
+  });
+
   it("uses an external protected verifier without trusting an M5 self-check", () => {
     const observation = observationFromM5CodeLoop(result({
       status: "cap-exceeded",

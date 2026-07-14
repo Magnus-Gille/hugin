@@ -14,6 +14,8 @@ export interface M5CodeLoopClientConfig {
 }
 
 export interface M5CodeLoopRequest {
+  /** Durable caller idempotency key (M5 client-run-id-v1). */
+  client_run_id?: string;
   instruction: string;
   files: Array<{ path: string; content: string }>;
   check_cmd?: string;
@@ -28,20 +30,33 @@ export interface M5CodeLoopRequest {
   };
 }
 
-const startSchema = z.object({
-  work_id: z.string().min(1),
-  status: z.literal("running"),
+const codeLoopCapabilitiesSchema = z.object({
+  start_idempotency: z.literal("client-run-id-v1"),
+  agent_checks: z.literal("pi-bash-events-v1"),
 }).strict();
 
+const jobStatusSchema = z.enum([
+  "running",
+  "completed",
+  "cap-exceeded",
+  "degenerate",
+  "arm-error",
+  "orphaned",
+]);
+
+const startSchema = z.object({
+  work_id: z.string().min(1),
+  status: jobStatusSchema,
+  client_run_id: z.string().min(1).nullable(),
+  request_fingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/).nullable(),
+  recovered: z.boolean(),
+  capabilities: codeLoopCapabilitiesSchema,
+  result: m5CodeLoopResultSchema.optional(),
+}).strict();
+export type M5CodeLoopStart = z.infer<typeof startSchema>;
+
 const statusSchema = z.object({
-  status: z.enum([
-    "running",
-    "completed",
-    "cap-exceeded",
-    "degenerate",
-    "arm-error",
-    "orphaned",
-  ]),
+  status: jobStatusSchema,
   usage: z.object({
     turns: z.number().int().nonnegative(),
     wall_ms: z.number().int().nonnegative(),
@@ -87,7 +102,7 @@ export class M5CodeLoopClient {
     this.fetchImpl = config.fetchImpl ?? fetch;
   }
 
-  async start(request: M5CodeLoopRequest): Promise<{ work_id: string; status: "running" }> {
+  async start(request: M5CodeLoopRequest): Promise<M5CodeLoopStart> {
     return startSchema.parse(
       await this.call("code_loop_start", { ...request }),
     );

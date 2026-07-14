@@ -27,7 +27,7 @@ class M5CodeLoopAgent(BaseAgent):
         self,
         logs_dir: Path,
         model_name: str | None = None,
-        expected_harness_version: str = "code-loop-pi-2026-07-13-v2",
+        expected_harness_version: str = "code-loop-pi-2026-07-14-v4",
         wall_s: int | str = 600,
         turns: int | str = 13,
         completion_tokens: int | str = 60_000,
@@ -76,7 +76,7 @@ class M5CodeLoopAgent(BaseAgent):
 
     @override
     def version(self) -> str:
-        return "0.1.0-harbor-0.18.0"
+        return "0.2.0-harbor-0.18.0"
 
     @override
     async def setup(self, environment: BaseEnvironment) -> None:
@@ -87,13 +87,33 @@ class M5CodeLoopAgent(BaseAgent):
         raw = json.loads(path.read_text())
         task_id = raw.get("task_id")
         protected = raw.get("protected")
+        holdout = raw.get("holdout")
+        client_run_ids = raw.get("client_run_ids")
         if not isinstance(task_id, str) or not task_id or "/" in task_id or ".." in task_id:
             raise ValueError("invalid Harbor pilot task_id")
         if not isinstance(protected, list) or not all(
             isinstance(item, str) and item for item in protected
         ):
             raise ValueError("invalid Harbor pilot protected paths")
-        return {"task_id": task_id, "protected": protected}
+        if not isinstance(holdout, bool):
+            raise ValueError("invalid Harbor pilot holdout flag")
+        if not isinstance(client_run_ids, dict):
+            raise ValueError("missing Harbor pilot client run ids")
+        for lane in ("baseline", "live"):
+            value = client_run_ids.get(lane)
+            if (
+                not isinstance(value, str)
+                or not value
+                or len(value) > 128
+                or any(not (ch.isalnum() or ch in "._:-") for ch in value)
+            ):
+                raise ValueError(f"invalid Harbor pilot {lane} client run id")
+        return {
+            "task_id": task_id,
+            "protected": protected,
+            "holdout": holdout,
+            "client_run_ids": client_run_ids,
+        }
 
     @staticmethod
     def _seed_files(root: Path) -> list[dict[str, str]]:
@@ -129,18 +149,29 @@ class M5CodeLoopAgent(BaseAgent):
 
     @staticmethod
     def _redacted_result(
-        result: dict[str, Any], apply_return_code: int | None, mode: str
+        result: dict[str, Any],
+        start: dict[str, Any] | None,
+        apply_return_code: int | None,
+        mode: str,
+        holdout: bool,
+        declared_client_run_id: str,
     ) -> dict[str, Any]:
         diff = result.get("diff") if isinstance(result.get("diff"), str) else ""
         check = result.get("check") if isinstance(result.get("check"), dict) else {}
         return {
             "schema_version": 1,
             "mode": mode,
+            "holdout": holdout,
             "status": result.get("status"),
             "work_id": result.get("work_id"),
+            "client_run_id": declared_client_run_id,
+            "request_fingerprint": start.get("request_fingerprint") if start else None,
+            "recovered": start.get("recovered") if start else None,
+            "start_capabilities": start.get("capabilities") if start else None,
             "usage": result.get("usage"),
             "execution": result.get("execution"),
             "telemetry": result.get("telemetry"),
+            "agent_checks": result.get("agent_checks"),
             "changed_files": result.get("changed_files"),
             "protected_violations": result.get("protected_violations"),
             "diff_sha256": hashlib.sha256(diff.encode()).hexdigest(),
@@ -220,8 +251,13 @@ class M5CodeLoopAgent(BaseAgent):
                 target_dir=seed_dir,
                 exclude=["node_modules", ".git", ".harbor-pilot.json"],
             )
+            replay_path = self._replay_path(control["task_id"])
+            request_client_run_id = control["client_run_ids"][
+                "baseline" if replay_path is not None else "live"
+            ]
             request: dict[str, Any] = {
                 "request": {
+                    "client_run_id": request_client_run_id,
                     "instruction": instruction,
                     "files": self._seed_files(seed_dir),
                     "protected": control["protected"],
@@ -232,11 +268,14 @@ class M5CodeLoopAgent(BaseAgent):
                     "model": self.model_name,
                     "harnessVersion": self.expected_harness_version,
                     "caps": self.caps,
+                    "capabilities": {
+                        "startIdempotency": "client-run-id-v1",
+                        "agentChecks": "pi-bash-events-v1",
+                    },
                 },
                 "pollMs": self.poll_ms,
                 "resultDeadlineS": self.result_deadline_s,
             }
-            replay_path = self._replay_path(control["task_id"])
             if replay_path is not None:
                 request["replayPath"] = str(replay_path)
 
@@ -245,7 +284,13 @@ class M5CodeLoopAgent(BaseAgent):
             request_path.write_text(json.dumps(request))
             request_path.chmod(0o600)
             await self._invoke_helper(request_path, result_path)
-            result = json.loads(result_path.read_text())
+            output = json.loads(result_path.read_text())
+            result = output.get("result")
+            start = output.get("start")
+            if not isinstance(result, dict):
+                raise RuntimeError("M5 code_loop helper omitted its result envelope")
+            if start is not None and not isinstance(start, dict):
+                raise RuntimeError("M5 code_loop helper returned invalid start evidence")
 
             diff = result.get("diff") if isinstance(result.get("diff"), str) else ""
             apply_return_code: int | None = None
@@ -258,7 +303,17 @@ class M5CodeLoopAgent(BaseAgent):
                     await environment.upload_dir(seed_dir, "/app")
 
             mode = "replay" if replay_path is not None else "live"
-            redacted = self._redacted_result(result, apply_return_code, mode)
+            declared_client_run_id = control["client_run_ids"][
+                "baseline" if mode == "replay" else "live"
+            ]
+            redacted = self._redacted_result(
+                result,
+                start,
+                apply_return_code,
+                mode,
+                control["holdout"],
+                declared_client_run_id,
+            )
             (self.logs_dir / "m5-result.json").write_text(
                 json.dumps(redacted, indent=2, sort_keys=True) + "\n"
             )

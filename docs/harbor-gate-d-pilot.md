@@ -1,18 +1,24 @@
 # Harbor Gate D proof-of-fit
 
 This pilot evaluates Harbor as Hugin's isolated task-execution and verification
-laboratory. It does **not** add Harbor to production dispatch, publish anything
-to Harbor Hub, or write observations to Munin.
+laboratory. It does **not** add Harbor to production dispatch or publish
+anything to Harbor Hub. A separate review-gated importer may write only a
+content-blind parity summary to Hugin's existing learning ledger.
 
 ## Pinned contract
 
 - Harbor: `0.18.0` on Python 3.12+
 - M5 model: `qwen3-coder-next-80b`
-- M5 harness: `code-loop-pi-2026-07-13-v2`
+- M5 harness: `code-loop-pi-2026-07-14-v4`
 - Caps: 600 wall seconds, 13 turns, 60,000 completion tokens
-- Tasks: Gate D `01-make-failing-test-pass` and `04-add-cli-flag`
+- Tasks: the fresh Gate D r2 cases `11` through `14`
+- Holdouts: `11-node-path-containment` and `12-add-csv-cli-format`, selected
+  before inference as the two lowest SHA-256 task IDs
+- M5 start contract: deterministic `client_run_id`, exact request binding, and
+  content-blind `pi-bash-events-v1` check evidence
 - Harbor concurrency: one trial
 - Container network: disabled on supported Linux providers; see the macOS note below
+- Base image: `node:22.17.0-bookworm-slim` pinned to digest `b04ce4ae...03a0`
 - Verifier: separate fresh container, original Gate D `check.sh`, no model
 
 The corpus remains owned by `gille-inference`. The runner requires that source
@@ -71,18 +77,25 @@ hashes, outcomes, usage, and provenance should cross into Hugin/Munin.
 
 ## Evidence layers
 
-1. The baseline calls the live M5 `code_loop`, applies each returned diff to a
+1. The baseline calls the live M5 `code_loop` once per task, applies each returned diff to a
    pristine host copy, and runs the original Gate D verifier.
 2. Harbor replays those exact diffs in its task containers. Reward and diff
    hashes must agree exactly with the baseline. This tests packaging and
    separate-verifier parity without model sampling noise.
-3. Harbor then runs both tasks through the live external M5 agent. Hugin's
+3. Harbor then runs every task through the live external M5 agent. Hugin's
    existing TypeScript client validates the response and effective model,
    harness, and caps before the adapter applies the diff. The separate verifier
    produces the authoritative reward.
 
 Only content-blind summaries belong in Hugin. Full replay results and Harbor
-trajectories contain task content and remain in the local pilot output.
+trajectories contain task content and remain in the local pilot output. The
+learning comparison is host verifier versus Harbor replay of the **same diff**;
+the separate live-adapter samples are operational evidence and are not treated
+as matched quality observations.
+
+The r2 task set, holdouts, source commit, corpus/verifier hashes, model, harness,
+caps, network policy, and image digest were frozen before inference in
+[`harbor-gate-d-v2-declaration-2026-07-14.json`](research/harbor-gate-d-v2-declaration-2026-07-14.json).
 
 ## Run
 
@@ -95,7 +108,8 @@ uv pip install \
   -r scripts/harbor_pilot/requirements.txt
 ```
 
-Start Docker Desktop, load the M5 owner credential through Keychain, and run:
+From the accepted Linux worker (using Docker Desktop's Linux daemon is fine),
+load the M5 owner credential through the host bridge and run:
 
 ```bash
 eval "$(m5-auth --env --tailnet)"
@@ -103,8 +117,11 @@ HARBOR_BIN=/private/tmp/hugin-harbor-pilot/venv/bin/harbor \
   HARBOR_TELEMETRY=off \
   npm run pilot:harbor -- \
   --source-repo /Users/magnus/repos/gille-inference \
-  --network-mode public \
-  --base-image hugin/harbor-gate-d-base:node22.17-ts5.9.3-types22.13-arm64
+  --campaign-id gate-d-fresh-v2-20260714 \
+  --declaration docs/research/harbor-gate-d-v2-declaration-2026-07-14.json \
+  --task-ids 11-node-path-containment,12-add-csv-cli-format,13-type-safe-slug-tests,14-shared-handle-validation \
+  --holdout-ids 11-node-path-containment,12-add-csv-cli-format \
+  --network-mode no-network
 ```
 
 The final `pilot-report.json` contains:
@@ -123,6 +140,19 @@ does not authorize automatic promotion or production routing.
 provider could not enforce network isolation. Re-run the same pin and source
 commit on Linux with `--network-mode no-network` before treating the pilot as a
 full go.
+
+After reviewing a `go` report from the accepted Linux/no-network environment,
+dry-run the content-blind import and inspect the exact experiment and
+observations:
+
+```bash
+npm run pilot:harbor:import -- /path/to/pilot-report.json
+```
+
+`--commit` is the only mutating mode. It creates or resumes the isolated
+`m5-code-edit-harbor-pilot` experiment and appends idempotent host/replay
+observations. It never imports prompts, diffs, verifier logs, or trajectories,
+and never calls the promotion endpoint.
 
 ## Initial pilot outcome (2026-07-14)
 

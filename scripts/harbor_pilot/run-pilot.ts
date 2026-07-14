@@ -25,34 +25,85 @@ import {
   type HarborCodeLoopOnceInput,
 } from "./m5-code-loop-once.js";
 import {
+  HARBOR_PILOT_CAMPAIGN_ID,
   HARBOR_PILOT_DEFAULT_BASE_IMAGE,
+  HARBOR_PILOT_HOLDOUT_IDS,
   HARBOR_PILOT_TASK_IDS,
   HARBOR_PILOT_VERSION,
   prepareGateDHarborPilot,
+  type PreparedHarborPilot,
 } from "./prepare-gate-d.js";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "../..");
 const MODEL = "qwen3-coder-next-80b";
-const HARNESS_VERSION = "code-loop-pi-2026-07-13-v2";
+const HARNESS_VERSION = "code-loop-pi-2026-07-14-v4";
 const CAPS = { wall_s: 600, turns: 13, completion_tokens: 60_000 } as const;
+const EXPECTED_CAPABILITIES = {
+  startIdempotency: "client-run-id-v1",
+  agentChecks: "pi-bash-events-v1",
+} as const;
 
 const controlSchema = z.object({
   task_id: z.string().min(1),
+  holdout: z.boolean(),
   protected: z.array(z.string().min(1)),
+  client_run_ids: z.object({
+    baseline: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+    live: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+  }).strict(),
+}).passthrough();
+const gitCommitSchema = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
+
+const declarationSchema = z.object({
+  schema_version: z.literal(1),
+  status: z.literal("declared-not-run"),
+  campaign_id: z.string().min(1),
+  pilot_version: z.string().min(1),
+  harbor_version: z.literal("0.18.0"),
+  source_commit: gitCommitSchema,
+  task_ids: z.array(z.string().min(1)),
+  holdout_ids: z.array(z.string().min(1)),
+  holdout_revision: z.string().min(1),
+  corpus_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  verifier_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  harbor_verifier_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  model: z.string().min(1),
+  harness_version: z.string().min(1),
+  caps: z.object({
+    wall_s: z.number().int().positive(),
+    turns: z.number().int().positive(),
+    completion_tokens: z.number().int().positive(),
+  }).strict(),
+  required_capabilities: z.object({
+    start_idempotency: z.literal("client-run-id-v1"),
+    agent_checks: z.literal("pi-bash-events-v1"),
+  }).strict(),
+  network_mode: z.literal("no-network"),
+  base_image: z.string().min(1),
+  harbor_concurrency: z.literal(1),
+  attempts_per_task: z.literal(1),
+  model_calls_at_declaration: z.literal(0),
 }).passthrough();
 
 interface BaselineResult {
   taskId: string;
   passed: boolean;
+  holdout: boolean;
   applyReturnCode: number | null;
   checkReturnCode: number | null;
-  checkTail: string;
+  checkDurationMs: number;
+  failureKind: "empty-diff" | "apply-failed" | "check-failed" | null;
   workId: string;
+  clientRunId: string;
+  requestFingerprint: string;
+  recovered: boolean;
+  startCapabilities: Record<string, string>;
   status: string;
   usage: M5CodeLoopResult["usage"];
   execution: M5CodeLoopResult["execution"];
   telemetry: M5CodeLoopResult["telemetry"];
+  agentChecks: M5CodeLoopResult["agent_checks"];
   diffSha256: string;
   diffBytes: number;
 }
@@ -74,6 +125,14 @@ function requiredEnv(name: string): string {
 function valueAfter(flag: string): string | undefined {
   const index = process.argv.indexOf(flag);
   return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+function csvAfter(flag: string): string[] | undefined {
+  const value = valueAfter(flag);
+  if (value === undefined) return undefined;
+  const entries = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  if (entries.length === 0) throw new Error(`${flag} requires a comma-separated value`);
+  return entries;
 }
 
 function filesUnder(rootInput: string): Array<{ path: string; content: string }> {
@@ -101,6 +160,51 @@ function runChecked(command: string, args: string[], cwd: string): string {
     throw new Error(`${command} ${args.join(" ")} failed: ${(result.stderr || result.stdout).trim()}`);
   }
   return result.stdout.trim();
+}
+
+export function bindDeclaration(input: {
+  path: string;
+  prepared: PreparedHarborPilot;
+  networkMode: "no-network" | "public";
+}): string {
+  const bytes = readFileSync(input.path);
+  const declaration = declarationSchema.parse(JSON.parse(bytes.toString("utf8")));
+  const expected = {
+    campaign_id: input.prepared.campaignId,
+    pilot_version: HARBOR_PILOT_VERSION,
+    source_commit: input.prepared.sourceCommit,
+    task_ids: input.prepared.taskIds,
+    holdout_ids: input.prepared.holdoutIds,
+    holdout_revision: input.prepared.holdoutRevision,
+    corpus_sha256: input.prepared.corpusSha256,
+    verifier_sha256: input.prepared.verifierSha256,
+    harbor_verifier_sha256: input.prepared.harborVerifierSha256,
+    model: MODEL,
+    harness_version: HARNESS_VERSION,
+    caps: CAPS,
+    network_mode: input.networkMode,
+    base_image: input.prepared.baseImage,
+  };
+  const actual = {
+    campaign_id: declaration.campaign_id,
+    pilot_version: declaration.pilot_version,
+    source_commit: declaration.source_commit,
+    task_ids: declaration.task_ids,
+    holdout_ids: declaration.holdout_ids,
+    holdout_revision: declaration.holdout_revision,
+    corpus_sha256: declaration.corpus_sha256,
+    verifier_sha256: declaration.verifier_sha256,
+    harbor_verifier_sha256: declaration.harbor_verifier_sha256,
+    model: declaration.model,
+    harness_version: declaration.harness_version,
+    caps: declaration.caps,
+    network_mode: declaration.network_mode,
+    base_image: declaration.base_image,
+  };
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error("generated Harbor campaign does not match the pre-inference declaration");
+  }
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 export function customBasePreflightScript(): string {
@@ -153,7 +257,10 @@ function verifyBaseline(input: {
   result: M5CodeLoopResult;
   sourceRepo: string;
   taskId: string;
-}): Pick<BaselineResult, "passed" | "applyReturnCode" | "checkReturnCode" | "checkTail"> {
+}): Pick<
+  BaselineResult,
+  "passed" | "applyReturnCode" | "checkReturnCode" | "checkDurationMs" | "failureKind"
+> {
   const taskDir = join(input.sourceRepo, "gate-d", "tasks", input.taskId);
   const root = mkdtempSync(join(tmpdir(), `hugin-harbor-baseline-${input.taskId}-`));
   const work = join(root, "repo");
@@ -173,20 +280,22 @@ function verifyBaseline(input: {
         passed: false,
         applyReturnCode: applied?.status ?? null,
         checkReturnCode: null,
-        checkTail: applied?.stderr?.slice(-1_000) ?? "empty diff",
+        checkDurationMs: 0,
+        failureKind: applied ? "apply-failed" : "empty-diff",
       };
     }
+    const checkStarted = Date.now();
     const checked = spawnSync(
       "bash",
       [join(input.sourceRepo, "gate-d", "check.sh"), taskDir, work],
       { encoding: "utf8", timeout: 300_000 },
     );
-    const output = `${checked.stdout ?? ""}${checked.stderr ?? ""}`;
     return {
       passed: checked.status === 0,
       applyReturnCode: applied.status,
       checkReturnCode: checked.status,
-      checkTail: output.slice(-1_000),
+      checkDurationMs: Date.now() - checkStarted,
+      failureKind: checked.status === 0 ? null : "check-failed",
     };
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -196,16 +305,18 @@ function verifyBaseline(input: {
 async function runBaseline(input: {
   sourceRepo: string;
   outputDir: string;
+  taskIds: string[];
 }): Promise<BaselineResult[]> {
   const replayDir = join(input.outputDir, "replays");
   mkdirSync(replayDir);
   const baselines: BaselineResult[] = [];
-  for (const taskId of HARBOR_PILOT_TASK_IDS) {
+  for (const taskId of input.taskIds) {
     const taskDir = join(input.sourceRepo, "gate-d", "tasks", taskId);
     const control = controlSchema.parse(JSON.parse(
       readFileSync(join(input.outputDir, "tasks", taskId, "environment", "control.json"), "utf8"),
     ));
     const request: HarborCodeLoopOnceInput["request"] = {
+      client_run_id: control.client_run_ids.baseline,
       instruction: readFileSync(join(taskDir, "INSTRUCTION.md"), "utf8"),
       files: filesUnder(join(taskDir, "repo")),
       protected: control.protected,
@@ -214,23 +325,38 @@ async function runBaseline(input: {
     };
     const once: HarborCodeLoopOnceInput = {
       request,
-      expected: { model: MODEL, harnessVersion: HARNESS_VERSION, caps: CAPS },
+      expected: {
+        model: MODEL,
+        harnessVersion: HARNESS_VERSION,
+        caps: CAPS,
+        capabilities: EXPECTED_CAPABILITIES,
+      },
       pollMs: 5_000,
       resultDeadlineS: 900,
     };
     process.stdout.write(`[baseline/${taskId}] starting M5 code_loop\n`);
-    const result = await runCodeLoopOnce(once);
+    const output = await runCodeLoopOnce(once);
+    const { result, start } = output;
+    if (!start || !start.request_fingerprint || start.client_run_id !== control.client_run_ids.baseline) {
+      throw new Error(`[baseline/${taskId}] missing durable M5 start evidence`);
+    }
     writeFileSync(join(replayDir, `${taskId}.json`), `${JSON.stringify(result)}\n`, { mode: 0o600 });
     const verified = verifyBaseline({ result, sourceRepo: input.sourceRepo, taskId });
     const diffBytes = Buffer.byteLength(result.diff);
     const baseline: BaselineResult = {
       taskId,
+      holdout: control.holdout,
       ...verified,
       workId: result.work_id,
+      clientRunId: control.client_run_ids.baseline,
+      requestFingerprint: start.request_fingerprint,
+      recovered: start.recovered,
+      startCapabilities: start.capabilities,
       status: result.status,
       usage: result.usage,
       execution: result.execution,
       telemetry: result.telemetry,
+      agentChecks: result.agent_checks,
       diffSha256: createHash("sha256").update(result.diff).digest("hex"),
       diffBytes,
     };
@@ -248,6 +374,7 @@ function runHarbor(input: {
   harborBin: string;
   outputDir: string;
   mode: "replay" | "live";
+  taskCount: number;
 }): Promise<void> {
   const jobsDir = join(input.outputDir, "jobs");
   mkdirSync(jobsDir, { recursive: true });
@@ -280,7 +407,7 @@ function runHarbor(input: {
   } else {
     delete env.HUGIN_HARBOR_REPLAY_DIR;
   }
-  process.stdout.write(`[harbor/${input.mode}] starting sequential two-task job\n`);
+  process.stdout.write(`[harbor/${input.mode}] starting sequential ${input.taskCount}-task job\n`);
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(input.harborBin, args, {
       cwd: REPO_ROOT,
@@ -326,16 +453,32 @@ export function summarizeHarborJob(jobDir: string): HarborTrialSummary[] {
   }).sort((a, b) => a.taskId.localeCompare(b.taskId));
 }
 
-function assertExpectedTrials(label: string, trials: HarborTrialSummary[]): void {
+function assertExpectedTrials(
+  label: string,
+  trials: HarborTrialSummary[],
+  expectedTaskIds: string[],
+): void {
   const ids = trials.map((trial) => trial.taskId);
-  if (JSON.stringify(ids) !== JSON.stringify([...HARBOR_PILOT_TASK_IDS])) {
+  if (JSON.stringify(ids) !== JSON.stringify([...expectedTaskIds].sort())) {
     throw new Error(`${label} produced unexpected trial set: ${ids.join(", ")}`);
   }
 }
 
 async function main(): Promise<void> {
+  const runnerDirty = runChecked("git", ["status", "--short"], REPO_ROOT);
+  if (runnerDirty) throw new Error("Hugin runner repository must be clean before the pilot");
+  const runnerCommit = runChecked("git", ["rev-parse", "HEAD"], REPO_ROOT);
   const sourceRepo = resolve(valueAfter("--source-repo") ?? join(REPO_ROOT, "../gille-inference"));
   const harborBin = resolve(valueAfter("--harbor-bin") ?? requiredEnv("HARBOR_BIN"));
+  const taskIds = csvAfter("--task-ids") ?? [...HARBOR_PILOT_TASK_IDS];
+  const holdoutIds = csvAfter("--holdout-ids") ?? [...HARBOR_PILOT_HOLDOUT_IDS];
+  const campaignId = valueAfter("--campaign-id") ?? HARBOR_PILOT_CAMPAIGN_ID;
+  const declarationPath = resolve(
+    valueAfter("--declaration") ??
+    join(REPO_ROOT, "docs/research/harbor-gate-d-v2-declaration-2026-07-14.json"),
+  );
+  if (taskIds.length < 4) throw new Error("the larger-corpus pilot requires at least four tasks");
+  if (holdoutIds.length < 2) throw new Error("the larger-corpus pilot requires at least two predeclared holdouts");
   const networkModeArg = valueAfter("--network-mode") ?? (process.platform === "darwin" ? "public" : "no-network");
   if (networkModeArg !== "no-network" && networkModeArg !== "public") {
     throw new Error("--network-mode must be no-network or public");
@@ -361,8 +504,16 @@ async function main(): Promise<void> {
   const prepared = prepareGateDHarborPilot({
     sourceRepo,
     outputDir: preparedDir,
+    taskIds,
+    holdoutIds,
+    campaignId,
     networkMode,
     baseImage,
+  });
+  const declarationSha256 = bindDeclaration({
+    path: declarationPath,
+    prepared,
+    networkMode,
   });
   preflightCustomBaseImage(prepared.baseImage);
   process.stdout.write(
@@ -370,56 +521,121 @@ async function main(): Promise<void> {
     `under ${prepared.outputDir}\n`,
   );
 
-  const baselines = await runBaseline({ sourceRepo, outputDir: prepared.outputDir });
-  await runHarbor({ harborBin, outputDir: prepared.outputDir, mode: "replay" });
-  await runHarbor({ harborBin, outputDir: prepared.outputDir, mode: "live" });
+  const baselines = await runBaseline({
+    sourceRepo,
+    outputDir: prepared.outputDir,
+    taskIds: prepared.taskIds,
+  });
+  await runHarbor({
+    harborBin,
+    outputDir: prepared.outputDir,
+    mode: "replay",
+    taskCount: prepared.taskIds.length,
+  });
+  await runHarbor({
+    harborBin,
+    outputDir: prepared.outputDir,
+    mode: "live",
+    taskCount: prepared.taskIds.length,
+  });
 
   const replay = summarizeHarborJob(join(prepared.outputDir, "jobs", "replay"));
   const live = summarizeHarborJob(join(prepared.outputDir, "jobs", "live"));
-  assertExpectedTrials("Harbor replay", replay);
-  assertExpectedTrials("Harbor live", live);
+  assertExpectedTrials("Harbor replay", replay, prepared.taskIds);
+  assertExpectedTrials("Harbor live", live, prepared.taskIds);
 
   const replayParity = replay.map((trial) => {
     const baseline = baselines.find((item) => item.taskId === trial.taskId)!;
     const metadata = trial.metadata ?? {};
     return {
       taskId: trial.taskId,
+      holdout: baseline.holdout,
       baselinePassed: baseline.passed,
       harborPassed: trial.reward === 1,
+      rewardMeasured: trial.reward === 0 || trial.reward === 1,
       rewardParity: baseline.passed === (trial.reward === 1),
       diffParity: metadata.diff_sha256 === baseline.diffSha256,
+      workParity: metadata.work_id === baseline.workId,
+      clientRunParity: metadata.client_run_id === baseline.clientRunId,
       applyReturnCode: metadata.apply_return_code ?? null,
       exceptionType: trial.exceptionType,
     };
   });
   const liveAdapter = live.map((trial) => ({
     taskId: trial.taskId,
+    holdout: trial.metadata?.holdout ?? null,
     passed: trial.reward === 1,
     reward: trial.reward,
     status: trial.metadata?.status ?? null,
     workId: trial.metadata?.work_id ?? null,
+    clientRunId: trial.metadata?.client_run_id ?? null,
+    requestFingerprint: trial.metadata?.request_fingerprint ?? null,
+    recovered: trial.metadata?.recovered ?? null,
+    startCapabilities: trial.metadata?.start_capabilities ?? null,
     execution: trial.metadata?.execution ?? null,
+    agentChecks: trial.metadata?.agent_checks ?? null,
     applyReturnCode: trial.metadata?.apply_return_code ?? null,
     diffBytes: trial.metadata?.diff_bytes ?? null,
     exceptionType: trial.exceptionType,
   }));
   const exactReplayParity = replayParity.every((row) =>
-    row.rewardParity && row.diffParity && row.exceptionType === null && row.applyReturnCode === 0
+    row.rewardMeasured &&
+    row.rewardParity &&
+    row.diffParity &&
+    row.workParity &&
+    row.clientRunParity &&
+    row.exceptionType === null &&
+    row.applyReturnCode === 0
   );
-  const liveAdapterCompleted = liveAdapter.every((row) =>
-    row.exceptionType === null && typeof row.workId === "string" && row.execution !== null
+  const baselineDecisionsVerified = baselines.every((row) =>
+    row.applyReturnCode === 0 &&
+    row.checkReturnCode !== null &&
+    row.passed === (row.checkReturnCode === 0)
   );
+  const liveAdapterCompleted = liveAdapter.every((row) => {
+    const execution = row.execution as Record<string, unknown> | null;
+    const effectiveCaps = execution?.effective_caps as Record<string, unknown> | undefined;
+    const executionCapabilities = execution?.capabilities as Record<string, unknown> | undefined;
+    const startCapabilities = row.startCapabilities as Record<string, unknown> | null;
+    const agentChecks = row.agentChecks as Record<string, unknown> | null;
+    return row.exceptionType === null &&
+      (row.reward === 0 || row.reward === 1) &&
+      typeof row.workId === "string" &&
+      row.clientRunId === `harbor:${prepared.campaignId}:${row.taskId}:live` &&
+      typeof row.requestFingerprint === "string" &&
+      /^sha256:[a-f0-9]{64}$/.test(row.requestFingerprint) &&
+      row.holdout === prepared.holdoutIds.includes(row.taskId) &&
+      startCapabilities?.start_idempotency === "client-run-id-v1" &&
+      startCapabilities.agent_checks === "pi-bash-events-v1" &&
+      execution?.model === MODEL &&
+      execution.harness_version === HARNESS_VERSION &&
+      effectiveCaps?.wall_s === CAPS.wall_s &&
+      effectiveCaps.turns === CAPS.turns &&
+      effectiveCaps.completion_tokens === CAPS.completion_tokens &&
+      executionCapabilities?.start_idempotency === "client-run-id-v1" &&
+      executionCapabilities.agent_checks === "pi-bash-events-v1" &&
+      agentChecks?.source === "pi-bash-events" &&
+      agentChecks.work_id === row.workId;
+  });
   const environmentConditionsMet =
     networkMode === "no-network" && prepared.baseImage === HARBOR_PILOT_DEFAULT_BASE_IMAGE;
-  const recommendation = exactReplayParity && liveAdapterCompleted
+  const recommendation = baselineDecisionsVerified && exactReplayParity && liveAdapterCompleted
     ? environmentConditionsMet ? "go" : "conditional-go"
     : "no-go";
   const report = {
-    schema_version: 1,
+    schema_version: 2,
     pilot_version: HARBOR_PILOT_VERSION,
+    campaign_id: prepared.campaignId,
     harbor_version: harborVersion,
+    runner_commit: runnerCommit,
+    declaration_sha256: declarationSha256,
     source_commit: prepared.sourceCommit,
     task_ids: prepared.taskIds,
+    holdout_ids: prepared.holdoutIds,
+    holdout_revision: prepared.holdoutRevision,
+    corpus_sha256: prepared.corpusSha256,
+    verifier_sha256: prepared.verifierSha256,
+    harbor_verifier_sha256: prepared.harborVerifierSha256,
     caps: CAPS,
     model: MODEL,
     harness_version: HARNESS_VERSION,
@@ -428,6 +644,7 @@ async function main(): Promise<void> {
     base_image: prepared.baseImage,
     standard_base_image_met: prepared.baseImage === HARBOR_PILOT_DEFAULT_BASE_IMAGE,
     exact_replay_parity: exactReplayParity,
+    baseline_decisions_verified: baselineDecisionsVerified,
     live_adapter_completed: liveAdapterCompleted,
     recommendation,
     baseline: baselines,

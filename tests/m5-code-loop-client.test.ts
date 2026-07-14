@@ -14,21 +14,42 @@ function rpcResult(value: unknown, isError = false): Response {
 
 describe("M5CodeLoopClient", () => {
   it("calls the owner-gated tool without leaking the token into the body", async () => {
-    const fetchImpl = vi.fn(async () => rpcResult({ work_id: "cl-1", status: "running" }));
+    const fetchImpl = vi.fn(async () => rpcResult({
+      work_id: "cl-1",
+      status: "running",
+      client_run_id: "harbor:campaign:task:live",
+      request_fingerprint: `sha256:${"a".repeat(64)}`,
+      recovered: false,
+      capabilities: {
+        start_idempotency: "client-run-id-v1",
+        agent_checks: "pi-bash-events-v1",
+      },
+    }));
     const client = new M5CodeLoopClient({
       endpoint: "http://m5.test:8080/mcp",
       bearerToken: "owner-secret",
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
-    expect(await client.start({ instruction: "fix", files: [{ path: "a.ts", content: "x" }] }))
-      .toEqual({ work_id: "cl-1", status: "running" });
+    expect(await client.start({
+      client_run_id: "harbor:campaign:task:live",
+      instruction: "fix",
+      files: [{ path: "a.ts", content: "x" }],
+    })).toMatchObject({
+      work_id: "cl-1",
+      status: "running",
+      client_run_id: "harbor:campaign:task:live",
+      recovered: false,
+    });
     const [, init] = fetchImpl.mock.calls[0]!;
     expect((init?.headers as Record<string, string>).authorization).toBe("Bearer owner-secret");
     expect(String(init?.body)).not.toContain("owner-secret");
     expect(JSON.parse(String(init?.body))).toMatchObject({
       method: "tools/call",
-      params: { name: "code_loop_start" },
+      params: {
+        name: "code_loop_start",
+        arguments: { client_run_id: "harbor:campaign:task:live" },
+      },
     });
   });
 
