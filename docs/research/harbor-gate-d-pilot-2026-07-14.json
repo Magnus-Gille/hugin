@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "pilot_version": "harbor-0.18.0-gate-d-v1",
+  "run_completed_at": "2026-07-14T00:02:00+02:00",
+  "recommendation": "conditional-go",
+  "harbor_version": "0.18.0",
+  "source_commit": "d2d2541dd01519ddf50a9bbba8903d02fcea5284",
+  "model": "qwen3-coder-next-80b",
+  "harness_version": "code-loop-pi-2026-07-13-v2",
+  "caps": {
+    "wall_s": 600,
+    "turns": 13,
+    "completion_tokens": 60000
+  },
+  "environment": {
+    "provider": "docker-desktop-macos",
+    "architecture": "arm64",
+    "network_mode": "public",
+    "network_isolation_met": false,
+    "base_image": "hugin/harbor-gate-d-base:node22.17-ts5.9.3-types22.13-arm64",
+    "base_image_digest": "sha256:e1e2fb3ac1fe3eeec0b6f1d025dabf2e6f7d43edc5f567c0fe36675f61891ea8",
+    "standard_base_image_met": false
+  },
+  "baseline": [
+    {
+      "task_id": "01-make-failing-test-pass",
+      "passed": true,
+      "status": "completed",
+      "work_id": "cl-20260713-4a270b0d",
+      "diff_sha256": "b826bb65b2a78c37f5852603d7531e33d1588c3e907b59fb0f5b985473260072"
+    },
+    {
+      "task_id": "04-add-cli-flag",
+      "passed": true,
+      "status": "cap-exceeded",
+      "work_id": "cl-20260713-3b33128c",
+      "diff_sha256": "f4bf46177b12adad8c389ff41a2857eacb6ec19eea39550ba20eef6da8c04709"
+    }
+  ],
+  "exact_replay": {
+    "trials": 2,
+    "passed": 2,
+    "exceptions": 0,
+    "reward_parity": 2,
+    "diff_hash_parity": 2
+  },
+  "live_adapter": [
+    {
+      "task_id": "01-make-failing-test-pass",
+      "adapter_completed": true,
+      "artifact_passed_corrected_verifier": true,
+      "status": "completed",
+      "work_id": "cl-20260713-863f2593",
+      "apply_return_code": 0,
+      "diff_sha256": "c3d7e736864ef11aed549ade2ea898e614f94ad154fa55c2996725e1cc765c77"
+    },
+    {
+      "task_id": "04-add-cli-flag",
+      "adapter_completed": true,
+      "artifact_passed_corrected_verifier": false,
+      "status": "cap-exceeded",
+      "work_id": "cl-20260713-087987ba",
+      "apply_return_code": 0,
+      "diff_sha256": "fa530066df78f6122278926ff628f57be5a47d363e004d7fffc0a9099f8e56b7",
+      "failure_gate": "G3-tsc"
+    }
+  ],
+  "security": {
+    "credential_prefix_matches_in_pilot_outputs": 0,
+    "credential_environment_name_matches_in_task_and_job_outputs": 0,
+    "credential_passed_to_containers": false,
+    "telemetry_enabled": false,
+    "hub_upload_performed": false
+  },
+  "cost": {
+    "harbor_reported_model_cost_usd": 0.0,
+    "harbor_license": "Apache-2.0",
+    "unmetered": [
+      "M5 electricity",
+      "hardware depreciation",
+      "operator time",
+      "local storage",
+      "Docker licensing"
+    ]
+  },
+  "required_follow_up": [
+    "Repeat the same source and Harbor pin on Linux with no-network enforcement",
+    "Use the standard pinned base image rather than the macOS offline fallback",
+    "Expand to a predeclared matched corpus before estimating capability rates",
+    "Keep promotion and production routing outside Harbor"
+  ]
+}

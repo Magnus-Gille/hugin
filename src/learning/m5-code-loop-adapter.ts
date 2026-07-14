@@ -151,7 +151,7 @@ function failureKindOf(
   return result.status === "completed" ? undefined : result.status;
 }
 
-function assertExecutionBinding(
+export function assertM5CodeLoopExecutionBinding(
   result: M5CodeLoopResult,
   expected: M5CodeLoopObservationContext["expectedExecution"],
 ): void {
@@ -183,7 +183,7 @@ export function observationFromM5CodeLoop(
   context: M5CodeLoopObservationContext,
 ): LearningObservationInput {
   const result = m5CodeLoopResultSchema.parse(rawResult);
-  assertExecutionBinding(result, context.expectedExecution);
+  assertM5CodeLoopExecutionBinding(result, context.expectedExecution);
   const fingerprint = sha256Schema.parse(context.configurationFingerprint);
   const external = context.externalVerification;
   const authoritativeCheck =

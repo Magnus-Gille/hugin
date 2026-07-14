@@ -1,7 +1,62 @@
 # Hugin — Status
 
-**Latest session:** 2026-07-13 (Codex) — **GitHub-independent overnight dev screen completed; evaluator and transport recovery hardened locally**
-**Branch/worktree:** `codex/gate-d-prompt-prefix` in `/private/tmp/hugin-gate-d-prompt-prefix`, based on exact `origin/main@d5eb909267111590c7b4b2442794197334fbedb2` (#199). Implementation commits `56ba7b0` (bound prompt prefixes) and `79db404` (durable observation recovery + numeric gate fix), plus the STATUS handoff, are published in draft PR [#200](https://github.com/Magnus-Gille/hugin/pull/200).
+**Latest session:** 2026-07-14 (Codex) — **Harbor/M5 Gate D proof-of-fit completed; conditional-go for an offline evaluation lane**
+**Branch:** `agent/harbor-gate-d-pilot` from `main@d5eb909267111590c7b4b2442794197334fbedb2`; Harbor pilot implementation and evidence are ready for independent review.
+
+## Latest — Harbor 0.18.0 proof-of-fit with the existing M5 code_loop
+
+- Added a pinned Harbor 0.18.0 pilot that converts two representative Gate D
+  tasks (`01-make-failing-test-pass`, `04-add-cli-flag`) into isolated Harbor
+  tasks, calls the existing M5 `code_loop` through a host-side external agent,
+  validates effective model/harness/caps with Hugin's existing schema/client,
+  collects the edited tree, and grades it in a fresh deterministic verifier
+  container. Credentials stay host-side; reports import only content-blind
+  metadata.
+- Direct M5 baselines both passed the original host Gate D verifier. Corrected
+  Harbor replay of those exact diffs passed 2/2 with exact reward and diff-hash
+  parity and zero exceptions. Both live Harbor adapter calls completed with the
+  pinned `qwen3-coder-next-80b` / `code-loop-pi-2026-07-13-v2` execution
+  binding; corrected model-free grading of those live artifacts passed task 01
+  and failed task 04 at G3 typecheck (undefined `formatJson`). This is semantic
+  sample quality, not an adapter failure.
+- The first verifier attempt produced four false zeroes because Harbor's
+  separate-verifier `/app` mount hid the image-layer dependency symlink and the
+  custom offline image lacked `@types/node`. The task generator now recreates
+  that symlink at verifier runtime, pins Node types in the standard image, and
+  preflights every custom image before live M5 work. Corrected replay then passed
+  2/2. The superseding content-blind record is
+  `docs/research/harbor-gate-d-pilot-2026-07-14.json`.
+- Recommendation is conditional-go only for an offline evaluation/control
+  plane. Harbor does not replace Hugin dispatch, Broker/Munin lifecycle, M5
+  model routing, or the existing reviewed learning promotion gate. The macOS
+  run used public container networking (Harbor 0.18 cannot enforce no-network
+  there) and a custom native-arm64 base after Docker Desktop registry pulls
+  stalled. Repeat the same source/pin on Linux with no-network plus the standard
+  base, then expand to a predeclared matched corpus before estimating capability
+  rates.
+- Harbor core and the installed wheel declare Apache-2.0. This local run made no
+  Hub upload and Harbor reported $0.00 model API cost; electricity, hardware,
+  operator time, Docker licensing, and any optional cloud sandbox/model costs
+  remain outside that figure. No public Harbor Hub price schedule was found.
+- Security checks found zero M5 credential-prefix matches and zero
+  `M5_API_KEY` names in generated task/job outputs. The Gate D source checkout
+  remained clean at exact commit `d2d2541dd01519ddf50a9bbba8903d02fcea5284`.
+- Validation: corrected Harbor exact replay 2/2; corrected live-artifact regrade
+  1/2 with zero infrastructure exceptions; TypeScript build; standalone strict
+  typecheck of all pilot TS scripts; Python bytecode compile; focused 11 tests;
+  full suite 104 files / 1,733 tests; `git diff --check`.
+
+**Next:** run the same content pin on a Linux Harbor worker with enforced
+`no-network` and the standard image. If parity stays exact, add a larger
+predeclared Gate D corpus and connect reviewed, content-blind Harbor summaries
+to Hugin's existing learning experiment endpoints. Do not deploy Harbor in the
+dispatcher, publish the dataset, enable automatic promotion, or commit/push the
+pilot without review.
+
+---
+
+**Previous session:** 2026-07-13 (Codex) — **GitHub-independent overnight dev screen completed; evaluator and transport recovery hardened locally**
+**Branch/worktree:** `codex/gate-d-prompt-prefix` in `/private/tmp/hugin-gate-d-prompt-prefix`, based on exact `origin/main@d5eb909267111590c7b4b2442794197334fbedb2` (#199). Implementation commits `56ba7b0` (bound prompt prefixes) and `79db404` (durable observation recovery + numeric gate fix), plus the STATUS handoff, were merged as PR [#200](https://github.com/Magnus-Gille/hugin/pull/200) in `71e7963`.
 
 ## Latest — development prompt evidence plus two failures converted into harness improvements
 
