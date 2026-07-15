@@ -681,7 +681,7 @@ export async function finalizeTaskBranch(
       await new Promise<void>((resolve) => {
         const child = spawn(
           "git",
-          ["commit", "-m", "hugin: auto-commit task output [skip ci]"],
+          ["commit", "-m", "hugin: auto-commit task output"],
           {
             cwd: workingDir,
             stdio: "ignore",

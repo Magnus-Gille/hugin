@@ -131,6 +131,7 @@ export async function main(): Promise<void> {
     tools.rate as HuginTool<Record<string, unknown>>,
     tools.list as HuginTool<Record<string, unknown>>,
     tools.models as HuginTool<Record<string, unknown>>,
+    tools.friction as HuginTool<Record<string, unknown>>,
     tools.experimentCreate as HuginTool<Record<string, unknown>>,
     tools.experimentObserve as HuginTool<Record<string, unknown>>,
     tools.experimentRate as HuginTool<Record<string, unknown>>,

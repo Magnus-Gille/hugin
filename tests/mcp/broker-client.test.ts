@@ -57,6 +57,28 @@ describe("BrokerClient", () => {
     expect(init?.body).toBeUndefined();
   });
 
+  it("posts friction reports to the authenticated shared endpoint", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ ok: true, namespace: "signals/friction", key: "event-1" }, { status: 201 }),
+    );
+    const client = new BrokerClient({
+      baseUrl: "http://broker.test:3033",
+      bearerToken: "tk",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    await client.reportFriction({
+      friction_type: "tool_failure",
+      severity: "high",
+      summary: "failed",
+      detail: "details",
+    });
+
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(url).toBe("http://broker.test:3033/v1/friction/report");
+    expect(init?.method).toBe("POST");
+  });
+
   it("posts learning-loop operations to their authenticated endpoints", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ ok: true }));
     const client = new BrokerClient({

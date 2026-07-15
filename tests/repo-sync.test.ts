@@ -318,6 +318,12 @@ describe("finalizeTaskBranch", () => {
     const commitCall = spawnCalls[2];
     expect(commitCall.args).toContain("commit");
     expect(commitCall.args).toContain("-m");
+    expect(commitCall.args).toEqual([
+      "commit",
+      "-m",
+      "hugin: auto-commit task output",
+    ]);
+    expect(commitCall.args.join(" ")).not.toContain("skip ci");
   });
 
   it("creates PR when commits exist without dirty tree", async () => {

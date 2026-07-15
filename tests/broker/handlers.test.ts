@@ -840,6 +840,66 @@ describe("POST /v1/delegate/rate", () => {
   });
 });
 
+describe("POST /v1/friction/report", () => {
+  it("writes a shared friction event with authenticated reporter provenance", async () => {
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "tool_failure",
+        severity: "blocking",
+        summary: "Codex sandbox could not start",
+        detail: "The systemd address-family allowlist omitted AF_NETLINK.",
+        task_id: "cassette/task-1",
+        tool_name: "codex-exec",
+        tags: ["reporter:spoofed", "repo:cassette-ai"],
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const response = await res.json() as Record<string, unknown>;
+    expect(response).toMatchObject({
+      ok: true,
+      dropped: false,
+      namespace: "signals/friction",
+    });
+    const write = harness.munin.writes.at(-1)!;
+    expect(write.namespace).toBe("signals/friction");
+    expect(write.key).toContain("cassette_task-1-");
+    expect(write.tags).toEqual(expect.arrayContaining([
+      "friction:tool_failure",
+      "severity:blocking",
+      "model:claude-code",
+      "source:broker-api",
+      "reporter:claude-code",
+      "task:cassette_task-1",
+      "repo:cassette-ai",
+    ]));
+    expect(write.tags).not.toContain("reporter:spoofed");
+    expect(JSON.parse(write.content)).toMatchObject({
+      model_id: "claude-code",
+      task_id_resolved: "cassette_task-1",
+      friction_type: "tool_failure",
+    });
+  });
+
+  it("rejects malformed friction without writing", async () => {
+    const writesBefore = harness.munin.writes.length;
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "made_up",
+        severity: "blocking",
+        summary: "bad",
+        detail: "bad",
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(harness.munin.writes).toHaveLength(writesBefore);
+  });
+});
+
 describe("GET /v1/delegate/list", () => {
   it("rejects a malformed since_ts instead of applying inconsistent time filters", async () => {
     const res = await fetch(

@@ -7,8 +7,9 @@
  *   - rate    (§5)
  *   - list    (§5 projection)
  *   - models  (§2 alias map + §6 registry view)
+ *   - friction (shared operational evidence corpus)
  *
- * All five endpoints assume `brokerAuthMiddleware` has already populated
+ * All handlers assume `brokerAuthMiddleware` has already populated
  * `req.brokerPrincipal`.
  */
 
@@ -41,6 +42,7 @@ import {
 import type { AwaitLifecycle } from "./await-observation.js";
 import type { AuthenticatedRequest } from "./auth.js";
 import { computeSubmitWarnings } from "./submit-warnings.js";
+import { reportFrictionInputSchema } from "../friction/schema.js";
 
 export interface BrokerHandlerDependencies {
   taskStore: BrokerTaskStore;
@@ -469,6 +471,38 @@ export function createRateHandler(deps: BrokerHandlerDependencies) {
     }
 
     res.status(204).send();
+  };
+}
+
+export function createFrictionHandler(deps: BrokerHandlerDependencies) {
+  return async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    const principal = req.brokerPrincipal;
+    if (!principal) {
+      res.status(500).json({ error: "internal", message: "principal missing" });
+      return;
+    }
+
+    let parsed;
+    try {
+      parsed = reportFrictionInputSchema.parse(req.body);
+    } catch (err) {
+      respondZodError(res, err);
+      return;
+    }
+
+    try {
+      const result = await deps.taskStore.writeFriction(
+        parsed,
+        principal,
+        nowFn(deps)(),
+      );
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(500).json({
+        error: "internal",
+        message: `friction write failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   };
 }
 

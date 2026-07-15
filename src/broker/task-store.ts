@@ -27,6 +27,14 @@ import { hashPayload } from "./idempotency.js";
 import { deriveAwaitObservation } from "./await-observation.js";
 import type { AwaitEvent, AwaitObservation } from "./await-observation.js";
 import { queryAllMuninEntries } from "../munin-pagination.js";
+import type { ReportFrictionInput } from "../friction/schema.js";
+import {
+  buildFrictionContent,
+  buildFrictionKey,
+  buildFrictionNamespace,
+  buildFrictionTags,
+  sanitiseTaskId,
+} from "../friction/munin-key.js";
 
 export { MUNIN_QUERY_MAX } from "../munin-pagination.js";
 
@@ -59,6 +67,13 @@ export interface CanonicalListResult {
   rows: CanonicalListRow[];
   /** True when a Munin ambiguity or the bounded history budget may omit matches. */
   truncated: boolean;
+}
+
+export interface FrictionWriteResult {
+  ok: true;
+  dropped: false;
+  namespace: string;
+  key: string;
 }
 
 /**
@@ -225,6 +240,51 @@ export class BrokerTaskStore {
       undefined,
       envelope?.sensitivity === "private" ? "client-restricted" : "internal",
     );
+  }
+
+  /**
+   * Persist a friction signal through the authenticated Broker surface.
+   *
+   * This deliberately reuses the standalone friction MCP's schema and Munin
+   * shape so API, MCP and CLI reports land in one corpus. The Broker principal
+   * is retained as a tag even when the caller supplies a more specific model id.
+   */
+  async writeFriction(
+    input: ReportFrictionInput,
+    reporter: string,
+    recordedAt: Date,
+  ): Promise<FrictionWriteResult> {
+    // `reporter:*` is authenticated server provenance. Drop caller attempts to
+    // add another reporter tag so consumers never have to guess which one wins.
+    const trustedInput: ReportFrictionInput = {
+      ...input,
+      ...(input.tags
+        ? { tags: input.tags.filter((tag) => !tag.startsWith("reporter:")) }
+        : {}),
+    };
+    const resolvedTaskId = trustedInput.task_id?.trim()
+      ? sanitiseTaskId(trustedInput.task_id)
+      : undefined;
+    const modelId = trustedInput.model_id?.trim() || reporter.trim() || "unknown";
+    const namespace = buildFrictionNamespace();
+    const key = buildFrictionKey(resolvedTaskId, recordedAt);
+    const reporterTag = reporter
+      .trim()
+      .replace(/[^A-Za-z0-9._-]/g, "_")
+      .slice(0, 64) || "unknown";
+    const tags = [...new Set([
+      ...buildFrictionTags({ input: trustedInput, modelId, resolvedTaskId }),
+      "source:broker-api",
+      `reporter:${reporterTag}`,
+    ])];
+    const content = buildFrictionContent({
+      input: trustedInput,
+      modelId,
+      resolvedTaskId,
+      recordedAt,
+    });
+    await this.munin.write(namespace, key, content, tags, undefined, "internal");
+    return { ok: true, dropped: false, namespace, key };
   }
 
   /**

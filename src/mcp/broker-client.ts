@@ -96,6 +96,10 @@ export class BrokerClient {
     return this.post("/v1/delegate/rate", payload);
   }
 
+  async reportFriction(payload: Record<string, unknown>): Promise<unknown> {
+    return this.post("/v1/friction/report", payload);
+  }
+
   async list(payload: Record<string, unknown>): Promise<unknown> {
     return this.post("/v1/delegate/list", payload);
   }

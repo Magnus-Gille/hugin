@@ -1,8 +1,9 @@
 /**
  * Broker HTTP server (orchestrator v1).
  *
- * Mounts the five `/v1/delegate/*` handlers and optional versioned-learning
- * handlers behind the bearer-token middleware on a separate Express app. The default bind is loopback only;
+ * Mounts the five `/v1/delegate/*` handlers, the shared friction endpoint, and
+ * optional versioned-learning handlers behind the bearer-token middleware on a
+ * separate Express app. The default bind is loopback only;
  * production deployments override `HUGIN_BROKER_HOST` to the Tailscale
  * interface IP. Health is unauthenticated; everything else requires a
  * known principal.
@@ -23,6 +24,7 @@ import {
 } from "./auth.js";
 import {
   createAwaitHandler,
+  createFrictionHandler,
   createListHandler,
   createModelsHandler,
   createRateHandler,
@@ -62,6 +64,7 @@ export function buildBrokerApp(config: BrokerServerConfig): Express {
   app.post("/v1/delegate/submit", auth, createSubmitHandler(config.deps));
   app.post("/v1/delegate/await", auth, createAwaitHandler(config.deps));
   app.post("/v1/delegate/rate", auth, createRateHandler(config.deps));
+  app.post("/v1/friction/report", auth, createFrictionHandler(config.deps));
   app.post("/v1/delegate/list", auth, createListHandler(config.deps));
   app.get("/v1/delegate/list", auth, createListHandler(config.deps));
   app.get(
