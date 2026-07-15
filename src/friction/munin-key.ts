@@ -21,6 +21,36 @@ import {
 export const FRICTION_NAMESPACE = "signals/friction";
 export const FRICTION_NO_TASK = "no-task";
 
+const SERVER_OWNED_FRICTION_TAG_PREFIXES = [
+  "friction:",
+  "friction-category:",
+  "severity:",
+  "model:",
+  "source:",
+  "schema:",
+  "task:",
+  "resource:",
+  "alias-suggested:",
+  "tool:",
+  "reporter:",
+  "classification:",
+] as const;
+
+/** Keep free-form routing tags while rejecting all authoritative tag families. */
+export function keepCallerFrictionTags(
+  tags: string[] | undefined,
+): string[] | undefined {
+  if (!tags) return undefined;
+  return [...new Set(tags
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0)
+    .filter((tag) => {
+      const normalized = tag.toLowerCase();
+      return !SERVER_OWNED_FRICTION_TAG_PREFIXES.some((prefix) =>
+        normalized.startsWith(prefix));
+    }))];
+}
+
 /**
  * Munin keys must be `[A-Za-z0-9_-]+` and start with an alphanumeric.
  * Dots (`.`) are not allowed — that's why the millisecond `.` and the
@@ -53,6 +83,7 @@ export interface FrictionTagInputs {
   input: ReportFrictionInput;
   modelId: string;
   resolvedTaskId: string | undefined;
+  source?: "model-self-report" | "standalone-mcp" | "broker-api";
 }
 
 export function buildFrictionTags(args: FrictionTagInputs): string[] {
@@ -64,7 +95,7 @@ export function buildFrictionTags(args: FrictionTagInputs): string[] {
     `friction-category:${shortCategory(category)}`,
     `severity:${input.severity}`,
     `model:${modelId}`,
-    "source:model-self-report",
+    `source:${args.source ?? "model-self-report"}`,
     `schema:v${FRICTION_SCHEMA_VERSION}`,
   ];
 

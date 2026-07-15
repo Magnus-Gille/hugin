@@ -12,6 +12,8 @@ import type { MuninClient } from "../../src/munin-client.js";
 
 const SECRET = "a".repeat(64);
 const OTHER_SECRET = "b".repeat(64);
+const UNSAFE_PRINCIPAL_SECRET = "c".repeat(64);
+const SAFE_PRINCIPAL_SECRET = "d".repeat(64);
 const FRICTION_EVENT_ID = "11111111-2222-4333-8444-555555555555";
 
 class FakeMunin {
@@ -71,7 +73,12 @@ beforeEach(async () => {
   const broker = await startBroker({
     host: "127.0.0.1",
     port: 0,
-    keys: { "claude-code": SECRET, codex: OTHER_SECRET },
+    keys: {
+      "claude-code": SECRET,
+      codex: OTHER_SECRET,
+      "alice/bob": UNSAFE_PRINCIPAL_SECRET,
+      alice_bob: SAFE_PRINCIPAL_SECRET,
+    },
     deps: {
       taskStore,
       journal,
@@ -886,7 +893,8 @@ describe("POST /v1/friction/report", () => {
     });
     const write = harness.munin.writes.at(-1)!;
     expect(write.namespace).toBe("signals/friction");
-    expect(write.key).toContain("cassette_task-1-");
+    expect(write.classification).toBe("internal");
+    expect(write.key).toMatch(/^friction-broker-[0-9a-f]{32}$/);
     expect(write.tags).toEqual(expect.arrayContaining([
       "friction:tool_failure",
       "severity:blocking",
@@ -899,6 +907,7 @@ describe("POST /v1/friction/report", () => {
     expect(write.tags).not.toContain("reporter:spoofed");
     expect(write.tags).not.toContain("reporter:gpt-5.4-codex");
     expect(write.tags).not.toContain("source:standalone-mcp");
+    expect(write.tags).not.toContain("source:model-self-report");
     expect(write.tags).not.toContain("Severity:low");
     expect(write.tags).not.toContain("model:spoofed");
     expect(write.tags).not.toContain("friction:ambiguity");
@@ -942,6 +951,34 @@ describe("POST /v1/friction/report", () => {
     expect(harness.munin.writes.at(-1)?.classification).toBe("client-restricted");
   });
 
+  it("maps a linked private task to client-confidential friction", async () => {
+    harness.munin.reads["tasks/confidential-task/status"] = {
+      namespace: "tasks/confidential-task",
+      key: "status",
+      content: "private task",
+      tags: ["completed"],
+      classification: "private",
+      created_at: "2026-07-11T12:00:00.000Z",
+      updated_at: "2026-07-11T12:00:00.000Z",
+    };
+
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "tool_failure",
+        severity: "high",
+        summary: "confidential task tool failed",
+        detail: "Only operational metadata is included.",
+        event_id: "77777777-8888-4999-8aaa-bbbbbbbbbbbb",
+        task_id: "confidential-task",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(harness.munin.writes.at(-1)?.classification).toBe("client-confidential");
+  });
+
   it("deduplicates an identical authenticated retry onto one Munin event", async () => {
     const body = JSON.stringify({
       friction_type: "connectivity",
@@ -981,6 +1018,83 @@ describe("POST /v1/friction/report", () => {
     )).toHaveLength(1);
   });
 
+  it("serializes overlapping identical and conflicting event retries", async () => {
+    const eventId = "88888888-9999-4aaa-8bbb-cccccccccccc";
+    const event = {
+      friction_type: "connectivity",
+      severity: "high",
+      summary: "overlapping retry",
+      detail: "original evidence",
+      event_id: eventId,
+      task_id: "task-overlap",
+    };
+    const originalWrite = harness.munin.write.bind(harness.munin);
+    let releaseWrite = (): void => {};
+    let markStarted = (): void => {};
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const writeStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+    let blocked = false;
+    const spy = vi.spyOn(harness.munin, "write").mockImplementation(async (
+      namespace,
+      key,
+      content,
+      tags,
+      expectedUpdatedAt,
+      classification,
+    ) => {
+      if (namespace === "signals/friction" && !blocked) {
+        blocked = true;
+        markStarted();
+        await writeGate;
+      }
+      return originalWrite(
+        namespace,
+        key,
+        content,
+        tags,
+        expectedUpdatedAt,
+        classification,
+      );
+    });
+
+    try {
+      const firstPromise = fetch(`${harness.url}/v1/friction/report`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(event),
+      });
+      await writeStarted;
+      const retryPromise = fetch(`${harness.url}/v1/friction/report`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(event),
+      });
+      const conflictPromise = fetch(`${harness.url}/v1/friction/report`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify({ ...event, detail: "conflicting evidence" }),
+      });
+      releaseWrite();
+
+      const [first, retry, conflict] = await Promise.all([
+        firstPromise,
+        retryPromise,
+        conflictPromise,
+      ]);
+      expect(first.status).toBe(201);
+      expect(retry.status).toBe(201);
+      expect(await retry.json()).toMatchObject({ deduplicated: true });
+      expect(conflict.status).toBe(409);
+      expect(await conflict.json()).toMatchObject({ error: "idempotency_collision" });
+      expect(harness.munin.writes.filter(
+        (write) => write.namespace === "signals/friction",
+      )).toHaveLength(1);
+    } finally {
+      releaseWrite();
+      spy.mockRestore();
+    }
+  });
+
   it("rejects reuse of an event identity with different evidence", async () => {
     const eventId = "33333333-4444-4555-8666-777777777777";
     const original = {
@@ -999,7 +1113,11 @@ describe("POST /v1/friction/report", () => {
     const collision = await fetch(`${harness.url}/v1/friction/report`, {
       method: "POST",
       headers: authHeader(),
-      body: JSON.stringify({ ...original, detail: "conflicting evidence" }),
+      body: JSON.stringify({
+        ...original,
+        detail: "conflicting evidence",
+        task_id: "changed-task-id",
+      }),
     });
 
     expect(first.status).toBe(201);
@@ -1023,6 +1141,37 @@ describe("POST /v1/friction/report", () => {
     });
 
     expect(res.status).toBe(400);
+  });
+
+  it("keeps colliding readable principal names in distinct provenance keyspaces", async () => {
+    const body = JSON.stringify({
+      friction_type: "ambiguity",
+      severity: "low",
+      summary: "same event id",
+      detail: "reported by two authenticated principals",
+      event_id: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+    });
+    const postAs = (token: string) => fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      body,
+    });
+
+    const unsafe = await postAs(UNSAFE_PRINCIPAL_SECRET);
+    const safe = await postAs(SAFE_PRINCIPAL_SECRET);
+    expect(unsafe.status).toBe(201);
+    expect(safe.status).toBe(201);
+    const [unsafeWrite, safeWrite] = harness.munin.writes.filter(
+      (write) => write.namespace === "signals/friction",
+    );
+    expect(unsafeWrite?.key).not.toBe(safeWrite?.key);
+    expect(unsafeWrite?.tags).toContainEqual(expect.stringMatching(
+      /^reporter:alice_bob-[0-9a-f]{16}$/,
+    ));
+    expect(safeWrite?.tags).toContain("reporter:alice_bob");
   });
 
   it("rejects unknown authenticated API fields instead of silently dropping them", async () => {

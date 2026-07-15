@@ -33,6 +33,7 @@ import {
   buildFrictionContent,
   buildFrictionNamespace,
   buildFrictionTags,
+  keepCallerFrictionTags,
   sanitiseTaskId,
 } from "../friction/munin-key.js";
 
@@ -77,33 +78,6 @@ export interface FrictionWriteResult {
   deduplicated: boolean;
 }
 
-const SERVER_OWNED_FRICTION_TAG_PREFIXES = [
-  "friction:",
-  "friction-category:",
-  "severity:",
-  "model:",
-  "source:",
-  "schema:",
-  "task:",
-  "resource:",
-  "alias-suggested:",
-  "tool:",
-  "reporter:",
-  "classification:",
-] as const;
-
-function keepCallerFrictionTags(tags: string[] | undefined): string[] | undefined {
-  if (!tags) return undefined;
-  return [...new Set(tags
-    .map((tag) => tag.trim())
-    .filter((tag) => tag.length > 0)
-    .filter((tag) => {
-      const normalized = tag.toLowerCase();
-      return !SERVER_OWNED_FRICTION_TAG_PREFIXES.some((prefix) =>
-        normalized.startsWith(prefix));
-    }))];
-}
-
 function frictionClassification(linkedTaskClassification: string | undefined): string {
   const normalized = linkedTaskClassification?.trim().toLowerCase();
   if (normalized === "client-restricted") return "client-restricted";
@@ -121,7 +95,7 @@ export class FrictionIdempotencyConflictError extends Error {
 
 function buildBrokerFrictionIdentity(
   input: ReportFrictionInput,
-  reporterTag: string,
+  authenticatedReporter: string,
   resolvedTaskId: string | undefined,
   modelId: string,
 ): { key: string; payloadHash: string } {
@@ -132,7 +106,7 @@ function buildBrokerFrictionIdentity(
   // accidental or malicious reuse of that identity for different evidence.
   // Tags are set-like metadata, so ordering does not change payload identity.
   const normalized = {
-    reporter: reporterTag,
+    reporter: authenticatedReporter,
     model_id: modelId,
     task_id: resolvedTaskId ?? null,
     friction_type: input.friction_type,
@@ -148,13 +122,28 @@ function buildBrokerFrictionIdentity(
     .update(JSON.stringify(normalized))
     .digest("hex");
   const eventHash = createHash("sha256")
-    .update(`${reporterTag}\0${input.event_id}`)
+    .update(`${authenticatedReporter}\0${input.event_id}`)
     .digest("hex")
     .slice(0, 32);
   return {
-    key: `${sanitiseTaskId(resolvedTaskId)}-broker-${eventHash}`,
+    key: `friction-broker-${eventHash}`,
     payloadHash,
   };
+}
+
+function brokerReporterTag(authenticatedReporter: string): string {
+  if (/^[A-Za-z0-9._-]{1,64}$/.test(authenticatedReporter)) {
+    return authenticatedReporter;
+  }
+  const digest = createHash("sha256")
+    .update(authenticatedReporter)
+    .digest("hex")
+    .slice(0, 16);
+  const readable = authenticatedReporter
+    .replace(/[^A-Za-z0-9._-]/g, "_")
+    .replace(/^[^A-Za-z0-9]+/, "")
+    .slice(0, 47) || "principal";
+  return `${readable}-${digest}`;
 }
 
 /**
@@ -349,13 +338,11 @@ export class BrokerTaskStore {
       : undefined;
     const modelId = trustedInput.model_id?.trim() || reporter.trim() || "unknown";
     const namespace = buildFrictionNamespace();
-    const reporterTag = reporter
-      .trim()
-      .replace(/[^A-Za-z0-9._-]/g, "_")
-      .slice(0, 64) || "unknown";
+    const authenticatedReporter = reporter || "unknown";
+    const reporterTag = brokerReporterTag(authenticatedReporter);
     const { key, payloadHash } = buildBrokerFrictionIdentity(
       trustedInput,
-      reporterTag,
+      authenticatedReporter,
       resolvedTaskId,
       modelId,
     );
@@ -385,8 +372,12 @@ export class BrokerTaskStore {
         throw new FrictionIdempotencyConflictError(trustedInput.event_id!);
       }
       const tags = [...new Set([
-        ...buildFrictionTags({ input: trustedInput, modelId, resolvedTaskId }),
-        "source:broker-api",
+        ...buildFrictionTags({
+          input: trustedInput,
+          modelId,
+          resolvedTaskId,
+          source: "broker-api",
+        }),
         `reporter:${reporterTag}`,
       ])];
       const contentPayload = JSON.parse(buildFrictionContent({
