@@ -83,6 +83,7 @@ export interface FrictionTagInputs {
   input: ReportFrictionInput;
   modelId: string;
   resolvedTaskId: string | undefined;
+  source?: "model-self-report" | "standalone-mcp" | "broker-api";
 }
 
 export function buildFrictionTags(args: FrictionTagInputs): string[] {
@@ -94,7 +95,7 @@ export function buildFrictionTags(args: FrictionTagInputs): string[] {
     `friction-category:${shortCategory(category)}`,
     `severity:${input.severity}`,
     `model:${modelId}`,
-    "source:model-self-report",
+    `source:${args.source ?? "model-self-report"}`,
     `schema:v${FRICTION_SCHEMA_VERSION}`,
   ];
 

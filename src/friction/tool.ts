@@ -127,14 +127,12 @@ export function buildFrictionTool(deps: FrictionToolDeps): FrictionTool {
       const resolvedModelId = pickModelId(input.model_id, deps.modelId);
       const namespace = buildFrictionNamespace();
       const key = buildFrictionKey(resolvedTaskId, recordedAt);
-      const tags = [...new Set([
-        ...buildFrictionTags({
-          input,
-          modelId: resolvedModelId,
-          resolvedTaskId,
-        }),
-        "source:standalone-mcp",
-      ])];
+      const tags = buildFrictionTags({
+        input,
+        modelId: resolvedModelId,
+        resolvedTaskId,
+        source: "standalone-mcp",
+      });
       const content = buildFrictionContent({
         input,
         modelId: resolvedModelId,

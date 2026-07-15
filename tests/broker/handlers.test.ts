@@ -12,6 +12,8 @@ import type { MuninClient } from "../../src/munin-client.js";
 
 const SECRET = "a".repeat(64);
 const OTHER_SECRET = "b".repeat(64);
+const UNSAFE_PRINCIPAL_SECRET = "c".repeat(64);
+const SAFE_PRINCIPAL_SECRET = "d".repeat(64);
 const FRICTION_EVENT_ID = "11111111-2222-4333-8444-555555555555";
 
 class FakeMunin {
@@ -71,7 +73,12 @@ beforeEach(async () => {
   const broker = await startBroker({
     host: "127.0.0.1",
     port: 0,
-    keys: { "claude-code": SECRET, codex: OTHER_SECRET },
+    keys: {
+      "claude-code": SECRET,
+      codex: OTHER_SECRET,
+      "alice/bob": UNSAFE_PRINCIPAL_SECRET,
+      alice_bob: SAFE_PRINCIPAL_SECRET,
+    },
     deps: {
       taskStore,
       journal,
@@ -899,6 +906,7 @@ describe("POST /v1/friction/report", () => {
     expect(write.tags).not.toContain("reporter:spoofed");
     expect(write.tags).not.toContain("reporter:gpt-5.4-codex");
     expect(write.tags).not.toContain("source:standalone-mcp");
+    expect(write.tags).not.toContain("source:model-self-report");
     expect(write.tags).not.toContain("Severity:low");
     expect(write.tags).not.toContain("model:spoofed");
     expect(write.tags).not.toContain("friction:ambiguity");
@@ -1027,6 +1035,37 @@ describe("POST /v1/friction/report", () => {
     });
 
     expect(res.status).toBe(400);
+  });
+
+  it("keeps colliding readable principal names in distinct provenance keyspaces", async () => {
+    const body = JSON.stringify({
+      friction_type: "ambiguity",
+      severity: "low",
+      summary: "same event id",
+      detail: "reported by two authenticated principals",
+      event_id: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+    });
+    const postAs = (token: string) => fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      body,
+    });
+
+    const unsafe = await postAs(UNSAFE_PRINCIPAL_SECRET);
+    const safe = await postAs(SAFE_PRINCIPAL_SECRET);
+    expect(unsafe.status).toBe(201);
+    expect(safe.status).toBe(201);
+    const [unsafeWrite, safeWrite] = harness.munin.writes.filter(
+      (write) => write.namespace === "signals/friction",
+    );
+    expect(unsafeWrite?.key).not.toBe(safeWrite?.key);
+    expect(unsafeWrite?.tags).toContainEqual(expect.stringMatching(
+      /^reporter:alice_bob-[0-9a-f]{16}$/,
+    ));
+    expect(safeWrite?.tags).toContain("reporter:alice_bob");
   });
 
   it("rejects unknown authenticated API fields instead of silently dropping them", async () => {
