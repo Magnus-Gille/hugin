@@ -437,7 +437,9 @@ export interface TaskBranchOptions {
    * can never branch a production checkout.
    */
   reposRoot?: string;
-  /** Pin origin/main before the agent runs so later exam evidence cannot trust an agent-mutated ref. */
+  /** Explicit remote branch name for disconnected or unusual repositories. */
+  baseBranchOverride?: string;
+  /** Pin the resolved base before the agent runs so later evidence cannot trust an agent-mutated ref. */
   captureBaseCommit?: boolean;
 }
 
@@ -445,6 +447,7 @@ export interface TaskBranchResult {
   /** skipped: not a managed git repo; created: branch ready; fetch-failed: network error, no branch */
   action: "skipped" | "created" | "fetch-failed";
   branchName?: string;
+  baseBranch?: string;
   baseCommit?: string;
   error?: string;
 }
@@ -464,6 +467,7 @@ export interface BranchFinalizeResult {
  * this record only pins the exact before/after trees and their changed paths.
  */
 export interface RepositoryChangeEvidence {
+  baseBranch: string;
   baseCommit: string;
   headCommit: string;
   changedFiles: string[];
@@ -473,11 +477,167 @@ export interface RepositoryChangeEvidence {
 export interface BranchFinalizeOptions {
   /** Capture exact before/after repository evidence for the daily exam factory. */
   captureRepositoryChange?: boolean;
-  /** Pre-agent origin/main commit returned by checkoutTaskBranch. */
+  /** Resolved remote branch returned by checkoutTaskBranch. */
+  baseBranch?: string;
+  /** Pre-agent base commit returned by checkoutTaskBranch. */
   baseCommit?: string;
 }
 
 const DEFAULT_FETCH_RETRY_DELAYS_MS = [500, 2000];
+const GIT_COMMIT_ID = /^[0-9a-f]{40,64}$/;
+
+export interface ParsedBaseBranchOverride {
+  baseBranch?: string;
+  error?: string;
+}
+
+/**
+ * Validate a branch name without invoking a shell. This mirrors Git's
+ * check-ref-format restrictions and additionally requires a branch name (not
+ * an `origin/*` or `refs/*` ref) so Hugin can construct one canonical remote
+ * tracking ref for every subsequent operation.
+ */
+export function isValidBaseBranchName(value: string): boolean {
+  if (!value || value !== value.trim() || value.length > 255) return false;
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) ||
+    value === "@" ||
+    value.toUpperCase() === "HEAD" ||
+    value.startsWith("-") ||
+    value.startsWith("/") ||
+    value.endsWith("/") ||
+    value.endsWith(".") ||
+    value.startsWith("origin/") ||
+    value.startsWith("refs/") ||
+    value.includes("..") ||
+    value.includes("//") ||
+    value.includes("@{") ||
+    /[\x00-\x20\x7f~^:?*[\]\\]/.test(value)
+  ) {
+    return false;
+  }
+  return value.split("/").every(
+    (component) =>
+      component.length > 0 &&
+      !component.startsWith(".") &&
+      !component.endsWith(".lock"),
+  );
+}
+
+/** Parse and validate the optional `Base branch:` task field. */
+export function parseBaseBranchOverride(content: string): ParsedBaseBranchOverride {
+  // Task metadata ends at `### Prompt`; prompt prose must never be able to
+  // select Git control-plane state by merely mentioning this field.
+  const metadata = content.split(/^###\s*Prompt\s*$/im, 1)[0] ?? "";
+  const raw = metadata.match(/\*\*Base branch:\*\*\s*(.+)/i)?.[1]?.trim();
+  if (!raw) return {};
+  if (!isValidBaseBranchName(raw)) {
+    return {
+      error:
+        `invalid Base branch override ${JSON.stringify(raw)}; provide a branch name ` +
+        "such as main, master, or release/stable (not an origin/* or refs/* ref)",
+    };
+  }
+  return { baseBranch: raw };
+}
+
+interface ResolvedBaseBranch {
+  baseBranch: string;
+  baseCommit: string;
+  source: "override" | "origin-head" | "remote-head";
+}
+
+async function verifyRemoteBaseBranch(
+  workingDir: string,
+  baseBranch: string,
+): Promise<{ baseCommit?: string; error?: string }> {
+  const remoteRef = `refs/remotes/origin/${baseBranch}`;
+  const base = await runGitCapture(workingDir, [
+    "rev-parse", "--verify", `${remoteRef}^{commit}`,
+  ]);
+  const baseCommit = base.stdout.toString("utf8").trim().toLowerCase();
+  if (!base.ok || !GIT_COMMIT_ID.test(baseCommit)) {
+    return {
+      error: `${remoteRef} has no valid commit: ${base.stderr || "invalid commit id"}`,
+    };
+  }
+  return { baseCommit };
+}
+
+async function resolveRepositoryBaseBranch(
+  workingDir: string,
+  override: string | undefined,
+): Promise<{ resolved?: ResolvedBaseBranch; error?: string }> {
+  if (override) {
+    if (!isValidBaseBranchName(override)) {
+      return { error: `invalid base-branch override ${JSON.stringify(override)}` };
+    }
+    const verified = await verifyRemoteBaseBranch(workingDir, override);
+    if (!verified.baseCommit) {
+      return {
+        error:
+          `explicit base branch ${JSON.stringify(override)} is unavailable: ` +
+          (verified.error || "unknown error"),
+      };
+    }
+    return {
+      resolved: {
+        baseBranch: override,
+        baseCommit: verified.baseCommit,
+        source: "override",
+      },
+    };
+  }
+
+  const symbolic = await runGitCapture(workingDir, [
+    "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD",
+  ]);
+  if (symbolic.ok) {
+    const candidate = symbolic.stdout.toString("utf8").trim();
+    if (candidate.startsWith("origin/")) {
+      const branch = candidate.slice("origin/".length);
+      if (isValidBaseBranchName(branch)) {
+        const verified = await verifyRemoteBaseBranch(workingDir, branch);
+        if (verified.baseCommit) {
+          return {
+            resolved: {
+              baseBranch: branch,
+              baseCommit: verified.baseCommit,
+              source: "origin-head",
+            },
+          };
+        }
+      }
+    }
+  }
+
+  const remoteHead = await runGitCapture(workingDir, [
+    "ls-remote", "--symref", "origin", "HEAD",
+  ]);
+  if (remoteHead.ok) {
+    for (const line of remoteHead.stdout.toString("utf8").split("\n")) {
+      const match = line.match(/^ref:\s+refs\/heads\/(.+)\tHEAD$/);
+      const branch = match?.[1];
+      if (!branch || !isValidBaseBranchName(branch)) continue;
+      const verified = await verifyRemoteBaseBranch(workingDir, branch);
+      if (verified.baseCommit) {
+        return {
+          resolved: {
+            baseBranch: branch,
+            baseCommit: verified.baseCommit,
+            source: "remote-head",
+          },
+        };
+      }
+    }
+  }
+
+  return {
+    error:
+      "could not resolve a valid origin default branch from origin/HEAD or remote HEAD; " +
+      "set an explicit Base branch task field",
+  };
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -507,8 +667,9 @@ async function runGitFetch(
 }
 
 /**
- * Pre-task: fetch origin and checkout a fresh branch `hugin/<taskId>` from
- * `origin/main`. Replaces the old `syncRepoBeforeTask` fast-forward approach.
+ * Pre-task: fetch origin, resolve its default branch, and checkout a fresh
+ * `hugin/<taskId>` branch from that exact remote-tracking ref. Replaces the old
+ * `syncRepoBeforeTask` fast-forward approach.
  *
  * - Returns `skipped` for non-managed directories (outside `reposRoot`
  *   (default /home/magnus/repos/), not a git repo, no remote). Task proceeds
@@ -522,6 +683,15 @@ export async function checkoutTaskBranch(
   taskId: string,
   options: TaskBranchOptions = {},
 ): Promise<TaskBranchResult> {
+  if (
+    options.baseBranchOverride !== undefined &&
+    !isValidBaseBranchName(options.baseBranchOverride)
+  ) {
+    return {
+      action: "fetch-failed",
+      error: `Invalid base-branch override ${JSON.stringify(options.baseBranchOverride)}`,
+    };
+  }
   // Canonicalize both sides before the prefix check: a raw `startsWith` guard
   // can be bypassed with `..` segments that string-match the isolated root but
   // resolve (via the OS `cwd`) onto a production checkout — the exact
@@ -583,30 +753,36 @@ export async function checkoutTaskBranch(
     );
   }
 
-  if (!fetchOk) {
+  if (!fetchOk && !options.baseBranchOverride) {
     return {
       action: "fetch-failed",
       error: `git fetch origin failed in ${workingDir} after ${totalAttempts} attempts — proceeding without branch`,
     };
   }
-
-  let baseCommit: string | undefined;
-  if (options.captureBaseCommit) {
-    const base = await runGitCapture(workingDir, ["rev-parse", "origin/main"]);
-    const candidate = base.stdout.toString("utf8").trim().toLowerCase();
-    if (!base.ok || !/^[0-9a-f]{40,64}$/.test(candidate)) {
-      return {
-        action: "fetch-failed",
-        error: `Failed to pin origin/main before task execution: ${base.stderr || "invalid commit id"}`,
-      };
-    }
-    baseCommit = candidate;
+  if (!fetchOk) {
+    console.warn(
+      `Pre-task git fetch failed in ${workingDir}; attempting explicit base branch ` +
+        `${JSON.stringify(options.baseBranchOverride)} from the existing remote-tracking ref`,
+    );
   }
+
+  const baseResolution = await resolveRepositoryBaseBranch(
+    workingDir,
+    options.baseBranchOverride,
+  );
+  if (!baseResolution.resolved) {
+    return {
+      action: "fetch-failed",
+      error: `Failed to resolve repository base branch: ${baseResolution.error || "unknown error"}`,
+    };
+  }
+  const { baseBranch, baseCommit, source } = baseResolution.resolved;
+  const baseRef = `origin/${baseBranch}`;
 
   const branchName = `hugin/${taskId}`;
 
   const checkoutOk = await new Promise<boolean>((resolve) => {
-    const child = spawn("git", ["checkout", "-b", branchName, "origin/main"], {
+    const child = spawn("git", ["checkout", "-b", branchName, baseRef], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, HOME: "/home/magnus" },
@@ -630,17 +806,25 @@ export async function checkoutTaskBranch(
     };
   }
 
-  console.log(`Pre-task: checked out branch ${branchName} from origin/main in ${workingDir}`);
-  return { action: "created", branchName, baseCommit };
+  console.log(
+    `Pre-task: checked out branch ${branchName} from ${baseRef} ` +
+      `(resolved via ${source}) in ${workingDir}`,
+  );
+  return {
+    action: "created",
+    branchName,
+    baseBranch,
+    baseCommit: options.captureBaseCommit ? baseCommit : undefined,
+  };
 }
 
 /**
  * Post-task: finalize a task branch.
  *
  * 1. Auto-commits any uncommitted changes the task left behind.
- * 2. If no commits exist on the branch vs origin/main: cleans up the branch
+ * 2. If no commits exist on the branch vs the resolved base: cleans up the branch
  *    (read-only tasks like research spikes).
- * 3. If commits exist: pushes branch and opens a PR against main.
+ * 3. If commits exist: pushes branch and opens a PR against that same base.
  *
  * Returns `pr-created` with `prUrl` on success, `no-changes` if nothing to
  * deliver, or `push-failed` on git/gh errors (non-fatal: task result is still
@@ -653,6 +837,20 @@ export async function finalizeTaskBranch(
   allowedEgressHosts: string[],
   options: BranchFinalizeOptions = {},
 ): Promise<BranchFinalizeResult> {
+  const baseBranch = options.baseBranch ?? "main";
+  if (!isValidBaseBranchName(baseBranch)) {
+    return {
+      action: "push-failed",
+      branchName,
+      error: `Invalid resolved base branch ${JSON.stringify(baseBranch)}`,
+    };
+  }
+  const baseRef = `origin/${baseBranch}`;
+  const pinnedBaseCommit = options.baseCommit?.trim().toLowerCase();
+  const comparisonBase = pinnedBaseCommit && GIT_COMMIT_ID.test(pinnedBaseCommit)
+    ? pinnedBaseCommit
+    : baseRef;
+
   // Auto-commit uncommitted changes (task may have written files without committing)
   const isDirty = await new Promise<boolean>((resolve) => {
     const child = spawn("git", ["status", "--porcelain"], {
@@ -694,29 +892,47 @@ export async function finalizeTaskBranch(
     }
   }
 
-  // Count commits on the branch that aren't on origin/main
-  const commitsAhead = await new Promise<number>((resolve) => {
-    const child = spawn("git", ["rev-list", "--count", "origin/main..HEAD"], {
+  // Count commits on the branch that aren't on the resolved remote base.
+  const commitsAhead = await new Promise<number | null>((resolve) => {
+    const child = spawn("git", ["rev-list", "--count", `${comparisonBase}..HEAD`], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, HOME: "/home/magnus" },
     });
     let out = "";
     child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
-    child.on("close", (code) => resolve(code === 0 ? parseInt(out.trim(), 10) || 0 : 0));
-    child.on("error", () => resolve(0));
+    child.on("close", (code) => {
+      if (code !== 0 || !/^\d+$/.test(out.trim())) {
+        resolve(null);
+        return;
+      }
+      resolve(parseInt(out.trim(), 10));
+    });
+    child.on("error", () => resolve(null));
   });
+
+  if (commitsAhead === null) {
+    return {
+      action: "push-failed",
+      branchName,
+      error: `Failed to compare task branch against pinned base ${comparisonBase}`,
+    };
+  }
 
   if (commitsAhead === 0) {
     console.log(`Post-task: no changes on ${branchName} — cleaning up`);
-    await cleanupLocalBranch(workingDir, branchName);
+    await cleanupLocalBranch(workingDir, branchName, comparisonBase);
     return { action: "no-changes" };
   }
 
   let repositoryChange: RepositoryChangeEvidence | undefined;
   let repositoryChangeError: string | undefined;
   if (options.captureRepositoryChange) {
-    const captured = await captureRepositoryChange(workingDir, options.baseCommit);
+    const captured = await captureRepositoryChange(
+      workingDir,
+      baseBranch,
+      options.baseCommit,
+    );
     repositoryChange = captured.evidence;
     repositoryChangeError = captured.error;
     if (repositoryChangeError) {
@@ -784,7 +1000,13 @@ export async function finalizeTaskBranch(
 
   // Open PR
   const taskId = branchName.replace(/^hugin\//, "");
-  const prUrl = await createPullRequest(workingDir, branchName, taskId, prBody);
+  const prUrl = await createPullRequest(
+    workingDir,
+    branchName,
+    baseBranch,
+    taskId,
+    prBody,
+  );
   if (!prUrl) {
     return {
       action: "push-failed",
@@ -834,6 +1056,7 @@ async function runGitCapture(
 
 async function captureRepositoryChange(
   workingDir: string,
+  baseBranch: string,
   preTaskBaseCommit: string | undefined,
 ): Promise<{ evidence?: RepositoryChangeEvidence; error?: string }> {
   const baseCommit = preTaskBaseCommit?.trim().toLowerCase();
@@ -870,6 +1093,7 @@ async function captureRepositoryChange(
 
   return {
     evidence: {
+      baseBranch,
       baseCommit,
       headCommit,
       changedFiles,
@@ -878,10 +1102,14 @@ async function captureRepositoryChange(
   };
 }
 
-async function cleanupLocalBranch(workingDir: string, branchName: string): Promise<void> {
+async function cleanupLocalBranch(
+  workingDir: string,
+  branchName: string,
+  detachTarget: string,
+): Promise<void> {
   // Detach HEAD so we can delete the branch we're on
   await new Promise<void>((resolve) => {
-    const child = spawn("git", ["checkout", "--detach", "origin/main"], {
+    const child = spawn("git", ["checkout", "--detach", detachTarget], {
       cwd: workingDir,
       stdio: "ignore",
       env: { ...process.env, HOME: "/home/magnus" },
@@ -904,6 +1132,7 @@ async function cleanupLocalBranch(workingDir: string, branchName: string): Promi
 async function createPullRequest(
   workingDir: string,
   branchName: string,
+  baseBranch: string,
   taskId: string,
   body: string,
 ): Promise<string | null> {
@@ -912,7 +1141,7 @@ async function createPullRequest(
       "gh",
       [
         "pr", "create",
-        "--base", "main",
+        "--base", baseBranch,
         "--head", branchName,
         "--title", `hugin: ${taskId}`,
         "--body", body,

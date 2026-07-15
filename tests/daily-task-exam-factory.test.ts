@@ -54,6 +54,7 @@ function resultContent(runtime: "claude" | "homeserver" = "claude"): string {
     bodyText: "Sensitive answer text that must not enter the candidate manifest",
     prUrl: "https://github.com/Magnus-Gille/demo/pull/42",
     repositoryChange: {
+      baseBranch: "master",
       baseCommit: BASE,
       headCommit: HEAD,
       changedFiles: ["src/parser.ts", "tests/parser.test.ts"],
@@ -138,6 +139,7 @@ describe("daily task exam factory", () => {
     expect(candidate.repository).toEqual(expect.objectContaining({
       githubRepository: "Magnus-Gille/demo",
       contextAlias: "repo:demo",
+      baseBranch: "master",
       baseCommit: BASE,
       headCommit: HEAD,
       diffSha256: DIFF,

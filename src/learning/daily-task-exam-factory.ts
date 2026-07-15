@@ -37,6 +37,9 @@ export const dailyExamCandidateSchema = z.object({
     githubRepository: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
     contextAlias: z.string().regex(/^repo:[A-Za-z0-9._-]+$/).optional(),
     pullRequestUrl: z.string().url(),
+    // Optional for historical task-result schema v1 rows; current Hugin
+    // results always bind the resolved repository base branch (#217).
+    baseBranch: z.string().min(1).max(255).optional(),
     baseCommit: gitCommitSchema,
     headCommit: gitCommitSchema,
     changedFiles: z.array(z.string().min(1)).min(1).max(10_000),
@@ -284,6 +287,7 @@ export function buildDailyExamCandidate(source: DailyTaskHarvestSource): DailyEx
     taskNamespace: source.status.namespace,
     taskDocumentSha256: sha256(taskDocument),
     promptSha256: promptFingerprint ?? null,
+    baseBranch: change?.baseBranch ?? null,
     baseCommit: change?.baseCommit ?? null,
     headCommit: change?.headCommit ?? null,
     diffSha256: change?.diffSha256 ?? null,
