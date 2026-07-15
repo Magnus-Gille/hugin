@@ -582,5 +582,5 @@ Runtime (gated by #77):
 - [ ] slice-one `RouteBinding` flipped to `active` behind `HUGIN_SKILL_LANE=active`.
 
 Docs/ops:
-- [ ] New env vars documented in `CLAUDE.md` (`HUGIN_SKILL_LANE`, retrieval thresholds, semaphore policy).
+- [ ] New env vars documented in `AGENTS.md` or a focused operator document (`HUGIN_SKILL_LANE`, retrieval thresholds, semaphore policy).
 - [ ] Open findings filed as GitHub issues, not left as prose.
