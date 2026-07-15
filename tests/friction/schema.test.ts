@@ -85,6 +85,31 @@ describe("friction schema", () => {
         detail: "",
       }),
     ).toThrow();
+    expect(() =>
+      reportFrictionInputSchema.parse({
+        friction_type: "ambiguity",
+        severity: "low",
+        summary: "   ",
+        detail: "y",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects line breaks and empty values in tag metadata", () => {
+    expect(() => reportFrictionInputSchema.parse({
+      friction_type: "tool_failure",
+      severity: "high",
+      summary: "x",
+      detail: "y",
+      model_id: "model\nspoof",
+    })).toThrow();
+    expect(() => reportFrictionInputSchema.parse({
+      friction_type: "tool_failure",
+      severity: "high",
+      summary: "x",
+      detail: "y",
+      tags: ["   "],
+    })).toThrow();
   });
 
   it("rejects too-long summary or detail", () => {

@@ -15,7 +15,13 @@ const OTHER_SECRET = "b".repeat(64);
 const FRICTION_EVENT_ID = "11111111-2222-4333-8444-555555555555";
 
 class FakeMunin {
-  writes: Array<{ namespace: string; key: string; content: string; tags?: string[] }> = [];
+  writes: Array<{
+    namespace: string;
+    key: string;
+    content: string;
+    tags?: string[];
+    classification?: string;
+  }> = [];
   reads: Record<string, unknown> = {};
   queryCalls = 0;
   queryReturn: { results: unknown[]; total: number } = { results: [], total: 0 };
@@ -25,11 +31,12 @@ class FakeMunin {
     content: string,
     tags?: string[],
     _expectedUpdatedAt?: string,
-    _classification?: string,
+    classification?: string,
   ): Promise<Record<string, unknown>> {
-    this.writes.push({ namespace, key, content, tags });
+    this.writes.push({ namespace, key, content, tags, classification });
     this.reads[`${namespace}/${key}`] = {
       namespace, key, content, tags: tags ?? [],
+      classification,
       created_at: "2026-07-11T12:00:00.000Z",
       updated_at: "2026-07-11T12:00:00.000Z",
     };
@@ -855,7 +862,17 @@ describe("POST /v1/friction/report", () => {
         task_id: "cassette/task-1",
         model_id: "gpt-5.4-codex",
         tool_name: "codex-exec",
-        tags: ["reporter:spoofed", "source:standalone-mcp", "repo:cassette-ai"],
+        tags: [
+          "reporter:spoofed",
+          "source:standalone-mcp",
+          "Severity:low",
+          "model:spoofed",
+          "friction:ambiguity",
+          "task:spoofed",
+          "tool:spoofed",
+          "classification:public",
+          "repo:cassette-ai",
+        ],
       }),
     });
 
@@ -882,6 +899,12 @@ describe("POST /v1/friction/report", () => {
     expect(write.tags).not.toContain("reporter:spoofed");
     expect(write.tags).not.toContain("reporter:gpt-5.4-codex");
     expect(write.tags).not.toContain("source:standalone-mcp");
+    expect(write.tags).not.toContain("Severity:low");
+    expect(write.tags).not.toContain("model:spoofed");
+    expect(write.tags).not.toContain("friction:ambiguity");
+    expect(write.tags).not.toContain("task:spoofed");
+    expect(write.tags).not.toContain("tool:spoofed");
+    expect(write.tags).not.toContain("classification:public");
     expect(JSON.parse(write.content)).toMatchObject({
       model_id: "gpt-5.4-codex",
       event_id: FRICTION_EVENT_ID,
@@ -889,6 +912,34 @@ describe("POST /v1/friction/report", () => {
       friction_type: "tool_failure",
       user_tags: ["repo:cassette-ai"],
     });
+  });
+
+  it("inherits the restricted classification of a linked private task", async () => {
+    harness.munin.reads["tasks/private-task/status"] = {
+      namespace: "tasks/private-task",
+      key: "status",
+      content: "private task",
+      tags: ["running"],
+      classification: "client-restricted",
+      created_at: "2026-07-11T12:00:00.000Z",
+      updated_at: "2026-07-11T12:00:00.000Z",
+    };
+
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "tool_failure",
+        severity: "high",
+        summary: "private task tool failed",
+        detail: "Only operational metadata is included.",
+        event_id: "44444444-5555-4666-8777-888888888888",
+        task_id: "private-task",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(harness.munin.writes.at(-1)?.classification).toBe("client-restricted");
   });
 
   it("deduplicates an identical authenticated retry onto one Munin event", async () => {
@@ -968,6 +1019,23 @@ describe("POST /v1/friction/report", () => {
         severity: "low",
         summary: "unclear wording",
         detail: "needed an assumption",
+      }),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects unknown authenticated API fields instead of silently dropping them", async () => {
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "ambiguity",
+        severity: "low",
+        summary: "unclear wording",
+        detail: "needed an assumption",
+        event_id: "55555555-6666-4777-8888-999999999999",
+        severty: "high",
       }),
     });
 

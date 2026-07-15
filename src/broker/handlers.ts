@@ -51,7 +51,7 @@ import { reportFrictionInputSchema } from "../friction/schema.js";
 
 const brokerFrictionInputSchema = reportFrictionInputSchema.extend({
   event_id: z.string().uuid(),
-});
+}).strict();
 
 export interface BrokerHandlerDependencies {
   taskStore: BrokerTaskStore;
@@ -516,8 +516,9 @@ export function createFrictionHandler(deps: BrokerHandlerDependencies) {
       }
       res.status(500).json({
         error: "internal",
-        message: `friction write failed: ${err instanceof Error ? err.message : String(err)}`,
+        message: "friction write failed",
       });
+      console.error("[broker] friction write failed:", err);
     }
   };
 }

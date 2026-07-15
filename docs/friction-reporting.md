@@ -30,9 +30,13 @@ write returns an error so the caller knows the evidence was not recorded.
 The Broker endpoint is available only when the authenticated Broker is enabled.
 It defaults `model_id` to the authenticated principal and adds
 `source:broker-api` plus `reporter:<principal>` tags. A caller may provide a
-more precise `model_id`, but the authenticated reporter tag remains. The
-`source:*` and `reporter:*` prefixes are server-owned; caller-supplied tags with
-either prefix are discarded.
+more precise `model_id`, but the authenticated reporter tag remains. Taxonomy,
+model, task, tool, classification, and provenance tag prefixes are server-owned;
+caller-supplied tags with those prefixes are discarded. Routing tags such as
+`repo:*`, `issue:*`, and `phase:*` remain available to callers.
+
+When `task_id` resolves to a private Munin task, the friction event inherits its
+restricted classification. Reports without a linked task remain `internal`.
 
 Broker writes are retry-safe without losing recurrence frequency. Each event
 has an `event_id`: the MCP and CLI clients generate one automatically and reuse
