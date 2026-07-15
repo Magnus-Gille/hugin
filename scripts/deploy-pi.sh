@@ -176,28 +176,20 @@ else
   echo "  NAS reachability are fixed (else delivery-capable tasks will fail)."
 fi
 
-echo "==> Codex sandbox preflight (issue #59)..."
-# Codex's `codex exec` sandboxes shell commands and apply_patch through
-# bubblewrap. When the system `bwrap` is missing, Codex silently falls back to a
-# VENDORED bwrap that is incompatible with the Pi kernel: every shell command and
-# file write fails with `bwrap: loopback: Failed to create NETLINK_ROUTE socket`,
-# yet the task still exits 0 — so codex tasks "succeed" while delivering nothing
-# (issue #59). Ensure the system bwrap exists AND can actually create the
-# network namespace + loopback that Codex relies on. Non-fatal WARNING: this only
-# affects the codex runtime, so it must not block a deploy that runs claude/ollama
-# tasks. The runtime fix is `sudo apt install bubblewrap`.
+echo "==> Host-side Codex sandbox preflight (issues #59/#218)..."
+# Exercise Codex's own zero-token sandbox entry point, not merely whichever
+# bwrap happens to be first on PATH. This catches a missing/incompatible system
+# bwrap before restart. It is still outside hugin.service confinement; the
+# post-restart /health gate below is authoritative because Hugin repeats this
+# exact command from inside the live unit before polling or any Codex task.
 if ssh "$REMOTE" "
-  command -v bwrap >/dev/null 2>&1 || { echo 'NO_BWRAP'; exit 1; }
-  # Mirror codex's usage: unshare the network namespace and bring up loopback.
-  # This is the exact path that fails with the vendored bwrap on the Pi kernel.
-  bwrap --unshare-net --ro-bind / / --dev /dev /bin/true 2>/dev/null || { echo 'BWRAP_NETNS_FAIL'; exit 1; }
+  command -v codex >/dev/null 2>&1 || { echo 'NO_CODEX'; exit 1; }
+  codex sandbox -- /bin/true >/dev/null 2>&1 || { echo 'CODEX_SANDBOX_FAIL'; exit 1; }
 "; then
-  echo "  OK: system bwrap present and network-namespace probe passed (codex sandbox healthy)"
+  echo "  OK: Codex zero-token sandbox command passed on the host"
 else
-  echo "  WARNING: codex sandbox preflight FAILED."
-  echo "  Codex tasks will exit 0 but deliver nothing (vendored-bwrap fallback is"
-  echo "  incompatible with the Pi kernel). Fix on the Pi: sudo apt install bubblewrap"
-  echo "  then re-run this probe. Until then, do not route code-capable tasks to codex."
+  echo "  WARNING: host-side Codex sandbox preflight FAILED."
+  echo "  The post-restart in-service health acceptance will remain authoritative."
 fi
 
 echo "==> Refreshing Claude config on the Pi (claude-config bootstrap)..."
@@ -233,7 +225,23 @@ echo "==> Restarting service..."
 ssh "$REMOTE" "XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart hugin.service && sleep 2 && XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status hugin.service --no-pager"
 
 echo "==> Health check..."
-ssh "$REMOTE" "curl -fsS http://127.0.0.1:3032/health"
+ssh "$REMOTE" "
+  for attempt in \$(seq 1 15); do
+    if curl -fsS http://127.0.0.1:3032/health | /usr/bin/node -e '
+      let raw = "";
+      process.stdin.on("data", (chunk) => raw += chunk).on("end", () => {
+        const health = JSON.parse(raw);
+        if (health.codex_sandbox?.available !== true) process.exit(1);
+        process.stdout.write(raw);
+      });
+    '; then
+      exit 0
+    fi
+    sleep 1
+  done
+  echo 'in-service Codex sandbox self-test unavailable after 15 attempts' >&2
+  exit 1
+"
 
 echo "==> Daily exam factory acceptance..."
 ssh "$REMOTE" "

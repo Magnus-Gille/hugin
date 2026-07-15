@@ -44,7 +44,7 @@ if [[ "$call" == *"test -d ~/repos/claude-config"* ]]; then
   exit 1
 fi
 if [[ "$call" == *"curl -fsS http://127.0.0.1:3032/health"* ]]; then
-  printf '{"status":"ok","polling":true}\n'
+  printf '{"status":"ok","polling":true,"codex_sandbox":{"available":true}}\n'
 fi
 exit 0
 EOF
@@ -246,6 +246,9 @@ assert_not_contains "$full_calls" "git reset" "deployment never depends on a rem
 assert_contains "$full_calls" "npm ci --omit=dev" "deployment installs the shipped lockfile deterministically"
 assert_not_contains "$full_calls" "npm install --omit=dev" "deployment never rewrites the shipped lockfile with npm install"
 assert_contains "$full_calls" "curl -fsS http://127.0.0.1:3032/health" "deployment retains the health acceptance gate"
+assert_contains "$full_calls" "health.codex_sandbox?.available !== true" "deployment health gate requires the live service-context Codex probe"
+assert_contains "$full_calls" "in-service Codex sandbox self-test unavailable after 15 attempts" "deployment waits for a definitive in-service probe result"
+assert_contains "$full_calls" "codex sandbox -- /bin/true" "deployment host preflight exercises Codex's zero-token sandbox entry point"
 assert_contains "$full_calls" "enable --now hugin-daily-exam-factory.timer" "deployment enables the automatic daily factory"
 assert_contains "$full_calls" "start hugin-daily-exam-factory.service" "deployment runs a factory acceptance sweep"
 assert_contains "$full_calls" "daily exam manifest must be schema v2" "deployment requires the cross-client exposure manifest contract"

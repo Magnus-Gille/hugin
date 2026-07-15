@@ -27,6 +27,13 @@ import {
   DEPS_DRIFT_FAILURE_KIND,
 } from "./failure-classification.js";
 import {
+  buildCodexSandboxFrictionEvent,
+  CODEX_SANDBOX_FAILURE_KIND,
+  codexSandboxFailureClassification,
+  probeCodexSandbox,
+  type CodexSandboxProbeResult,
+} from "./codex-sandbox.js";
+import {
   decideAuthAlarm,
   alertDeliveryCommitsTransition,
   hydratePersistedAuthAlarmState,
@@ -2026,10 +2033,31 @@ interface SpawnContext {
   muninClient: MuninClient;
 }
 
+interface SpawnRuntimeResult {
+  exitCode: number | "TIMEOUT";
+  output: string;
+  logFile: string;
+  preflightFailureKind?: typeof CODEX_SANDBOX_FAILURE_KIND;
+  preflightFailureReason?: string;
+}
+
+let codexSandboxStatus: CodexSandboxProbeResult | null = null;
+
+async function refreshCodexSandboxStatus(): Promise<CodexSandboxProbeResult> {
+  const result = await probeCodexSandbox();
+  codexSandboxStatus = result;
+  if (result.available) {
+    console.log(`[codex-sandbox] ready (${result.command})`);
+  } else {
+    console.error(`[codex-sandbox] unavailable: ${result.reason}`);
+  }
+  return result;
+}
+
 function spawnRuntime(
   task: TaskConfig,
   ctx: SpawnContext
-): Promise<{ exitCode: number | "TIMEOUT"; output: string; logFile: string }> {
+): Promise<SpawnRuntimeResult> {
   if (task.runtime !== "codex") {
     throw new Error(`Spawn executor no longer supports runtime "${task.runtime}"`);
   }
@@ -2169,6 +2197,47 @@ function spawnRuntime(
       });
     });
   });
+}
+
+async function executeCodexWithPreflightChecks(
+  task: TaskConfig,
+  ctx: SpawnContext,
+): Promise<SpawnRuntimeResult> {
+  const probe = await refreshCodexSandboxStatus();
+  if (probe.available) return spawnRuntime(task, ctx);
+
+  const taskId = extractTaskId(ctx.taskNs);
+  const logFile = path.join(LOG_DIR, `${taskId}.log`);
+  const reason = probe.reason || "Codex sandbox self-test failed without a diagnostic";
+  try {
+    fs.writeFileSync(
+      logFile,
+      [
+        "=== Hugin Task Log (Codex preflight) ===",
+        `Task: ${ctx.taskNs}`,
+        `Started: ${new Date().toISOString()}`,
+        "===",
+        reason,
+        "",
+        "===",
+        "Exit code: 1",
+        `Failure kind: ${CODEX_SANDBOX_FAILURE_KIND}`,
+        "No model was invoked.",
+        "===",
+        "",
+      ].join("\n"),
+      { encoding: "utf8" },
+    );
+  } catch {
+    /* log is best-effort — never turn a known infra refusal into a crash */
+  }
+  return {
+    exitCode: 1,
+    output: reason,
+    logFile,
+    preflightFailureKind: CODEX_SANDBOX_FAILURE_KIND,
+    preflightFailureReason: reason,
+  };
 }
 
 // --- Lease helpers ---
@@ -4447,6 +4516,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
     const isOllama = task.runtime === "ollama";
     const isClaude = task.runtime === "claude";
+    const isCodex = task.runtime === "codex";
     const isOpencode = task.runtime === "opencode";
     const isHomeserver = task.runtime === "homeserver";
     const isOrchestrator = task.runtime === "orchestrator";
@@ -4454,13 +4524,15 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       ? "ollama"
       : isClaude
         ? "agent-sdk"
-        : isHomeserver
-          ? "homeserver-delegate"
-        : isOpencode
-          ? "opencode"
-          : isOrchestrator
-            ? "orchestrator"
-            : "spawn";
+        : isCodex
+          ? "codex-spawn"
+          : isHomeserver
+            ? "homeserver-delegate"
+            : isOpencode
+              ? "opencode"
+              : isOrchestrator
+                ? "orchestrator"
+                : "spawn";
 
     // Capture quota before task execution (skip for ollama — it's Claude-specific)
     const quotaBefore = isOllama || isHomeserver ? { q5: null, q7: null } : await fetchQuota();
@@ -4495,6 +4567,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // refused the task itself, so the classification below never has to
     // regex-sniff synthetic output.
     let sdkPreflightFailureKind: typeof AUTH_FAILURE_KIND | typeof DEPS_DRIFT_FAILURE_KIND | undefined;
+    let codexPreflightFailureReason: string | undefined;
     let fallbackTriggered = false;
     let fallbackReason: string | null = null;
 
@@ -4879,10 +4952,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     orchOutcomes = orchResult.outcomes;
     orchSavings = orchResult.savings;
     } else {
-      const spawnResult = await spawnRuntime(task, { taskNs, muninClient: munin });
+      const spawnResult = await executeCodexWithPreflightChecks(task, {
+        taskNs,
+        muninClient: munin,
+      });
       exitCode = spawnResult.exitCode;
       output = spawnResult.output;
       logFile = spawnResult.logFile;
+      if (spawnResult.preflightFailureKind === CODEX_SANDBOX_FAILURE_KIND) {
+        codexPreflightFailureReason = spawnResult.preflightFailureReason;
+      }
     }
 
     // The agent run is done. Lease renewal is stopped HERE, before the
@@ -4944,17 +5023,43 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // discriminator (sdkPreflightFailureKind) — only a REAL SDK run (no
     // discriminator) falls back to regex-classifying its output (Codex
     // review, #123: DEPS_DRIFT is never inferred from output text).
-    const failureClassification =
-      !ok && !isTimeout && !isCancelled && (isClaude || fallbackTriggered)
-        ? sdkPreflightFailureKind === DEPS_DRIFT_FAILURE_KIND
-          ? driftFailureClassification()
-          : classifyClaudeFailure(output)
-        : null;
+    const failureClassification = !ok && !isTimeout && !isCancelled
+      ? isCodex && codexPreflightFailureReason
+        ? codexSandboxFailureClassification(codexPreflightFailureReason)
+        : isClaude || fallbackTriggered
+          ? sdkPreflightFailureKind === DEPS_DRIFT_FAILURE_KIND
+            ? driftFailureClassification()
+            : classifyClaudeFailure(output)
+          : null
+      : null;
     if (failureClassification) {
       await munin.log(
         taskNs,
         `Task failed (${failureClassification.kind}): ${failureClassification.reason}`,
       );
+    }
+    if (failureClassification?.kind === CODEX_SANDBOX_FAILURE_KIND) {
+      const friction = buildCodexSandboxFrictionEvent({
+        taskId,
+        modelId: task.model,
+        reason: failureClassification.reason,
+        recordedAt: new Date(),
+      });
+      try {
+        await munin.write(
+          friction.namespace,
+          friction.key,
+          friction.content,
+          friction.tags,
+          undefined,
+          taskClassification,
+        );
+      } catch (err) {
+        console.error(
+          `[codex-sandbox] failed to persist infrastructure friction for ${taskNs}:`,
+          err,
+        );
+      }
     }
 
     // #131: feed the CONFIRMED Claude auth outcome into the proactive alarm. A
@@ -5809,6 +5914,18 @@ app.get("/health", (_req, res) => {
       enabled: egressPolicy.enabled,
       allowed_hosts: egressPolicy.allowedHosts,
     },
+    codex_sandbox: codexSandboxStatus
+      ? {
+          available: codexSandboxStatus.available,
+          checked_at: codexSandboxStatus.checkedAt,
+          command: codexSandboxStatus.command,
+          failure_kind: codexSandboxStatus.failureKind,
+          reason: codexSandboxStatus.reason,
+        }
+      : {
+          available: false,
+          state: "checking",
+        },
   });
 });
 
@@ -6047,8 +6164,10 @@ if (brokerEnv.enabled) {
   console.log("Broker: disabled (set HUGIN_BROKER_KEYS to enable)");
 }
 
-// Check Munin is reachable before starting poll loop
-munin.health().then((ok) => {
+// Check Munin and the zero-token Codex sandbox concurrently before polling.
+// The HTTP server is already listening so deploy acceptance can observe the
+// probe's transient `checking` state, then its definitive result.
+Promise.all([munin.health(), refreshCodexSandboxStatus()]).then(([ok]) => {
   if (!ok) {
     console.warn("WARNING: Munin health check failed — will retry on first poll");
   } else {
