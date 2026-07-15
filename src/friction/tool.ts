@@ -131,7 +131,7 @@ export function buildFrictionTool(deps: FrictionToolDeps): FrictionTool {
         input,
         modelId: resolvedModelId,
         resolvedTaskId,
-        source: "standalone-mcp",
+        source: "model-self-report",
       });
       const content = buildFrictionContent({
         input,
