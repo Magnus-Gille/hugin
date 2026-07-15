@@ -44,12 +44,22 @@ if [[ "$call" == *"test -d ~/repos/claude-config"* ]]; then
   exit 1
 fi
 if [[ "$call" == *"curl -fsS http://127.0.0.1:3032/health"* ]]; then
-  printf '{"status":"ok","polling":true,"codex_sandbox":{"available":true}}\n'
+  # Execute the exact remote command string so local-to-remote quote loss is a
+  # tested failure, not merely invisible text in the call log (#220 follow-up).
+  local_node="$(command -v node)"
+  health_command="${2//\/usr\/bin\/node/$local_node}"
+  bash -c "$health_command"
+  exit $?
 fi
 exit 0
 EOF
 
-chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/rsync" "$FAKE_BIN/ssh"
+cat >"$FAKE_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"status":"ok","polling":true,"codex_sandbox":{"available":true}}\n'
+EOF
+
+chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/rsync" "$FAKE_BIN/ssh" "$FAKE_BIN/curl"
 export PATH="$FAKE_BIN:$PATH"
 export CALL_LOG
 export FAKE_NPM_DIRTY_ON_BUILD=0
