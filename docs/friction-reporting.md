@@ -5,10 +5,11 @@ Munin namespace `signals/friction`. A friction event says that the model,
 environment, or task specification made execution harder than it should have
 been. It is operational evidence; it is not a verdict on the final answer.
 
-Use `hugin_rate` for product usefulness of a terminal Broker task. Use friction
-reporting for events such as a missing tool, a sandbox failure, an unclear
-prerequisite, or a model hitting a reasoning limit. One task can legitimately
-have both kinds of evidence.
+Use `hugin_rate` for exact-bound product quality of a terminal Hugin task
+(owner-only when it is a Broker task). Use friction reporting for events such
+as a missing tool, a sandbox failure, an unclear prerequisite, or a model
+hitting a reasoning limit. One task can legitimately have both kinds of
+evidence.
 
 ## Submission surfaces
 

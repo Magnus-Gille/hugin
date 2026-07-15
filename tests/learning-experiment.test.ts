@@ -316,6 +316,36 @@ describe("LearningExperimentStore", () => {
     })).reused).toBe(true);
   });
 
+  it("refuses promotion-ready evidence with no explicit accepted product outcome", async () => {
+    const munin = new FakeMunin();
+    const store = new LearningExperimentStore(munin as unknown as MuninClient);
+    const input = makeExperimentInput({
+      experiment_id: "mechanical-only",
+      gates: {
+        ...makeExperimentInput().gates,
+        minRatedCoverage: 0,
+      },
+    });
+    const created = await store.create("codex", input);
+    for (const sample of ["case-1", "case-2"]) {
+      await store.observe("codex", makeObservation(sample, "champion", {
+        experiment_id: "mechanical-only",
+        product_outcome: "unrated",
+      }));
+      await store.observe("codex", makeObservation(sample, "challenger", {
+        experiment_id: "mechanical-only",
+        product_outcome: "unrated",
+      }));
+    }
+    expect((await store.read("codex", "mechanical-only")).status).toBe("promotion-ready");
+
+    await expect(store.promote("codex", {
+      experiment_id: "mechanical-only",
+      configuration_fingerprint: created.state.challenger.fingerprint,
+      applied_ref: "gille-inference@abc123",
+    })).rejects.toMatchObject({ code: "invalid-state" });
+  });
+
   it("reuses an identical run_id but rejects conflicting evidence", async () => {
     const store = new LearningExperimentStore(new FakeMunin() as unknown as MuninClient);
     await store.create("codex", makeExperimentInput());

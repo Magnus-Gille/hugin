@@ -15,12 +15,47 @@ describe("structured task result schema", () => {
         changedFiles: ["src/parser.ts", "tests/parser.test.ts"],
         diffSha256: "c".repeat(64),
       },
+      repositoryOutcome: {
+        state: "changes-present",
+        baseBranch: "master",
+        baseCommit: "a".repeat(40),
+      },
     });
     expect(result.repositoryChange?.changedFiles).toEqual([
       "src/parser.ts",
       "tests/parser.test.ts",
     ]);
     expect(result.repositoryChange?.baseBranch).toBe("master");
+    expect(result.repositoryOutcome?.state).toBe("changes-present");
+  });
+
+  it("makes a managed-repository no-op explicit without inventing change evidence", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "noop",
+      taskNamespace: "tasks/noop",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "codex",
+      executor: "codex-spawn",
+      resultSource: "stdout",
+      exitCode: 0,
+      completedAt: "2026-07-15T12:00:00Z",
+      bodyKind: "response",
+      bodyText: "No changes needed.",
+      repositoryOutcome: {
+        state: "no-changes",
+        baseBranch: "master",
+        baseCommit: "a".repeat(40),
+      },
+    });
+
+    expect(result.repositoryOutcome).toEqual({
+      state: "no-changes",
+      baseBranch: "master",
+      baseCommit: "a".repeat(40),
+    });
+    expect(result.repositoryChange).toBeUndefined();
   });
 
   it("preserves M5 delegation provenance on canonical homeserver results", () => {

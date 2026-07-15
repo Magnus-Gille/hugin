@@ -451,6 +451,20 @@ export class LearningExperimentStore {
           `experiment is ${current.status}; only promotion-ready evidence can be promoted`,
         );
       }
+      const hasAcceptedChallengerProduct = current.observations.some(
+        (observation) =>
+          observation.arm === "challenger" &&
+          observation.quality_outcome === "pass" &&
+          observation.verifier.independent &&
+          (observation.product_outcome === "accepted-unchanged" ||
+            observation.product_outcome === "minor-edit"),
+      );
+      if (!hasAcceptedChallengerProduct) {
+        throw new LearningStoreError(
+          "invalid-state",
+          "promotion requires an independently verified challenger with explicit accepted product evidence",
+        );
+      }
 
       const championNamespace = championNamespaceFor(principal, current.scope);
       const championEntry = await this.munin.read(championNamespace, STATE_KEY);

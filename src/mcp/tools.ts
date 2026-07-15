@@ -148,6 +148,13 @@ export const rateInputShape = {
   rating_reason: z.string().min(1),
   verification_outcome: verificationOutcomeSchema,
   retries_count: z.number().int().nonnegative().optional(),
+  reviewer_role: z.enum(["independent", "self"]).optional()
+    .describe("Authenticated reviewer attestation. Same-task owners cannot claim independent."),
+  expected_binding: z.object({
+    task_document_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    structured_result_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    repository_diff_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  }).strict().optional().describe("Optional exact hashes reviewed by the caller; stale hashes are rejected."),
 };
 const rateInputSchema = z.object(rateInputShape);
 
@@ -329,9 +336,9 @@ export function buildTools(deps: ToolDeps): {
 
   const rate: HuginTool<z.infer<typeof rateInputSchema>> = {
     name: "hugin_rate",
-    title: "Rate the outcome of a delegated task",
+    title: "Record an exact-bound task quality review",
     description:
-      "Store a product-usefulness rating for a terminal task. This is Hugin product evidence; it does not directly modify M5's capability ledger.",
+      "Append an authenticated quality receipt for a terminal Hugin task, bound to its current task/result/repository evidence. This does not directly modify M5's capability ledger.",
     inputShape: rateInputShape,
     handler: async (rawInput) => {
       try {

@@ -176,9 +176,13 @@ and logs any failure. Consumers must treat a missing structured result on a term
 task as an infrastructure/recovery fault; they must not invent one.
 
 `completed` means the executor completed successfully. It does **not** prove that the
-answer was correct, useful, reviewed, merged, or accepted. `hugin_rate` is product
-usefulness feedback. Friction reports are orthogonal execution evidence. See
-`docs/friction-reporting.md`.
+answer was correct, useful, reviewed, merged, or accepted. `hugin_rate` appends an
+authenticated schema-v1 quality receipt for any terminal Hugin task; Broker tasks
+remain owner-only. The receipt binds the exact task/result hashes and repository
+state/diff, records reviewer independence, rejects stale caller-supplied bindings,
+and cannot overwrite a prior verdict from the same reviewer. Legacy flat feedback
+is readable but never counts as bound acceptance. Friction reports are orthogonal
+execution evidence. See `docs/friction-reporting.md`.
 
 ### Submission provenance
 
@@ -194,9 +198,12 @@ in credential stores or the Pi environment, never Git or Munin.
 
 ### Managed-repository evidence
 
-Successful managed-repository tasks may include `repositoryChange`. Current writers
-bind the resolved base branch, its exact pre-agent commit, the final task-branch commit,
-safe repository-relative changed paths, and SHA-256 of the binary Git diff.
+Current normal task results include `repositoryOutcome`: `not-managed`,
+`checkout-failed`, `not-finalized`, `no-changes`, `changes-present`, or
+`publication-failed`. A managed no-op is therefore machine-readable rather than an
+implicit success. Managed tasks with changes may also include `repositoryChange`,
+binding the resolved base branch, its exact pre-agent commit, the final task-branch
+commit, safe repository-relative changed paths, and SHA-256 of the binary Git diff.
 
 This object is content-blind: it contains no prompt, response, diff, file content, or
 credential. Base and head must differ; changed paths must not be absolute, contain

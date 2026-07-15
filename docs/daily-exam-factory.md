@@ -24,6 +24,11 @@ factory manifest. They remain in their existing owner-controlled systems. The
 manifest keeps hashes and Munin/Git references so a later, reviewed packager can
 reconstruct and verify the candidate.
 
+Current Hugin results also record `repositoryOutcome` independently of change
+evidence. A managed no-op is therefore explicit (`no-changes`) rather than
+being indistinguishable from a skipped checkout, a checkout failure, an
+unfinished finalization, or a publication failure.
+
 `source.taskCreatedAt` is the Munin status entry's original `created_at`, not its
 terminal update or result completion time. That distinction is load-bearing: a
 task created before M5's complete capture window cannot become fresh merely
@@ -40,16 +45,21 @@ classifies them without running a model or writing any learning state:
 | `regression` | Hugin has evidence that the task reached an M5 runtime or leaf. It may test non-regression, but it is not fresh. |
 | `quarantine` | Reproducibility, privacy, completion, repository, PR, or exposure evidence is incomplete. |
 
-Every non-quarantined candidate still has readiness
-`needs-independent-verifier`. Agent prose and a changed test file are not an
-independent grading oracle.
-
 `completed` means that the executor lifecycle finished successfully; it is not
-proof that the solution was accepted. The schema-v2 factory does not yet join
-general post-run reviewer feedback. Hugin
-[#216](https://github.com/Magnus-Gille/hugin/issues/216) tracks binding semantic
-acceptance to the exact result/diff and carrying it into harvesting. Until then,
-neither a candidate record nor a green task lifecycle is a golden answer.
+proof that the solution was accepted. The factory reads each task's optional
+`feedback` document and joins only schema-v1 quality receipts whose hashes bind
+the exact task document, structured result, and repository state/diff. It
+preserves the receipt IDs, authenticated reviewer principals, and whether an
+independent reviewer explicitly accepted the unchanged result. Legacy flat
+feedback is labeled `legacy-unbound` and never upgraded into acceptance.
+
+Every non-quarantined candidate remains `needs-independent-verifier`, including
+one whose product output has an exact independent acceptance: accepting the
+delivered change is not the same as proving it is a suitable exam oracle. The
+acceptance is preserved separately as `quality.state: accepted` plus
+`independentAccepted: true`. A partial, rejected, conflicting, malformed, or
+stale receipt quarantines the candidate. The factory never promotes
+configuration or merges a pull request.
 
 ## Cross-client exposure snapshot
 

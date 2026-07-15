@@ -338,6 +338,32 @@ export const repositoryChangeEvidenceSchema = z.object({
 });
 export type RepositoryChangeEvidence = z.infer<typeof repositoryChangeEvidenceSchema>;
 
+// Execution and publication are separate facts from semantic acceptance.
+// Current writers always emit this content-blind repository outcome, including
+// an explicit no-op. It remains optional so historical schema-v1 results parse.
+export const repositoryOutcomeSchema = z.object({
+  state: z.enum([
+    "not-managed",
+    "checkout-failed",
+    "not-finalized",
+    "no-changes",
+    "changes-present",
+    "publication-failed",
+  ]),
+  baseBranch: repositoryChangeEvidenceSchema.shape.baseBranch,
+  baseCommit: z.string().regex(/^[0-9a-f]{40,64}$/).optional(),
+}).strict().superRefine((value, ctx) => {
+  if (["no-changes", "changes-present", "publication-failed"].includes(value.state)) {
+    if (!value.baseBranch) {
+      ctx.addIssue({ code: "custom", path: ["baseBranch"], message: "managed outcome requires baseBranch" });
+    }
+    if (!value.baseCommit) {
+      ctx.addIssue({ code: "custom", path: ["baseCommit"], message: "managed outcome requires baseCommit" });
+    }
+  }
+});
+export type RepositoryOutcome = z.infer<typeof repositoryOutcomeSchema>;
+
 export const structuredTaskResultSchema = z.object({
   schemaVersion: z.literal(1),
   taskId: z.string().min(1),
@@ -365,6 +391,7 @@ export const structuredTaskResultSchema = z.object({
   bodyText: z.string(),
   errorMessage: z.string().min(1).optional(),
   prUrl: z.string().url().optional(),
+  repositoryOutcome: repositoryOutcomeSchema.optional(),
   repositoryChange: repositoryChangeEvidenceSchema.optional(),
   runtimeMetadata: taskExecutionRuntimeMetadataSchema.optional(),
   pipeline: taskExecutionPipelineContextSchema.optional(),

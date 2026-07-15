@@ -70,6 +70,14 @@ The challenger is rejected if it exceeds any configured regression limit for cor
 completion, human rescue, infrastructure failures, latency, or cost. If every guard passes, it
 must still clear the predeclared primary improvement threshold. Otherwise the champion remains.
 
+`promotion-ready` is a mechanical evaluator result, not authorization to apply
+the challenger. The promotion mutation additionally requires at least one
+challenger run with an independent `pass` and an explicit product outcome of
+accepted unchanged or minor edit. This guard remains active even when an
+experiment deliberately sets `minRatedCoverage` to zero, so unrated mechanical
+evidence can never advance the champion pointer. Hugin has no automatic PR
+merge path; a repository merge remains a separately reviewed action.
+
 Every evaluation returns dominant challenger failure signals and a concrete next action. Common
 signals are `no-edit`, `tests-not-run`, `tests-failed`, `unverified-output`, `infra-error`, and the
 explicit failure kind supplied by the harness.

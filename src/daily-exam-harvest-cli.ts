@@ -158,9 +158,10 @@ async function loadSources(
       .filter((entry) => entry.key === "status" && entry.namespace.startsWith("tasks/"))
       .map((entry) => entry.namespace),
   )].sort();
-  const [statuses, results] = await Promise.all([
+  const [statuses, results, feedback] = await Promise.all([
     munin.readBatch(namespaces.map((namespace) => ({ namespace, key: "status" }))),
     munin.readBatch(namespaces.map((namespace) => ({ namespace, key: "result-structured" }))),
+    munin.readBatch(namespaces.map((namespace) => ({ namespace, key: "feedback" }))),
   ]);
   const sources: DailyTaskHarvestSource[] = [];
   for (let index = 0; index < namespaces.length; index += 1) {
@@ -170,6 +171,7 @@ async function loadSources(
     sources.push({
       status: status as MuninEntry,
       resultStructured: result?.found ? result as MuninEntry : null,
+      feedback: feedback[index]?.found ? feedback[index] as MuninEntry : null,
     });
   }
   return { sources, historyComplete: !queried.truncated };

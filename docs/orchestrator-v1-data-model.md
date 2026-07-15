@@ -354,6 +354,11 @@ interface DelegationRatedEvent {
 }
 ```
 
+> Historical note: this section specifies the retired orch-v1 JSONL event.
+> Current canonical tasks persist schema-v1 append-only quality receipts in
+> Munin `feedback`, bound to the exact task/result/repository evidence. Legacy
+> flat feedback remains readable but is never treated as bound acceptance.
+
 **Forward-compat rule:** projection code MUST tolerate unknown `event_schema_version` values by skipping the event (with a logged warning) rather than crashing. Producers MUST bump the version on any breaking shape change; additive field changes do not require a bump.
 
 ### Projection (read-time)

@@ -4,6 +4,12 @@ import type { MuninClient } from "../src/munin-client.js";
 import type { Ledger, LedgerClientLike } from "../src/orchestrator/ledger-client.js";
 import { evaluateLearningExperiment } from "../src/learning/experiment-evaluator.js";
 import { makeExperimentInput } from "./fixtures/learning.js";
+import { buildStructuredTaskResult } from "../src/task-result-schema.js";
+import {
+  buildQualityBinding,
+  buildQualityReceipt,
+  foldQualityReceipt,
+} from "../src/quality-receipt.js";
 
 const ENVELOPE = (submitter: string) =>
   `## Task\n\n### Broker envelope\n\`\`\`json\n${JSON.stringify({
@@ -114,6 +120,94 @@ describe("LearningLoopCollector", () => {
     expect(t.durableHandoff).toBe(true);
     expect(t.delegation?.policyMode).toBe("shadow");
     expect(evidence.ledger).toEqual(okLedger);
+  });
+
+  it("collects only a receipt bound to the current task and structured result", async () => {
+    const statusContent = ENVELOPE("claude-code");
+    const structuredContent = JSON.stringify(buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "mcp-m5-receipt",
+      taskNamespace: "tasks/mcp-m5-receipt",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "homeserver",
+      executor: "homeserver-delegate",
+      resultSource: "homeserver-delegate",
+      exitCode: 0,
+      completedAt: "2026-07-15T10:00:00.000Z",
+      bodyKind: "response",
+      bodyText: "ok",
+      repositoryOutcome: { state: "not-managed" },
+    }));
+    const receipt = buildQualityReceipt({
+      taskId: "mcp-m5-receipt",
+      reviewerPrincipal: "codex-review",
+      reviewerIndependence: "independent",
+      rating: "partial",
+      ratingReason: "Useful but needs an edit.",
+      verificationOutcome: "minor_edit",
+      ratedAt: "2026-07-15T10:05:00.000Z",
+      bindingAttestation: "reviewer-confirmed",
+      binding: buildQualityBinding({ statusContent, structuredResultContent: structuredContent }),
+    });
+    const munin = fakeMunin({
+      "tasks/mcp-m5-receipt/status": { content: statusContent, tags: ["completed"] },
+      "tasks/mcp-m5-receipt/result-structured": { content: structuredContent },
+      "tasks/mcp-m5-receipt/feedback": {
+        content: JSON.stringify(foldQualityReceipt(null, receipt).ledger),
+      },
+    });
+
+    const evidence = await new LearningLoopCollector({
+      munin,
+      ledgerClient: fakeLedgerClient(null),
+    }).refresh();
+    expect(evidence.tasks[0]).toMatchObject({
+      rating: "partial",
+      verificationOutcome: "minor_edit",
+    });
+  });
+
+  it("does not turn conflicting exact-bound reviews into a useful product rating", async () => {
+    const statusContent = ENVELOPE("claude-code");
+    const structuredContent = JSON.stringify(buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "mcp-m5-conflict",
+      taskNamespace: "tasks/mcp-m5-conflict",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "homeserver",
+      executor: "homeserver-delegate",
+      resultSource: "homeserver-delegate",
+      exitCode: 0,
+      completedAt: "2026-07-15T10:00:00.000Z",
+      bodyKind: "response",
+      bodyText: "ok",
+      repositoryOutcome: { state: "not-managed" },
+    }));
+    const binding = buildQualityBinding({ statusContent, structuredResultContent: structuredContent });
+    const accepted = buildQualityReceipt({
+      taskId: "mcp-m5-conflict", reviewerPrincipal: "reviewer-a",
+      reviewerIndependence: "independent", rating: "pass", ratingReason: "accepted",
+      verificationOutcome: "accepted_unchanged", ratedAt: "2026-07-15T10:05:00.000Z",
+      bindingAttestation: "reviewer-confirmed", binding,
+    });
+    const rejected = buildQualityReceipt({
+      taskId: "mcp-m5-conflict", reviewerPrincipal: "reviewer-b",
+      reviewerIndependence: "independent", rating: "wrong", ratingReason: "rejected",
+      verificationOutcome: "discarded", ratedAt: "2026-07-15T10:06:00.000Z",
+      bindingAttestation: "reviewer-confirmed", binding,
+    });
+    const ledger = foldQualityReceipt(foldQualityReceipt(null, accepted).ledger, rejected).ledger;
+    const evidence = await new LearningLoopCollector({
+      munin: fakeMunin({
+        "tasks/mcp-m5-conflict/status": { content: statusContent, tags: ["completed"] },
+        "tasks/mcp-m5-conflict/result-structured": { content: structuredContent },
+        "tasks/mcp-m5-conflict/feedback": { content: JSON.stringify(ledger) },
+      }),
+      ledgerClient: fakeLedgerClient(null),
+    }).refresh();
+    expect(evidence.tasks[0]).toMatchObject({ rating: null, verificationOutcome: null });
   });
 
   // Caught against REAL production data: the one existing broker task predates

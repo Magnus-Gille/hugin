@@ -51,6 +51,7 @@ vi.mock("node:child_process", () => ({
 // Import after mocking
 const {
   checkoutTaskBranch,
+  deriveRepositoryOutcome,
   finalizeTaskBranch,
   isValidBaseBranchName,
   parseBaseBranchOverride,
@@ -61,6 +62,26 @@ beforeEach(() => {
   spawnBehaviors = [];
   spawnCallIndex = 0;
   autoResolveMain = true;
+});
+
+describe("deriveRepositoryOutcome", () => {
+  const managed = {
+    action: "created" as const,
+    branchName: "hugin/t1",
+    baseBranch: "master",
+    baseCommit: "a".repeat(40),
+  };
+
+  it("distinguishes managed no-op, changes, and publication failure", () => {
+    expect(deriveRepositoryOutcome(managed, "no-changes").state).toBe("no-changes");
+    expect(deriveRepositoryOutcome(managed, "pr-created").state).toBe("changes-present");
+    expect(deriveRepositoryOutcome(managed, "push-failed").state).toBe("publication-failed");
+  });
+
+  it("fails closed when a created branch lacks pinned base evidence", () => {
+    expect(deriveRepositoryOutcome({ action: "created", branchName: "hugin/t2" }, "no-changes"))
+      .toEqual({ state: "not-finalized" });
+  });
 });
 
 // Sequences for checkoutTaskBranch:

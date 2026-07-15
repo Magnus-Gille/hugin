@@ -4,6 +4,7 @@ import {
   applyCrossClientExposure,
   buildDailyExamCandidate,
   buildDailyExamManifest,
+  type DailyTaskHarvestSource,
 } from "../src/learning/daily-task-exam-factory.js";
 import {
   REQUIRED_TASK_EXPOSURE_LANES,
@@ -11,6 +12,11 @@ import {
   type TaskExposureSnapshot,
 } from "../src/learning/m5-task-exposure.js";
 import { buildStructuredTaskResult } from "../src/task-result-schema.js";
+import {
+  buildQualityBinding,
+  buildQualityReceipt,
+  foldQualityReceipt,
+} from "../src/quality-receipt.js";
 
 const BASE = "a".repeat(40);
 const HEAD = "b".repeat(40);
@@ -53,6 +59,11 @@ function resultContent(runtime: "claude" | "homeserver" = "claude"): string {
     bodyKind: "response",
     bodyText: "Sensitive answer text that must not enter the candidate manifest",
     prUrl: "https://github.com/Magnus-Gille/demo/pull/42",
+    repositoryOutcome: {
+      state: "changes-present",
+      baseBranch: "master",
+      baseCommit: BASE,
+    },
     repositoryChange: {
       baseBranch: "master",
       baseCommit: BASE,
@@ -78,7 +89,7 @@ function resultContent(runtime: "claude" | "homeserver" = "claude"): string {
   }));
 }
 
-function source(runtime: "claude" | "homeserver" = "claude") {
+function source(runtime: "claude" | "homeserver" = "claude"): DailyTaskHarvestSource {
   return {
     status: entry({
       namespace: "tasks/daily-1",
@@ -93,6 +104,34 @@ function source(runtime: "claude" | "homeserver" = "claude") {
       tags: ["type:task-result", "type:task-result-structured"],
     }),
   };
+}
+
+function addQualityReceipt(
+  candidateSource: DailyTaskHarvestSource,
+  input: { rating?: "pass" | "wrong"; verificationOutcome?: "accepted_unchanged" | "discarded" } = {},
+): DailyTaskHarvestSource {
+  const structuredResultContent = candidateSource.resultStructured!.content;
+  const receipt = buildQualityReceipt({
+    taskId: "daily-1",
+    reviewerPrincipal: "codex-review",
+    reviewerIndependence: "independent",
+    rating: input.rating ?? "pass",
+    ratingReason: "Reviewed the exact diff and checks.",
+    verificationOutcome: input.verificationOutcome ?? "accepted_unchanged",
+    ratedAt: "2026-07-14T11:30:00.000Z",
+    bindingAttestation: "reviewer-confirmed",
+    binding: buildQualityBinding({
+      statusContent: candidateSource.status.content,
+      structuredResultContent,
+    }),
+  });
+  candidateSource.feedback = entry({
+    namespace: "tasks/daily-1",
+    key: "feedback",
+    content: JSON.stringify(foldQualityReceipt(null, receipt).ledger),
+    tags: ["feedback", "quality:receipt-v1"],
+  });
+  return candidateSource;
 }
 
 function snapshot(fingerprint: string, input: {
@@ -165,6 +204,30 @@ describe("daily task exam factory", () => {
     expect(candidate.reasons).toContain("already-exposed-to-m5-use-only-as-regression");
   });
 
+  it("preserves independent accepted quality without treating completion alone as acceptance", () => {
+    const unrated = buildDailyExamCandidate(source("claude"));
+    expect(unrated.quality).toMatchObject({ state: "unrated", independentAccepted: false });
+    expect(unrated.readiness).toBe("needs-independent-verifier");
+
+    const accepted = buildDailyExamCandidate(addQualityReceipt(source("claude")));
+    expect(accepted.quality).toMatchObject({ state: "accepted", independentAccepted: true });
+    expect(accepted.readiness).toBe("needs-independent-verifier");
+    expect(accepted.reasons).toContain("independent-quality-receipt-present");
+    expect(accepted.reasons).toContain("independent-verifier-required");
+    expect(accepted.source.qualityReceiptLedgerSha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("quarantines explicitly rejected quality evidence", () => {
+    const candidate = buildDailyExamCandidate(addQualityReceipt(source("claude"), {
+      rating: "wrong",
+      verificationOutcome: "discarded",
+    }));
+    expect(candidate.quality?.state).toBe("rejected");
+    expect(candidate.lane).toBe("quarantine");
+    expect(candidate.readiness).toBe("quarantined");
+    expect(candidate.reasons).toContain("quality-receipt-rejected");
+  });
+
   it("quarantines historical tasks without exact repository evidence", () => {
     const historical = source("claude");
     const parsed = JSON.parse(historical.resultStructured.content) as Record<string, unknown>;
@@ -173,6 +236,24 @@ describe("daily task exam factory", () => {
     const candidate = buildDailyExamCandidate(historical);
     expect(candidate.lane).toBe("quarantine");
     expect(candidate.readiness).toBe("quarantined");
+    expect(candidate.reasons).toContain("repository-change-evidence-missing");
+  });
+
+  it("preserves a managed no-op as an explicit repository outcome", () => {
+    const noOp = source("claude");
+    const parsed = JSON.parse(noOp.resultStructured!.content) as Record<string, unknown>;
+    delete parsed.repositoryChange;
+    delete parsed.prUrl;
+    parsed.repositoryOutcome = {
+      state: "no-changes",
+      baseBranch: "master",
+      baseCommit: BASE,
+    };
+    noOp.resultStructured!.content = JSON.stringify(parsed);
+
+    const candidate = buildDailyExamCandidate(noOp);
+    expect(candidate.source.repositoryOutcome).toBe("no-changes");
+    expect(candidate.lane).toBe("quarantine");
     expect(candidate.reasons).toContain("repository-change-evidence-missing");
   });
 
