@@ -12,9 +12,16 @@ import type { MuninClient } from "../../src/munin-client.js";
 
 const SECRET = "a".repeat(64);
 const OTHER_SECRET = "b".repeat(64);
+const FRICTION_EVENT_ID = "11111111-2222-4333-8444-555555555555";
 
 class FakeMunin {
-  writes: Array<{ namespace: string; key: string; content: string; tags?: string[] }> = [];
+  writes: Array<{
+    namespace: string;
+    key: string;
+    content: string;
+    tags?: string[];
+    classification?: string;
+  }> = [];
   reads: Record<string, unknown> = {};
   queryCalls = 0;
   queryReturn: { results: unknown[]; total: number } = { results: [], total: 0 };
@@ -24,11 +31,12 @@ class FakeMunin {
     content: string,
     tags?: string[],
     _expectedUpdatedAt?: string,
-    _classification?: string,
+    classification?: string,
   ): Promise<Record<string, unknown>> {
-    this.writes.push({ namespace, key, content, tags });
+    this.writes.push({ namespace, key, content, tags, classification });
     this.reads[`${namespace}/${key}`] = {
       namespace, key, content, tags: tags ?? [],
+      classification,
       created_at: "2026-07-11T12:00:00.000Z",
       updated_at: "2026-07-11T12:00:00.000Z",
     };
@@ -837,6 +845,217 @@ describe("POST /v1/delegate/rate", () => {
     });
     expect(res.status).toBe(409);
     expect(harness.munin.writes.some((write) => write.key === "feedback")).toBe(false);
+  });
+});
+
+describe("POST /v1/friction/report", () => {
+  it("writes a shared friction event with authenticated reporter provenance", async () => {
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "tool_failure",
+        severity: "blocking",
+        summary: "Codex sandbox could not start",
+        detail: "The systemd address-family allowlist omitted AF_NETLINK.",
+        event_id: FRICTION_EVENT_ID,
+        task_id: "cassette/task-1",
+        model_id: "gpt-5.4-codex",
+        tool_name: "codex-exec",
+        tags: [
+          "reporter:spoofed",
+          "source:standalone-mcp",
+          "Severity:low",
+          "model:spoofed",
+          "friction:ambiguity",
+          "task:spoofed",
+          "tool:spoofed",
+          "classification:public",
+          "repo:cassette-ai",
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const response = await res.json() as Record<string, unknown>;
+    expect(response).toMatchObject({
+      ok: true,
+      dropped: false,
+      deduplicated: false,
+      namespace: "signals/friction",
+    });
+    const write = harness.munin.writes.at(-1)!;
+    expect(write.namespace).toBe("signals/friction");
+    expect(write.key).toContain("cassette_task-1-");
+    expect(write.tags).toEqual(expect.arrayContaining([
+      "friction:tool_failure",
+      "severity:blocking",
+      "model:gpt-5.4-codex",
+      "source:broker-api",
+      "reporter:claude-code",
+      "task:cassette_task-1",
+      "repo:cassette-ai",
+    ]));
+    expect(write.tags).not.toContain("reporter:spoofed");
+    expect(write.tags).not.toContain("reporter:gpt-5.4-codex");
+    expect(write.tags).not.toContain("source:standalone-mcp");
+    expect(write.tags).not.toContain("Severity:low");
+    expect(write.tags).not.toContain("model:spoofed");
+    expect(write.tags).not.toContain("friction:ambiguity");
+    expect(write.tags).not.toContain("task:spoofed");
+    expect(write.tags).not.toContain("tool:spoofed");
+    expect(write.tags).not.toContain("classification:public");
+    expect(JSON.parse(write.content)).toMatchObject({
+      model_id: "gpt-5.4-codex",
+      event_id: FRICTION_EVENT_ID,
+      task_id_resolved: "cassette_task-1",
+      friction_type: "tool_failure",
+      user_tags: ["repo:cassette-ai"],
+    });
+  });
+
+  it("inherits the restricted classification of a linked private task", async () => {
+    harness.munin.reads["tasks/private-task/status"] = {
+      namespace: "tasks/private-task",
+      key: "status",
+      content: "private task",
+      tags: ["running"],
+      classification: "client-restricted",
+      created_at: "2026-07-11T12:00:00.000Z",
+      updated_at: "2026-07-11T12:00:00.000Z",
+    };
+
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "tool_failure",
+        severity: "high",
+        summary: "private task tool failed",
+        detail: "Only operational metadata is included.",
+        event_id: "44444444-5555-4666-8777-888888888888",
+        task_id: "private-task",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(harness.munin.writes.at(-1)?.classification).toBe("client-restricted");
+  });
+
+  it("deduplicates an identical authenticated retry onto one Munin event", async () => {
+    const body = JSON.stringify({
+      friction_type: "connectivity",
+      severity: "medium",
+      summary: "M5 connection reset",
+      detail: "The first response was ambiguous after the request was sent.",
+      event_id: "22222222-3333-4444-8555-666666666666",
+      task_id: "task-1",
+      tags: ["repo:hugin", "phase:dogfood"],
+    });
+
+    const first = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body,
+    });
+    const second = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        ...JSON.parse(body) as Record<string, unknown>,
+        tags: ["phase:dogfood", "repo:hugin"],
+      }),
+    });
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    const firstResult = await first.json() as Record<string, unknown>;
+    const secondResult = await second.json() as Record<string, unknown>;
+    expect(firstResult).toMatchObject({ deduplicated: false });
+    expect(secondResult).toMatchObject({
+      deduplicated: true,
+      key: firstResult.key,
+    });
+    expect(harness.munin.writes.filter(
+      (write) => write.namespace === "signals/friction" && write.key === firstResult.key,
+    )).toHaveLength(1);
+  });
+
+  it("rejects reuse of an event identity with different evidence", async () => {
+    const eventId = "33333333-4444-4555-8666-777777777777";
+    const original = {
+      friction_type: "tool_failure",
+      severity: "high",
+      summary: "tool failed",
+      detail: "first evidence",
+      event_id: eventId,
+      task_id: "task-2",
+    };
+    const first = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(original),
+    });
+    const collision = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({ ...original, detail: "conflicting evidence" }),
+    });
+
+    expect(first.status).toBe(201);
+    expect(collision.status).toBe(409);
+    expect(await collision.json()).toMatchObject({ error: "idempotency_collision" });
+    expect(harness.munin.writes.filter(
+      (write) => write.namespace === "signals/friction",
+    )).toHaveLength(1);
+  });
+
+  it("requires an event identity on the authenticated API", async () => {
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "ambiguity",
+        severity: "low",
+        summary: "unclear wording",
+        detail: "needed an assumption",
+      }),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects unknown authenticated API fields instead of silently dropping them", async () => {
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "ambiguity",
+        severity: "low",
+        summary: "unclear wording",
+        detail: "needed an assumption",
+        event_id: "55555555-6666-4777-8888-999999999999",
+        severty: "high",
+      }),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects malformed friction without writing", async () => {
+    const writesBefore = harness.munin.writes.length;
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "made_up",
+        severity: "blocking",
+        summary: "bad",
+        detail: "bad",
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(harness.munin.writes).toHaveLength(writesBefore);
   });
 });
 

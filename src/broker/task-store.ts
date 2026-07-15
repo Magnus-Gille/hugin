@@ -27,6 +27,14 @@ import { hashPayload } from "./idempotency.js";
 import { deriveAwaitObservation } from "./await-observation.js";
 import type { AwaitEvent, AwaitObservation } from "./await-observation.js";
 import { queryAllMuninEntries } from "../munin-pagination.js";
+import type { ReportFrictionInput } from "../friction/schema.js";
+import { muninClassificationToSensitivity } from "../sensitivity.js";
+import {
+  buildFrictionContent,
+  buildFrictionNamespace,
+  buildFrictionTags,
+  sanitiseTaskId,
+} from "../friction/munin-key.js";
 
 export { MUNIN_QUERY_MAX } from "../munin-pagination.js";
 
@@ -61,6 +69,94 @@ export interface CanonicalListResult {
   truncated: boolean;
 }
 
+export interface FrictionWriteResult {
+  ok: true;
+  dropped: false;
+  namespace: string;
+  key: string;
+  deduplicated: boolean;
+}
+
+const SERVER_OWNED_FRICTION_TAG_PREFIXES = [
+  "friction:",
+  "friction-category:",
+  "severity:",
+  "model:",
+  "source:",
+  "schema:",
+  "task:",
+  "resource:",
+  "alias-suggested:",
+  "tool:",
+  "reporter:",
+  "classification:",
+] as const;
+
+function keepCallerFrictionTags(tags: string[] | undefined): string[] | undefined {
+  if (!tags) return undefined;
+  return [...new Set(tags
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0)
+    .filter((tag) => {
+      const normalized = tag.toLowerCase();
+      return !SERVER_OWNED_FRICTION_TAG_PREFIXES.some((prefix) =>
+        normalized.startsWith(prefix));
+    }))];
+}
+
+function frictionClassification(linkedTaskClassification: string | undefined): string {
+  const normalized = linkedTaskClassification?.trim().toLowerCase();
+  if (normalized === "client-restricted") return "client-restricted";
+  return muninClassificationToSensitivity(linkedTaskClassification) === "private"
+    ? "client-confidential"
+    : "internal";
+}
+
+export class FrictionIdempotencyConflictError extends Error {
+  constructor(public readonly eventId: string) {
+    super(`friction event_id ${eventId} was already used with a different payload`);
+    this.name = "FrictionIdempotencyConflictError";
+  }
+}
+
+function buildBrokerFrictionIdentity(
+  input: ReportFrictionInput,
+  reporterTag: string,
+  resolvedTaskId: string | undefined,
+  modelId: string,
+): { key: string; payloadHash: string } {
+  if (!input.event_id) {
+    throw new Error("authenticated Broker friction writes require event_id");
+  }
+  // event_id identifies one occurrence. The separate payload hash catches an
+  // accidental or malicious reuse of that identity for different evidence.
+  // Tags are set-like metadata, so ordering does not change payload identity.
+  const normalized = {
+    reporter: reporterTag,
+    model_id: modelId,
+    task_id: resolvedTaskId ?? null,
+    friction_type: input.friction_type,
+    severity: input.severity,
+    summary: input.summary,
+    detail: input.detail,
+    resource_assessment: input.resource_assessment ?? null,
+    alias_suggested: input.alias_suggested ?? null,
+    tool_name: input.tool_name ?? null,
+    tags: [...new Set(input.tags ?? [])].sort(),
+  };
+  const payloadHash = createHash("sha256")
+    .update(JSON.stringify(normalized))
+    .digest("hex");
+  const eventHash = createHash("sha256")
+    .update(`${reporterTag}\0${input.event_id}`)
+    .digest("hex")
+    .slice(0, 32);
+  return {
+    key: `${sanitiseTaskId(resolvedTaskId)}-broker-${eventHash}`,
+    payloadHash,
+  };
+}
+
 /**
  * Generate a stable principal-scoped task id. Persisting the request at this
  * namespace is the restart-safe idempotency record; the raw key is never tagged.
@@ -84,6 +180,8 @@ export interface SubmitTaskParams {
 export class BrokerTaskStore {
   /** Per-task guard so a poll storm cannot pile up un-awaited observation writes. */
   private readonly awaitWritesInFlight = new Set<string>();
+  /** Serialize same-process writes for one friction event identity. */
+  private readonly frictionWritesInFlight = new Map<string, Promise<FrictionWriteResult>>();
 
   constructor(private readonly munin: MuninClient) {}
 
@@ -225,6 +323,103 @@ export class BrokerTaskStore {
       undefined,
       envelope?.sensitivity === "private" ? "client-restricted" : "internal",
     );
+  }
+
+  /**
+   * Persist a friction signal through the authenticated Broker surface.
+   *
+   * This deliberately reuses the standalone friction MCP's schema and Munin
+   * shape so API, MCP and CLI reports land in one corpus. The Broker principal
+   * is retained as a tag even when the caller supplies a more specific model id.
+   */
+  async writeFriction(
+    input: ReportFrictionInput,
+    reporter: string,
+    recordedAt: Date,
+  ): Promise<FrictionWriteResult> {
+    // Taxonomy, provenance, task, and classification tags are server-owned.
+    // Keep arbitrary routing tags (for example repo:* and issue:*) while
+    // preventing callers from adding a second authoritative value.
+    const trustedInput: ReportFrictionInput = {
+      ...input,
+      ...(input.tags ? { tags: keepCallerFrictionTags(input.tags) } : {}),
+    };
+    const resolvedTaskId = trustedInput.task_id?.trim()
+      ? sanitiseTaskId(trustedInput.task_id)
+      : undefined;
+    const modelId = trustedInput.model_id?.trim() || reporter.trim() || "unknown";
+    const namespace = buildFrictionNamespace();
+    const reporterTag = reporter
+      .trim()
+      .replace(/[^A-Za-z0-9._-]/g, "_")
+      .slice(0, 64) || "unknown";
+    const { key, payloadHash } = buildBrokerFrictionIdentity(
+      trustedInput,
+      reporterTag,
+      resolvedTaskId,
+      modelId,
+    );
+    // Munin has update-CAS but no create-only CAS. Serialize one key inside the
+    // single Broker process so simultaneous retries cannot overwrite a payload
+    // conflict before either request observes the durable event.
+    while (this.frictionWritesInFlight.has(key)) {
+      try {
+        await this.frictionWritesInFlight.get(key);
+      } catch {
+        // The waiting request must re-run the durable read after a failed write.
+      }
+    }
+
+    const write = (async (): Promise<FrictionWriteResult> => {
+      const existing = await this.munin.read(namespace, key);
+      if (existing) {
+        try {
+          const existingPayload = JSON.parse(existing.content) as Record<string, unknown>;
+          if (existingPayload.broker_event_payload_sha256 === payloadHash) {
+            return { ok: true, dropped: false, namespace, key, deduplicated: true };
+          }
+        } catch {
+          // A corrupt/conflicting durable record must never be mistaken for a
+          // successful retry.
+        }
+        throw new FrictionIdempotencyConflictError(trustedInput.event_id!);
+      }
+      const tags = [...new Set([
+        ...buildFrictionTags({ input: trustedInput, modelId, resolvedTaskId }),
+        "source:broker-api",
+        `reporter:${reporterTag}`,
+      ])];
+      const contentPayload = JSON.parse(buildFrictionContent({
+        input: trustedInput,
+        modelId,
+        resolvedTaskId,
+        recordedAt,
+      })) as Record<string, unknown>;
+      const content = JSON.stringify({
+        ...contentPayload,
+        broker_event_payload_sha256: payloadHash,
+      }, null, 2);
+      const linkedTask = resolvedTaskId
+        ? await this.munin.read(namespaceForTaskId(resolvedTaskId), STATUS_KEY)
+        : null;
+      await this.munin.write(
+        namespace,
+        key,
+        content,
+        tags,
+        undefined,
+        frictionClassification(linkedTask?.classification),
+      );
+      return { ok: true, dropped: false, namespace, key, deduplicated: false };
+    })();
+    this.frictionWritesInFlight.set(key, write);
+    try {
+      return await write;
+    } finally {
+      if (this.frictionWritesInFlight.get(key) === write) {
+        this.frictionWritesInFlight.delete(key);
+      }
+    }
   }
 
   /**

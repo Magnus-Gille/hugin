@@ -17,6 +17,7 @@ function fakeBroker(overrides: Partial<BrokerClient> = {}): BrokerClient {
     submit: noop,
     await_: noop,
     rate: noop,
+    reportFriction: noop,
     list: noop,
     models: noop,
     experimentCreate: noop,
@@ -380,6 +381,44 @@ describe("buildTools — hugin_rate", () => {
       rating: "pass",
       rating_reason: "looked correct",
       verification_outcome: "accepted_unchanged",
+    });
+  });
+});
+
+describe("buildTools — hugin_report_friction", () => {
+  it("validates and forwards the shared friction payload", async () => {
+    const reportFriction = vi.fn(async () => ({
+      ok: true,
+      dropped: false,
+      namespace: "signals/friction",
+      key: "t-1-stamp",
+    }));
+    const broker = fakeBroker({ reportFriction });
+    const tools = buildTools({ broker, sessionId: "sess", submitter: "codex" });
+
+    const result = await tools.friction.handler({
+      friction_type: "tool_failure",
+      severity: "blocking",
+      summary: "bubblewrap could not start",
+      detail: "AF_NETLINK was blocked by the outer service sandbox",
+      task_id: "t-1",
+      tool_name: "codex-exec",
+      tags: ["repo:cassette-ai"],
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(reportFriction).toHaveBeenCalledWith({
+      friction_type: "tool_failure",
+      severity: "blocking",
+      summary: "bubblewrap could not start",
+      detail: "AF_NETLINK was blocked by the outer service sandbox",
+      task_id: "t-1",
+      tool_name: "codex-exec",
+      tags: ["repo:cassette-ai"],
+    });
+    expect(parseResult(result)).toMatchObject({
+      ok: true,
+      namespace: "signals/friction",
     });
   });
 });

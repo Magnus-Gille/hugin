@@ -150,6 +150,7 @@ describe("buildFrictionContent", () => {
       schema_version: 1,
       recorded_at: "2026-05-05T10:30:00.123Z",
       model_id: "claude-haiku-4-5",
+      event_id: null,
       task_id_resolved: "t-abc",
       friction_type: "knowledge_gap",
       friction_category: "capability",
@@ -177,6 +178,7 @@ describe("buildFrictionContent", () => {
     });
     const parsed = JSON.parse(content);
     expect(parsed.task_id_resolved).toBeNull();
+    expect(parsed.event_id).toBeNull();
     expect(parsed.resource_assessment).toBeNull();
     expect(parsed.alias_suggested).toBeNull();
     expect(parsed.tool_name).toBeNull();

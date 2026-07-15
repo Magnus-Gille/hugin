@@ -106,6 +106,7 @@ export function buildFrictionContent(args: FrictionContentInputs): string {
     schema_version: FRICTION_SCHEMA_VERSION,
     recorded_at: recordedAt.toISOString(),
     model_id: modelId,
+    event_id: input.event_id ?? null,
     task_id_resolved: resolvedTaskId ?? null,
     friction_type: input.friction_type,
     friction_category: category,

@@ -44,6 +44,13 @@ Every non-quarantined candidate still has readiness
 `needs-independent-verifier`. Agent prose and a changed test file are not an
 independent grading oracle.
 
+`completed` means that the executor lifecycle finished successfully; it is not
+proof that the solution was accepted. The schema-v2 factory does not yet join
+general post-run reviewer feedback. Hugin
+[#216](https://github.com/Magnus-Gille/hugin/issues/216) tracks binding semantic
+acceptance to the exact result/diff and carrying it into harvesting. Until then,
+neither a candidate record nor a green task lifecycle is a golden answer.
+
 ## Cross-client exposure snapshot
 
 Hugin computes the exact M5 fingerprint contract:

@@ -6,6 +6,8 @@
  * Five learning tools expose the durable champion/challenger loop:
  *   hugin_experiment_create, hugin_experiment_observe,
  *   hugin_experiment_rate, hugin_experiment_status, hugin_experiment_promote.
+ * One shared friction tool writes into the same corpus as friction-mcp:
+ *   hugin_report_friction.
  *
  * The MCP layer is the only place that fills in protocol envelope
  * fields (`envelope_version`, `alias_map_version`, `idempotency_key`,
@@ -43,6 +45,10 @@ import {
   learningObservationInputShape,
   learningObservationSchema,
 } from "../learning/experiment-schema.js";
+import {
+  reportFrictionInputSchema,
+  reportFrictionInputShape,
+} from "../friction/schema.js";
 
 export const ALIAS_MAP_VERSION = 2;
 export const ENVELOPE_VERSION = 2 as const;
@@ -156,6 +162,8 @@ const listInputSchema = z.object(listInputShape);
 export const modelsInputShape = {};
 const modelsInputSchema = z.object(modelsInputShape);
 
+export const frictionInputShape = reportFrictionInputShape;
+
 export const experimentCreateInputShape = learningExperimentCreateInputShape;
 export const experimentObserveInputShape = learningObservationInputShape;
 export const experimentStatusInputShape = learningExperimentStatusInputShape;
@@ -231,6 +239,7 @@ export function buildTools(deps: ToolDeps): {
   rate: HuginTool<z.infer<typeof rateInputSchema>>;
   list: HuginTool<z.infer<typeof listInputSchema>>;
   models: HuginTool<z.infer<typeof modelsInputSchema>>;
+  friction: HuginTool<z.infer<typeof reportFrictionInputSchema>>;
   experimentCreate: HuginTool<z.infer<typeof learningExperimentCreateSchema>>;
   experimentObserve: HuginTool<z.infer<typeof learningObservationSchema>>;
   experimentRate: HuginTool<z.infer<typeof learningExperimentRateSchema>>;
@@ -368,6 +377,22 @@ export function buildTools(deps: ToolDeps): {
     },
   };
 
+  const friction: HuginTool<z.infer<typeof reportFrictionInputSchema>> = {
+    name: "hugin_report_friction",
+    title: "Report friction encountered while solving a task",
+    description:
+      "Persist one concrete capability, environment, or specification friction event in Hugin's shared signals/friction corpus. Use task_id when the event came from a Hugin task. This is operational evidence, not a semantic task rating.",
+    inputShape: frictionInputShape,
+    handler: async (rawInput) => {
+      try {
+        const input = reportFrictionInputSchema.parse(rawInput);
+        return asResult(await deps.broker.reportFriction(input));
+      } catch (err) {
+        return asResult(errorPayload(err), true);
+      }
+    },
+  };
+
   const experimentCreate: HuginTool<z.infer<typeof learningExperimentCreateSchema>> = {
     name: "hugin_experiment_create",
     title: "Create a versioned learning experiment",
@@ -454,6 +479,7 @@ export function buildTools(deps: ToolDeps): {
     rate,
     list,
     models,
+    friction,
     experimentCreate,
     experimentObserve,
     experimentRate,

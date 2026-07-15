@@ -116,6 +116,7 @@ hugin/
 │   ├── ollama-hosts.ts    # Lazy host resolution with negative caching
 │   ├── context-loader.ts  # Context-refs resolver (fetch Munin entries for prompt injection)
 │   ├── daily-exam-harvest-cli.ts # Production-built, read-only Munin sweep → mode-0600 candidate manifest
+│   ├── friction-cli.ts    # Authenticated Broker CLI for writing shared friction events
 │   ├── prompt-injection-scanner.ts # Regex scanner for adversarial patterns in context-ref content
 │   ├── exfiltration-scanner.ts   # Regex scanner for data-leak patterns in task output
 │   ├── provenance.ts               # External-vs-trusted provenance detection for context-refs
@@ -124,8 +125,8 @@ hugin/
 │   ├── artifact-delivery.ts      # Runtime-owned artefact delivery (#68): manifest parse/validate, target allowlist, symlink guard, rsync→sha256→mv deliver+verify
 │   ├── mcp-server.ts             # hugin-mcp stdio entrypoint (orchestrator-side, on the laptop)
 │   ├── mcp/                      # hugin-mcp internals (broker client + tool definitions)
-│   │   ├── broker-client.ts      # HTTP client for /v1/delegate/* (bearer auth, AbortController timeout)
-│   │   └── tools.ts              # 5 delegation + 5 learning-loop MCP tools
+│   │   ├── broker-client.ts      # HTTP client for delegate/friction/learning APIs (bearer auth, AbortController timeout)
+│   │   └── tools.ts              # 5 delegation + 5 learning-loop + friction MCP tools
 │   ├── broker/                   # MCP durable-delegation API (Tailscale-only HTTP, /v1/delegate/*)
 │   │   ├── server.ts             # Express app + opt-in startup (HUGIN_BROKER_KEYS)
 │   │   ├── handlers.ts           # submit/await/rate/list/models endpoint handlers
@@ -152,6 +153,16 @@ hugin/
     ├── sync-claude-config.sh     # DEPRECATED — config now lives in the claude-config repo (bootstrap.sh)
     └── update-cli.sh             # Auto-update CLI tools (daily cron)
 ```
+
+### Lifecycle, quality, and friction
+
+`completed` means the executor exited successfully. It does not by itself mean
+that the requested change was correct, useful, or accepted. `hugin_rate` stores
+product-usefulness feedback for owned terminal Broker tasks. Friction is an
+orthogonal signal: use the standalone `report_friction` MCP tool, Broker
+`POST /v1/friction/report`, main-MCP `hugin_report_friction`, or the
+`hugin-friction` CLI to record capability, environment, or specification
+problems in `signals/friction`. See `docs/friction-reporting.md`.
 
 ## How to build
 
