@@ -23,7 +23,10 @@ Environment=PATH=/home/magnus/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 # families). ReadWritePaths is dropped with it (a no-op without ProtectSystem).
 NoNewPrivileges=true
 PrivateTmp=false
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# AF_NETLINK is required by Codex's bubblewrap sandbox to create/configure the
+# isolated loopback interface. Omitting it makes every Codex shell/edit command
+# fail before execution while the outer agent can still consume tokens (#218).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=default.target

@@ -197,6 +197,13 @@ that local payload by rsync (the remote Hugin tree intentionally needs no
 atomically stamps the exact local full SHA only after service restart/status and
 the loopback health check succeed. Any failed acceptance remains markerless.
 
+The health acceptance includes a zero-token `codex sandbox -- /bin/true` probe
+run from inside the live `hugin.service` confinement. Codex's bubblewrap sandbox
+needs `AF_NETLINK` to create its isolated loopback interface; the systemd unit
+therefore includes that family in `RestrictAddressFamilies`. Hugin repeats the
+probe before every Codex task and records a `failure:infra` friction event if it
+fails, without invoking a model.
+
 The Pi needs a `.env` file at `/home/magnus/hugin/.env`:
 ```
 MUNIN_API_KEY=<same key Munin uses>
