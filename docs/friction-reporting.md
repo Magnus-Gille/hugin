@@ -27,12 +27,17 @@ The standalone MCP remains deliberately lossy: a Munin timeout is reported as
 Broker API and its MCP/CLI clients are explicit post-run operations; a failed
 write returns an error so the caller knows the evidence was not recorded.
 
+All writers enforce the same authoritative tag families. The injected writer
+stamps `source:standalone-mcp`; authenticated API/MCP/CLI writes stamp
+`source:broker-api` and `reporter:<principal>`. Caller-supplied values in those
+families are discarded on every surface.
+
 The Broker endpoint is available only when the authenticated Broker is enabled.
 It defaults `model_id` to the authenticated principal and adds
 `source:broker-api` plus `reporter:<principal>` tags. A caller may provide a
 more precise `model_id`, but the authenticated reporter tag remains. Taxonomy,
-model, task, tool, classification, and provenance tag prefixes are server-owned;
-caller-supplied tags with those prefixes are discarded. Routing tags such as
+model, task, tool, classification, and provenance tag prefixes are server-owned.
+Routing tags such as
 `repo:*`, `issue:*`, and `phase:*` remain available to callers.
 
 When `task_id` resolves to a private Munin task, the friction event inherits its

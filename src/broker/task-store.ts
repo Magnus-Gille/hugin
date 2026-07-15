@@ -33,6 +33,7 @@ import {
   buildFrictionContent,
   buildFrictionNamespace,
   buildFrictionTags,
+  keepCallerFrictionTags,
   sanitiseTaskId,
 } from "../friction/munin-key.js";
 
@@ -75,33 +76,6 @@ export interface FrictionWriteResult {
   namespace: string;
   key: string;
   deduplicated: boolean;
-}
-
-const SERVER_OWNED_FRICTION_TAG_PREFIXES = [
-  "friction:",
-  "friction-category:",
-  "severity:",
-  "model:",
-  "source:",
-  "schema:",
-  "task:",
-  "resource:",
-  "alias-suggested:",
-  "tool:",
-  "reporter:",
-  "classification:",
-] as const;
-
-function keepCallerFrictionTags(tags: string[] | undefined): string[] | undefined {
-  if (!tags) return undefined;
-  return [...new Set(tags
-    .map((tag) => tag.trim())
-    .filter((tag) => tag.length > 0)
-    .filter((tag) => {
-      const normalized = tag.toLowerCase();
-      return !SERVER_OWNED_FRICTION_TAG_PREFIXES.some((prefix) =>
-        normalized.startsWith(prefix));
-    }))];
 }
 
 function frictionClassification(linkedTaskClassification: string | undefined): string {
@@ -152,7 +126,7 @@ function buildBrokerFrictionIdentity(
     .digest("hex")
     .slice(0, 32);
   return {
-    key: `${sanitiseTaskId(resolvedTaskId)}-broker-${eventHash}`,
+    key: `friction-broker-${eventHash}`,
     payloadHash,
   };
 }
