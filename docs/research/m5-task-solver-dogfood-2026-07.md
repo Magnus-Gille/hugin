@@ -68,6 +68,17 @@ Do not train routing from exit code, PR existence, or green repository tests
 alone. Hugin [#216](https://github.com/Magnus-Gille/hugin/issues/216) tracks the
 missing general semantic-acceptance contract.
 
+### CI on task-output branches
+
+Hugin's automatic task-output commits intentionally do not contain `[skip ci]`.
+The resulting pull request must run the repository's normal CI because those
+checks are independent mechanical evidence for the quality gate and future
+exam record. Hugin does not auto-merge the PR or enqueue a follow-up Hugin task
+from CI, so the dispatcher itself does not create a commit → CI → task loop.
+Repositories that add such automation must provide their own actor, branch, or
+event guard to prevent recursion. CI success still does not replace independent
+semantic acceptance.
+
 ## M5 meta-check of this finding
 
 A bounded M5 `mellum` classification call was run against the evidence summary
