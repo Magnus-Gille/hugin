@@ -34,11 +34,13 @@ more precise `model_id`, but the authenticated reporter tag remains. The
 `source:*` and `reporter:*` prefixes are server-owned; caller-supplied tags with
 either prefix are discarded.
 
-Broker writes are retry-safe. The server derives the Munin key from the
-authenticated reporter and normalized event payload, so submitting the same
-event again returns the existing key with `deduplicated: true` instead of
-adding a second corpus entry. A materially different report gets a different
-key.
+Broker writes are retry-safe without losing recurrence frequency. Each event
+has an `event_id`: the MCP and CLI clients generate one automatically and reuse
+it for an automatic transport retry. Raw API callers must supply a UUID and
+reuse it only when retrying the same occurrence. The same event and payload
+returns the existing key with `deduplicated: true`; reusing an ID with different
+evidence returns HTTP `409`. A genuinely later recurrence gets a new ID and a
+new corpus entry.
 
 ## CLI example
 
@@ -51,6 +53,7 @@ hugin-friction \
   --severity blocking \
   --summary "Codex sandbox could not start" \
   --detail "The outer systemd sandbox did not allow AF_NETLINK." \
+  --event-id 11111111-2222-4333-8444-555555555555 \
   --task-id 20260714t214415z-dogfood-cassette3 \
   --tool-name codex-exec \
   --tag repo:cassette-ai \
@@ -69,6 +72,7 @@ Authorization: Bearer <broker token>
 Content-Type: application/json
 
 {
+  "event_id": "11111111-2222-4333-8444-555555555555",
   "friction_type": "prerequisite_missing",
   "severity": "high",
   "summary": "Managed repository assumed the wrong default branch",

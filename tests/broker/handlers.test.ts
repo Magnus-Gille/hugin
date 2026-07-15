@@ -12,6 +12,7 @@ import type { MuninClient } from "../../src/munin-client.js";
 
 const SECRET = "a".repeat(64);
 const OTHER_SECRET = "b".repeat(64);
+const FRICTION_EVENT_ID = "11111111-2222-4333-8444-555555555555";
 
 class FakeMunin {
   writes: Array<{ namespace: string; key: string; content: string; tags?: string[] }> = [];
@@ -850,7 +851,9 @@ describe("POST /v1/friction/report", () => {
         severity: "blocking",
         summary: "Codex sandbox could not start",
         detail: "The systemd address-family allowlist omitted AF_NETLINK.",
+        event_id: FRICTION_EVENT_ID,
         task_id: "cassette/task-1",
+        model_id: "gpt-5.4-codex",
         tool_name: "codex-exec",
         tags: ["reporter:spoofed", "source:standalone-mcp", "repo:cassette-ai"],
       }),
@@ -870,16 +873,18 @@ describe("POST /v1/friction/report", () => {
     expect(write.tags).toEqual(expect.arrayContaining([
       "friction:tool_failure",
       "severity:blocking",
-      "model:claude-code",
+      "model:gpt-5.4-codex",
       "source:broker-api",
       "reporter:claude-code",
       "task:cassette_task-1",
       "repo:cassette-ai",
     ]));
     expect(write.tags).not.toContain("reporter:spoofed");
+    expect(write.tags).not.toContain("reporter:gpt-5.4-codex");
     expect(write.tags).not.toContain("source:standalone-mcp");
     expect(JSON.parse(write.content)).toMatchObject({
-      model_id: "claude-code",
+      model_id: "gpt-5.4-codex",
+      event_id: FRICTION_EVENT_ID,
       task_id_resolved: "cassette_task-1",
       friction_type: "tool_failure",
       user_tags: ["repo:cassette-ai"],
@@ -892,6 +897,7 @@ describe("POST /v1/friction/report", () => {
       severity: "medium",
       summary: "M5 connection reset",
       detail: "The first response was ambiguous after the request was sent.",
+      event_id: "22222222-3333-4444-8555-666666666666",
       task_id: "task-1",
       tags: ["repo:hugin", "phase:dogfood"],
     });
@@ -922,6 +928,50 @@ describe("POST /v1/friction/report", () => {
     expect(harness.munin.writes.filter(
       (write) => write.namespace === "signals/friction" && write.key === firstResult.key,
     )).toHaveLength(1);
+  });
+
+  it("rejects reuse of an event identity with different evidence", async () => {
+    const eventId = "33333333-4444-4555-8666-777777777777";
+    const original = {
+      friction_type: "tool_failure",
+      severity: "high",
+      summary: "tool failed",
+      detail: "first evidence",
+      event_id: eventId,
+      task_id: "task-2",
+    };
+    const first = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(original),
+    });
+    const collision = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({ ...original, detail: "conflicting evidence" }),
+    });
+
+    expect(first.status).toBe(201);
+    expect(collision.status).toBe(409);
+    expect(await collision.json()).toMatchObject({ error: "idempotency_collision" });
+    expect(harness.munin.writes.filter(
+      (write) => write.namespace === "signals/friction",
+    )).toHaveLength(1);
+  });
+
+  it("requires an event identity on the authenticated API", async () => {
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "ambiguity",
+        severity: "low",
+        summary: "unclear wording",
+        detail: "needed an assumption",
+      }),
+    });
+
+    expect(res.status).toBe(400);
   });
 
   it("rejects malformed friction without writing", async () => {

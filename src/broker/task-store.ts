@@ -76,15 +76,25 @@ export interface FrictionWriteResult {
   deduplicated: boolean;
 }
 
-function buildBrokerFrictionKey(
+export class FrictionIdempotencyConflictError extends Error {
+  constructor(public readonly eventId: string) {
+    super(`friction event_id ${eventId} was already used with a different payload`);
+    this.name = "FrictionIdempotencyConflictError";
+  }
+}
+
+function buildBrokerFrictionIdentity(
   input: ReportFrictionInput,
   reporterTag: string,
   resolvedTaskId: string | undefined,
   modelId: string,
-): string {
-  // A friction report describes a semantic event, not an HTTP attempt. Hash
-  // the normalized event so an ambiguous client retry reuses one Munin key.
-  // Tags are set-like metadata, so their order must not change the identity.
+): { key: string; payloadHash: string } {
+  if (!input.event_id) {
+    throw new Error("authenticated Broker friction writes require event_id");
+  }
+  // event_id identifies one occurrence. The separate payload hash catches an
+  // accidental or malicious reuse of that identity for different evidence.
+  // Tags are set-like metadata, so ordering does not change payload identity.
   const normalized = {
     reporter: reporterTag,
     model_id: modelId,
@@ -98,11 +108,17 @@ function buildBrokerFrictionKey(
     tool_name: input.tool_name ?? null,
     tags: [...new Set(input.tags ?? [])].sort(),
   };
-  const digest = createHash("sha256")
+  const payloadHash = createHash("sha256")
     .update(JSON.stringify(normalized))
+    .digest("hex");
+  const eventHash = createHash("sha256")
+    .update(`${reporterTag}\0${input.event_id}`)
     .digest("hex")
     .slice(0, 32);
-  return `${sanitiseTaskId(resolvedTaskId)}-broker-${digest}`;
+  return {
+    key: `${sanitiseTaskId(resolvedTaskId)}-broker-${eventHash}`,
+    payloadHash,
+  };
 }
 
 /**
@@ -304,26 +320,40 @@ export class BrokerTaskStore {
       .trim()
       .replace(/[^A-Za-z0-9._-]/g, "_")
       .slice(0, 64) || "unknown";
-    const key = buildBrokerFrictionKey(
+    const { key, payloadHash } = buildBrokerFrictionIdentity(
       trustedInput,
       reporterTag,
       resolvedTaskId,
       modelId,
     );
-    if (await this.munin.read(namespace, key)) {
-      return { ok: true, dropped: false, namespace, key, deduplicated: true };
+    const existing = await this.munin.read(namespace, key);
+    if (existing) {
+      try {
+        const existingPayload = JSON.parse(existing.content) as Record<string, unknown>;
+        if (existingPayload.broker_event_payload_sha256 === payloadHash) {
+          return { ok: true, dropped: false, namespace, key, deduplicated: true };
+        }
+      } catch {
+        // A corrupt/conflicting durable record must never be mistaken for a
+        // successful retry.
+      }
+      throw new FrictionIdempotencyConflictError(trustedInput.event_id!);
     }
     const tags = [...new Set([
       ...buildFrictionTags({ input: trustedInput, modelId, resolvedTaskId }),
       "source:broker-api",
       `reporter:${reporterTag}`,
     ])];
-    const content = buildFrictionContent({
+    const contentPayload = JSON.parse(buildFrictionContent({
       input: trustedInput,
       modelId,
       resolvedTaskId,
       recordedAt,
-    });
+    })) as Record<string, unknown>;
+    const content = JSON.stringify({
+      ...contentPayload,
+      broker_event_payload_sha256: payloadHash,
+    }, null, 2);
     await this.munin.write(namespace, key, content, tags, undefined, "internal");
     return { ok: true, dropped: false, namespace, key, deduplicated: false };
   }

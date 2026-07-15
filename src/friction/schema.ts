@@ -101,6 +101,13 @@ export const reportFrictionInputShape = {
     .describe(
       "Your own model identifier (e.g. claude-opus-4-8, claude-sonnet-4-6). Set this so the friction event is attributed to the right model — interactive sessions are not tagged via env. Falls back to the server's HUGIN_FRICTION_MODEL_ID env (default \"unknown\") when omitted.",
     ),
+  event_id: z
+    .string()
+    .uuid()
+    .optional()
+    .describe(
+      "Stable identity for one occurrence. Reuse only when retrying the same report. Broker clients generate this automatically.",
+    ),
   tags: z
     .array(z.string().max(80))
     .max(16)

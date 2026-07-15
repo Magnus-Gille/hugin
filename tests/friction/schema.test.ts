@@ -27,10 +27,22 @@ describe("friction schema", () => {
       alias_suggested: "medium",
       tool_name: "ssh",
       task_id: "t-123",
+      event_id: "11111111-2222-4333-8444-555555555555",
       tags: ["network", "infra"],
     });
     expect(parsed.alias_suggested).toBe("medium");
     expect(parsed.tags).toEqual(["network", "infra"]);
+    expect(parsed.event_id).toBe("11111111-2222-4333-8444-555555555555");
+  });
+
+  it("rejects malformed event identities", () => {
+    expect(() => reportFrictionInputSchema.parse({
+      friction_type: "ambiguity",
+      severity: "low",
+      summary: "x",
+      detail: "y",
+      event_id: "not-a-uuid",
+    })).toThrow();
   });
 
   it("rejects unknown friction_type", () => {

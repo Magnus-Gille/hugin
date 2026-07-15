@@ -22,6 +22,7 @@ Required:
 Optional:
   --task-id <id>          Related Hugin task id
   --model-id <id>         Model/runtime identifier (defaults to Broker principal)
+  --event-id <uuid>       Reuse only when retrying the same occurrence
   --tool-name <name>      Tool that failed or was missing
   --resource-assessment <value>
                           under-resourced | appropriate | over-resourced
@@ -46,6 +47,7 @@ export function parseFrictionCliArgs(argv: string[]): ReportFrictionInput | null
       detail: { type: "string" },
       "task-id": { type: "string" },
       "model-id": { type: "string" },
+      "event-id": { type: "string" },
       "tool-name": { type: "string" },
       "resource-assessment": { type: "string" },
       "alias-suggested": { type: "string" },
@@ -61,6 +63,7 @@ export function parseFrictionCliArgs(argv: string[]): ReportFrictionInput | null
     detail: values.detail,
     task_id: values["task-id"],
     model_id: values["model-id"],
+    event_id: values["event-id"],
     tool_name: values["tool-name"],
     resource_assessment: values["resource-assessment"],
     alias_suggested: values["alias-suggested"],

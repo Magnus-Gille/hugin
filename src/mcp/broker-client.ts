@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 /**
  * HTTP client for the Pi-side orchestrator broker.
  *
@@ -97,7 +99,21 @@ export class BrokerClient {
   }
 
   async reportFriction(payload: Record<string, unknown>): Promise<unknown> {
-    return this.post("/v1/friction/report", payload);
+    const event = {
+      ...payload,
+      event_id: typeof payload.event_id === "string" && payload.event_id.trim()
+        ? payload.event_id
+        : randomUUID(),
+    };
+    try {
+      return await this.post("/v1/friction/report", event);
+    } catch (err) {
+      // A connection reset can happen after the Broker committed the write.
+      // Retry once with the same event_id; the server will return the existing
+      // key instead of recording a second occurrence.
+      if (!(err instanceof BrokerNetworkError)) throw err;
+      return this.post("/v1/friction/report", event);
+    }
   }
 
   async list(payload: Record<string, unknown>): Promise<unknown> {

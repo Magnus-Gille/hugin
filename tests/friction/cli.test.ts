@@ -9,6 +9,7 @@ describe("hugin-friction CLI", () => {
       "--summary", "bubblewrap failed",
       "--detail", "AF_NETLINK was unavailable",
       "--task-id", "task-1",
+      "--event-id", "11111111-2222-4333-8444-555555555555",
       "--tool-name", "codex-exec",
       "--tag", "repo:cassette-ai",
       "--tag", "issue:hugin-218",
@@ -18,6 +19,7 @@ describe("hugin-friction CLI", () => {
       summary: "bubblewrap failed",
       detail: "AF_NETLINK was unavailable",
       task_id: "task-1",
+      event_id: "11111111-2222-4333-8444-555555555555",
       tool_name: "codex-exec",
       tags: ["repo:cassette-ai", "issue:hugin-218"],
     });
