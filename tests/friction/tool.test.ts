@@ -46,8 +46,8 @@ describe("report_friction tool — happy path", () => {
     expect(tags).toContain("friction:reasoning_limit");
     expect(tags).toContain("severity:high");
     expect(tags).toContain("model:claude-sonnet-4-6");
-    expect(tags).toContain("source:model-self-report");
     expect(tags).toContain("source:standalone-mcp");
+    expect(tags).not.toContain("source:model-self-report");
     expect(tags).toContain("repo:hugin");
     expect(tags).not.toContain("source:broker-api");
     expect(tags).not.toContain("reporter:spoofed");
