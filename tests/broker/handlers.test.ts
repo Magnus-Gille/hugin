@@ -9,6 +9,7 @@ import { DelegationJournal } from "../../src/broker/journal.js";
 import { IdempotencyIndex } from "../../src/broker/idempotency.js";
 import { brokerExecutorCapabilities } from "../../src/broker/executor-capabilities.js";
 import type { MuninClient } from "../../src/munin-client.js";
+import { buildStructuredTaskResult } from "../../src/task-result-schema.js";
 
 const SECRET = "a".repeat(64);
 const OTHER_SECRET = "b".repeat(64);
@@ -118,6 +119,24 @@ function otherAuthHeader(): Record<string, string> {
 
 function historicalBrokerStatus(principal = "claude-code"): string {
   return JSON.stringify({ broker_principal: principal });
+}
+
+function structuredTaskResultContent(taskId: string): string {
+  return JSON.stringify(buildStructuredTaskResult({
+    schemaVersion: 1,
+    taskId,
+    taskNamespace: `tasks/${taskId}`,
+    lifecycle: "completed",
+    outcome: "completed",
+    runtime: "homeserver",
+    executor: "homeserver-delegate",
+    resultSource: "homeserver-delegate",
+    exitCode: 0,
+    completedAt: "2026-07-15T10:00:00.000Z",
+    bodyKind: "response",
+    bodyText: "ok",
+    repositoryOutcome: { state: "not-managed" },
+  }));
 }
 
 function validRequest(overrides: Record<string, unknown> = {}) {
@@ -788,6 +807,12 @@ describe("POST /v1/delegate/rate", () => {
       created_at: "ts",
       updated_at: "ts",
     };
+    harness.munin.reads["tasks/t1/result-structured"] = {
+      content: JSON.stringify({ task_id: "t1", result_schema_version: 1, response: "ok" }),
+      tags: ["type:task-result-structured"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
     const res = await fetch(`${harness.url}/v1/delegate/rate`, {
       method: "POST",
       headers: authHeader(),
@@ -801,10 +826,105 @@ describe("POST /v1/delegate/rate", () => {
     expect(res.status).toBe(204);
     expect(harness.munin.writes.at(-1)?.key).toBe("feedback");
     expect(JSON.parse(harness.munin.writes.at(-1)!.content)).toMatchObject({
-      task_id: "t1",
-      rating: "pass",
-      rated_by: "claude-code",
+      schemaVersion: 1,
+      taskId: "t1",
+      receipts: [{
+        rating: "pass",
+        reviewer: { principal: "claude-code", independence: "self" },
+      }],
     });
+  });
+
+  it("rates an ordinary terminal Hugin task and rejects a stale reviewed binding", async () => {
+    harness.munin.reads["tasks/general-1/status"] = {
+      content: "## Task: general\n\n### Prompt\nFix it.",
+      tags: ["completed", "runtime:codex"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    harness.munin.reads["tasks/general-1/result-structured"] = {
+      content: structuredTaskResultContent("general-1"),
+      tags: ["type:task-result-structured"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    const stale = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        task_id: "general-1",
+        rating: "pass",
+        rating_reason: "reviewed exact result",
+        verification_outcome: "accepted_unchanged",
+        reviewer_role: "independent",
+        expected_binding: {
+          task_document_sha256: "a".repeat(64),
+          structured_result_sha256: "b".repeat(64),
+        },
+      }),
+    });
+    expect(stale.status).toBe(409);
+
+    const accepted = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        task_id: "general-1",
+        rating: "pass",
+        rating_reason: "reviewed current server-bound result",
+        verification_outcome: "accepted_unchanged",
+        reviewer_role: "independent",
+      }),
+    });
+    expect(accepted.status).toBe(204);
+    expect(JSON.parse(harness.munin.writes.at(-1)!.content).receipts[0]).toMatchObject({
+      reviewer: { principal: "claude-code", independence: "independent" },
+      bindingAttestation: "server-bound",
+    });
+  });
+
+  it("makes an identical rating retry idempotent and rejects a changed verdict", async () => {
+    harness.munin.reads["tasks/general-retry/status"] = {
+      content: "## Task: retry\n\n### Prompt\nFix it.",
+      tags: ["completed", "runtime:codex"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    harness.munin.reads["tasks/general-retry/result-structured"] = {
+      content: structuredTaskResultContent("general-retry"),
+      tags: ["type:task-result-structured"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    const payload = {
+      task_id: "general-retry",
+      rating: "pass",
+      rating_reason: "exact result accepted",
+      verification_outcome: "accepted_unchanged",
+      reviewer_role: "independent",
+    };
+    for (let index = 0; index < 2; index += 1) {
+      const response = await fetch(`${harness.url}/v1/delegate/rate`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(payload),
+      });
+      expect(response.status).toBe(204);
+    }
+    expect(harness.munin.writes.filter((write) => write.key === "feedback")).toHaveLength(1);
+
+    const conflict = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        ...payload,
+        rating: "wrong",
+        rating_reason: "changed verdict",
+        verification_outcome: "discarded",
+      }),
+    });
+    expect(conflict.status).toBe(409);
+    expect(harness.munin.writes.filter((write) => write.key === "feedback")).toHaveLength(1);
   });
 
   it("returns 404 if task not found", async () => {
@@ -1358,6 +1478,12 @@ describe("GET /v1/delegate/list", () => {
     };
     // Mark it terminal so hugin_rate is allowed to write feedback.
     harness.munin.reads[`tasks/${task_id}/status`] = { ...statusEntry, tags: ["completed"] };
+    harness.munin.reads[`tasks/${task_id}/result-structured`] = {
+      content: structuredTaskResultContent(task_id),
+      tags: ["type:task-result-structured"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
 
     const rate = await fetch(`${harness.url}/v1/delegate/rate`, {
       method: "POST",

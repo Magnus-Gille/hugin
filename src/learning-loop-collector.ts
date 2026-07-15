@@ -28,6 +28,12 @@ import {
   type LearningExperimentState,
 } from "./learning/experiment-schema.js";
 import { MUNIN_QUERY_MAX, queryAllMuninEntries } from "./munin-pagination.js";
+import {
+  buildQualityBinding,
+  qualityBindingsEqual,
+  qualityReceiptLedgerSchema,
+  summarizeQualityReceipts,
+} from "./quality-receipt.js";
 
 /** Dashboard-facing data: refresh a few times an hour, not every 60s poll. */
 export const DEFAULT_COLLECT_TTL_MS = 300_000;
@@ -310,19 +316,36 @@ export class LearningLoopCollector {
     let verificationOutcome: string | null = null;
     if (feedback) {
       try {
-        const parsed = JSON.parse(feedback.content) as {
-          rating?: string;
-          verification_outcome?: string;
-        };
-        if (
-          parsed.rating === "pass" ||
-          parsed.rating === "partial" ||
-          parsed.rating === "redo" ||
-          parsed.rating === "wrong"
-        ) {
-          rating = parsed.rating;
+        const raw = JSON.parse(feedback.content) as unknown;
+        const ledger = qualityReceiptLedgerSchema.safeParse(raw);
+        if (ledger.success && structured) {
+          const binding = buildQualityBinding({
+            statusContent: status.content,
+            structuredResultContent: structured.content,
+          });
+          const summary = summarizeQualityReceipts(feedback.content, binding);
+          const current = ledger.data.receipts
+            .filter((receipt) => qualityBindingsEqual(receipt.binding, binding))
+            .sort((left, right) => right.ratedAt.localeCompare(left.ratedAt))[0];
+          if (current && ["accepted", "partial", "rejected"].includes(summary.state)) {
+            rating = current.rating;
+            verificationOutcome = current.verificationOutcome;
+          }
+        } else {
+          const parsed = raw as {
+            rating?: string;
+            verification_outcome?: string;
+          };
+          if (
+            parsed.rating === "pass" ||
+            parsed.rating === "partial" ||
+            parsed.rating === "redo" ||
+            parsed.rating === "wrong"
+          ) {
+            rating = parsed.rating;
+          }
+          verificationOutcome = parsed.verification_outcome ?? null;
         }
-        verificationOutcome = parsed.verification_outcome ?? null;
       } catch {
         // A corrupt feedback doc is one lost data point, not a broken panel.
       }

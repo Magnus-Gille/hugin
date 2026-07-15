@@ -179,7 +179,13 @@ export const rateRequestSchema = z.object({
   rating_reason: z.string().min(1),
   verification_outcome: verificationOutcomeSchema,
   retries_count: z.number().int().nonnegative().optional(),
-});
+  reviewer_role: z.enum(["independent", "self"]).optional(),
+  expected_binding: z.object({
+    task_document_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    structured_result_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    repository_diff_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  }).strict().optional(),
+}).strict();
 export type RateRequest = z.infer<typeof rateRequestSchema>;
 
 export const awaitRequestSchema = z.object({

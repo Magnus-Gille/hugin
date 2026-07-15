@@ -17,7 +17,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt } from "./task-helpers.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
 import {
@@ -4498,6 +4498,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         console.log(`Pre-task: branch ${branchResult.branchName} ready in ${task.workingDir}`);
       }
     }
+    let repositoryOutcome: StructuredTaskResult["repositoryOutcome"] =
+      deriveRepositoryOutcome(branchResult);
 
     currentTaskConfig = task;
     const taskClassification = getTaskArtifactClassification(task);
@@ -5124,6 +5126,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         },
       );
       repositoryChange = finalizeResult.repositoryChange;
+      repositoryOutcome = deriveRepositoryOutcome(branchResult, finalizeResult.action);
       if (finalizeResult.action === "pr-created" && finalizeResult.prUrl) {
         prUrl = finalizeResult.prUrl;
         await munin.log(taskNs, `PR created: ${prUrl}`);
@@ -5695,6 +5698,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             sequence: task.sequence,
             costUsd: costUsd ?? undefined,
             prUrl,
+            repositoryOutcome,
             repositoryChange,
             bodyKind: structuredBodyKind,
             bodyText: structuredBodyText,

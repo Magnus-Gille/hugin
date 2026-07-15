@@ -13,6 +13,11 @@ import {
   type TaskExposureLookupResult,
   type TaskExposureSnapshot,
 } from "./m5-task-exposure.js";
+import {
+  buildQualityBinding,
+  qualitySummarySchema,
+  summarizeQualityReceipts,
+} from "../quality-receipt.js";
 
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 const gitCommitSchema = z.string().regex(/^[0-9a-f]{40,64}$/);
@@ -29,9 +34,18 @@ export const dailyExamCandidateSchema = z.object({
     taskDocumentSha256: sha256Schema,
     promptSha256: sha256Schema.optional(),
     structuredResultSha256: sha256Schema.optional(),
+    qualityReceiptLedgerSha256: sha256Schema.optional(),
     runtime: z.string().min(1).optional(),
     taskType: z.string().min(1).optional(),
     sensitivity: z.enum(["public", "internal", "private"]).optional(),
+    repositoryOutcome: z.enum([
+      "not-managed",
+      "checkout-failed",
+      "not-finalized",
+      "no-changes",
+      "changes-present",
+      "publication-failed",
+    ]).optional(),
   }).strict(),
   repository: z.object({
     githubRepository: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
@@ -50,6 +64,7 @@ export const dailyExamCandidateSchema = z.object({
     models: z.array(z.string().min(1)),
     evidence: z.array(z.string().min(1)),
   }).strict(),
+  quality: qualitySummarySchema.optional(),
   crossClientExposure: z.object({
     fingerprintVersion: z.literal(TASK_EXPOSURE_FINGERPRINT_VERSION),
     fingerprintSha256: sha256Schema.optional(),
@@ -130,6 +145,7 @@ export type DailyExamManifest = z.infer<typeof dailyExamManifestSchema>;
 export interface DailyTaskHarvestSource {
   status: MuninEntry;
   resultStructured?: MuninEntry | null;
+  feedback?: MuninEntry | null;
 }
 
 function sha256(value: string | Buffer): string {
@@ -232,6 +248,25 @@ export function buildDailyExamCandidate(source: DailyTaskHarvestSource): DailyEx
   const promptFingerprint = prompt ? taskTextFingerprint(prompt) : undefined;
   const resultContent = source.resultStructured?.content;
   const result = parseStructuredResult(resultContent);
+  const feedbackContent = source.feedback?.content;
+  let quality = qualitySummarySchema.parse({ state: "unrated" });
+  if (feedbackContent) {
+    if (resultContent && result) {
+      try {
+        quality = summarizeQualityReceipts(
+          feedbackContent,
+          buildQualityBinding({
+            statusContent: taskDocument,
+            structuredResultContent: resultContent,
+          }),
+        );
+      } catch {
+        quality = qualitySummarySchema.parse({ state: "invalid" });
+      }
+    } else {
+      quality = qualitySummarySchema.parse({ state: "invalid" });
+    }
+  }
   const exposure = exposureFor(result);
   const contextAlias = contextAliasFromTask(taskDocument);
   const githubRepository = githubRepositoryFromPr(result?.prUrl);
@@ -260,6 +295,9 @@ export function buildDailyExamCandidate(source: DailyTaskHarvestSource): DailyEx
   if (sensitivity === "private") reasons.push("private-task-not-eligible-for-automatic-packaging");
   if (sourceClassificationIsPrivate) reasons.push("source-classification-not-eligible-for-automatic-packaging");
   if (exposure.state === "unknown") reasons.push("m5-exposure-unknown");
+  if (["partial", "rejected", "conflicted", "invalid"].includes(quality.state)) {
+    reasons.push(`quality-receipt-${quality.state}`);
+  }
 
   const repository = sensitivity !== "private" && !sourceClassificationIsPrivate && change && result?.prUrl && githubRepository
     ? {
@@ -280,8 +318,13 @@ export function buildDailyExamCandidate(source: DailyTaskHarvestSource): DailyEx
     lane === "regression"
       ? "already-exposed-to-m5-use-only-as-regression"
       : "requires-cross-client-exposure-check-before-holdout-seal",
-    "independent-verifier-required",
   );
+  if (!quarantine) {
+    reasons.push("independent-verifier-required");
+    if (quality.state === "accepted" && quality.independentAccepted) {
+      reasons.push("independent-quality-receipt-present");
+    }
+  }
 
   const identity = JSON.stringify({
     taskNamespace: source.status.namespace,
@@ -291,6 +334,8 @@ export function buildDailyExamCandidate(source: DailyTaskHarvestSource): DailyEx
     baseCommit: change?.baseCommit ?? null,
     headCommit: change?.headCommit ?? null,
     diffSha256: change?.diffSha256 ?? null,
+    repositoryOutcome: result?.repositoryOutcome?.state ?? null,
+    qualityReceiptLedgerSha256: feedbackContent ? sha256(feedbackContent) : null,
   });
   const candidate: DailyExamCandidate = {
     schemaVersion: 2,
@@ -303,14 +348,17 @@ export function buildDailyExamCandidate(source: DailyTaskHarvestSource): DailyEx
       taskDocumentSha256: sha256(taskDocument),
       ...(promptFingerprint ? { promptSha256: promptFingerprint } : {}),
       ...(resultContent ? { structuredResultSha256: sha256(resultContent) } : {}),
+      ...(feedbackContent ? { qualityReceiptLedgerSha256: sha256(feedbackContent) } : {}),
       ...(result?.runtime ? { runtime: result.runtime } : {}),
       ...(taskTypeFromTags(source.status.tags)
         ? { taskType: taskTypeFromTags(source.status.tags) }
         : {}),
       ...(sensitivity ? { sensitivity } : {}),
+      ...(result?.repositoryOutcome ? { repositoryOutcome: result.repositoryOutcome.state } : {}),
     },
     repository,
     exposure,
+    quality,
     crossClientExposure: {
       fingerprintVersion: TASK_EXPOSURE_FINGERPRINT_VERSION,
       ...(promptFingerprint ? { fingerprintSha256: promptFingerprint } : {}),

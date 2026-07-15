@@ -8,7 +8,7 @@
  *   namespace: tasks/<task_id>
  *   key:       status              — task envelope + lifecycle tags
  *   key:       result-structured   — DelegationResult JSON (success path)
- *   key:       feedback            — product usefulness rating
+ *   key:       feedback            — append-only exact-bound quality receipts
  *
  * New v2 status entries are ordinary `runtime:homeserver` tasks consumed by
  * the canonical dispatcher. The orch-v1 constants/methods below remain only
@@ -36,6 +36,10 @@ import {
   keepCallerFrictionTags,
   sanitiseTaskId,
 } from "../friction/munin-key.js";
+import {
+  foldQualityReceipt,
+  type QualityReceipt,
+} from "../quality-receipt.js";
 
 export { MUNIN_QUERY_MAX } from "../munin-pagination.js";
 
@@ -301,17 +305,44 @@ export class BrokerTaskStore {
     }
   }
 
-  async writeFeedback(taskId: string, feedback: Record<string, unknown>): Promise<void> {
+  async writeQualityReceipt(
+    taskId: string,
+    receipt: QualityReceipt,
+  ): Promise<{ changed: boolean }> {
     const status = await this.readStatus(taskId);
     const envelope = status ? parseStoredEnvelope(status.content) : null;
-    await this.munin.write(
-      namespaceForTaskId(taskId),
-      "feedback",
-      JSON.stringify(feedback),
-      ["broker:mcp-v2", "feedback"],
-      undefined,
-      envelope?.sensitivity === "private" ? "client-restricted" : "internal",
-    );
+    const namespace = namespaceForTaskId(taskId);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = await this.munin.read(namespace, "feedback");
+      let existing: Record<string, unknown> | null = null;
+      if (current) {
+        const parsed = JSON.parse(current.content) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("stored feedback is not a JSON object");
+        }
+        existing = parsed as Record<string, unknown>;
+      }
+      const folded = foldQualityReceipt(existing, receipt);
+      if (!folded.changed) return { changed: false };
+      try {
+        await this.munin.write(
+          namespace,
+          "feedback",
+          JSON.stringify(folded.ledger),
+          envelope
+            ? ["broker:mcp-v2", "feedback", "quality:receipt-v1"]
+            : ["feedback", "quality:receipt-v1"],
+          current?.updated_at,
+          envelope?.sensitivity === "private"
+            ? "client-restricted"
+            : current?.classification ?? status?.classification ?? "internal",
+        );
+        return { changed: true };
+      } catch (err) {
+        if (attempt === 2) throw err;
+      }
+    }
+    throw new Error("quality receipt update lost repeated CAS races");
   }
 
   /**

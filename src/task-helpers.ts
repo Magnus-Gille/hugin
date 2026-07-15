@@ -461,6 +461,38 @@ export interface BranchFinalizeResult {
   error?: string;
 }
 
+export interface RepositoryOutcomeEvidence {
+  state:
+    | "not-managed"
+    | "checkout-failed"
+    | "not-finalized"
+    | "no-changes"
+    | "changes-present"
+    | "publication-failed";
+  baseBranch?: string;
+  baseCommit?: string;
+}
+
+/** Derive the machine-readable repository outcome without trusting agent prose. */
+export function deriveRepositoryOutcome(
+  branch: TaskBranchResult,
+  finalizeAction?: BranchFinalizeResult["action"],
+): RepositoryOutcomeEvidence {
+  if (branch.action === "skipped") return { state: "not-managed" };
+  if (branch.action === "fetch-failed") return { state: "checkout-failed" };
+  const base = {
+    ...(branch.baseBranch ? { baseBranch: branch.baseBranch } : {}),
+    ...(branch.baseCommit ? { baseCommit: branch.baseCommit } : {}),
+  };
+  if (!branch.baseBranch || !branch.baseCommit) {
+    return { state: "not-finalized", ...base };
+  }
+  if (finalizeAction === "no-changes") return { state: "no-changes", ...base };
+  if (finalizeAction === "pr-created") return { state: "changes-present", ...base };
+  if (finalizeAction === "push-failed") return { state: "publication-failed", ...base };
+  return { state: "not-finalized", ...base };
+}
+
 /**
  * Content-blind binding for turning a completed managed-repository task into a
  * reproducible evaluation candidate. The task prompt/result remain in Munin;

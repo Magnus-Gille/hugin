@@ -27,9 +27,10 @@ with a different behavior payload is rejected. An in-process reservation closes
 the concurrent-submit race before the first Munin write completes. Both the
 durable identity and that reservation are scoped by authenticated principal.
 
-Await, list, and rate are principal-isolated. A Broker key cannot discover or
-read another principal's canonical results, and product feedback is accepted
-only for an owned terminal task.
+Await and list are principal-isolated. A Broker key cannot discover or read
+another principal's canonical results. Rate remains owner-only for Broker
+tasks; the same authenticated endpoint can also review an ordinary terminal
+Hugin task, which has no Broker owner.
 
 This guarantees one durable task for idempotent submission retries. It does not
 claim exactly-once network execution if the process crashes after M5 performs a
@@ -40,7 +41,9 @@ gateway-side idempotency or a prepare/commit protocol before being admitted.
 M5 remains the authority for model selection, verification and capability
 evidence. Hugin preserves the returned task type, node, model, outcome, score,
 decision reason, verifier notes and `ledgerId` in `result-structured`; Hugin's
-`feedback` entry is separate product-usefulness evidence.
+`feedback` entry is a separate append-only quality-receipt ledger. Each current
+receipt binds the exact status/result bytes and repository state, records the
+authenticated reviewer, and never changes M5's capability ledger.
 
 The old orch-v1 worker, reconciler and new journal writes are retired. The v1
 alias catalogue and existing JSONL journal remain available for historical

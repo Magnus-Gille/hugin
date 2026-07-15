@@ -48,6 +48,12 @@ import type { AwaitLifecycle } from "./await-observation.js";
 import type { AuthenticatedRequest } from "./auth.js";
 import { computeSubmitWarnings } from "./submit-warnings.js";
 import { reportFrictionInputSchema } from "../friction/schema.js";
+import {
+  QualityReceiptConflictError,
+  buildQualityBinding,
+  buildQualityReceipt,
+} from "../quality-receipt.js";
+import { structuredTaskResultSchema } from "../task-result-schema.js";
 
 const brokerFrictionInputSchema = reportFrictionInputSchema.extend({
   event_id: z.string().uuid(),
@@ -440,6 +446,11 @@ export function createAwaitHandler(deps: BrokerHandlerDependencies) {
 
 export function createRateHandler(deps: BrokerHandlerDependencies) {
   return async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    const authenticatedPrincipal = req.brokerPrincipal;
+    if (!authenticatedPrincipal) {
+      res.status(500).json({ error: "internal", message: "principal missing" });
+      return;
+    }
     let parsed;
     try {
       parsed = rateRequestSchema.parse(req.body);
@@ -456,7 +467,9 @@ export function createRateHandler(deps: BrokerHandlerDependencies) {
       });
       return;
     }
-    if (!requireOwnedBrokerTask(req, res, status)) return;
+    const canonical = parseCanonicalEnvelope(status.content);
+    const historicalBrokerTask = status.tags.includes("orch-v1");
+    if ((canonical.ok || historicalBrokerTask) && !requireOwnedBrokerTask(req, res, status)) return;
     if (!status.tags.some((tag) => ["completed", "failed", "cancelled"].includes(tag))) {
       res.status(409).json({
         error: "policy_rejected",
@@ -465,15 +478,92 @@ export function createRateHandler(deps: BrokerHandlerDependencies) {
       return;
     }
 
+    const structuredEntry = await deps.taskStore.readStructuredResult(parsed.task_id);
+    if (!structuredEntry) {
+      res.status(409).json({
+        error: "policy_rejected",
+        message: "task has no structured result to bind the quality receipt to",
+      });
+      return;
+    }
+    let structuredTaskId: string;
+    let verifiedSubmitter: string | null;
+    let binding;
     try {
-      await deps.taskStore.writeFeedback(parsed.task_id, {
-        ...parsed,
-        rated_at: nowFn(deps)().toISOString(),
-        rated_by: req.brokerPrincipal ?? "unknown",
+      const raw = JSON.parse(structuredEntry.content) as unknown;
+      const current = structuredTaskResultSchema.safeParse(raw);
+      if (current.success) {
+        structuredTaskId = current.data.taskId;
+        verifiedSubmitter = current.data.provenance?.verifiedSubmitter ?? null;
+      } else {
+        const legacy = z.object({
+          task_id: z.string().min(1),
+          result_schema_version: z.literal(1),
+        }).passthrough().parse(raw);
+        structuredTaskId = legacy.task_id;
+        verifiedSubmitter = null;
+      }
+      binding = buildQualityBinding({
+        statusContent: status.content,
+        structuredResultContent: structuredEntry.content,
       });
     } catch (err) {
-      res.status(500).json({
-        error: "internal",
+      res.status(409).json({
+        error: "policy_rejected",
+        message: `task structured result cannot be bound: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    if (structuredTaskId !== parsed.task_id) {
+      res.status(409).json({ error: "policy_rejected", message: "structured result task id mismatch" });
+      return;
+    }
+    const expected = parsed.expected_binding;
+    if (expected && (
+      expected.task_document_sha256 !== binding.taskDocumentSha256 ||
+      expected.structured_result_sha256 !== binding.structuredResultSha256 ||
+      (expected.repository_diff_sha256 !== undefined &&
+        expected.repository_diff_sha256 !== binding.repository.diffSha256)
+    )) {
+      res.status(409).json({ error: "policy_rejected", message: "reviewed binding is stale or mismatched" });
+      return;
+    }
+    const principal = authenticatedPrincipal;
+    const brokerOwner = canonical.ok
+      ? canonical.envelope.broker_principal
+      : historicalBrokerTask
+        ? storedBrokerPrincipal(status.content)
+        : null;
+    const reviewerIsOwner = brokerOwner === principal || verifiedSubmitter === principal;
+    if (parsed.reviewer_role === "independent" && reviewerIsOwner) {
+      res.status(409).json({
+        error: "policy_rejected",
+        message: "task owner cannot attest that this review is independent",
+      });
+      return;
+    }
+    const independence = parsed.reviewer_role === "independent"
+      ? "independent"
+      : parsed.reviewer_role === "self" || reviewerIsOwner
+        ? "self"
+        : "unknown";
+    const receipt = buildQualityReceipt({
+      taskId: parsed.task_id,
+      reviewerPrincipal: principal,
+      reviewerIndependence: independence,
+      rating: parsed.rating,
+      ratingReason: parsed.rating_reason,
+      verificationOutcome: parsed.verification_outcome,
+      retriesCount: parsed.retries_count,
+      ratedAt: nowFn(deps)().toISOString(),
+      bindingAttestation: expected ? "reviewer-confirmed" : "server-bound",
+      binding,
+    });
+    try {
+      await deps.taskStore.writeQualityReceipt(parsed.task_id, receipt);
+    } catch (err) {
+      res.status(err instanceof QualityReceiptConflictError ? 409 : 500).json({
+        error: err instanceof QualityReceiptConflictError ? "policy_rejected" : "internal",
         message: `feedback write failed: ${err instanceof Error ? err.message : String(err)}`,
       });
       return;
