@@ -2,9 +2,10 @@
 
 **Latest session:** 2026-07-15 (Codex) — **Quality Receipt v1 merged,
 deployed, and live**
-**Origin/main and production:** `935a10abb6adc00d1fbf6715569295f335d2245d`
+**Production feature tree:** `935a10abb6adc00d1fbf6715569295f335d2245d`
 via merged PR [#227](https://github.com/Magnus-Gille/hugin/pull/227), closing
-[#216](https://github.com/Magnus-Gille/hugin/issues/216).
+[#216](https://github.com/Magnus-Gille/hugin/issues/216). The session-close
+record itself was merged separately in documentation-only PR #228.
 
 ## Latest — execution success and semantic acceptance are separate signals
 
