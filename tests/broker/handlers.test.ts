@@ -886,7 +886,7 @@ describe("POST /v1/friction/report", () => {
     });
     const write = harness.munin.writes.at(-1)!;
     expect(write.namespace).toBe("signals/friction");
-    expect(write.key).toContain("cassette_task-1-");
+    expect(write.key).toMatch(/^friction-broker-[0-9a-f]{32}$/);
     expect(write.tags).toEqual(expect.arrayContaining([
       "friction:tool_failure",
       "severity:blocking",
@@ -999,7 +999,11 @@ describe("POST /v1/friction/report", () => {
     const collision = await fetch(`${harness.url}/v1/friction/report`, {
       method: "POST",
       headers: authHeader(),
-      body: JSON.stringify({ ...original, detail: "conflicting evidence" }),
+      body: JSON.stringify({
+        ...original,
+        detail: "conflicting evidence",
+        task_id: "changed-task-id",
+      }),
     });
 
     expect(first.status).toBe(201);

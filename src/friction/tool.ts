@@ -17,6 +17,7 @@ import {
   buildFrictionKey,
   buildFrictionNamespace,
   buildFrictionTags,
+  keepCallerFrictionTags,
   sanitiseTaskId,
 } from "./munin-key.js";
 import {
@@ -113,6 +114,10 @@ export function buildFrictionTool(deps: FrictionToolDeps): FrictionTool {
       let input: ReportFrictionInput;
       try {
         input = reportFrictionInputSchema.parse(rawInput);
+        input = {
+          ...input,
+          ...(input.tags ? { tags: keepCallerFrictionTags(input.tags) } : {}),
+        };
       } catch (err) {
         return asResult(errorPayload(err), true);
       }
@@ -122,11 +127,14 @@ export function buildFrictionTool(deps: FrictionToolDeps): FrictionTool {
       const resolvedModelId = pickModelId(input.model_id, deps.modelId);
       const namespace = buildFrictionNamespace();
       const key = buildFrictionKey(resolvedTaskId, recordedAt);
-      const tags = buildFrictionTags({
-        input,
-        modelId: resolvedModelId,
-        resolvedTaskId,
-      });
+      const tags = [...new Set([
+        ...buildFrictionTags({
+          input,
+          modelId: resolvedModelId,
+          resolvedTaskId,
+        }),
+        "source:standalone-mcp",
+      ])];
       const content = buildFrictionContent({
         input,
         modelId: resolvedModelId,
