@@ -852,7 +852,7 @@ describe("POST /v1/friction/report", () => {
         detail: "The systemd address-family allowlist omitted AF_NETLINK.",
         task_id: "cassette/task-1",
         tool_name: "codex-exec",
-        tags: ["reporter:spoofed", "repo:cassette-ai"],
+        tags: ["reporter:spoofed", "source:standalone-mcp", "repo:cassette-ai"],
       }),
     });
 
@@ -861,6 +861,7 @@ describe("POST /v1/friction/report", () => {
     expect(response).toMatchObject({
       ok: true,
       dropped: false,
+      deduplicated: false,
       namespace: "signals/friction",
     });
     const write = harness.munin.writes.at(-1)!;
@@ -876,11 +877,51 @@ describe("POST /v1/friction/report", () => {
       "repo:cassette-ai",
     ]));
     expect(write.tags).not.toContain("reporter:spoofed");
+    expect(write.tags).not.toContain("source:standalone-mcp");
     expect(JSON.parse(write.content)).toMatchObject({
       model_id: "claude-code",
       task_id_resolved: "cassette_task-1",
       friction_type: "tool_failure",
+      user_tags: ["repo:cassette-ai"],
     });
+  });
+
+  it("deduplicates an identical authenticated retry onto one Munin event", async () => {
+    const body = JSON.stringify({
+      friction_type: "connectivity",
+      severity: "medium",
+      summary: "M5 connection reset",
+      detail: "The first response was ambiguous after the request was sent.",
+      task_id: "task-1",
+      tags: ["repo:hugin", "phase:dogfood"],
+    });
+
+    const first = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body,
+    });
+    const second = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        ...JSON.parse(body) as Record<string, unknown>,
+        tags: ["phase:dogfood", "repo:hugin"],
+      }),
+    });
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    const firstResult = await first.json() as Record<string, unknown>;
+    const secondResult = await second.json() as Record<string, unknown>;
+    expect(firstResult).toMatchObject({ deduplicated: false });
+    expect(secondResult).toMatchObject({
+      deduplicated: true,
+      key: firstResult.key,
+    });
+    expect(harness.munin.writes.filter(
+      (write) => write.namespace === "signals/friction" && write.key === firstResult.key,
+    )).toHaveLength(1);
   });
 
   it("rejects malformed friction without writing", async () => {

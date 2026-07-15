@@ -30,7 +30,6 @@ import { queryAllMuninEntries } from "../munin-pagination.js";
 import type { ReportFrictionInput } from "../friction/schema.js";
 import {
   buildFrictionContent,
-  buildFrictionKey,
   buildFrictionNamespace,
   buildFrictionTags,
   sanitiseTaskId,
@@ -74,6 +73,36 @@ export interface FrictionWriteResult {
   dropped: false;
   namespace: string;
   key: string;
+  deduplicated: boolean;
+}
+
+function buildBrokerFrictionKey(
+  input: ReportFrictionInput,
+  reporterTag: string,
+  resolvedTaskId: string | undefined,
+  modelId: string,
+): string {
+  // A friction report describes a semantic event, not an HTTP attempt. Hash
+  // the normalized event so an ambiguous client retry reuses one Munin key.
+  // Tags are set-like metadata, so their order must not change the identity.
+  const normalized = {
+    reporter: reporterTag,
+    model_id: modelId,
+    task_id: resolvedTaskId ?? null,
+    friction_type: input.friction_type,
+    severity: input.severity,
+    summary: input.summary,
+    detail: input.detail,
+    resource_assessment: input.resource_assessment ?? null,
+    alias_suggested: input.alias_suggested ?? null,
+    tool_name: input.tool_name ?? null,
+    tags: [...new Set(input.tags ?? [])].sort(),
+  };
+  const digest = createHash("sha256")
+    .update(JSON.stringify(normalized))
+    .digest("hex")
+    .slice(0, 32);
+  return `${sanitiseTaskId(resolvedTaskId)}-broker-${digest}`;
 }
 
 /**
@@ -254,12 +283,16 @@ export class BrokerTaskStore {
     reporter: string,
     recordedAt: Date,
   ): Promise<FrictionWriteResult> {
-    // `reporter:*` is authenticated server provenance. Drop caller attempts to
-    // add another reporter tag so consumers never have to guess which one wins.
+    // `reporter:*` and `source:*` are server-owned provenance. Drop caller
+    // attempts to add either so consumers never have to guess which one wins.
     const trustedInput: ReportFrictionInput = {
       ...input,
       ...(input.tags
-        ? { tags: input.tags.filter((tag) => !tag.startsWith("reporter:")) }
+        ? {
+            tags: input.tags.filter(
+              (tag) => !tag.startsWith("reporter:") && !tag.startsWith("source:"),
+            ),
+          }
         : {}),
     };
     const resolvedTaskId = trustedInput.task_id?.trim()
@@ -267,11 +300,19 @@ export class BrokerTaskStore {
       : undefined;
     const modelId = trustedInput.model_id?.trim() || reporter.trim() || "unknown";
     const namespace = buildFrictionNamespace();
-    const key = buildFrictionKey(resolvedTaskId, recordedAt);
     const reporterTag = reporter
       .trim()
       .replace(/[^A-Za-z0-9._-]/g, "_")
       .slice(0, 64) || "unknown";
+    const key = buildBrokerFrictionKey(
+      trustedInput,
+      reporterTag,
+      resolvedTaskId,
+      modelId,
+    );
+    if (await this.munin.read(namespace, key)) {
+      return { ok: true, dropped: false, namespace, key, deduplicated: true };
+    }
     const tags = [...new Set([
       ...buildFrictionTags({ input: trustedInput, modelId, resolvedTaskId }),
       "source:broker-api",
@@ -284,7 +325,7 @@ export class BrokerTaskStore {
       recordedAt,
     });
     await this.munin.write(namespace, key, content, tags, undefined, "internal");
-    return { ok: true, dropped: false, namespace, key };
+    return { ok: true, dropped: false, namespace, key, deduplicated: false };
   }
 
   /**

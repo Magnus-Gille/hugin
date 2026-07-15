@@ -30,7 +30,15 @@ write returns an error so the caller knows the evidence was not recorded.
 The Broker endpoint is available only when the authenticated Broker is enabled.
 It defaults `model_id` to the authenticated principal and adds
 `source:broker-api` plus `reporter:<principal>` tags. A caller may provide a
-more precise `model_id`, but the authenticated reporter tag remains.
+more precise `model_id`, but the authenticated reporter tag remains. The
+`source:*` and `reporter:*` prefixes are server-owned; caller-supplied tags with
+either prefix are discarded.
+
+Broker writes are retry-safe. The server derives the Munin key from the
+authenticated reporter and normalized event payload, so submitting the same
+event again returns the existing key with `deduplicated: true` instead of
+adding a second corpus entry. A materially different report gets a different
+key.
 
 ## CLI example
 
@@ -70,5 +78,6 @@ Content-Type: application/json
 }
 ```
 
-A successful write returns HTTP `201` with the durable Munin namespace and key.
+A successful write returns HTTP `201` with the durable Munin namespace, key,
+and a `deduplicated` boolean.
 Use `npm run friction-report` for the existing aggregate readout.
