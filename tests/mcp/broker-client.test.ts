@@ -112,6 +112,26 @@ describe("BrokerClient", () => {
     expect(secondBody.event_id).toBe(firstBody.event_id);
   });
 
+  it("does not retry a friction HTTP error", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(
+      { error: "policy_rejected" },
+      { status: 400 },
+    ));
+    const client = new BrokerClient({
+      baseUrl: "http://broker.test:3033",
+      bearerToken: "tk",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    await expect(client.reportFriction({
+      friction_type: "ambiguity",
+      severity: "low",
+      summary: "bad request",
+      detail: "the server rejected it",
+    })).rejects.toBeInstanceOf(BrokerHttpError);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("posts learning-loop operations to their authenticated endpoints", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ ok: true }));
     const client = new BrokerClient({

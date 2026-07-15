@@ -40,6 +40,11 @@ model, task, tool, classification, and provenance tag prefixes are server-owned.
 Routing tags such as
 `repo:*`, `issue:*`, and `phase:*` remain available to callers.
 
+`model_id` is self-declared metadata, not authenticated identity. Consumers may
+use it as a routing hypothesis or diagnostic dimension, but any attribution or
+anti-poisoning decision must key on the authenticated `reporter:<principal>`
+tag (or another independently bound model receipt), never `model:*` alone.
+
 When `task_id` resolves to a private Munin task, the friction event inherits its
 restricted classification. Reports without a linked task remain `internal`.
 
