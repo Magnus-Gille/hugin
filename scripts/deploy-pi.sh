@@ -228,8 +228,8 @@ echo "==> Health check..."
 ssh "$REMOTE" "
   for attempt in \$(seq 1 15); do
     if curl -fsS http://127.0.0.1:3032/health | /usr/bin/node -e '
-      let raw = "";
-      process.stdin.on("data", (chunk) => raw += chunk).on("end", () => {
+      let raw = \"\";
+      process.stdin.on(\"data\", (chunk) => raw += chunk).on(\"end\", () => {
         const health = JSON.parse(raw);
         if (health.codex_sandbox?.available !== true) process.exit(1);
         process.stdout.write(raw);
