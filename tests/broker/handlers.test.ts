@@ -893,6 +893,7 @@ describe("POST /v1/friction/report", () => {
     });
     const write = harness.munin.writes.at(-1)!;
     expect(write.namespace).toBe("signals/friction");
+    expect(write.classification).toBe("internal");
     expect(write.key).toMatch(/^friction-broker-[0-9a-f]{32}$/);
     expect(write.tags).toEqual(expect.arrayContaining([
       "friction:tool_failure",
@@ -950,6 +951,34 @@ describe("POST /v1/friction/report", () => {
     expect(harness.munin.writes.at(-1)?.classification).toBe("client-restricted");
   });
 
+  it("maps a linked private task to client-confidential friction", async () => {
+    harness.munin.reads["tasks/confidential-task/status"] = {
+      namespace: "tasks/confidential-task",
+      key: "status",
+      content: "private task",
+      tags: ["completed"],
+      classification: "private",
+      created_at: "2026-07-11T12:00:00.000Z",
+      updated_at: "2026-07-11T12:00:00.000Z",
+    };
+
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "tool_failure",
+        severity: "high",
+        summary: "confidential task tool failed",
+        detail: "Only operational metadata is included.",
+        event_id: "77777777-8888-4999-8aaa-bbbbbbbbbbbb",
+        task_id: "confidential-task",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(harness.munin.writes.at(-1)?.classification).toBe("client-confidential");
+  });
+
   it("deduplicates an identical authenticated retry onto one Munin event", async () => {
     const body = JSON.stringify({
       friction_type: "connectivity",
@@ -987,6 +1016,83 @@ describe("POST /v1/friction/report", () => {
     expect(harness.munin.writes.filter(
       (write) => write.namespace === "signals/friction" && write.key === firstResult.key,
     )).toHaveLength(1);
+  });
+
+  it("serializes overlapping identical and conflicting event retries", async () => {
+    const eventId = "88888888-9999-4aaa-8bbb-cccccccccccc";
+    const event = {
+      friction_type: "connectivity",
+      severity: "high",
+      summary: "overlapping retry",
+      detail: "original evidence",
+      event_id: eventId,
+      task_id: "task-overlap",
+    };
+    const originalWrite = harness.munin.write.bind(harness.munin);
+    let releaseWrite = (): void => {};
+    let markStarted = (): void => {};
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const writeStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+    let blocked = false;
+    const spy = vi.spyOn(harness.munin, "write").mockImplementation(async (
+      namespace,
+      key,
+      content,
+      tags,
+      expectedUpdatedAt,
+      classification,
+    ) => {
+      if (namespace === "signals/friction" && !blocked) {
+        blocked = true;
+        markStarted();
+        await writeGate;
+      }
+      return originalWrite(
+        namespace,
+        key,
+        content,
+        tags,
+        expectedUpdatedAt,
+        classification,
+      );
+    });
+
+    try {
+      const firstPromise = fetch(`${harness.url}/v1/friction/report`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(event),
+      });
+      await writeStarted;
+      const retryPromise = fetch(`${harness.url}/v1/friction/report`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(event),
+      });
+      const conflictPromise = fetch(`${harness.url}/v1/friction/report`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify({ ...event, detail: "conflicting evidence" }),
+      });
+      releaseWrite();
+
+      const [first, retry, conflict] = await Promise.all([
+        firstPromise,
+        retryPromise,
+        conflictPromise,
+      ]);
+      expect(first.status).toBe(201);
+      expect(retry.status).toBe(201);
+      expect(await retry.json()).toMatchObject({ deduplicated: true });
+      expect(conflict.status).toBe(409);
+      expect(await conflict.json()).toMatchObject({ error: "idempotency_collision" });
+      expect(harness.munin.writes.filter(
+        (write) => write.namespace === "signals/friction",
+      )).toHaveLength(1);
+    } finally {
+      releaseWrite();
+      spy.mockRestore();
+    }
   });
 
   it("rejects reuse of an event identity with different evidence", async () => {
