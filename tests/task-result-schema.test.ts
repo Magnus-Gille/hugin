@@ -9,6 +9,7 @@ describe("structured task result schema", () => {
       executor: "claude-sdk", resultSource: "sdk-result", exitCode: 0,
       completedAt: "2026-07-14T12:00:00Z", bodyKind: "response", bodyText: "ok",
       repositoryChange: {
+        baseBranch: "master",
         baseCommit: "a".repeat(40),
         headCommit: "b".repeat(40),
         changedFiles: ["src/parser.ts", "tests/parser.test.ts"],
@@ -19,6 +20,7 @@ describe("structured task result schema", () => {
       "src/parser.ts",
       "tests/parser.test.ts",
     ]);
+    expect(result.repositoryChange?.baseBranch).toBe("master");
   });
 
   it("preserves M5 delegation provenance on canonical homeserver results", () => {

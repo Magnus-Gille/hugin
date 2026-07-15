@@ -295,6 +295,25 @@ export type TaskSubmissionProvenance = z.infer<
 // factory reconstruct the exact before/after trees from Git without trusting
 // an agent's prose claim that it edited or tested something.
 export const repositoryChangeEvidenceSchema = z.object({
+  // Optional only for historical schema-v1 results. Every current managed
+  // repository writer supplies the resolved/validated branch (#217).
+  baseBranch: z.string()
+    .min(1)
+    .max(255)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/)
+    .refine(
+      (value) =>
+        value.toUpperCase() !== "HEAD" &&
+        !value.startsWith("origin/") &&
+        !value.startsWith("refs/") &&
+        !value.includes("..") &&
+        !value.includes("//") &&
+        !value.split("/").some(
+          (component) => component.startsWith(".") || component.endsWith(".lock"),
+        ),
+      "invalid repository base branch",
+    )
+    .optional(),
   baseCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
   headCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
   changedFiles: z.array(z.string().min(1)).min(1).max(10_000),

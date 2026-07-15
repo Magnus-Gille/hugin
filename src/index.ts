@@ -17,7 +17,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt } from "./task-helpers.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
 import {
@@ -651,6 +651,8 @@ interface TaskConfig {
   runtime: "claude" | "codex" | "ollama" | "opencode" | "homeserver" | "orchestrator";
   workingDir: string;
   context?: string;
+  baseBranch?: string;
+  baseBranchError?: string;
   timeoutMs: number;
   submittedBy: string;
   submittedAt: string;
@@ -755,6 +757,7 @@ function parseTask(content: string): TaskConfig | null {
   const contextRaw = content.match(
     /\*\*Context:\*\*\s*(.+)/i
   )?.[1]?.trim();
+  const baseBranchOverride = parseBaseBranchOverride(content);
   const timeoutStr = content.match(/\*\*Timeout:\*\*\s*(\d+)/i)?.[1];
   const submittedBy = content.match(
     /\*\*Submitted by:\*\*\s*(.+)/i
@@ -885,6 +888,8 @@ function parseTask(content: string): TaskConfig | null {
     runtime: runtime || "claude",  // temporary for auto — overwritten by router
     workingDir: resolvedDir,
     context: contextRaw || undefined,
+    baseBranch: baseBranchOverride.baseBranch,
+    baseBranchError: baseBranchOverride.error,
     timeoutMs: parseBoundedPositiveInt(
       canonicalBrokerEnvelope?.timeout_ms ?? timeoutStr,
       config.defaultTimeoutMs,
@@ -4156,6 +4161,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     return { hadTask: true, queueDepth };
   }
 
+  if (parsedTask?.baseBranchError) {
+    const rejection = `Repository base branch invalid: ${parsedTask.baseBranchError}`;
+    console.warn(`Rejecting task ${taskNs}: ${rejection}`);
+    await failTaskWithMessage(taskNs, entry, rejection);
+    await munin.log(taskNs, `Task rejected before execution: ${rejection}`);
+    await promoteDependents(extractTaskId(taskNs));
+    await refreshPipelineSummaryFromContent(entry.content);
+    return { hadTask: true, queueDepth };
+  }
+
   if (declaredRuntime !== "pipeline" && parsedTask) {
     const sensitivityAssessment = await assessTaskSecurity(parsedTask);
 
@@ -4468,11 +4483,13 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       throw new Error(`Internal dispatcher error: parsed task missing for ${taskNs}`);
     }
 
-    // Pre-task: checkout a fresh hugin/<taskId> branch from origin/main (#47)
+    // Pre-task: checkout a fresh hugin/<taskId> branch from the repository's
+    // resolved default branch (or validated explicit override, #217).
     let branchResult: Awaited<ReturnType<typeof checkoutTaskBranch>> = { action: "skipped" };
     if (task.runtime !== "homeserver") {
       branchResult = await checkoutTaskBranch(task.workingDir, taskId, {
         reposRoot: config.reposRoot,
+        baseBranchOverride: task.baseBranch,
         captureBaseCommit: true,
       });
       if (branchResult.action === "fetch-failed") {
@@ -5102,6 +5119,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         egressPolicy.allowedHosts,
         {
           captureRepositoryChange: true,
+          baseBranch: branchResult.baseBranch,
           baseCommit: branchResult.baseCommit,
         },
       );

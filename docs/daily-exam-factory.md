@@ -14,7 +14,7 @@ non-runnable artifacts and must never be treated as fresh evidence.
 For a successful task branch, Hugin records a content-blind repository binding
 in `result-structured`:
 
-- exact `origin/main` commit used as the before tree;
+- resolved repository base branch and its exact commit used as the before tree;
 - exact task-branch head commit;
 - repository-relative changed-file names; and
 - SHA-256 of the binary Git diff.

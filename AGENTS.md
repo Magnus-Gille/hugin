@@ -72,6 +72,14 @@ Content format:
 - `files` → `/home/magnus/mimir`
 - Raw absolute paths under `/home/magnus/` are passed through; paths outside this prefix are rejected and fall back to the default workspace
 
+**Managed-repository base branch:** Hugin prefers the fetched
+`refs/remotes/origin/HEAD`, then queries the remote `HEAD` symref. Use the
+optional `Base branch:` field only for disconnected or unusual repositories;
+its value is a validated branch name such as `main`, `master`, or
+`release/stable` (not an `origin/*` or `refs/*` ref). The resolved branch is
+bound once and reused for checkout, no-change detection, cleanup, PR base, and
+repository evidence.
+
 **Reply routing:** `Reply-to:` and `Reply-format:` are forwarded in the result for downstream consumers (e.g., Ratatoskr).
 
 **Task groups:** `Group:` and `Sequence:` enable multi-step task orchestration. Both are forwarded in results and heartbeats.
@@ -134,10 +142,12 @@ maps to the `build` agent with `edit`/`bash` allowed.
 - `result` — human-readable markdown with exit code, timestamps, duration, and response body
 - `result-structured` — machine-readable JSON (Zod-validated) with schema version, lifecycle metadata, runtime metadata (requested vs effective model/host), sensitivity audit, honest submission provenance (`claimedSubmitter`, nullable `verifiedSubmitter`, signing policy/status/keyId), and structured body. Prefer this for programmatic consumption.
 
-Successful managed-repository tasks may include `repositoryChange` in `result-structured`:
-the pre-agent `origin/main`, final task-branch commit, changed paths, and binary Git diff
-SHA-256. The daily exam factory uses this content-blind evidence only to classify history as
-provisional holdout, regression, or quarantine; it never runs or promotes candidates. See
+Successful managed-repository tasks may include `repositoryChange` in
+`result-structured`. Current writers bind the resolved base branch, its exact
+pre-agent commit, final task-branch commit, changed paths, and binary Git diff
+SHA-256. The daily exam factory uses this content-blind evidence only to
+classify history as provisional holdout, regression, or quarantine; it never
+runs or promotes candidates. See
 `docs/daily-exam-factory.md`.
 
 **M5 execution provenance (issue #163):** every M5 `/delegate` call — whether it arrives via the canonical #167 Broker leaf (`runtime:homeserver`) or as an orchestrator fan-out worker leaf — records the same canonical trace: `ledgerId` (the join key to M5's authoritative evidence row), effective `nodeId`/`modelId`, `taskType`, verification `outcome`/`score`, `verifier` identity + `verifierNotes`, `delegated`/`escalated` + `decisionReason`, route-policy `policyMode`/`policyAction`/`policyReason`, `priceCatalogVersion`, and `costTraceId`. It surfaces at `runtimeMetadata.delegation` for the direct path and per-leaf at `orchestratorOutcomes[].delegation` for fan-out. `src/m5-provenance.ts` is the **only** sanctioned producer: the gateway body is untrusted input, so it validates enums/bounds and DROPS anything out of contract rather than throwing — a malformed gateway value must never sink the `result-structured` write of an already-paid run (`buildStructuredTaskResult` calls `.parse()`). This is a **trace, not a verdict**: M5 remains the sole capability-evidence authority and Hugin never duplicates its judgements into a Hugin-owned capability store. Retrieving the row *by* `ledgerId` currently needs an id-addressable read on the gateway — filed as gille-inference#227.
