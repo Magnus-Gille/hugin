@@ -28,9 +28,9 @@ Broker API and its MCP/CLI clients are explicit post-run operations; a failed
 write returns an error so the caller knows the evidence was not recorded.
 
 All writers enforce the same authoritative tag families. The injected writer
-stamps `source:standalone-mcp`; authenticated API/MCP/CLI writes stamp
-`source:broker-api` and `reporter:<principal>`. Caller-supplied values in those
-families are discarded on every surface.
+keeps the corpus's established `source:model-self-report` value; authenticated
+API/MCP/CLI writes stamp `source:broker-api` and `reporter:<principal>`.
+Caller-supplied values in those families are discarded on every surface.
 
 The Broker endpoint is available only when the authenticated Broker is enabled.
 It defaults `model_id` to the authenticated principal and adds
