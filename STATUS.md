@@ -1,5 +1,61 @@
 # Hugin — Status
 
+**Latest session:** 2026-07-15 (Codex) — **Quality Receipt v1 merged,
+deployed, and live**
+**Origin/main and production:** `935a10abb6adc00d1fbf6715569295f335d2245d`
+via merged PR [#227](https://github.com/Magnus-Gille/hugin/pull/227), closing
+[#216](https://github.com/Magnus-Gille/hugin/issues/216).
+
+## Latest — execution success and semantic acceptance are separate signals
+
+- Current normal task results now carry an explicit repository outcome,
+  including managed no-op and publication-failure states. A successful process
+  exit is therefore preserved as execution evidence without being mislabeled as
+  a useful repository change or an accepted answer.
+- `hugin_rate` and `POST /v1/delegate/rate` append authenticated Quality Receipt
+  v1 verdicts bound to the exact task-status bytes, structured-result bytes,
+  repository base/head, and diff hash. Identical retries are idempotent;
+  changed verdicts from the same reviewer conflict; stale bindings, malformed
+  ledgers, and disagreeing receipts fail closed.
+- Reviewer independence is explicit (`independent`, `self`, or `unknown`). The
+  server prevents a verified task submitter/Broker owner from claiming
+  independence. For other principals it remains an authenticated attestation,
+  not proof of organizational separation.
+- The learning collector and daily exam factory consume only exact-bound receipt
+  summaries. Independent acceptance is retained as product-quality evidence but
+  does not automatically turn a task into a golden exam oracle. Experiment
+  promotion now requires at least one independently accepted challenger
+  observation even when configured rated coverage is zero.
+- Historical Broker results and legacy flat feedback remain readable, but legacy
+  feedback is never promoted to bound quality evidence. There is no multi-key
+  Munin transaction across status/result/feedback; exact hash matching makes a
+  later mismatch ineligible rather than silently joining it.
+- Review fixed canonical hashing of optional fields, corrupt-ledger handling,
+  conflicting-receipt aggregation, candidate-readiness overclaim,
+  classification preservation, and repository-outcome derivation. Claude Fable
+  was unavailable because of its spend limit and Opus returned no bounded review
+  output, so the final adversarial review was performed with Codex.
+- Acceptance passed: TypeScript build; 112 files / 1,842 tests; deployment and
+  bootstrap shell suites; `git diff --check`; GitHub CI; exact-SHA Pi deployment;
+  active service; loopback health green, polling and idle with queue depth zero;
+  Codex sandbox available; post-deploy daily factory schema v2 with complete
+  history and 1 provisional / 1 regression / 6 quarantine candidates.
+
+**Next:** dogfood the live receipt path on a real managed-repository task, obtain
+an authenticated independent verdict, and verify the collector plus daily exam
+join end to end. Then implement
+[#225](https://github.com/Magnus-Gille/hugin/issues/225) so managed-repository
+publication failures are durable and recoverable, before feeding qualified
+receipt-backed outcomes into the matched M5 champion/challenger loop. Execution,
+product quality, and friction remain separate signals.
+
+**Non-blocking operations debt:** Ratatoskr still carries independent substantive
+instruction files. The deploy host-shell probe can report `NO_CODEX` while the
+authoritative in-service Codex sandbox probe is green. Stale worktrees should be
+cleaned only with explicit cleanup authorization.
+
+---
+
 **Latest session:** 2026-07-15 (Codex) — **fail-closed cross-client exposure contract merged, deployed, and live**
 **Production/deployed:** `a03c829f766d51d15a628c694a69b7e33b96b777`
 via merged PR [#214](https://github.com/Magnus-Gille/hugin/pull/214). The
