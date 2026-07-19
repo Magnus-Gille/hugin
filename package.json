@@ -19,6 +19,8 @@
     "build:pii-fixtures": "tsx scripts/build-pii-fixtures.ts",
     "eval:pii": "tsx scripts/run-pii-eval.ts",
     "experiment:m5-code-loop": "tsx scripts/run-m5-code-loop-experiment.ts",
+    "smoke:learning-task:negative": "tsx scripts/learning-task-joint-smoke.ts --mode=negative",
+    "smoke:learning-task:live": "tsx scripts/learning-task-joint-smoke.ts --mode=live",
     "harvest:daily-exams": "node dist/daily-exam-harvest-cli.js",
     "pilot:harbor": "tsx scripts/harbor_pilot/run-pilot.ts",
     "pilot:harbor:import": "tsx scripts/harbor_pilot/import-learning-report.ts",
