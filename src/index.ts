@@ -58,10 +58,28 @@ import {
 import { executeOllamaTask } from "./ollama-executor.js";
 import {
   executeHomeserverTask,
+  buildFreshHomeserverDelegateRequestBody,
   loadHomeserverGatewayConfig,
+  renderHomeserverUserMessage,
   type HomeserverExecutorResult,
   type HomeserverVerifierSpec,
 } from "./homeserver-executor.js";
+import {
+  createPreparedLearningTaskDispatch,
+  learningTaskAttemptKey,
+  learningTaskExecutionEvidenceSchema,
+  learningTaskOutcomePersistenceFailure,
+  prepareDurableLearningTaskAttempt,
+  validatePreparedLearningTaskOutcome,
+  type LearningTaskExecutionEvidence,
+  type LearningTaskSource,
+} from "./learning-task-handshake.js";
+import {
+  recoverLatestStoredLearningTaskAttempt,
+  type RecoveredStoredLearningTask,
+} from "./learning-task-recovery.js";
+import { createImmutableLearningArtifact } from "./learning-task-store.js";
+import { buildAuthenticatedLearningTaskSource } from "./learning-task-source.js";
 import {
   executeOpencodeTask,
   loadOpencodeGatewayConfig,
@@ -177,6 +195,10 @@ import { consultSkillLane } from "./skill/skill-lane-dispatch.js";
 import { readBrokerEnv, startBroker, type RunningBroker } from "./broker/server.js";
 import { brokerExecutorCapabilities } from "./broker/executor-capabilities.js";
 import { BrokerTaskStore, parseCanonicalEnvelope } from "./broker/task-store.js";
+import {
+  parseStoredBrokerAttestation,
+  validateBrokerAttestation,
+} from "./broker/attestation.js";
 import { DelegationJournal } from "./broker/journal.js";
 import { IdempotencyIndex } from "./broker/idempotency.js";
 import {
@@ -692,6 +714,11 @@ interface TaskConfig {
   homeserverVerifier?: HomeserverVerifierSpec;
   maxOutputTokens?: number;
   homeserverPolicyError?: string;
+  /** Authenticated Hugin Broker source, never parsed from free-form task prose. */
+  brokerPrincipal?: string;
+  brokerAttestedNamespace?: string;
+  /** Why an embedded Broker claim did not qualify as authenticated learning provenance. */
+  brokerAttestationError?: string;
 }
 
 type DeclaredRuntime = TaskConfig["runtime"] | "pipeline" | "auto";
@@ -858,6 +885,14 @@ function parseTask(content: string): TaskConfig | null {
     }
   }
 
+  const brokerAttestation = canonicalBrokerEnvelope
+    ? validateBrokerAttestation({
+        envelope: canonicalBrokerEnvelope,
+        attestation: parseStoredBrokerAttestation(content),
+        serverSecret: config.muninApiKey,
+      })
+    : null;
+
   if ((!prompt && !canonicalBrokerEnvelope) || (!runtime && !isAutoRoute)) return null;
 
   // Resolution priority: Context > Working dir > config.workspace
@@ -937,6 +972,13 @@ function parseTask(content: string): TaskConfig | null {
         )
       : undefined,
     homeserverPolicyError,
+    brokerPrincipal: brokerAttestation?.ok ? brokerAttestation.principal : undefined,
+    brokerAttestedNamespace: brokerAttestation?.ok
+      ? brokerAttestation.attestation.namespace
+      : undefined,
+    brokerAttestationError: brokerAttestation && !brokerAttestation.ok
+      ? brokerAttestation.error
+      : undefined,
     pipeline:
       pipelineId && pipelinePhase
         ? {
@@ -961,6 +1003,24 @@ function parseTask(content: string): TaskConfig | null {
           }
         : undefined,
   };
+}
+
+function buildLearningTaskSource(
+  task: TaskConfig,
+  taskNs: string,
+  createdAt: string,
+  acceptedAt: string,
+  provenance: TaskSubmissionProvenance,
+): LearningTaskSource {
+  return buildAuthenticatedLearningTaskSource({
+    taskNamespace: taskNs,
+    createdAt,
+    acceptedAt,
+    verifiedSubmitter: provenance.verifiedSubmitter ?? undefined,
+    brokerPrincipal: task.brokerPrincipal,
+    brokerAttestedNamespace: task.brokerAttestedNamespace,
+    brokerAttestationError: task.brokerAttestationError,
+  });
 }
 
 function buildTaskSensitivitySnapshot(
@@ -2740,6 +2800,18 @@ async function queryOperationalTaskEntries(
   return page.results;
 }
 
+async function recoverPreparedLearningAttempt(
+  taskNs: string,
+  classification?: string,
+): Promise<RecoveredStoredLearningTask | null> {
+  return recoverLatestStoredLearningTaskAttempt({
+    munin,
+    taskNamespace: taskNs,
+    taskClassification: classification,
+    gateway: loadHomeserverGatewayConfig(process.env),
+  });
+}
+
 async function recoverStaleTasks(): Promise<void> {
   try {
     const results = await queryOperationalTaskEntries(munin, ["running"], "startup recovery");
@@ -2796,17 +2868,26 @@ async function recoverStaleTasks(): Promise<void> {
       );
 
       const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
+      const learningRecovery = runtimeTag === "runtime:homeserver"
+        ? await recoverPreparedLearningAttempt(result.namespace, entry.classification)
+        : null;
+      const recoveryOutputClassification = learningRecovery?.classification
+        ?? entry.classification;
       await munin.write(
         result.namespace,
         "status",
         entry.content,
         buildTerminalStatusTags("failed", entry.tags),
-        entry.updated_at
+        entry.updated_at,
+        recoveryOutputClassification,
       );
       await munin.write(
         result.namespace,
         "result",
-        `## Result\n\n- **Exit code:** ${DISPATCHER_FAILURE_EXIT_CODE}\n- **Error:** Task recovered (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)\n`
+        `## Result\n\n- **Exit code:** ${DISPATCHER_FAILURE_EXIT_CODE}\n- **Error:** Task recovered (${reason}, worker: ${claimedBy || "unknown"}, elapsed: ${elapsed}s)\n`,
+        undefined,
+        undefined,
+        recoveryOutputClassification,
       );
       const runtime = (runtimeTag || "runtime:claude").replace(
         /^runtime:/,
@@ -2821,8 +2902,17 @@ async function recoverStaleTasks(): Promise<void> {
           {
             executor: "dispatcher",
             resultSource: "recovery",
+            ...(learningRecovery
+              ? {
+                  runtimeMetadata: {
+                    huginTaskIdentity: learningRecovery.huginTaskIdentity,
+                    learningTask: learningRecovery.evidence,
+                  },
+                }
+              : {}),
           }
-        )
+        ),
+        recoveryOutputClassification,
       );
       await munin.log(
         result.namespace,
@@ -4424,6 +4514,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   // one stable session (enables Munin's outcome-aware retrieval and telemetry
   // session-flow analysis). A fresh ID is set again in the finally block below.
   munin.setSessionId(randomUUID());
+  let claimAcceptedAt = entry.updated_at;
   try {
     const claimResult = await munin.write(
       taskNs,
@@ -4435,6 +4526,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // Update entry.updated_at so subsequent CAS writes (failTaskWithMessage, etc.) use the fresh timestamp
     if (typeof claimResult.updated_at === "string") {
       entry.updated_at = claimResult.updated_at;
+      claimAcceptedAt = claimResult.updated_at;
     }
   } catch (err) {
     // Another dispatcher won the CAS. Its claim-time assessment owns the
@@ -4447,7 +4539,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
   currentTask = taskNs;
   currentCancellation = null;
-  const startedAt = new Date().toISOString();
+  const acceptedAtMs = Date.parse(claimAcceptedAt);
+  const startedAt = new Date(
+    Number.isNaN(acceptedAtMs) ? Date.now() : Math.max(Date.now(), acceptedAtMs),
+  ).toISOString();
   const taskId = extractTaskId(taskNs);
   console.log(`Executing task ${taskNs}...`);
 
@@ -4786,7 +4881,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     } else {
       const homeserverAbort = new AbortController();
       currentOllamaAbort = homeserverAbort;
-      homeserverResult = await executeHomeserverTask({
+      const renderedPrompt = renderHomeserverUserMessage({
         prompt: task.prompt,
         gatewayBaseUrl: gateway.baseUrl,
         apiKey: gateway.apiKey,
@@ -4797,7 +4892,136 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         timeoutMs: task.timeoutMs,
         maxOutputChars: config.maxOutputChars,
         injectedContext: task.contextResolution?.content || undefined,
+      });
+      const homeserverTaskConfig = {
+        prompt: task.prompt,
+        gatewayBaseUrl: gateway.baseUrl,
+        apiKey: gateway.apiKey,
+        path: "delegate" as const,
+        taskType: task.homeserverTaskType,
+        maxTokens: task.maxOutputTokens,
+        verifier: task.homeserverVerifier,
+        timeoutMs: task.timeoutMs,
+        maxOutputChars: config.maxOutputChars,
+        injectedContext: task.contextResolution?.content || undefined,
+      };
+      let authenticatedLearningSource: LearningTaskSource | undefined;
+      try {
+        authenticatedLearningSource = buildLearningTaskSource(
+          task,
+          taskNs,
+          entry.created_at,
+          claimAcceptedAt,
+          signingVerdict.provenance,
+        );
+      } catch (error) {
+        // Existing unstamped /delegate traffic remains operational but is not
+        // learning-eligible. Only authenticated source identities enter the
+        // durable harvest/join protocol.
+        console.log(
+          `LearningTaskContract ineligible for ${taskNs}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const preparedLearningTask = authenticatedLearningSource
+        ? await prepareDurableLearningTaskAttempt({
+        taskId,
+        startedAt,
+        rawTaskText: task.prompt,
+        renderedPrompt,
+        gatewayBaseUrl: gateway.baseUrl,
+        apiKey: gateway.apiKey,
+        buildSource: () => authenticatedLearningSource!,
+        // This immutable, UUID-keyed start is the authoritative attempt clock.
+        // It lands before capability negotiation, request stamping, admission,
+        // or any model call and contains no prompt or response bytes.
+        persistStart: async (ref, record) => {
+          await createImmutableLearningArtifact(munin, {
+            namespace: ref.namespace,
+            key: ref.key,
+            content: JSON.stringify(record),
+            tags: ["learning-task-attempt", "attempt:started", "contract:grimnir-learning-task-v1"],
+            classification: taskClassification,
+          });
+        },
+        buildPreparedDispatch: (context) => {
+          const requestBody = buildFreshHomeserverDelegateRequestBody(
+            homeserverTaskConfig,
+            taskId,
+            context,
+          );
+          return createPreparedLearningTaskDispatch({
+            context,
+            requestStamp: requestBody.learningTaskStamp!,
+            requestBody,
+          });
+        },
+        persistReplayPayload: async (ref, record) => {
+          await createImmutableLearningArtifact(munin, {
+            namespace: ref.namespace,
+            key: ref.key,
+            content: JSON.stringify(record),
+            tags: ["learning-task-replay", "attempt:prepared", "contract:grimnir-learning-task-v1"],
+            classification: taskClassification,
+          });
+        },
+        persistPrepared: async (ref, record) => {
+          await createImmutableLearningArtifact(munin, {
+            namespace: ref.namespace,
+            key: ref.key,
+            content: JSON.stringify(record),
+            tags: ["learning-task-dispatch", "attempt:prepared", "contract:grimnir-learning-task-v1"],
+            classification: taskClassification,
+          });
+        },
+      })
+        : null;
+      const learningAttempt = preparedLearningTask?.attempt;
+      const learningAttemptKey = learningAttempt
+        ? learningTaskAttemptKey(learningAttempt.attemptId)
+        : undefined;
+      homeserverResult = await executeHomeserverTask({
+        ...homeserverTaskConfig,
+        learningTask: preparedLearningTask?.preparation ?? { kind: "ineligible" },
       }, taskId, LOG_DIR, { abortController: homeserverAbort });
+      if (homeserverResult.learningTask && learningAttemptKey) {
+        const outcomeKey = `${learningAttemptKey}-outcome`;
+        const attemptOutcomeRef = { namespace: taskNs, key: outcomeKey };
+        try {
+          const parsedEvidence = learningTaskExecutionEvidenceSchema.parse({
+            ...homeserverResult.learningTask,
+            attemptOutcomeRef,
+          });
+          const durableEvidence = preparedLearningTask?.preparation.kind === "ready"
+            ? validatePreparedLearningTaskOutcome(
+                preparedLearningTask.preparation.preparedDispatch,
+                parsedEvidence,
+              )
+            : parsedEvidence;
+          await createImmutableLearningArtifact(munin, {
+            namespace: taskNs,
+            key: outcomeKey,
+            content: JSON.stringify(durableEvidence),
+            tags: [
+              "learning-task-attempt",
+              durableEvidence.state === "m5-admitted" ? "attempt:admitted" : "attempt:not-admitted",
+              "contract:grimnir-learning-task-v1",
+            ],
+            classification: taskClassification,
+          }, { allowExactExisting: true });
+          homeserverResult.learningTask = durableEvidence;
+        } catch (err) {
+          const failureReason = "durable learning-task attempt outcome write failed";
+          homeserverResult.learningTask = learningTaskOutcomePersistenceFailure(
+            homeserverResult.learningTask,
+            failureReason,
+          );
+          homeserverResult.exitCode = 1;
+          homeserverResult.resultText = null;
+          homeserverResult.provenance = null;
+          homeserverResult.output = `[LearningTaskContract evidence rejected: ${failureReason}]\n`;
+          console.error(`${failureReason} for ${taskNs}:`, err);
+        }
+      }
       currentOllamaAbort = null;
       exitCode = homeserverResult.exitCode;
       output = homeserverResult.output;
@@ -5464,6 +5688,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
               taskType: homeserverResult.taskType ?? task.homeserverTaskType,
             },
             huginTaskIdentity: homeserverResult.huginTaskIdentity ?? undefined,
+            learningTask: homeserverResult.learningTask ?? undefined,
           }
         : isOllama
         ? {
@@ -6154,7 +6379,7 @@ server.on("error", (err: NodeJS.ErrnoException) => {
 if (brokerEnv.enabled) {
   const brokerHome = path.join(HUGIN_HOME, "delegation-events.jsonl");
   const journal = new DelegationJournal({ path: brokerHome });
-  const taskStore = new BrokerTaskStore(munin);
+  const taskStore = new BrokerTaskStore(munin, { attestationSecret: config.muninApiKey });
   const learningStore = new LearningExperimentStore(learningExperimentMunin);
   const idempotency = new IdempotencyIndex();
   const homeserverReady = loadHomeserverGatewayConfig(process.env) !== null;

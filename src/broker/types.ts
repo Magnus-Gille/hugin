@@ -13,6 +13,12 @@ import {
   qualityRubricSchema,
   qualityVerifierIdentitySchema,
 } from "../quality-receipt.js";
+import {
+  taskTypeSchema,
+  type TaskType,
+} from "./task-type-metadata.js";
+
+export { taskTypeSchema, type TaskType } from "./task-type-metadata.js";
 
 export const aliasSchema = z.enum([
   "m5",
@@ -22,36 +28,6 @@ export const aliasSchema = z.enum([
   "pi-large-coder",
 ]);
 export type Alias = z.infer<typeof aliasSchema>;
-
-export const taskTypeSchema = z.enum([
-  "draft",
-  "code-implement",
-  "code-edit",
-  "code-review",
-  "unit-test-gen",
-  "summarize",
-  "extract",
-  "classify",
-  "data-transform",
-  "regex",
-  "sql",
-  "reason-math",
-  "reason-hard",
-  "rewrite",
-  "translate",
-  "plan-decompose",
-  "qa-factual",
-  "triage",
-  "memory-decision",
-  "research-plan",
-  "source-distill",
-  "claim-verify",
-  "gap-check",
-  "synthesis",
-  "conversation",
-  "other",
-]);
-export type TaskType = z.infer<typeof taskTypeSchema>;
 
 export const sensitivitySchema = z.enum(["public", "internal", "private"]);
 export type DelegationSensitivity = z.infer<typeof sensitivitySchema>;

@@ -187,6 +187,234 @@ describe("structured task result schema", () => {
     expect(result.runtimeMetadata?.huginTaskIdentity?.renderedPromptFingerprint.digest)
       .toBe("b".repeat(64));
   });
+
+  it("preserves a durable preflight-failed attempt without inventing a stamp or echo", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "task-learning-1",
+      taskNamespace: "tasks/task-learning-1",
+      lifecycle: "failed",
+      outcome: "failed",
+      runtime: "homeserver",
+      executor: "homeserver-delegate",
+      resultSource: "homeserver-delegate",
+      exitCode: 1,
+      completedAt: "2026-07-19T12:00:00.000Z",
+      bodyKind: "error",
+      bodyText: "preflight failed",
+      runtimeMetadata: {
+        huginTaskIdentity: {
+          schemaVersion: 1,
+          producer: "hugin",
+          taskId: "task-learning-1",
+          rawTaskFingerprint: {
+            algorithm: "sha256",
+            version: "trim-utf8-sha256-v1",
+            digest: "a".repeat(64),
+          },
+          renderedPromptFingerprint: {
+            algorithm: "sha256",
+            version: "hugin-delegate-prompt-utf8-sha256-v1",
+            digest: "b".repeat(64),
+            utf8Bytes: 123,
+          },
+        },
+        learningTask: {
+          schemaVersion: 1,
+          contractVersion: "grimnir.learning-task/v1",
+          state: "preflight-failed",
+          evidenceAccepted: false,
+          taskId: "task-learning-1",
+          attemptId: "hugin-attempt:11111111-1111-4111-8111-111111111111",
+          attemptStartedAt: "2026-07-19T11:59:58.000Z",
+          attemptStartRef: {
+            namespace: "tasks/task-learning-1",
+            key: "learning-attempt-11111111-1111-4111-8111-111111111111",
+          },
+          taskOutcomeRef: {
+            namespace: "tasks/task-learning-1",
+            key: "result-structured",
+          },
+          rawFingerprint: {
+            algorithm: "sha256",
+            version: "trim-utf8-sha256-v1",
+            digest: "a".repeat(64),
+          },
+          failureCode: "preflight-failed",
+          failureReason: "unsupported feature set",
+        },
+      },
+    });
+    expect(result.runtimeMetadata?.learningTask?.state).toBe("preflight-failed");
+    expect(result.runtimeMetadata?.learningTask?.requestStamp).toBeUndefined();
+    expect(result.runtimeMetadata?.learningTask?.gatewayEcho).toBeUndefined();
+  });
+
+  it("requires one cross-bound Hugin producer identity for learning evidence", () => {
+    const base = {
+      schemaVersion: 1 as const,
+      taskId: "task-learning-bound",
+      taskNamespace: "tasks/task-learning-bound",
+      lifecycle: "failed" as const,
+      outcome: "failed" as const,
+      runtime: "homeserver" as const,
+      executor: "homeserver-delegate",
+      resultSource: "recovery",
+      exitCode: 1,
+      completedAt: "2026-07-19T12:00:00.000Z",
+      bodyKind: "error" as const,
+      bodyText: "recovered",
+      runtimeMetadata: {
+        huginTaskIdentity: {
+          schemaVersion: 1 as const,
+          producer: "hugin" as const,
+          taskId: "task-learning-bound",
+          rawTaskFingerprint: {
+            algorithm: "sha256" as const,
+            version: "trim-utf8-sha256-v1" as const,
+            digest: "a".repeat(64),
+          },
+          renderedPromptFingerprint: {
+            algorithm: "sha256" as const,
+            version: "hugin-delegate-prompt-utf8-sha256-v1" as const,
+            digest: "b".repeat(64),
+            utf8Bytes: 123,
+          },
+        },
+        learningTask: {
+          schemaVersion: 1 as const,
+          contractVersion: "grimnir.learning-task/v1" as const,
+          state: "preflight-failed" as const,
+          evidenceAccepted: false,
+          taskId: "task-learning-bound",
+          attemptId: "hugin-attempt:11111111-1111-4111-8111-111111111111",
+          attemptStartedAt: "2026-07-19T11:59:58.000Z",
+          attemptStartRef: {
+            namespace: "tasks/task-learning-bound",
+            key: "learning-attempt-11111111-1111-4111-8111-111111111111",
+          },
+          taskOutcomeRef: {
+            namespace: "tasks/task-learning-bound",
+            key: "result-structured",
+          },
+          rawFingerprint: {
+            algorithm: "sha256" as const,
+            version: "trim-utf8-sha256-v1" as const,
+            digest: "a".repeat(64),
+          },
+          failureCode: "preflight-failed" as const,
+          failureReason: "unsupported feature set",
+        },
+      },
+    };
+
+    expect(() => buildStructuredTaskResult(base)).not.toThrow();
+
+    const missingIdentity = structuredClone(base) as typeof base & {
+      runtimeMetadata: { huginTaskIdentity?: typeof base.runtimeMetadata.huginTaskIdentity };
+    };
+    delete missingIdentity.runtimeMetadata.huginTaskIdentity;
+    expect(() => buildStructuredTaskResult(missingIdentity as typeof base)).toThrow(/producer identity/i);
+
+    const crossTask = structuredClone(base);
+    crossTask.runtimeMetadata.huginTaskIdentity.taskId = "another-task";
+    expect(() => buildStructuredTaskResult(crossTask)).toThrow(/producer identity|task id/i);
+
+    const crossRaw = structuredClone(base);
+    crossRaw.runtimeMetadata.huginTaskIdentity.rawTaskFingerprint.digest = "c".repeat(64);
+    expect(() => buildStructuredTaskResult(crossRaw)).toThrow(/raw fingerprint/i);
+  });
+
+  it("rejects learning evidence bound to a different outer structured task", () => {
+    expect(() => buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "outer-task",
+      taskNamespace: "tasks/outer-task",
+      lifecycle: "failed",
+      outcome: "failed",
+      runtime: "homeserver",
+      executor: "homeserver-delegate",
+      resultSource: "homeserver-delegate",
+      exitCode: 1,
+      completedAt: "2026-07-19T12:00:00.000Z",
+      bodyKind: "error",
+      bodyText: "must reject",
+      runtimeMetadata: {
+        huginTaskIdentity: {
+          schemaVersion: 1,
+          producer: "hugin",
+          taskId: "cross-task",
+          rawTaskFingerprint: {
+            algorithm: "sha256",
+            version: "trim-utf8-sha256-v1",
+            digest: "a".repeat(64),
+          },
+          renderedPromptFingerprint: {
+            algorithm: "sha256",
+            version: "hugin-delegate-prompt-utf8-sha256-v1",
+            digest: "b".repeat(64),
+            utf8Bytes: 123,
+          },
+        },
+        learningTask: {
+          schemaVersion: 1,
+          contractVersion: "grimnir.learning-task/v1",
+          state: "preflight-failed",
+          evidenceAccepted: false,
+          taskId: "cross-task",
+          attemptId: "hugin-attempt:11111111-1111-4111-8111-111111111111",
+          attemptStartedAt: "2026-07-19T11:59:58.000Z",
+          attemptStartRef: {
+            namespace: "tasks/cross-task",
+            key: "learning-attempt-11111111-1111-4111-8111-111111111111",
+          },
+          taskOutcomeRef: { namespace: "tasks/cross-task", key: "result-structured" },
+          rawFingerprint: {
+            algorithm: "sha256",
+            version: "trim-utf8-sha256-v1",
+            digest: "a".repeat(64),
+          },
+          failureCode: "preflight-failed",
+          failureReason: "preflight failed",
+        },
+      },
+    })).toThrow(/structured result/i);
+  });
+
+  it("rejects an admitted LearningTaskContract result without an exact echo", () => {
+    expect(() => buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "task-learning-invalid",
+      taskNamespace: "tasks/task-learning-invalid",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "homeserver",
+      executor: "homeserver-delegate",
+      resultSource: "homeserver-delegate",
+      exitCode: 0,
+      completedAt: "2026-07-19T12:00:00.000Z",
+      bodyKind: "response",
+      bodyText: "must reject",
+      runtimeMetadata: {
+        learningTask: {
+          schemaVersion: 1,
+          contractVersion: "grimnir.learning-task/v1",
+          state: "m5-admitted",
+          evidenceAccepted: true,
+          taskId: "task-learning-invalid",
+          attemptId: "hugin-attempt:11111111-1111-4111-8111-111111111111",
+          attemptStartedAt: "2026-07-19T11:59:58.000Z",
+          attemptStartRef: { namespace: "tasks/task-learning-invalid", key: "attempt" },
+          taskOutcomeRef: { namespace: "tasks/task-learning-invalid", key: "result-structured" },
+          rawFingerprint: {
+            algorithm: "sha256",
+            version: "trim-utf8-sha256-v1",
+            digest: "a".repeat(64),
+          },
+        } as never,
+      },
+    })).toThrow(/echo|stamp/i);
+  });
   it("accepts completed pipeline phase results", () => {
     const result = buildStructuredTaskResult({
       schemaVersion: 1,

@@ -1,8 +1,9 @@
 # Canonical Hugin task identity
 
-**Status:** producer projection implemented for Hugin's direct homeserver
-executor `/delegate` lane; authenticated gateway admission/capture and the
-orchestrator worker lane are pending `gille-inference` #2/#4 and Hugin #240.
+**Status:** producer projection and LearningTaskContract v1 handshake are
+implemented for Hugin's direct homeserver `/delegate` lane. End-to-end use
+still requires the matching `gille-inference` #2 deployment; canonical
+exposure capture remains `gille-inference` #4 work.
 
 Hugin's logical task is the parsed `### Prompt` text before context injection,
 the `## Task` wrapper, a system prompt, gateway orchestration, or a runtime chat
@@ -48,13 +49,12 @@ producer-owned projection:
 }
 ```
 
-`renderedPromptFingerprint` identifies the exact UTF-8 bytes in the legacy
+`renderedPromptFingerprint` identifies the exact UTF-8 bytes in the
 `/delegate.prompt` field. It does not trim or normalize them. It is separate
 from the raw identity because injected context and wrapper bytes legitimately
-change it. It is also narrower than the future three-stage prompt provenance:
-an optional `systemPrompt`, gateway canonical envelope, and runtime chat
-template are not represented by this field and remain Hugin #240 / Gille #2
-work.
+change it. The LearningTaskContract stamp additionally content-addresses the
+Hugin envelope and the prompt, harness, and tool-policy configurations. Gille
+owns the later gateway-envelope and runtime-chat-template stages.
 
 The task document cannot supply `huginTaskIdentity`; the serializer always
 recomputes it from Hugin's accepted logical prompt and lifecycle task id. The
@@ -68,27 +68,25 @@ The in-process orchestrator's homeserver worker uses a separate serializer in
 `src/orchestrator/worker-executor.ts`. It remains on the legacy rendered-prompt
 identity and does not emit `huginTaskIdentity`. Extending that lane requires an
 authoritative outer task/attempt binding rather than copying this direct-runtime
-field into an independently fanned-out subtask. Hugin #240 owns that common
-attempt/stamp integration.
+field into an independently fanned-out subtask. It is not evidence-eligible.
 
 ## Trust and legacy boundary
 
-This projection is Hugin producer evidence, not yet gateway evidence. The
-current public Gille `/delegate` parser ignores unknown fields and its exposure
-recorder still hashes the rendered `prompt`; orchestrator worker calls do not
-yet carry the projection at all. A body claim—even one sent over a
-Bearer-authenticated request—is not proof that Gille bound it to the actual
-transport principal, admitted it once, recorded it, or echoed it unchanged.
-No consumer may infer any of those facts from
-`runtimeMetadata.huginTaskIdentity` alone.
+This projection alone is Hugin producer evidence, not gateway evidence. A body
+claim—even one sent over a Bearer-authenticated request—is not proof that Gille
+bound it to the actual transport principal, admitted it once, recorded it, or
+echoed it unchanged. No consumer may infer any of those facts from
+`runtimeMetadata.huginTaskIdentity` alone. Hugin accepts gateway evidence only
+when the v1 stamp is returned exactly in a principal-bound gateway echo; see
+[`learning-task-handshake.md`](learning-task-handshake.md).
 
-End-to-end trust requires:
+End-to-end trust additionally requires:
 
 - Gille #2 to authenticate the actual caller, validate the versioned Hugin
   request stamp, bind it to admission, and return an exact echo;
-- Hugin #240 to create the authoritative attempt before dispatch, embed this
-  identity in that preflight-bound stamp, and reject a missing or mismatched
-  echo; and
+- the deployed Hugin direct lane to create the authoritative attempt before
+  dispatch, embed this identity in the preflight-bound stamp, and reject a
+  missing or mismatched echo; and
 - Gille #4 to record the stamped raw fingerprint as the exposure identity and
   establish a new coverage epoch whose start is no earlier than canonical
   capture becoming effective.
@@ -100,7 +98,8 @@ backfilled, or treated as exact canonical Hugin exposure. Positive exact raw
 matches remain conservative evidence of prior exposure; a negative lookup over
 the legacy Hugin-delegate period is not canonical freshness proof.
 
-The fixture intentionally stops at the current repository boundary: it drives
-Hugin's real serializer and supplies the exact byte/hash/lookup values that
-Gille #4 must consume. It does not mock a successful Gille capture or echo that
-the current Gille implementation cannot produce.
+The fixture in `tests/fixtures/hugin-learning-task-serializer-v1.json` drives
+Hugin's real serializer and pins the contract capabilities, raw bytes, raw
+fingerprint, task taxonomy, and production config identities. The matching
+Gille fixture must be updated from this serializer before the two changes are
+deployed together.

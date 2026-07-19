@@ -1,4 +1,35 @@
-import { taskTypeSchema, type TaskType } from "./types.js";
+import { z } from "zod";
+
+/** Canonical Hugin mirror of the ordered gille-inference task-type taxonomy. */
+export const taskTypeSchema = z.enum([
+  "draft",
+  "code-implement",
+  "code-edit",
+  "code-review",
+  "unit-test-gen",
+  "summarize",
+  "extract",
+  "classify",
+  "data-transform",
+  "regex",
+  "sql",
+  "reason-math",
+  "reason-hard",
+  "rewrite",
+  "translate",
+  "plan-decompose",
+  "qa-factual",
+  "triage",
+  "memory-decision",
+  "research-plan",
+  "source-distill",
+  "claim-verify",
+  "gap-check",
+  "synthesis",
+  "conversation",
+  "other",
+]);
+export type TaskType = z.infer<typeof taskTypeSchema>;
 
 /**
  * Version of the M5 task-type taxonomy mirrored by Hugin's Broker schema.

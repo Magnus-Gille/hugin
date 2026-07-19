@@ -14,6 +14,7 @@ import {
   type HomeserverTaskConfig,
 } from "../src/homeserver-executor.js";
 import { taskTextFingerprint } from "../src/learning/m5-task-exposure.js";
+import { withLearningTaskContext } from "./helpers/learning-task.js";
 
 interface FixtureCase {
   name: string;
@@ -149,7 +150,10 @@ describe("canonical Hugin task identity", () => {
         taskId: "substituted",
       },
     } as HomeserverTaskConfig;
-    const body = buildHomeserverRequestBody(configWithSpoofedExtraField, vector.taskId);
+    const body = buildHomeserverRequestBody(
+      withLearningTaskContext(configWithSpoofedExtraField, vector.taskId),
+      vector.taskId,
+    );
 
     expect(body.prompt).toBe(vector.renderedWithContext);
     expect(body.huginTaskIdentity).toEqual({
@@ -172,9 +176,15 @@ describe("canonical Hugin task identity", () => {
   });
 
   it("fails closed rather than emitting a missing or ambiguous identity", () => {
-    expect(() => buildHomeserverRequestBody(taskConfig({ prompt: " \n\t" }), "task-1"))
+    expect(() => buildHomeserverRequestBody(
+      withLearningTaskContext(taskConfig({ prompt: " \n\t" }), "task-1"),
+      "task-1",
+    ))
       .toThrow("non-empty logical task");
-    expect(() => buildHomeserverRequestBody(taskConfig({ prompt: "valid" }), " task-1"))
+    expect(() => buildHomeserverRequestBody(
+      withLearningTaskContext(taskConfig({ prompt: "valid" }), " task-1"),
+      " task-1",
+    ))
       .toThrow("non-whitespace-padded task id");
   });
 });
