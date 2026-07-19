@@ -1,0 +1,33 @@
+{
+  "contract": "Grimnir LearningTaskContract/v1 schema_revision 1",
+  "taxonomy_id": "gille-inference/task-types",
+  "taxonomy_version": "gille-inference-task-types-2026-07-19-v1",
+  "task_types": [
+    "draft",
+    "code-implement",
+    "code-edit",
+    "code-review",
+    "unit-test-gen",
+    "summarize",
+    "extract",
+    "classify",
+    "data-transform",
+    "regex",
+    "sql",
+    "reason-math",
+    "reason-hard",
+    "rewrite",
+    "translate",
+    "plan-decompose",
+    "qa-factual",
+    "triage",
+    "memory-decision",
+    "research-plan",
+    "source-distill",
+    "claim-verify",
+    "gap-check",
+    "synthesis",
+    "conversation",
+    "other"
+  ]
+}

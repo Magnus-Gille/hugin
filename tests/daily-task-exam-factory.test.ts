@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { BROKER_TASK_TYPE_TAXONOMY_VERSION } from "../src/broker/task-type-metadata.js";
 import type { MuninEntry } from "../src/munin-client.js";
 import {
   applyCrossClientExposure,
   buildDailyExamCandidate,
   buildDailyExamManifest,
+  dailyExamCandidateSchema,
   type DailyTaskHarvestSource,
 } from "../src/learning/daily-task-exam-factory.js";
 import {
@@ -96,7 +98,7 @@ function source(runtime: "claude" | "homeserver" = "claude"): DailyTaskHarvestSo
       namespace: "tasks/daily-1",
       key: "status",
       content: taskDocument(runtime),
-      tags: ["completed", "runtime:claude", "type:code-repair"],
+      tags: ["completed", "runtime:claude", "type:code-edit"],
     }),
     resultStructured: entry({
       namespace: "tasks/daily-1",
@@ -190,11 +192,86 @@ describe("daily task exam factory", () => {
     expect(candidate.reasons).toContain("requires-cross-client-exposure-check-before-holdout-seal");
     expect(candidate.schemaVersion).toBe(2);
     expect(candidate.source.taskCreatedAt).toBe("2026-07-14T10:00:00.000Z");
+    expect(candidate.source).toMatchObject({
+      taskType: "code-edit",
+      taskTypeTaxonomyVersion: "legacy-unversioned",
+      taskTypeSource: "legacy-type-tag",
+    });
     expect(candidate.crossClientExposure).toEqual(expect.objectContaining({
       state: "not-checked",
       fingerprintVersion: TASK_EXPOSURE_FINGERPRINT_VERSION,
       fingerprintSha256: candidate.source.promptSha256,
     }));
+  });
+
+  it("quarantines an unknown canonical Broker task type instead of collapsing it to other", () => {
+    const candidateSource = source("claude");
+    candidateSource.status.tags = [
+      "completed",
+      "runtime:homeserver",
+      "broker:mcp-v2",
+      "task-type:not-in-the-taxonomy",
+      `task-taxonomy:${BROKER_TASK_TYPE_TAXONOMY_VERSION}`,
+    ];
+
+    const candidate = buildDailyExamCandidate(candidateSource);
+
+    expect(candidate.lane).toBe("quarantine");
+    expect(candidate.source.taskType).toBeUndefined();
+    expect(candidate.reasons).toContain("task-type-metadata-unknown-value");
+  });
+
+  it("reads historical unversioned Broker task-type tags through the explicit compatibility path", () => {
+    const candidateSource = source("homeserver");
+    candidateSource.status.tags = [
+      "completed",
+      "runtime:homeserver",
+      "broker:mcp-v2",
+      "task-type:summarize",
+    ];
+
+    const candidate = buildDailyExamCandidate(candidateSource);
+
+    expect(candidate.source).toMatchObject({
+      taskType: "summarize",
+      taskTypeTaxonomyVersion: "legacy-unversioned",
+      taskTypeSource: "broker-unversioned",
+    });
+  });
+
+  it("keeps old schema-v2 taskType-only manifests parseable but rejects a partial new triplet", () => {
+    const candidate = buildDailyExamCandidate(source("claude"));
+    const legacy = structuredClone(candidate) as Record<string, unknown>;
+    const legacySource = legacy.source as Record<string, unknown>;
+    delete legacySource.taskTypeTaxonomyVersion;
+    delete legacySource.taskTypeSource;
+    legacySource.taskType = "historical-free-form-type";
+    expect(dailyExamCandidateSchema.safeParse(legacy).success).toBe(true);
+
+    const incomplete = structuredClone(candidate) as Record<string, unknown>;
+    const candidateSource = incomplete.source as Record<string, unknown>;
+    delete candidateSource.taskTypeTaxonomyVersion;
+
+    expect(dailyExamCandidateSchema.safeParse(incomplete).success).toBe(false);
+  });
+
+  it.each([
+    ["pipeline phase", ["type:pipeline", "type:pipeline-phase"]],
+    ["approval phase", [
+      "type:pipeline",
+      "type:pipeline-phase",
+      "type:approval-request",
+      "type:pipeline-approval-request",
+    ]],
+  ])("does not quarantine a realistic %s row as an unknown task type", (_name, markerTags) => {
+    const candidateSource = source("claude");
+    candidateSource.status.tags = ["completed", "runtime:claude", ...markerTags];
+
+    const candidate = buildDailyExamCandidate(candidateSource);
+
+    expect(candidate.lane).toBe("provisional-holdout");
+    expect(candidate.source.taskType).toBeUndefined();
+    expect(candidate.reasons.some((reason) => reason.includes("task-type-metadata"))).toBe(false);
   });
 
   it("routes a task already seen by M5 to regression rather than a holdout", () => {

@@ -40,6 +40,7 @@ import {
   foldQualityReceipt,
   type NativeQualityReceipt,
 } from "../quality-receipt.js";
+import { buildBrokerTaskTypeTags } from "./task-type-metadata.js";
 
 export { MUNIN_QUERY_MAX } from "../munin-pagination.js";
 
@@ -645,7 +646,7 @@ export function buildSubmitTags(envelope: DelegationEnvelope): string[] {
     "runtime:homeserver",
     `runtime-row:${envelope.alias_resolved.runtime_row_id}`,
     `alias:${envelope.alias_resolved.alias}`,
-    `task-type:${envelope.task_type}`,
+    ...buildBrokerTaskTypeTags(envelope.task_type),
     "broker:mcp-v2",
     `idempotency:${createHash("sha256").update(`${envelope.broker_principal}\0${envelope.idempotency_key}`).digest("hex")}`,
   ];
