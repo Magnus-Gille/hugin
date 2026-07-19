@@ -491,6 +491,9 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
     });
     expect(body.verifier).toBeUndefined();
     expect(body.responseFormat).toBeUndefined();
+    // #230 is currently scoped to the direct homeserver runtime serializer.
+    // Orchestrator worker identity/stamping remains legacy until #240.
+    expect(body.huginTaskIdentity).toBeUndefined();
 
     // Issue #163: the ledger id must survive onto the result, not just be parsed
     // and dropped — it is the join key back to M5's authoritative evidence row.

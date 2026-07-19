@@ -136,6 +136,7 @@ describe("executeHomeserverTask — chat path", () => {
     expect(result.totalTokens).toBe(14);
     expect(result.backpressure).toBe("none");
     expect(result.delegated).toBeNull(); // chat path carries no delegate metadata
+    expect(result.huginTaskIdentity).toBeNull();
 
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe("http://m5.test:8080/v1/chat/completions");
@@ -223,6 +224,17 @@ describe("executeHomeserverTask — delegate path", () => {
     expect(result.completionTokens).toBe(3);
     expect(result.totalTokens).toBe(48);
     expect(result.inferenceMs).toBe(820);
+    expect(result.huginTaskIdentity).toEqual(expect.objectContaining({
+      schemaVersion: 1,
+      producer: "hugin",
+      taskId: "delegate-ok",
+      rawTaskFingerprint: expect.objectContaining({
+        version: "trim-utf8-sha256-v1",
+      }),
+      renderedPromptFingerprint: expect.objectContaining({
+        version: "hugin-delegate-prompt-utf8-sha256-v1",
+      }),
+    }));
 
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe("http://m5.test:8080/delegate");
@@ -323,7 +335,38 @@ describe("executeHomeserverTask — delegate path", () => {
     expect(body).toEqual({
       prompt: expect.any(String),
       taskType: "extract",
+      huginTaskIdentity: expect.objectContaining({
+        schemaVersion: 1,
+        producer: "hugin",
+        taskId: "delegate-min",
+        rawTaskFingerprint: expect.objectContaining({
+          version: "trim-utf8-sha256-v1",
+        }),
+        renderedPromptFingerprint: expect.objectContaining({
+          version: "hugin-delegate-prompt-utf8-sha256-v1",
+        }),
+      }),
     });
+  });
+
+  it("returns a logged failure when defensive identity validation rejects the request", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const result = await executeHomeserverTask(
+      makeTaskConfig({ path: "delegate", prompt: " \n\t" }),
+      "delegate-invalid-identity",
+      tmpLogDir,
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.exitCode).toBe(1);
+    expect(result.huginTaskIdentity).toBeNull();
+    expect(result.output).toContain(
+      "[Gateway error: Hugin task identity requires a non-empty logical task]",
+    );
+    expect(fs.readFileSync(result.logFile, "utf8")).toContain(
+      "Hugin task identity requires a non-empty logical task",
+    );
   });
 
   it("maps outcome 'fail'/'error' to a non-zero exit code, but 'unverified' to 0", async () => {

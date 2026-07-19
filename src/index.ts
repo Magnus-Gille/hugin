@@ -5463,6 +5463,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
               ...(homeserverResult.provenance ?? {}),
               taskType: homeserverResult.taskType ?? task.homeserverTaskType,
             },
+            huginTaskIdentity: homeserverResult.huginTaskIdentity ?? undefined,
           }
         : isOllama
         ? {

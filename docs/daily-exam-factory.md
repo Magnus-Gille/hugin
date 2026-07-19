@@ -70,6 +70,12 @@ Hugin computes the exact M5 fingerprint contract:
 3. UTF-8 bytes; then
 4. lowercase SHA-256, version `trim-utf8-sha256-v1`.
 
+The same calculation now lives in Hugin's real homeserver serializer as
+`huginTaskIdentity.rawTaskFingerprint`; see
+[`canonical-task-identity.md`](canonical-task-identity.md). That producer
+projection is deliberately separate from the exact rendered `/delegate.prompt`
+identity, which changes when context is injected.
+
 The CLI deduplicates fingerprints and sends batches of at most 100 to
 `POST /admin/task-exposures/lookup`, using the existing
 `HOMESERVER_GATEWAY_URL` and minted-owner `HOMESERVER_GATEWAY_API_KEY` from the
@@ -109,6 +115,18 @@ and the content-blind match metadata. It is not durable freshness. A task may be
 shown to M5 after the daily sweep. Any future packager or runner **must repeat
 the same owner-only lookup immediately before freezing and again immediately
 before running a holdout**. Nothing in schema v2 is named or treated as sealed.
+
+There is an additional migration boundary for Hugin-delegated traffic. The
+current public Gille capture hashes the rendered `/delegate.prompt`, while the
+factory queries the logical raw-task hash. Hugin's direct homeserver executor
+now emits both identities, but its orchestrator homeserver worker remains
+legacy until #240, and Gille does not yet authenticate or capture the raw
+projection. Therefore an `unseen-covered` snapshot from the legacy lookup is
+not, by itself, canonical
+negative evidence across Hugin delegation history. No packager may admit it as
+a holdout until Gille #2/#4 and Hugin #240 establish authenticated stamp/echo,
+canonical raw capture, and a new post-cutover coverage epoch. Legacy rows stay
+rendered/inexact; they are never silently upgraded.
 
 ## Run it
 
@@ -155,5 +173,9 @@ immediately before execution. The reusable Gate D corpus and M5 capability
 ledger remain owned by `gille-inference`; this Hugin-side factory owns daily
 task discovery and reproducibility evidence.
 
-The owner-side registry and lookup contract shipped in
-[`gille-inference#257`](https://github.com/Magnus-Gille/gille-inference/issues/257).
+The legacy owner-side registry and lookup contract shipped in the former
+private repository. Public follow-up
+[`gille-inference#4`](https://github.com/Magnus-Gille/gille-inference/issues/4)
+owns canonical capture and holdout coverage; authenticated stamp admission is
+owned by [`gille-inference#2`](https://github.com/Magnus-Gille/gille-inference/issues/2)
+and Hugin [#240](https://github.com/Magnus-Gille/hugin/issues/240).
