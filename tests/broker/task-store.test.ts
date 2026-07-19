@@ -10,6 +10,7 @@ import {
   parseCanonicalEnvelope,
   serializeEnvelope,
 } from "../../src/broker/task-store.js";
+import { BROKER_TASK_TYPE_TAXONOMY_VERSION } from "../../src/broker/task-type-metadata.js";
 import { MuninWriteRejectedError, type MuninClient } from "../../src/munin-client.js";
 import type { DelegationEnvelope } from "../../src/broker/types.js";
 import {
@@ -131,6 +132,7 @@ describe("buildSubmitTags", () => {
     expect(tags).toContain("runtime-row:homeserver-m5");
     expect(tags).toContain("alias:m5");
     expect(tags).toContain("task-type:summarize");
+    expect(tags).toContain(`task-taxonomy:${BROKER_TASK_TYPE_TAXONOMY_VERSION}`);
     expect(tags).toContain("broker:mcp-v2");
     expect(tags).not.toContain(ORCH_V1_TAG);
   });

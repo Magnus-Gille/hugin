@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { BROKER_TASK_TYPE_TAXONOMY_VERSION } from "../src/broker/task-type-metadata.js";
 import {
   buildAwaitingApprovalTags,
   buildPipelineParentCancelledTags,
@@ -15,6 +16,7 @@ describe("task status tag helpers", () => {
       "broker:mcp-v2",
       "alias:m5",
       "task-type:extract",
+      `task-taxonomy:${BROKER_TASK_TYPE_TAXONOMY_VERSION}`,
       "runtime-row:homeserver-m5",
       "idempotency:abc123",
       "claimed_by:hugin-pi",
@@ -25,6 +27,7 @@ describe("task status tag helpers", () => {
       "broker:mcp-v2",
       "alias:m5",
       "task-type:extract",
+      `task-taxonomy:${BROKER_TASK_TYPE_TAXONOMY_VERSION}`,
       "runtime-row:homeserver-m5",
       "idempotency:abc123",
     ];
