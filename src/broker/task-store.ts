@@ -16,7 +16,7 @@
  */
 
 import { createHash } from "node:crypto";
-import type { MuninClient } from "../munin-client.js";
+import { MuninWriteRejectedError, type MuninClient } from "../munin-client.js";
 import type {
   AwaitRequest,
   DelegationEnvelope,
@@ -38,8 +38,9 @@ import {
 } from "../friction/munin-key.js";
 import {
   foldQualityReceipt,
-  type QualityReceipt,
+  type NativeQualityReceipt,
 } from "../quality-receipt.js";
+import { buildBrokerTaskTypeTags } from "./task-type-metadata.js";
 
 export { MUNIN_QUERY_MAX } from "../munin-pagination.js";
 
@@ -307,7 +308,7 @@ export class BrokerTaskStore {
 
   async writeQualityReceipt(
     taskId: string,
-    receipt: QualityReceipt,
+    receipt: NativeQualityReceipt,
   ): Promise<{ changed: boolean }> {
     const status = await this.readStatus(taskId);
     const envelope = status ? parseStoredEnvelope(status.content) : null;
@@ -324,22 +325,35 @@ export class BrokerTaskStore {
       }
       const folded = foldQualityReceipt(existing, receipt);
       if (!folded.changed) return { changed: false };
+      const receiptVersionTags = [...new Set(
+        folded.ledger.receipts.map((item) => `quality:receipt-v${item.schemaVersion}`),
+      )];
+      const expectedConflictReason = current ? "version_mismatch" : "already_exists";
       try {
-        await this.munin.write(
+        const result = await this.munin.write(
           namespace,
           "feedback",
           JSON.stringify(folded.ledger),
           envelope
-            ? ["broker:mcp-v2", "feedback", "quality:receipt-v1"]
-            : ["feedback", "quality:receipt-v1"],
+            ? ["broker:mcp-v2", "feedback", ...receiptVersionTags]
+            : ["feedback", ...receiptVersionTags],
           current?.updated_at,
           envelope?.sensitivity === "private"
             ? "client-restricted"
             : current?.classification ?? status?.classification ?? "internal",
+          current === null ? true : undefined,
         );
+        if (current === null && result.status !== "created") {
+          throw new Error(
+            "Munin create_if_absent did not return status created; refusing to trust first-write atomicity",
+          );
+        }
         return { changed: true };
       } catch (err) {
-        if (attempt === 2) throw err;
+        const expectedConflict = err instanceof MuninWriteRejectedError &&
+          err.errorCode === "conflict" &&
+          err.conflictReason === expectedConflictReason;
+        if (!expectedConflict || attempt === 2) throw err;
       }
     }
     throw new Error("quality receipt update lost repeated CAS races");
@@ -632,7 +646,7 @@ export function buildSubmitTags(envelope: DelegationEnvelope): string[] {
     "runtime:homeserver",
     `runtime-row:${envelope.alias_resolved.runtime_row_id}`,
     `alias:${envelope.alias_resolved.alias}`,
-    `task-type:${envelope.task_type}`,
+    ...buildBrokerTaskTypeTags(envelope.task_type),
     "broker:mcp-v2",
     `idempotency:${createHash("sha256").update(`${envelope.broker_principal}\0${envelope.idempotency_key}`).digest("hex")}`,
   ];

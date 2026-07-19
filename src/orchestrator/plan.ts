@@ -1,41 +1,24 @@
 import { z } from "zod";
+import {
+  taskTypeSchema,
+  type TaskType as BrokerTaskType,
+} from "../broker/types.js";
 
 export type OrchestratorRole = "planner" | "worker" | "verifier" | "synthesizer";
 
 /**
  * Task-type taxonomy (verdict layer, V1 — docs/orchestrator-verdict-layer.md).
  *
- * Adopted VERBATIM from the M5 gateway's `/ledger` taxonomy so Hugin's own
- * cloud-worker verdict store shares the same `(taskType × modelId)` row shape
- * from day one — a merge, not a migration, when the two stores converge later
- * (D5's "converge to a single KB later").
+ * Hugin has one local mirror of the M5 taxonomy: broker/types.ts. Reusing its
+ * schema here prevents planner/verdict labels from drifting from Broker submit
+ * and persisted harvest metadata. Additive values owned by Hugin #191 will
+ * flow through this alias when they land in the shared schema.
  */
-export const TASK_TYPES = [
-  "claim-verify",
-  "classify",
-  "code-edit",
-  "code-implement",
-  "code-review",
-  "data-transform",
-  "extract",
-  "gap-check",
-  "other",
-  "plan-decompose",
-  "qa-factual",
-  "reason-hard",
-  "reason-math",
-  "regex",
-  "research-plan",
-  "rewrite",
-  "source-distill",
-  "sql",
-  "summarize",
-  "synthesis",
-  "translate",
-  "unit-test-gen",
-] as const;
+export const TASK_TYPES: readonly BrokerTaskType[] = Object.freeze([
+  ...taskTypeSchema.options,
+]);
 
-export type TaskType = (typeof TASK_TYPES)[number];
+export type TaskType = BrokerTaskType;
 
 const TASK_TYPE_SET: ReadonlySet<string> = new Set(TASK_TYPES);
 

@@ -18,6 +18,12 @@ import {
   qualitySummarySchema,
   summarizeQualityReceipts,
 } from "../quality-receipt.js";
+import { taskTypeSchema } from "../broker/types.js";
+import {
+  BROKER_TASK_TYPE_TAXONOMY_VERSION,
+  LEGACY_TASK_TYPE_TAXONOMY_VERSION,
+  readPersistedTaskTypeMetadata,
+} from "../broker/task-type-metadata.js";
 
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 const gitCommitSchema = z.string().regex(/^[0-9a-f]{40,64}$/);
@@ -36,7 +42,20 @@ export const dailyExamCandidateSchema = z.object({
     structuredResultSha256: sha256Schema.optional(),
     qualityReceiptLedgerSha256: sha256Schema.optional(),
     runtime: z.string().min(1).optional(),
+    // schema-v2 manifests emitted before task taxonomy metadata was versioned
+    // may contain only an arbitrary non-empty taskType string. Keep those
+    // historical documents parseable; new emitted candidates use the validated
+    // three-field form enforced below.
     taskType: z.string().min(1).optional(),
+    taskTypeTaxonomyVersion: z.enum([
+      BROKER_TASK_TYPE_TAXONOMY_VERSION,
+      LEGACY_TASK_TYPE_TAXONOMY_VERSION,
+    ]).optional(),
+    taskTypeSource: z.enum([
+      "broker-canonical",
+      "broker-unversioned",
+      "legacy-type-tag",
+    ]).optional(),
     sensitivity: z.enum(["public", "internal", "private"]).optional(),
     repositoryOutcome: z.enum([
       "not-managed",
@@ -46,7 +65,48 @@ export const dailyExamCandidateSchema = z.object({
       "changes-present",
       "publication-failed",
     ]).optional(),
-  }).strict(),
+  }).strict().superRefine((value, ctx) => {
+    const taskTypeFields = [
+      value.taskType,
+      value.taskTypeTaxonomyVersion,
+      value.taskTypeSource,
+    ];
+    const present = taskTypeFields.filter((fieldValue) => fieldValue !== undefined).length;
+    const hasVersionedMetadata = value.taskTypeTaxonomyVersion !== undefined
+      || value.taskTypeSource !== undefined;
+    if (hasVersionedMetadata && present !== taskTypeFields.length) {
+      ctx.addIssue({
+        code: "custom",
+        message: "task type, taxonomy version, and source must be carried together",
+      });
+      return;
+    }
+    if (hasVersionedMetadata && !taskTypeSchema.safeParse(value.taskType).success) {
+      ctx.addIssue({
+        code: "custom",
+        message: "versioned task type must be a known Hugin Broker taxonomy value",
+      });
+      return;
+    }
+    if (
+      value.taskTypeSource === "broker-canonical"
+      && value.taskTypeTaxonomyVersion !== BROKER_TASK_TYPE_TAXONOMY_VERSION
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "canonical Broker task type requires the current taxonomy version",
+      });
+    }
+    if (
+      (value.taskTypeSource === "broker-unversioned" || value.taskTypeSource === "legacy-type-tag")
+      && value.taskTypeTaxonomyVersion !== LEGACY_TASK_TYPE_TAXONOMY_VERSION
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "legacy task type source requires the legacy-unversioned marker",
+      });
+    }
+  }),
   repository: z.object({
     githubRepository: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
     contextAlias: z.string().regex(/^repo:[A-Za-z0-9._-]+$/).optional(),
@@ -230,12 +290,6 @@ function exposureFor(result: StructuredTaskResult | undefined): DailyExamCandida
   return { state: "unknown", models: [...models].sort(), evidence: ["runtime-exposure-ambiguous"] };
 }
 
-function taskTypeFromTags(tags: readonly string[]): string | undefined {
-  return tags
-    .find((tag) => tag.startsWith("type:") && !tag.startsWith("type:task-result"))
-    ?.slice("type:".length);
-}
-
 /**
  * Convert one completed daily task into content-blind exam-candidate metadata.
  * "No M5 evidence" is intentionally only provisional: Hugin cannot prove the
@@ -279,6 +333,7 @@ export function buildDailyExamCandidate(source: DailyTaskHarvestSource): DailyEx
   const taskCreatedAt = typeof source.status.created_at === "string"
     ? source.status.created_at
     : "";
+  const taskTypeMetadata = readPersistedTaskTypeMetadata(source.status.tags);
   const reasons: string[] = [];
 
   if (!source.status.tags.includes("completed")) reasons.push("source-task-not-completed");
@@ -298,6 +353,7 @@ export function buildDailyExamCandidate(source: DailyTaskHarvestSource): DailyEx
   if (["partial", "rejected", "conflicted", "invalid"].includes(quality.state)) {
     reasons.push(`quality-receipt-${quality.state}`);
   }
+  if (taskTypeMetadata.state === "invalid") reasons.push(taskTypeMetadata.reason);
 
   const repository = sensitivity !== "private" && !sourceClassificationIsPrivate && change && result?.prUrl && githubRepository
     ? {
@@ -350,8 +406,12 @@ export function buildDailyExamCandidate(source: DailyTaskHarvestSource): DailyEx
       ...(resultContent ? { structuredResultSha256: sha256(resultContent) } : {}),
       ...(feedbackContent ? { qualityReceiptLedgerSha256: sha256(feedbackContent) } : {}),
       ...(result?.runtime ? { runtime: result.runtime } : {}),
-      ...(taskTypeFromTags(source.status.tags)
-        ? { taskType: taskTypeFromTags(source.status.tags) }
+      ...(taskTypeMetadata.state === "known"
+        ? {
+            taskType: taskTypeMetadata.taskType,
+            taskTypeTaxonomyVersion: taskTypeMetadata.taxonomyVersion,
+            taskTypeSource: taskTypeMetadata.source,
+          }
         : {}),
       ...(sensitivity ? { sensitivity } : {}),
       ...(result?.repositoryOutcome ? { repositoryOutcome: result.repositoryOutcome.state } : {}),

@@ -1,0 +1,56 @@
+{
+  "$comment": "Vendored executable fixture from grimnir#86 tests/fixtures/learning-task-contract/positive.json and tests/scripts/validate-learning-task-contract.mjs. The expected receipt id and correction-group digest are produced by Grimnir's independent native-v2/JCS validator construction.",
+  "contract_source": {
+    "repository": "Magnus-Gille/grimnir",
+    "issue": 86,
+    "schema": "docs/learning-task-contract-v1.schema.json#/$defs/qualityReceipt",
+    "validator": "tests/scripts/validate-learning-task-contract.mjs"
+  },
+  "predecessor_receipt_id": "qr-cfb94bcb44ec647526263aef",
+  "expected_receipt_id": "qr-c47ee672b5044013ae90e948",
+  "rated_at": "2026-07-19T10:02:01Z",
+  "verifier": {
+    "id": "claude-opus",
+    "version": "2026-07-19"
+  },
+  "normalized_group_payload": {
+    "task_id": "task-001",
+    "attempt_id": "attempt-1",
+    "reviewer": {
+      "principal": "principal:reviewer-1",
+      "independence": "independent"
+    },
+    "rubric": {
+      "id": "quality-rubric",
+      "version": "v1",
+      "config_digest": {
+        "algorithm": "sha256",
+        "canonicalization": "jcs-rfc8785-utf8-v1",
+        "source_ref": "source-doc:rubric/quality-v1",
+        "source_type": "rubric-config",
+        "source_version": "rubric-source-v1",
+        "digest": "2e1a3ff4b58995e03aedcc3e4fca9f73db9e0bb8ccf8db12458129b1932d081d"
+      }
+    },
+    "binding": {
+      "task_document_sha256": "247b64d04a2308dc9ab56109ef4fc3e7e3c4da091361c6fbe8ef18710ddf1540",
+      "structured_result_sha256": "3cb419ee88b4ded261d747a05745c7c2a8161bb98a048fe761cd3419fd8e9af1",
+      "repository": {
+        "state": "changes-present",
+        "base_branch": "main",
+        "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "head_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "diff_sha256": {
+          "algorithm": "sha256",
+          "version": "git-binary-diff-sha256-v1",
+          "digest": "8888888888888888888888888888888888888888888888888888888888888888"
+        }
+      }
+    }
+  },
+  "expected_correction_group": {
+    "algorithm": "sha256",
+    "version": "quality-correction-group-jcs-v1",
+    "digest": "d7810217367d212f713e5362fbf6b234e7438d8adb7a77b9a35236b2e7a40f29"
+  }
+}

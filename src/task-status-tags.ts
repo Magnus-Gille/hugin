@@ -11,6 +11,7 @@ const ROUTING_PREFIX = "routing:";
 const BROKER_PREFIX = "broker:";
 const ALIAS_PREFIX = "alias:";
 const TASK_TYPE_PREFIX = "task-type:";
+const TASK_TAXONOMY_PREFIX = "task-taxonomy:";
 const RUNTIME_ROW_PREFIX = "runtime-row:";
 const IDEMPOTENCY_PREFIX = "idempotency:";
 // Runtime-owned artefact delivery (issue #68). `delivery:*` must survive lease
@@ -50,6 +51,7 @@ export function getPersistentStatusTags(
   const brokerTags = tags.filter((tag) => tag.startsWith(BROKER_PREFIX));
   const aliasTags = tags.filter((tag) => tag.startsWith(ALIAS_PREFIX));
   const taskTypeTags = tags.filter((tag) => tag.startsWith(TASK_TYPE_PREFIX));
+  const taskTaxonomyTags = tags.filter((tag) => tag.startsWith(TASK_TAXONOMY_PREFIX));
   const runtimeRowTags = tags.filter((tag) => tag.startsWith(RUNTIME_ROW_PREFIX));
   const idempotencyTags = tags.filter((tag) => tag.startsWith(IDEMPOTENCY_PREFIX));
 
@@ -64,6 +66,7 @@ export function getPersistentStatusTags(
     ...brokerTags,
     ...aliasTags,
     ...taskTypeTags,
+    ...taskTaxonomyTags,
     ...runtimeRowTags,
     ...idempotencyTags,
   ]);

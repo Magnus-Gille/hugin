@@ -25,7 +25,9 @@ errors, successRate, frozen, recommendation: delegate-local|escalate-frontier|ex
 avgLatencyMs, avgTokPerSec}`. The live probe's `report` array only showed 21 distinct
 task types that day — it's data-dependent, listing only types actually attempted so
 far — but the gateway's own `taxonomy.ts` (the authoritative full enumeration, see V1
-below) defines 22, including `claim-verify`, which simply hadn't been exercised yet.
+below) included 22 at that time, including `claim-verify`, which simply had not been
+exercised yet. Later coordinated additive values are consumed through Hugin's shared
+Broker schema rather than copied into a second orchestrator list.
 
 ## Decisions
 
@@ -33,11 +35,11 @@ below) defines 22, including `claim-verify`, which simply hadn't been exercised 
 
 Hugin's cloud-worker verdict store uses the **same task-type taxonomy** and the **same
 aggregate row shape** as the gateway ledger. D5's "converge to a single KB later"
-becomes a merge, not a migration. Task types: **22 values including `other`**
-(`TASK_TYPES` in `plan.ts`, includes `claim-verify`). The gateway's **`taxonomy.ts`** —
-not the data-dependent `/ledger` report, which only lists task types that have actually
-been attempted at least once — is the authoritative source of truth for the full
-enumeration; Hugin's `TASK_TYPES` mirrors it 1:1 (Fix #6).
+becomes a merge, not a migration. The gateway's **`taxonomy.ts`** — not the
+data-dependent `/ledger` report, which only lists task types actually attempted — is
+the cross-repo authority. Inside Hugin, `taskTypeSchema` in `broker/types.ts` is the one
+local mirror; orchestrator `TASK_TYPES`, Broker submit validation, and persisted
+learning metadata all consume it rather than maintaining separate enum lists.
 
 ### V2 — Task-type is planner-emitted per subtask
 

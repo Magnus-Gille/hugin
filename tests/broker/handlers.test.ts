@@ -35,6 +35,7 @@ class FakeMunin {
     tags?: string[],
     _expectedUpdatedAt?: string,
     classification?: string,
+    createIfAbsent?: boolean,
   ): Promise<Record<string, unknown>> {
     this.writes.push({ namespace, key, content, tags, classification });
     this.reads[`${namespace}/${key}`] = {
@@ -43,7 +44,7 @@ class FakeMunin {
       created_at: "2026-07-11T12:00:00.000Z",
       updated_at: "2026-07-11T12:00:00.000Z",
     };
-    return { ok: true };
+    return { ok: true, status: createIfAbsent ? "created" : "updated" };
   }
   async read(namespace: string, key: string): Promise<unknown> {
     return this.reads[`${namespace}/${key}`] ?? null;
@@ -183,6 +184,20 @@ describe("buildBrokerApp", () => {
 });
 
 describe("POST /v1/delegate/submit", () => {
+  it.each(["draft", "conversation"])(
+    "accepts the additive M5 task type %s",
+    async (taskType) => {
+      const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(validRequest({ task_type: taskType })),
+      });
+
+      expect(res.status).toBe(202);
+      expect(harness.munin.writes[0]?.content).toContain(`\"task_type\": \"${taskType}\"`);
+    },
+  );
+
   it("accepts a valid envelope, returns 202 with task_id", async () => {
     const res = await fetch(`${harness.url}/v1/delegate/submit`, {
       method: "POST",
@@ -925,6 +940,145 @@ describe("POST /v1/delegate/rate", () => {
     });
     expect(conflict.status).toBe(409);
     expect(harness.munin.writes.filter((write) => write.key === "feedback")).toHaveLength(1);
+  });
+
+  it("fails closed instead of fabricating a task id as native-v2 attempt identity", async () => {
+    harness.munin.reads["tasks/general-correction/status"] = {
+      content: "## Task: correction\n\n### Prompt\nFix it.",
+      tags: ["completed", "runtime:codex"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    harness.munin.reads["tasks/general-correction/result-structured"] = {
+      content: structuredTaskResultContent("general-correction"),
+      tags: ["type:task-result-structured"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    const initial = {
+      task_id: "general-correction",
+      rating: "pass",
+      rating_reason: "Initially accepted.",
+      verification_outcome: "accepted_unchanged",
+      reviewer_role: "independent",
+    };
+    expect((await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(initial),
+    })).status).toBe(204);
+    const firstLedger = JSON.parse(harness.munin.writes.at(-1)!.content);
+    const predecessor = firstLedger.receipts[0];
+    // Make the immutable lineage clock deterministic rather than relying on
+    // two loopback HTTP requests landing in different milliseconds.
+    predecessor.ratedAt = "2026-07-18T10:00:00.000Z";
+    (harness.munin.reads["tasks/general-correction/feedback"] as { content: string }).content =
+      JSON.stringify(firstLedger);
+
+    const correctionPayload = {
+      ...initial,
+      rating: "wrong",
+      rating_reason: "Unicode regression remained.",
+      verification_outcome: "discarded",
+      correction: {
+        predecessor_receipt_id: predecessor.receiptId,
+        rubric: {
+          id: "code-review",
+          version: "2.1.0",
+          config_digest: {
+            algorithm: "sha256",
+            canonicalization: "jcs-rfc8785-utf8-v1",
+            source_ref: "source-doc:rubric/code-review-2.1.0",
+            source_type: "rubric-config",
+            source_version: "rubric-source-2.1.0",
+            digest: "d".repeat(64),
+          },
+        },
+        verifier: { id: "claude-opus", version: "2026-07-19" },
+        failure: {
+          taxonomy: { id: "hugin-quality-failure", version: "1" },
+          code: "incorrect-answer",
+        },
+        producing_configuration: {
+          harness: { id: "codex", version: "1", sha256: "e".repeat(64) },
+          model: { id: "gpt-5", configuration_sha256: "f".repeat(64) },
+        },
+        references: {
+          corrected_successor: {
+            task_id: "general-correction-fix",
+            structured_result_sha256: "1".repeat(64),
+          },
+          pull_request_url: "https://github.com/Magnus-Gille/demo/pull/2",
+          replacement_commit: "2".repeat(40),
+        },
+      },
+    };
+    const correctionResponse = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(correctionPayload),
+    });
+    expect(correctionResponse.status).toBe(409);
+    expect(await correctionResponse.json()).toMatchObject({
+      error: "policy_rejected",
+      message: expect.stringContaining("authoritative execution attempt"),
+    });
+    expect(harness.munin.writes.filter((write) => write.key === "feedback")).toHaveLength(1);
+    expect(JSON.parse(
+      (harness.munin.reads["tasks/general-correction/feedback"] as { content: string }).content,
+    )).toEqual(firstLedger);
+  });
+
+  it("enforces failure code none iff a v2 correction is accepted unchanged", async () => {
+    const correction = {
+      predecessor_receipt_id: "qr-" + "a".repeat(24),
+      rubric: {
+        id: "code-review",
+        version: "2",
+        config_digest: {
+          algorithm: "sha256",
+          canonicalization: "jcs-rfc8785-utf8-v1",
+          source_ref: "source-doc:rubric/code-review-2",
+          source_type: "rubric-config",
+          source_version: "rubric-source-2",
+          digest: "b".repeat(64),
+        },
+      },
+      verifier: { id: "claude-opus", version: "2026-07-19" },
+      failure: {
+        taxonomy: { id: "hugin-quality-failure", version: "1" },
+        code: "none",
+      },
+    };
+    const missingFailure = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        task_id: "missing-is-not-reached",
+        rating: "wrong",
+        rating_reason: "Bad output.",
+        verification_outcome: "discarded",
+        correction,
+      }),
+    });
+
+    expect(missingFailure.status).toBe(400);
+    const contradictoryFailure = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        task_id: "missing-is-not-reached",
+        rating: "pass",
+        rating_reason: "Accepted output.",
+        verification_outcome: "accepted_unchanged",
+        correction: {
+          ...correction,
+          failure: { ...correction.failure, code: "verification-failure" },
+        },
+      }),
+    });
+    expect(contradictoryFailure.status).toBe(400);
+    expect(harness.munin.writes).toHaveLength(0);
   });
 
   it("returns 404 if task not found", async () => {

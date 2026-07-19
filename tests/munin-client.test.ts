@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { MuninClient } from "../src/munin-client.js";
+import { MuninClient, MuninWriteRejectedError } from "../src/munin-client.js";
 
 function rpcResponse(payload: unknown): Response {
   return new Response(
@@ -177,6 +177,64 @@ describe("MuninClient", () => {
     expect(request).toBeDefined();
     const body = JSON.parse(String((request as RequestInit).body));
     expect(body.params.arguments.classification).toBe("private");
+  });
+
+  it("passes the explicit create-if-absent precondition through memory_write", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(rpcResponse({ status: "created" }));
+    const client = new MuninClient({
+      baseUrl: "http://munin.test",
+      apiKey: "test-key",
+      minRequestSpacingMs: 0,
+    });
+
+    await client.write(
+      "tasks/demo",
+      "feedback",
+      "{}",
+      ["feedback"],
+      undefined,
+      "internal",
+      true,
+    );
+
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const body = JSON.parse(String(request.body));
+    expect(body.params.arguments).toMatchObject({ create_if_absent: true });
+    expect(body.params.arguments).not.toHaveProperty("expected_updated_at");
+  });
+
+  it("preserves typed memory_write conflict details", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(rpcResponse({
+      ok: false,
+      error: "conflict",
+      conflict_reason: "already_exists",
+      current_updated_at: "2026-07-19T18:00:00.000Z",
+      message: "Entry already exists.",
+    }));
+    const client = new MuninClient({
+      baseUrl: "http://munin.test",
+      apiKey: "test-key",
+      minRequestSpacingMs: 0,
+    });
+
+    const rejected = await client.write(
+      "tasks/demo",
+      "feedback",
+      "{}",
+      undefined,
+      undefined,
+      "internal",
+      true,
+    ).catch((error: unknown) => error);
+
+    expect(rejected).toBeInstanceOf(MuninWriteRejectedError);
+    expect(rejected).toMatchObject({
+      errorCode: "conflict",
+      conflictReason: "already_exists",
+      currentUpdatedAt: "2026-07-19T18:00:00.000Z",
+    });
   });
 
   it("throws when memory_write responds with ok:false", async () => {

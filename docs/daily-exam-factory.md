@@ -34,6 +34,27 @@ terminal update or result completion time. That distinction is load-bearing: a
 task created before M5's complete capture window cannot become fresh merely
 because it completed after the window opened.
 
+Broker task type has one canonical persisted representation: the pair
+`task-type:<value>` and
+`task-taxonomy:gille-inference-task-types-2026-07-19-v1`. The version is pinned
+to the accepted Grimnir LearningTaskContract v1 taxonomy fixture. The factory
+validates the value against Hugin's mirrored M5 taxonomy and carries it as
+`source.taskType`, `source.taskTypeTaxonomyVersion`, and `source.taskTypeSource`.
+Existing Broker rows with an unversioned `task-type:*` tag and older Hugin rows
+with a single `type:*` tag remain readable as `legacy-unversioned`; they are
+never rewritten in place. Conflicting tags, unknown values, and unsupported
+taxonomy versions quarantine the candidate with a specific reason instead of
+collapsing it into `other`. Hugin #191 separately owns the additive `draft` and
+`conversation` enum mirror; once that schema lands, both values use this same
+v1 persistence path without another format change.
+
+Legacy `type:*` compatibility ignores Hugin's structural marker tags:
+`pipeline`, `pipeline-phase`, `pipeline-spec`, `pipeline-summary`,
+`approval-request`, `pipeline-approval-request`, and the `task-result` family.
+A phase or approval row carrying only those markers has missing task-type
+metadata; it is not misreported as an unknown taxonomy value. A separate valid
+legacy task type may coexist with those markers and is still harvested.
+
 ## Candidate lanes
 
 `npm run harvest:daily-exams` reads completed `tasks/` entries from Munin and
@@ -47,11 +68,16 @@ classifies them without running a model or writing any learning state:
 
 `completed` means that the executor lifecycle finished successfully; it is not
 proof that the solution was accepted. The factory reads each task's optional
-`feedback` document and joins only schema-v1 quality receipts whose hashes bind
-the exact task document, structured result, and repository state/diff. It
-preserves the receipt IDs, authenticated reviewer principals, and whether an
-independent reviewer explicitly accepted the unchanged result. Legacy flat
-feedback is labeled `legacy-unbound` and never upgraded into acceptance.
+`feedback` document and joins only valid native-v1/v2 quality receipts whose
+hashes bind the exact task document, structured result, and repository
+state/diff. It collapses a valid correction chain to its unique unsuperseded
+leaf. The content-blind quality view preserves receipt IDs, authenticated
+reviewer principals, reason digests, and—on native v2—attempt, predecessor,
+stable correction group, rubric/verifier, structured failure, available
+producing-configuration identities, and successor references. It never copies
+the text rating reason. Native v1 remains exact and does not acquire fabricated
+attempt or rubric fields. Legacy flat feedback is labeled `legacy-unbound` and
+never upgraded into acceptance. See `docs/quality-receipts.md`.
 
 Every non-quarantined candidate remains `needs-independent-verifier`, including
 one whose product output has an exact independent acceptance: accepting the
