@@ -138,6 +138,11 @@ import {
   buildTerminalStatusTags,
   getPersistentStatusTags,
 } from "./task-status-tags.js";
+import {
+  finalizeManagedCheckoutFailure,
+  renewTaskLease,
+  type MutableTaskStatus,
+} from "./managed-checkout-failure.js";
 import { LearningLoopCollector } from "./learning-loop-collector.js";
 import { LearningExperimentStore } from "./learning/experiment-store.js";
 import { sanitizeProviderTokenCount } from "./m5-provenance.js";
@@ -549,6 +554,7 @@ let currentReconcileAbort: AbortController | null = null;
 let server: Server;
 let runningBroker: RunningBroker | null = null;
 let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
+let leaseRenewalInFlight: Promise<void> | null = null;
 let cancelWatchTimer: ReturnType<typeof setInterval> | null = null;
 let leaseReaperTimer: ReturnType<typeof setInterval> | null = null;
 let leaseReaperInFlight = false;
@@ -2332,20 +2338,38 @@ function stripLeaseTags(tags: string[]): string[] {
 }
 
 /** Start periodic lease renewal for the current task. */
-function startLeaseRenewal(taskNs: string, entryContent: string, baseTags: string[]): void {
+function startLeaseRenewal(
+  taskNs: string,
+  status: MutableTaskStatus,
+  baseTags: string[],
+): void {
   stopLeaseRenewal();
-  leaseRenewalTimer = setInterval(async () => {
+  leaseRenewalTimer = setInterval(() => {
     if (!currentTask || currentTask !== taskNs) {
       stopLeaseRenewal();
       return;
     }
-    try {
-      const renewedTags = buildClaimTags(baseTags, "running");
-      await leaseMunin.write(taskNs, "status", entryContent, renewedTags);
-      console.log(`Lease renewed for ${taskNs} (expires: ${leaseExpiry()})`);
-    } catch (err) {
-      console.error(`Lease renewal failed for ${taskNs}:`, err);
-    }
+    if (leaseRenewalInFlight) return;
+
+    const renewedTags = buildClaimTags(baseTags, "running");
+    const renewal = renewTaskLease({
+      client: leaseMunin,
+      taskNs,
+      status,
+      renewedTags,
+    })
+      .then(() => {
+        console.log(`Lease renewed for ${taskNs} (expires: ${leaseExpiry()})`);
+      })
+      .catch((err) => {
+        console.error(`Lease renewal failed for ${taskNs}:`, err);
+      })
+      .finally(() => {
+        if (leaseRenewalInFlight === renewal) {
+          leaseRenewalInFlight = null;
+        }
+      });
+    leaseRenewalInFlight = renewal;
   }, LEASE_RENEWAL_INTERVAL_MS);
 }
 
@@ -2354,6 +2378,12 @@ function stopLeaseRenewal(): void {
     clearInterval(leaseRenewalTimer);
     leaseRenewalTimer = null;
   }
+}
+
+async function stopLeaseRenewalAndWait(): Promise<void> {
+  stopLeaseRenewal();
+  const inFlight = leaseRenewalInFlight;
+  if (inFlight) await inFlight;
 }
 
 function requestCancellationForCurrentTask(request: CancellationRequest): void {
@@ -4528,6 +4558,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       entry.updated_at = claimResult.updated_at;
       claimAcceptedAt = claimResult.updated_at;
     }
+    entry.tags = claimTags;
   } catch (err) {
     // Another dispatcher won the CAS. Its claim-time assessment owns the
     // eventual result; retaining ours risks applying stale identity to a
@@ -4547,7 +4578,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   console.log(`Executing task ${taskNs}...`);
 
   // Start periodic lease renewal
-  startLeaseRenewal(taskNs, entry.content, entry.tags);
+  startLeaseRenewal(taskNs, entry, claimTags);
 
   try {
     if (declaredRuntime === "pipeline") {
@@ -4566,7 +4597,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         await probeAllHosts(),
         { allowOwnerOverride: isOwnerSubmitter(submittedBy) },
       );
-      stopLeaseRenewal();
+      await stopLeaseRenewalAndWait();
       stopCancellationWatch();
       currentTask = null;
       currentTaskConfig = null;
@@ -4597,27 +4628,37 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     const checkoutFailure = getManagedCheckoutFailure(branchResult);
     if (checkoutFailure) {
       console.error(`Refusing to execute ${taskNs}: ${checkoutFailure}`);
-      await failTaskWithMessage(taskNs, entry, checkoutFailure);
-      await writeStructuredTaskResult(
+      const classification = getTaskArtifactClassification(task);
+      await finalizeManagedCheckoutFailure({
+        client: munin,
         taskNs,
-        {
-          ...createFailureStructuredResult(taskNs, task.runtime, checkoutFailure, {
-            executor: "dispatcher",
-            resultSource: "repository-checkout",
-            startedAt,
-            replyTo: task.replyTo,
-            replyFormat: task.replyFormat,
-            group: task.group,
-            sequence: task.sequence,
-            pipeline: task.pipeline,
-            sensitivity: buildTaskSensitivitySnapshot(task.sensitivityAssessment),
-          }),
-          repositoryOutcome,
-          provenance: signingVerdict.provenance,
-        },
-        getTaskArtifactClassification(task),
-      );
-      await munin.log(taskNs, `Task rejected before execution: ${checkoutFailure}`);
+        status: entry,
+        classification,
+        resultContent:
+          `## Result\n\n- **Exit code:** ${DISPATCHER_FAILURE_EXIT_CODE}\n` +
+          `- **Error:** ${checkoutFailure}\n`,
+        stopLeaseRenewal: stopLeaseRenewalAndWait,
+        writeStructuredResult: () => writeStructuredTaskResult(
+          taskNs,
+          {
+            ...createFailureStructuredResult(taskNs, task.runtime, checkoutFailure, {
+              executor: "dispatcher",
+              resultSource: "repository-checkout",
+              startedAt,
+              replyTo: task.replyTo,
+              replyFormat: task.replyFormat,
+              group: task.group,
+              sequence: task.sequence,
+              pipeline: task.pipeline,
+              sensitivity: buildTaskSensitivitySnapshot(task.sensitivityAssessment),
+            }),
+            repositoryOutcome,
+            provenance: signingVerdict.provenance,
+          },
+          classification,
+        ),
+        logMessage: `Task rejected before execution: ${checkoutFailure}`,
+      });
       await promoteDependents(taskId);
       await refreshPipelineSummaryFromContent(entry.content);
       return { hadTask: true, queueDepth };
@@ -5248,7 +5289,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // cancellation watch stays
     // ACTIVE through delivery so an operator can still abort a hung rsync; it
     // is stopped after delivery finalization below.
-    stopLeaseRenewal();
+    await stopLeaseRenewalAndWait();
     currentSdkAbort = null;
     currentOllamaAbort = null;
     currentOpencodeAbort = null;
@@ -5609,7 +5650,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         maxAgeMs: config.deliveryRetryMaxAgeMs,
       });
       if (decision.action === "retry") {
-        stopLeaseRenewal();
+        await stopLeaseRenewalAndWait();
         stopCancellationWatch();
         await writeDeliveryRetryMeta(
           taskNs,
@@ -5666,7 +5707,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // below is an idempotent guard, not the primary stop. The cancellation
     // watch, however, was kept ACTIVE through delivery so an operator could
     // abort a hung rsync; THIS is where it is finally stopped.
-    stopLeaseRenewal();
+    await stopLeaseRenewalAndWait();
     stopCancellationWatch();
 
     // Write result to Munin (skip if timeout already wrote partial result via SDK)
@@ -6067,7 +6108,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     currentTaskConfig = null;
     return { hadTask: true, queueDepth };
   } finally {
-    stopLeaseRenewal();
+    await stopLeaseRenewalAndWait();
     stopCancellationWatch();
     currentSdkAbort = null;
     currentOllamaAbort = null;
@@ -6240,7 +6281,7 @@ async function shutdown(signal: string): Promise<void> {
     });
   }
 
-  stopLeaseRenewal();
+  await stopLeaseRenewalAndWait();
   stopCancellationWatch();
   stopLeaseReaper();
   stopDeliveryRetryReaper();

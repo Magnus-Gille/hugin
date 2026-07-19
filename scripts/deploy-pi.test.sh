@@ -164,6 +164,21 @@ assert_order "$calls" "rm -f '/var/lib/hugin/app/.deployed-commit'" "rsync " "no
 assert_not_contains "$calls" "npm ci --omit=dev" "rsync failure stops before later remote mutation"
 assert_not_contains "$calls" "mv '/var/lib/hugin/app/.deployed-commit.tmp' '/var/lib/hugin/app/.deployed-commit'" "rsync failure remains markerless"
 
+# The shipped units use one fixed application directory. An obsolete local
+# HUGIN_DEPLOY_DIR must not silently split the synced/stamped payload from the
+# tree systemd actually executes.
+FIXED_DIR_SOURCE="$TMP_DIR/fixed-dir-source"
+init_clean_source "$FIXED_DIR_SOURCE"
+: >"$CALL_LOG"
+set +e
+(cd "$FIXED_DIR_SOURCE" && HUGIN_DEPLOY_DIR=/srv/ignored-hugin bash "$DEPLOY_SCRIPT" testhost >/dev/null 2>&1)
+fixed_dir_rc=$?
+set -e
+[[ "$fixed_dir_rc" -eq 42 ]] || fail "fixed-directory deployment should reach the rsync stub"
+fixed_dir_calls="$(cat "$CALL_LOG")"
+assert_contains "$fixed_dir_calls" "hugin@testhost:/var/lib/hugin/app/" "deployment always syncs the unit's canonical application tree"
+assert_not_contains "$fixed_dir_calls" "/srv/ignored-hugin" "obsolete HUGIN_DEPLOY_DIR cannot split payload and unit paths"
+
 # A deploy payload must be one clean, addressable local commit. Reject both a
 # dirty source and a build that dirties tracked files before remote mutation.
 DIRTY_SOURCE="$TMP_DIR/dirty-source"
@@ -267,6 +282,9 @@ assert_contains "$full_calls" "health.codex_sandbox?.available !== true" "deploy
 assert_contains "$full_calls" "in-service Codex sandbox self-test unavailable after 15 attempts" "deployment waits for a definitive in-service probe result"
 assert_contains "$full_calls" "codex sandbox -- /bin/true" "deployment host preflight exercises Codex's zero-token sandbox entry point"
 assert_contains "$full_calls" "enable --now hugin-daily-exam-factory.timer" "deployment enables the automatic daily factory"
+assert_contains "$full_calls" "sudo loginctl enable-linger 'hugin'" "deployment enables linger with privilege"
+assert_contains "$full_calls" "loginctl show-user 'hugin' --property=Linger --value" "deployment verifies the durable user-manager contract"
+assert_contains "$(cat "$DEPLOY_SCRIPT")" 'test \"\$linger\" = yes' "deployment fails closed unless linger is enabled"
 assert_contains "$full_calls" "start hugin-daily-exam-factory.service" "deployment runs a factory acceptance sweep"
 assert_contains "$full_calls" "daily exam manifest must be schema v2" "deployment requires the cross-client exposure manifest contract"
 assert_contains "$full_calls" "provisional candidate lacks complete cross-client exposure coverage" "deployment rejects an unjoined provisional candidate"
@@ -303,6 +321,22 @@ export FAKE_SSH_FAIL_MATCH=""
 health_fail_calls="$(cat "$CALL_LOG")"
 assert_contains "$health_fail_calls" "rm -f '/var/lib/hugin/app/.deployed-commit'" "failed deployment first invalidates the old marker"
 assert_not_contains "$health_fail_calls" "mv '/var/lib/hugin/app/.deployed-commit.tmp' '/var/lib/hugin/app/.deployed-commit'" "failed health acceptance remains markerless"
+
+# Linger is part of service durability, not a best-effort convenience. A host
+# that cannot enable/verify it must remain markerless and stop before restart.
+: >"$CALL_LOG"
+export FAKE_SSH_FAIL_MATCH="loginctl show-user 'hugin' --property=Linger --value"
+export FAKE_SSH_FAIL_RC=71
+set +e
+(cd "$FULL_SOURCE" && bash "$DEPLOY_SCRIPT" testhost >/dev/null 2>&1)
+linger_fail_rc=$?
+set -e
+export FAKE_SSH_FAIL_MATCH=""
+[[ "$linger_fail_rc" -ne 0 ]] || fail "failed linger verification must fail deployment"
+linger_fail_calls="$(cat "$CALL_LOG")"
+assert_contains "$linger_fail_calls" "sudo loginctl enable-linger 'hugin'" "linger failure reaches privileged enablement"
+assert_not_contains "$linger_fail_calls" "systemctl --user restart hugin.service" "linger failure stops before service acceptance"
+assert_not_contains "$linger_fail_calls" "mv '/var/lib/hugin/app/.deployed-commit.tmp' '/var/lib/hugin/app/.deployed-commit'" "linger failure remains markerless"
 
 # The automatic factory is part of production acceptance: a broken compiled
 # runner, unit sandbox, Munin credential, or manifest write must also leave the

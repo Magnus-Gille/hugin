@@ -16,7 +16,7 @@ set -euo pipefail
 PI_HOST="${1:-${HUGIN_DEPLOY_HOST:-hugin.local}}"
 DEPLOY_USER="${DEPLOY_USER:-hugin}"
 REMOTE="${DEPLOY_USER}@$PI_HOST"
-REMOTE_DIR="${HUGIN_DEPLOY_DIR:-/var/lib/hugin/app}"
+REMOTE_DIR="/var/lib/hugin/app"
 REMOTE_ENV="$REMOTE_DIR/.env"
 # Heimdall owns 3033 and Ratatoskr owns 3034 on the Pi's tailnet address.
 # Keep Hugin on a dedicated production port; the generic Broker default

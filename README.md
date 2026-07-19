@@ -54,7 +54,7 @@ result.
 
 ## Requirements
 
-- Node.js 20 or newer (Node.js 22 is used for release verification).
+- Node.js 20.6 or newer (Node.js 22 is used for release verification).
 - A reachable Munin Memory server and bearer token.
 - At least one configured executor. Local-only deployments can omit cloud keys.
 - Git and GitHub CLI only when managed-repository publication is enabled.

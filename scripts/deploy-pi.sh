@@ -11,7 +11,7 @@ else
 fi
 DEPLOY_USER="${DEPLOY_USER:-hugin}"
 REMOTE="$DEPLOY_USER@$PI_HOST"
-REMOTE_DIR="${HUGIN_DEPLOY_DIR:-/var/lib/hugin/app}"
+REMOTE_DIR="/var/lib/hugin/app"
 HUGIN_HOME="/var/lib/hugin"
 
 read_clean_deploy_sha() {
@@ -143,7 +143,10 @@ ssh "$REMOTE" "
   XDG_RUNTIME_DIR=/run/user/\$user_id systemctl --user daemon-reload
   XDG_RUNTIME_DIR=/run/user/\$user_id systemctl --user enable hugin.service
   XDG_RUNTIME_DIR=/run/user/\$user_id systemctl --user enable --now hugin-daily-exam-factory.timer
-  loginctl enable-linger "$DEPLOY_USER" 2>/dev/null || true
+  sudo loginctl enable-linger '$DEPLOY_USER'
+  linger=\$(loginctl show-user '$DEPLOY_USER' --property=Linger --value)
+  echo \"Linger=\$linger\"
+  test \"\$linger\" = yes
 "
 
 echo "==> Checking for .env file..."
