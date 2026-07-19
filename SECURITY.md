@@ -28,6 +28,11 @@ scanning, and output exfiltration scanning are defense-in-depth controls. They d
 not make arbitrary untrusted model execution safe. See `docs/security/` and the
 README's limitations before deploying.
 
+Security controls and open-source licensing are separate questions. Hugin's
+MIT license covers this repository's own code, while dependencies retain their
+own terms. The Claude executor requires the separately licensed Anthropic
+Claude Agent SDK; see [third-party notices](THIRD_PARTY_NOTICES.md).
+
 ## Public-data hygiene
 
 Fixtures committed to this repository must be explicitly synthetic. Do not

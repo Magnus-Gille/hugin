@@ -305,7 +305,7 @@ const labelled: LabelledExample[] = [
       "ping from ",
       pii("private_person", "kasia"),
       " — she'll join from ",
-      pii("private_email", "kasia@konsulter.example.io"),
+      pii("private_email", "kasia@konsulter.example"),
       " tomorrow.",
     ],
     { lang: "en", category: "chat" },

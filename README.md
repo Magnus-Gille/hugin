@@ -7,6 +7,8 @@ turns durable tasks stored in
 cloud or local agent runtimes, then stores human-readable and structured results
 back in Munin.
 
+This dispatcher is unrelated to the Hugin panorama-stitching project.
+
 Hugin is infrastructure, not a chat application. A client or adapter submits a
 task; Hugin owns claiming, policy checks, execution, cancellation, repository
 isolation, optional artifact delivery, and result finalization.
@@ -187,4 +189,6 @@ reports should follow [SECURITY.md](SECURITY.md), not a public issue.
 
 ## License
 
-[MIT](LICENSE)
+Hugin's own source code is available under [MIT](LICENSE). Dependencies retain
+their own terms; in particular, the Claude executor uses Anthropic's separately
+licensed Agent SDK. See [third-party notices](THIRD_PARTY_NOTICES.md).

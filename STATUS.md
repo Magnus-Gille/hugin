@@ -6,8 +6,13 @@ Current release-readiness work:
 
 - managed repository tasks fail before model execution if Hugin cannot create
   the isolated task branch;
+- managed-root containment resolves symlinks before allowing Git operations;
 - artifact delivery has no installation-specific default target and requires an
   explicit `HUGIN_DELIVERY_TARGETS` allowlist;
+- current-tree and full-history secret scans use exact synthetic-fixture
+  allowlists and report no unallowlisted findings;
+- third-party licensing is disclosed separately: Hugin code is MIT, while the
+  Claude executor depends on Anthropic's separately licensed Agent SDK;
 - deployment-specific security audits and generated host benchmark results are
   excluded from the public tree;
 - setup, architecture, security, and contribution documentation is public and
