@@ -24,6 +24,10 @@ import * as path from "node:path";
 import { extractM5Provenance, sanitizeProviderTokenCount } from "./m5-provenance.js";
 import type { M5DelegationProvenance } from "./m5-provenance.js";
 import { resolveGatewayRootUrl } from "./orchestrator/provider-config.js";
+import {
+  buildHuginTaskIdentity,
+  type HuginTaskIdentity,
+} from "./task-identity.js";
 
 // --- Types ---
 
@@ -108,6 +112,8 @@ export interface HomeserverExecutorResult {
    * carried.
    */
   provenance: M5DelegationProvenance | null;
+  /** Hugin-produced raw-task/rendered-prompt identity; not a gateway admission echo. */
+  huginTaskIdentity: HuginTaskIdentity | null;
 }
 
 export interface HomeserverExecutorOptions {
@@ -175,11 +181,57 @@ function parseRetryAfter(res: Response): number | null {
   return null;
 }
 
-function buildUserMessage(task: HomeserverTaskConfig): string {
+export function renderHomeserverUserMessage(task: HomeserverTaskConfig): string {
   const parts: string[] = [];
   if (task.injectedContext) parts.push("## Context\n" + task.injectedContext);
   parts.push("## Task\n" + task.prompt);
   return parts.join("\n\n---\n\n");
+}
+
+export interface HomeserverRequestBody extends Record<string, unknown> {
+  prompt?: string;
+  huginTaskIdentity?: HuginTaskIdentity;
+}
+
+/**
+ * The one real serializer used by the executor and cross-repository fixtures.
+ * The canonical identity is always recomputed here; no config/body override is
+ * accepted from the task document.
+ */
+export function buildHomeserverRequestBody(
+  task: HomeserverTaskConfig,
+  taskId: string,
+): HomeserverRequestBody {
+  const userMessage = renderHomeserverUserMessage(task);
+  if (task.path === "delegate") {
+    return {
+      prompt: userMessage,
+      ...(task.taskType ? { taskType: task.taskType } : {}),
+      ...(task.systemPrompt !== undefined ? { systemPrompt: task.systemPrompt } : {}),
+      ...(task.maxTokens !== undefined ? { maxTokens: task.maxTokens } : {}),
+      ...(task.modelId !== undefined ? { modelId: task.modelId } : {}),
+      ...(task.frontierModelId !== undefined ? { frontierModelId: task.frontierModelId } : {}),
+      ...(task.verifier !== undefined ? { verifier: task.verifier } : {}),
+      ...(task.responseFormat !== undefined ? { responseFormat: task.responseFormat } : {}),
+      ...(task.delegatorModelId !== undefined ? { delegatorModelId: task.delegatorModelId } : {}),
+      ...(task.premiumBaselineModelId !== undefined
+        ? { premiumBaselineModelId: task.premiumBaselineModelId }
+        : {}),
+      huginTaskIdentity: buildHuginTaskIdentity({
+        taskId,
+        rawTaskText: task.prompt,
+        renderedPrompt: userMessage,
+      }),
+    };
+  }
+  return {
+    model: task.model,
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: userMessage },
+    ],
+    stream: true,
+  };
 }
 
 // --- Executor ---
@@ -192,7 +244,7 @@ export async function executeHomeserverTask(
 ): Promise<HomeserverExecutorResult> {
   const logFile = path.join(logDir, `${taskId}.log`);
   const startedAt = new Date().toISOString();
-  const userMessage = buildUserMessage(task);
+  const userMessage = renderHomeserverUserMessage(task);
   const promptChars = SYSTEM_PROMPT.length + userMessage.length;
 
   fs.mkdirSync(logDir, { recursive: true });
@@ -249,6 +301,7 @@ export async function executeHomeserverTask(
     verifierNotes: null,
     nodeId: null,
     provenance: null,
+    huginTaskIdentity: null,
   };
 
   const finish = async (): Promise<HomeserverExecutorResult> => {
@@ -283,35 +336,15 @@ export async function executeHomeserverTask(
   if (task.apiKey) headers.Authorization = `Bearer ${task.apiKey}`;
 
   try {
+    // Keep defensive identity/serialization validation inside the executor's
+    // normal failure boundary so malformed direct callers still receive a
+    // closed log and structured executor result rather than an escaped throw.
+    const body = buildHomeserverRequestBody(task, taskId);
+    result.huginTaskIdentity = body.huginTaskIdentity ?? null;
     const url =
       task.path === "delegate"
         ? `${task.gatewayBaseUrl}/delegate`
         : `${task.gatewayBaseUrl}/v1/chat/completions`;
-
-    const body: Record<string, unknown> =
-      task.path === "delegate"
-        ? {
-            prompt: userMessage,
-            ...(task.taskType ? { taskType: task.taskType } : {}),
-            ...(task.systemPrompt !== undefined ? { systemPrompt: task.systemPrompt } : {}),
-            ...(task.maxTokens !== undefined ? { maxTokens: task.maxTokens } : {}),
-            ...(task.modelId !== undefined ? { modelId: task.modelId } : {}),
-            ...(task.frontierModelId !== undefined ? { frontierModelId: task.frontierModelId } : {}),
-            ...(task.verifier !== undefined ? { verifier: task.verifier } : {}),
-            ...(task.responseFormat !== undefined ? { responseFormat: task.responseFormat } : {}),
-            ...(task.delegatorModelId !== undefined ? { delegatorModelId: task.delegatorModelId } : {}),
-            ...(task.premiumBaselineModelId !== undefined
-              ? { premiumBaselineModelId: task.premiumBaselineModelId }
-              : {}),
-          }
-        : {
-            model: task.model,
-            messages: [
-              { role: "system", content: SYSTEM_PROMPT },
-              { role: "user", content: userMessage },
-            ],
-            stream: true,
-          };
 
     const res = await fetch(url, {
       method: "POST",

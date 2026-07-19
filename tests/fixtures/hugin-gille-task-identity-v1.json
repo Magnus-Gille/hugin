@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "producer": "hugin",
+  "normativeRawVectorSource": "grimnir/tests/fixtures/learning-task-contract/raw-fingerprint-vectors.json",
+  "rawFingerprintVersion": "trim-utf8-sha256-v1",
+  "renderedFingerprintVersion": "hugin-delegate-prompt-utf8-sha256-v1",
+  "cases": [
+    {
+      "name": "ASCII task with optional injected context",
+      "taskId": "fixture-task-230",
+      "rawTaskText": "  Summarize the fixture incident report.\n",
+      "canonicalRawUtf8Hex": "53756d6d6172697a6520746865206669787475726520696e636964656e74207265706f72742e",
+      "canonicalRawUtf8Bytes": 38,
+      "expectedRawSha256": "7b1c423b1792795a9442c6df25d5035af9daa83dbe43c48476f9bd8baa633152",
+      "injectedContext": "Incident severity: SEV-2.",
+      "renderedWithoutContext": "## Task\n  Summarize the fixture incident report.\n",
+      "renderedWithoutContextUtf8Bytes": 49,
+      "renderedWithoutContextSha256": "d0846c9a9de32ee9708e8ed7dd039b0156465807252a65f68304822919264969",
+      "currentGilleLegacyWithoutContextSha256": "5ca59329d305e062b90bac8d13a36cb91bc10412b489e69902f86db0a41c682d",
+      "renderedWithContext": "## Context\nIncident severity: SEV-2.\n\n---\n\n## Task\n  Summarize the fixture incident report.\n",
+      "renderedWithContextUtf8Bytes": 92,
+      "renderedWithContextSha256": "3171013936122536e14f5608f94a49d84d9c9cf9999bd2a41a9cec669557b691",
+      "currentGilleLegacyWithContextSha256": "602d867064f12080fc2accc5c9fd24d3eee803fcfe5701e5d0ceb35cf05ad618",
+      "expectedRawLookupRequest": {
+        "fingerprint_version": "trim-utf8-sha256-v1",
+        "fingerprints": ["7b1c423b1792795a9442c6df25d5035af9daa83dbe43c48476f9bd8baa633152"]
+      }
+    },
+    {
+      "name": "Unicode trim without normalization",
+      "taskId": "fixture-task-unicode",
+      "rawTaskText": "\tÅngström \n",
+      "canonicalRawUtf8Hex": "41cc8a6e677374726fcc886d",
+      "canonicalRawUtf8Bytes": 12,
+      "expectedRawSha256": "d27607e4723af34d42f72e65d29314aa7ffa372d39a5440cce37e260c4a4138b"
+    }
+  ]
+}

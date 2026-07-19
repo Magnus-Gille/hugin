@@ -147,6 +147,46 @@ describe("structured task result schema", () => {
     expect(result.runtimeMetadata?.delegation?.priceCatalogVersion).toBe("2026-07-08");
     expect(result.runtimeMetadata?.delegation?.costTraceId).toBe("ct-1");
   });
+
+  it("preserves Hugin raw-task and rendered-prompt identity as separate provenance", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "task-identity-1",
+      taskNamespace: "tasks/task-identity-1",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "homeserver",
+      executor: "homeserver-delegate",
+      resultSource: "homeserver-delegate",
+      exitCode: 0,
+      completedAt: "2026-07-19T12:00:00.000Z",
+      bodyKind: "response",
+      bodyText: "ok",
+      runtimeMetadata: {
+        huginTaskIdentity: {
+          schemaVersion: 1,
+          producer: "hugin",
+          taskId: "task-identity-1",
+          rawTaskFingerprint: {
+            algorithm: "sha256",
+            version: "trim-utf8-sha256-v1",
+            digest: "a".repeat(64),
+          },
+          renderedPromptFingerprint: {
+            algorithm: "sha256",
+            version: "hugin-delegate-prompt-utf8-sha256-v1",
+            digest: "b".repeat(64),
+            utf8Bytes: 123,
+          },
+        },
+      },
+    });
+
+    expect(result.runtimeMetadata?.huginTaskIdentity?.rawTaskFingerprint.digest)
+      .toBe("a".repeat(64));
+    expect(result.runtimeMetadata?.huginTaskIdentity?.renderedPromptFingerprint.digest)
+      .toBe("b".repeat(64));
+  });
   it("accepts completed pipeline phase results", () => {
     const result = buildStructuredTaskResult({
       schemaVersion: 1,

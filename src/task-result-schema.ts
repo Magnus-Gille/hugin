@@ -10,6 +10,7 @@ import {
   SIGNING_POLICIES,
   TASK_SIGNATURE_STATUSES,
 } from "./task-signing.js";
+import { huginTaskIdentitySchema } from "./task-identity.js";
 
 export const taskExecutionOutcomeSchema = z.enum([
   "completed",
@@ -146,6 +147,9 @@ export const taskExecutionRuntimeMetadataSchema = z.object({
   eliminatedRuntimes: z.array(routingEliminationSchema).optional(),
   skillRoute: skillRouteSchema.optional(),
   delegation: delegationProvenanceSchema.optional(),
+  // Producer-side identity only. Gateway-authenticated acceptance/echo is a
+  // separate future field owned by the LearningTaskContract handshake.
+  huginTaskIdentity: huginTaskIdentitySchema.optional(),
 });
 export type TaskExecutionRuntimeMetadata = z.infer<
   typeof taskExecutionRuntimeMetadataSchema
