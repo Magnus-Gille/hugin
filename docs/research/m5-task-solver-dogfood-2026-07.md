@@ -16,7 +16,7 @@ and verifier—not an enduring property of the machine or model family.
 
 | Task | Lane | Result | Independent quality gate | Interpretation |
 |---|---|---|---|---|
-| Heimdall #88 | M5/OpenCode | PR [#122](https://github.com/Magnus-Gille/heimdall/pull/122) | 45 focused tests, 943 full Node tests, 29 Python tests, and lint passed | Positive evidence for bounded, well-specified, mechanically verifiable work |
+| Archived Heimdall panel read-back task | M5/OpenCode | Private-history PR, later superseded by the existing service-filtered API | 45 focused tests, 943 full Node tests, 29 Python tests, and lint passed | Positive evidence for bounded, well-specified, mechanically verifiable work; not a patch to port onto the public history |
 | Munin #170 repair, attempt 1 | M5/OpenCode | Exit 0 after operating in the wrong path; no repository change | Rejected | Harness completion is not semantic completion |
 | Munin #170 repair, attempt 2 | M5/OpenCode | Unsafe partial result after about 19 minutes | Rejected | Negative evidence for complex transactional repair/review convergence |
 | Munin #170 continuation | cloud Claude | PR [#206](https://github.com/Magnus-Gille/munin-memory/pull/206) | Implementation worked under an added adversarial test, but the submitted PR still lacked required regression coverage and needed cleanup | Even cloud completion requires an independent quality gate |
