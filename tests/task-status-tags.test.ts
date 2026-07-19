@@ -32,6 +32,21 @@ describe("task status tag helpers", () => {
     expect(buildTerminalStatusTags("completed", input)).toEqual(persistent);
   });
 
+  it.each(["draft", "conversation"])(
+    "preserves the additive M5 task type %s through terminalization",
+    (taskType) => {
+      expect(
+        buildTerminalStatusTags("completed", [
+          "running",
+          "runtime:homeserver",
+          "broker:mcp-v2",
+          `task-type:${taskType}`,
+          "claimed_by:hugin-pi",
+        ]),
+      ).toContain(`task-type:${taskType}`);
+    },
+  );
+
   it("preserves policy tags on terminal child tasks", () => {
     expect(
       buildTerminalStatusTags("completed", [

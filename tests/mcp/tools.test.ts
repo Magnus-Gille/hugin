@@ -34,6 +34,28 @@ function parseResult(result: { content: { text: string }[]; isError?: boolean })
 }
 
 describe("buildTools — hugin_submit", () => {
+  it.each(["draft", "conversation"] as const)(
+    "accepts the additive M5 task type %s",
+    async (taskType) => {
+      const submit = vi.fn(async () => ({ task_id: `t-${taskType}`, state: "pending" }));
+      const tools = buildTools({
+        broker: fakeBroker({ submit }),
+        sessionId: "sess-fixed",
+        submitter: "claude-code",
+        newId: () => "11111111-1111-4111-8111-111111111111",
+      });
+
+      const result = await tools.submit.handler({
+        task_type: taskType,
+        prompt: `Handle this ${taskType} task.`,
+        alias_requested: "m5",
+      });
+
+      expect(result.isError).toBeUndefined();
+      expect(submit).toHaveBeenCalledWith(expect.objectContaining({ task_type: taskType }));
+    },
+  );
+
   it("forwards a one-shot envelope with auto-generated idempotency key", async () => {
     const submit = vi.fn(async () => ({ task_id: "t1", state: "pending" }));
     const broker = fakeBroker({ submit });
