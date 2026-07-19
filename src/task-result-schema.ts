@@ -11,6 +11,7 @@ import {
   TASK_SIGNATURE_STATUSES,
 } from "./task-signing.js";
 import { huginTaskIdentitySchema } from "./task-identity.js";
+import { learningTaskExecutionEvidenceSchema } from "./learning-task-handshake.js";
 
 export const taskExecutionOutcomeSchema = z.enum([
   "completed",
@@ -147,9 +148,13 @@ export const taskExecutionRuntimeMetadataSchema = z.object({
   eliminatedRuntimes: z.array(routingEliminationSchema).optional(),
   skillRoute: skillRouteSchema.optional(),
   delegation: delegationProvenanceSchema.optional(),
-  // Producer-side identity only. Gateway-authenticated acceptance/echo is a
-  // separate future field owned by the LearningTaskContract handshake.
+  // Producer-side identity only. Gateway-authenticated acceptance/echo lives
+  // in the separate LearningTaskContract evidence field below.
   huginTaskIdentity: huginTaskIdentitySchema.optional(),
+  // Authenticated LearningTaskContract v1 producer stamp/echo and the exact
+  // durable Hugin attempt references. This remains separate from the legacy
+  // #230 identity so raw and rendered prompt semantics cannot collapse.
+  learningTask: learningTaskExecutionEvidenceSchema.optional(),
 });
 export type TaskExecutionRuntimeMetadata = z.infer<
   typeof taskExecutionRuntimeMetadataSchema
@@ -405,6 +410,60 @@ export const structuredTaskResultSchema = z.object({
   orchestratorOutcomes: z.array(orchestratorOutcomeSchema).optional(),
   savings: savingsSummarySchema.optional(),
   provenance: taskSubmissionProvenanceSchema.optional(),
+}).superRefine((value, ctx) => {
+  const learning = value.runtimeMetadata?.learningTask;
+  if (!learning) return;
+  const producerIdentity = value.runtimeMetadata?.huginTaskIdentity;
+  if (!producerIdentity) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["runtimeMetadata", "huginTaskIdentity"],
+      message: "learning evidence requires the exact Hugin producer identity",
+    });
+    return;
+  }
+  if (learning.taskId !== value.taskId) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["runtimeMetadata", "learningTask", "taskId"],
+      message: "learning evidence task id does not match the structured result",
+    });
+  }
+  if (learning.taskOutcomeRef.namespace !== value.taskNamespace
+    || learning.taskOutcomeRef.key !== "result-structured") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["runtimeMetadata", "learningTask", "taskOutcomeRef"],
+      message: "learning evidence task outcome reference does not match the structured result",
+    });
+  }
+  if (producerIdentity.taskId !== value.taskId
+    || producerIdentity.taskId !== learning.taskId) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["runtimeMetadata", "huginTaskIdentity", "taskId"],
+      message: "Hugin producer identity task id does not match the structured result learning task",
+    });
+  }
+  if (producerIdentity.rawTaskFingerprint.algorithm !== learning.rawFingerprint.algorithm
+    || producerIdentity.rawTaskFingerprint.version !== learning.rawFingerprint.version
+    || producerIdentity.rawTaskFingerprint.digest !== learning.rawFingerprint.digest) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["runtimeMetadata", "huginTaskIdentity", "rawTaskFingerprint"],
+      message: "Hugin producer identity raw fingerprint does not match learning evidence",
+    });
+  }
+  if (learning.requestStamp
+    && (learning.requestStamp.raw_fingerprint.algorithm !== producerIdentity.rawTaskFingerprint.algorithm
+      || learning.requestStamp.raw_fingerprint.version !== producerIdentity.rawTaskFingerprint.version
+      || learning.requestStamp.raw_fingerprint.digest !== producerIdentity.rawTaskFingerprint.digest)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["runtimeMetadata", "learningTask", "requestStamp", "raw_fingerprint"],
+      message: "learning request stamp raw fingerprint does not match the Hugin producer identity",
+    });
+  }
 });
 export type StructuredTaskResult = z.infer<typeof structuredTaskResultSchema>;
 

@@ -17,6 +17,10 @@
 
 import { createHash } from "node:crypto";
 import { MuninWriteRejectedError, type MuninClient } from "../munin-client.js";
+import {
+  createBrokerAttestation,
+  type BrokerAttestation,
+} from "./attestation.js";
 import type {
   AwaitRequest,
   DelegationEnvelope,
@@ -177,12 +181,19 @@ export class BrokerTaskStore {
   /** Serialize same-process writes for one friction event identity. */
   private readonly frictionWritesInFlight = new Map<string, Promise<FrictionWriteResult>>();
 
-  constructor(private readonly munin: MuninClient) {}
+  constructor(
+    private readonly munin: MuninClient,
+    private readonly options: { attestationSecret?: string } = {},
+  ) {}
 
   async submit(params: SubmitTaskParams): Promise<void> {
     const ns = namespaceForTaskId(params.envelope.task_id);
     const tags = buildSubmitTags(params.envelope);
-    const content = serializeEnvelope(params.envelope);
+    const secret = this.options.attestationSecret;
+    const attestation = secret
+      ? createBrokerAttestation(params.envelope, secret)
+      : undefined;
+    const content = serializeEnvelope(params.envelope, attestation);
     await this.munin.write(
       ns,
       STATUS_KEY,
@@ -662,7 +673,10 @@ export function flipLifecycleTags(
   return [next, ...filtered];
 }
 
-export function serializeEnvelope(envelope: DelegationEnvelope): string {
+export function serializeEnvelope(
+  envelope: DelegationEnvelope,
+  attestation?: BrokerAttestation,
+): string {
   const verifier = envelope.acceptance.mode === "verifier"
     ? JSON.stringify(envelope.acceptance.verifier)
     : "none";
@@ -692,6 +706,15 @@ export function serializeEnvelope(envelope: DelegationEnvelope): string {
     "```json",
     JSON.stringify(envelope, null, 2),
     "```",
+    ...(attestation
+      ? [
+          "",
+          "### Broker attestation",
+          "```json",
+          JSON.stringify(attestation, null, 2),
+          "```",
+        ]
+      : []),
     "",
     "### Prompt",
     envelope.prompt,
