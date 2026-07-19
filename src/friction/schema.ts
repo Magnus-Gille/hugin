@@ -13,6 +13,14 @@
 import { z } from "zod";
 import { aliasSchema } from "../broker/types.js";
 
+const metadataString = (max: number) => z
+  .string()
+  .trim()
+  .max(max)
+  .regex(/^[^\r\n\0]*$/, "must not contain line breaks or NUL bytes");
+
+const nonEmptyMetadataString = (max: number) => metadataString(max).min(1);
+
 export const frictionTypeSchema = z.enum([
   // capability
   "reasoning_limit",
@@ -66,11 +74,13 @@ export const reportFrictionInputShape = {
   ),
   summary: z
     .string()
+    .trim()
     .min(1)
     .max(500)
     .describe("One-sentence headline of the friction."),
   detail: z
     .string()
+    .trim()
     .min(1)
     .max(8_000)
     .describe("What you tried, what failed, and what would have made this easier."),
@@ -84,25 +94,26 @@ export const reportFrictionInputShape = {
     .describe(
       "If under-resourced, which alias from {tiny, medium, large-reasoning, pi-large-coder} would have helped? Skip if unsure.",
     ),
-  tool_name: z
-    .string()
-    .max(120)
+  tool_name: metadataString(120)
     .optional()
     .describe("Tool that failed or was missing (only for tool_failure/tool_missing)."),
-  task_id: z
-    .string()
-    .max(200)
+  task_id: metadataString(200)
     .optional()
     .describe("Override for HUGIN_FRICTION_TASK_ID env."),
-  model_id: z
-    .string()
-    .max(200)
+  model_id: metadataString(200)
     .optional()
     .describe(
-      "Your own model identifier (e.g. claude-opus-4-8, claude-sonnet-4-6). Set this so the friction event is attributed to the right model — interactive sessions are not tagged via env. Falls back to the server's HUGIN_FRICTION_MODEL_ID env (default \"unknown\") when omitted.",
+      "Self-declared, unauthenticated model metadata (e.g. claude-opus-4-8). Set this for diagnostics, but consumers requiring trusted attribution must use reporter provenance instead. Interactive sessions are not tagged via env. Falls back to HUGIN_FRICTION_MODEL_ID (default \"unknown\") when omitted.",
+    ),
+  event_id: z
+    .string()
+    .uuid()
+    .optional()
+    .describe(
+      "Stable identity for one occurrence. Reuse only when retrying the same report. Broker clients generate this automatically.",
     ),
   tags: z
-    .array(z.string().max(80))
+    .array(nonEmptyMetadataString(80))
     .max(16)
     .optional()
     .describe("Extra free-form tags appended to the Munin entry."),

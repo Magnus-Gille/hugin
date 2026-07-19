@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "pilot_version": "harbor-0.18.0-gate-d-v1",
+  "run_completed_at": "2026-07-14T17:28:25+02:00",
+  "recommendation": "go",
+  "harbor_version": "0.18.0",
+  "source_commit": "d2d2541dd01519ddf50a9bbba8903d02fcea5284",
+  "model": "qwen3-coder-next-80b",
+  "harness_version": "code-loop-pi-2026-07-13-v2",
+  "caps": {
+    "wall_s": 600,
+    "turns": 13,
+    "completion_tokens": 60000
+  },
+  "environment": {
+    "provider": "docker-linuxkit-worker",
+    "physical_host": "macos-docker-desktop",
+    "worker_os": "linux",
+    "architecture": "arm64",
+    "network_mode": "no-network",
+    "network_isolation_met": true,
+    "base_image": "node:22.17.0-bookworm-slim",
+    "base_image_digest": "sha256:b04ce4ae4e95b522112c2e5c52f781471a5cbc3b594527bcddedee9bc48c03a0",
+    "standard_base_image_met": true
+  },
+  "baseline": [
+    {
+      "task_id": "01-make-failing-test-pass",
+      "passed": true,
+      "status": "completed",
+      "work_id": "cl-20260714-7fa3a954",
+      "diff_sha256": "eaee6e0b09df8761072cb9a163652adbb0d9584055e4bcc431d92c8450b5c0af"
+    },
+    {
+      "task_id": "04-add-cli-flag",
+      "passed": true,
+      "status": "cap-exceeded",
+      "work_id": "cl-20260714-53589905",
+      "diff_sha256": "bcd83fc565a898b994d079f96b586d2d5968b5cc5028e20efea2e2b9b48b2081"
+    }
+  ],
+  "baseline_correction": {
+    "required": true,
+    "reason": "The first host baseline linked a Darwin esbuild binary into the Linux worker.",
+    "method": "Re-apply the identical recorded diffs and original Gate D verifier after a clean Linux-native npm ci.",
+    "additional_m5_calls": 0,
+    "replay_diff_hashes_unchanged": true
+  },
+  "exact_replay": {
+    "trials": 2,
+    "passed": 2,
+    "exceptions": 0,
+    "reward_parity": 2,
+    "diff_hash_parity": 2
+  },
+  "live_adapter": [
+    {
+      "task_id": "01-make-failing-test-pass",
+      "adapter_completed": true,
+      "artifact_passed": true,
+      "status": "completed",
+      "work_id": "cl-20260714-e9a7f694",
+      "apply_return_code": 0,
+      "diff_sha256": "71e136eb505ab50b56ac20ba15cb3e3d03c324af149d6e9f1eb66c65eb0f6700"
+    },
+    {
+      "task_id": "04-add-cli-flag",
+      "adapter_completed": true,
+      "artifact_passed": true,
+      "status": "completed",
+      "work_id": "cl-20260714-6fda5b2e",
+      "apply_return_code": 0,
+      "diff_sha256": "5a320514708817f2fbb697a805a9383deb67b24c90a8736571f44996447bee99"
+    }
+  ],
+  "security": {
+    "credential_prefix_matches_in_pilot_outputs": 0,
+    "credential_environment_name_matches_in_task_and_job_outputs": 0,
+    "credential_passed_to_task_or_verifier_containers": false,
+    "telemetry_enabled": false,
+    "hub_upload_performed": false
+  },
+  "cost": {
+    "harbor_reported_model_cost_usd": 0.0,
+    "harbor_license": "Apache-2.0",
+    "unmetered": [
+      "M5 electricity",
+      "hardware depreciation",
+      "operator time",
+      "local storage",
+      "Docker licensing"
+    ]
+  },
+  "required_follow_up": [
+    "Expand to a predeclared matched corpus before estimating capability rates",
+    "Keep full trajectories local and import only reviewed content-blind summaries",
+    "Keep promotion and production routing outside Harbor"
+  ]
+}

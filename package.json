@@ -5,7 +5,8 @@
   "type": "module",
   "bin": {
     "hugin-mcp": "dist/mcp-server.js",
-    "friction-mcp": "dist/friction-mcp.js"
+    "friction-mcp": "dist/friction-mcp.js",
+    "hugin-friction": "dist/friction-cli.js"
   },
   "scripts": {
     "build": "tsc",
@@ -14,8 +15,13 @@
     "start:mcp": "node dist/mcp-server.js",
     "start:friction-mcp": "node dist/friction-mcp.js",
     "friction-report": "node scripts/friction-report.mjs",
+    "friction-submit": "node dist/friction-cli.js",
     "build:pii-fixtures": "tsx scripts/build-pii-fixtures.ts",
     "eval:pii": "tsx scripts/run-pii-eval.ts",
+    "experiment:m5-code-loop": "tsx scripts/run-m5-code-loop-experiment.ts",
+    "harvest:daily-exams": "node dist/daily-exam-harvest-cli.js",
+    "pilot:harbor": "tsx scripts/harbor_pilot/run-pilot.ts",
+    "pilot:harbor:import": "tsx scripts/harbor_pilot/import-learning-report.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

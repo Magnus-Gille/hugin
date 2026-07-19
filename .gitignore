@@ -7,3 +7,5 @@ debate/*
 !debate/*-summary.md
 !debate/*-critique-log.json
 .claude/
+__pycache__/
+*.pyc

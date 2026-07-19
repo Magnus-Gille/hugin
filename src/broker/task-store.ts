@@ -8,7 +8,7 @@
  *   namespace: tasks/<task_id>
  *   key:       status              — task envelope + lifecycle tags
  *   key:       result-structured   — DelegationResult JSON (success path)
- *   key:       feedback            — product usefulness rating
+ *   key:       feedback            — append-only exact-bound quality receipts
  *
  * New v2 status entries are ordinary `runtime:homeserver` tasks consumed by
  * the canonical dispatcher. The orch-v1 constants/methods below remain only
@@ -16,7 +16,7 @@
  */
 
 import { createHash } from "node:crypto";
-import type { MuninClient } from "../munin-client.js";
+import { MuninWriteRejectedError, type MuninClient } from "../munin-client.js";
 import type {
   AwaitRequest,
   DelegationEnvelope,
@@ -26,6 +26,22 @@ import { delegationEnvelopeSchema, delegationRequestSchema } from "./types.js";
 import { hashPayload } from "./idempotency.js";
 import { deriveAwaitObservation } from "./await-observation.js";
 import type { AwaitEvent, AwaitObservation } from "./await-observation.js";
+import { queryAllMuninEntries } from "../munin-pagination.js";
+import type { ReportFrictionInput } from "../friction/schema.js";
+import { muninClassificationToSensitivity } from "../sensitivity.js";
+import {
+  buildFrictionContent,
+  buildFrictionNamespace,
+  buildFrictionTags,
+  keepCallerFrictionTags,
+  sanitiseTaskId,
+} from "../friction/munin-key.js";
+import {
+  foldQualityReceipt,
+  type NativeQualityReceipt,
+} from "../quality-receipt.js";
+
+export { MUNIN_QUERY_MAX } from "../munin-pagination.js";
 
 export interface DelegationResultLike {
   task_id: string;
@@ -39,10 +55,8 @@ export const RESULT_STRUCTURED_KEY = "result-structured";
 export const RESULT_ERROR_KEY = "result-error";
 /** Durable-handoff evidence for the #165 trial (#164). */
 export const AWAIT_OBSERVATION_KEY = "await-observation";
-/** Munin's memory_query tool documents a hard server-side cap of 50 results
- * per call regardless of the requested `limit` — see listCanonical (#181). */
-export const MUNIN_QUERY_MAX = 50;
-
+const CANONICAL_HISTORY_SCAN_BUDGET = { maxPages: 20, maxResults: 1_000 } as const;
+const CANONICAL_HISTORY_READ_CONCURRENCY = 25;
 export interface TaskStoreConfig {
   munin: MuninClient;
 }
@@ -56,8 +70,84 @@ export interface CanonicalListRow {
 
 export interface CanonicalListResult {
   rows: CanonicalListRow[];
-  /** True when at least one Munin query hit its cap and may have omitted matches. */
+  /** True when a Munin ambiguity or the bounded history budget may omit matches. */
   truncated: boolean;
+}
+
+export interface FrictionWriteResult {
+  ok: true;
+  dropped: false;
+  namespace: string;
+  key: string;
+  deduplicated: boolean;
+}
+
+function frictionClassification(linkedTaskClassification: string | undefined): string {
+  const normalized = linkedTaskClassification?.trim().toLowerCase();
+  if (normalized === "client-restricted") return "client-restricted";
+  return muninClassificationToSensitivity(linkedTaskClassification) === "private"
+    ? "client-confidential"
+    : "internal";
+}
+
+export class FrictionIdempotencyConflictError extends Error {
+  constructor(public readonly eventId: string) {
+    super(`friction event_id ${eventId} was already used with a different payload`);
+    this.name = "FrictionIdempotencyConflictError";
+  }
+}
+
+function buildBrokerFrictionIdentity(
+  input: ReportFrictionInput,
+  authenticatedReporter: string,
+  resolvedTaskId: string | undefined,
+  modelId: string,
+): { key: string; payloadHash: string } {
+  if (!input.event_id) {
+    throw new Error("authenticated Broker friction writes require event_id");
+  }
+  // event_id identifies one occurrence. The separate payload hash catches an
+  // accidental or malicious reuse of that identity for different evidence.
+  // Tags are set-like metadata, so ordering does not change payload identity.
+  const normalized = {
+    reporter: authenticatedReporter,
+    model_id: modelId,
+    task_id: resolvedTaskId ?? null,
+    friction_type: input.friction_type,
+    severity: input.severity,
+    summary: input.summary,
+    detail: input.detail,
+    resource_assessment: input.resource_assessment ?? null,
+    alias_suggested: input.alias_suggested ?? null,
+    tool_name: input.tool_name ?? null,
+    tags: [...new Set(input.tags ?? [])].sort(),
+  };
+  const payloadHash = createHash("sha256")
+    .update(JSON.stringify(normalized))
+    .digest("hex");
+  const eventHash = createHash("sha256")
+    .update(`${authenticatedReporter}\0${input.event_id}`)
+    .digest("hex")
+    .slice(0, 32);
+  return {
+    key: `friction-broker-${eventHash}`,
+    payloadHash,
+  };
+}
+
+function brokerReporterTag(authenticatedReporter: string): string {
+  if (/^[A-Za-z0-9._-]{1,64}$/.test(authenticatedReporter)) {
+    return authenticatedReporter;
+  }
+  const digest = createHash("sha256")
+    .update(authenticatedReporter)
+    .digest("hex")
+    .slice(0, 16);
+  const readable = authenticatedReporter
+    .replace(/[^A-Za-z0-9._-]/g, "_")
+    .replace(/^[^A-Za-z0-9]+/, "")
+    .slice(0, 47) || "principal";
+  return `${readable}-${digest}`;
 }
 
 /**
@@ -83,6 +173,8 @@ export interface SubmitTaskParams {
 export class BrokerTaskStore {
   /** Per-task guard so a poll storm cannot pile up un-awaited observation writes. */
   private readonly awaitWritesInFlight = new Set<string>();
+  /** Serialize same-process writes for one friction event identity. */
+  private readonly frictionWritesInFlight = new Map<string, Promise<FrictionWriteResult>>();
 
   constructor(private readonly munin: MuninClient) {}
 
@@ -213,17 +305,156 @@ export class BrokerTaskStore {
     }
   }
 
-  async writeFeedback(taskId: string, feedback: Record<string, unknown>): Promise<void> {
+  async writeQualityReceipt(
+    taskId: string,
+    receipt: NativeQualityReceipt,
+  ): Promise<{ changed: boolean }> {
     const status = await this.readStatus(taskId);
     const envelope = status ? parseStoredEnvelope(status.content) : null;
-    await this.munin.write(
-      namespaceForTaskId(taskId),
-      "feedback",
-      JSON.stringify(feedback),
-      ["broker:mcp-v2", "feedback"],
-      undefined,
-      envelope?.sensitivity === "private" ? "client-restricted" : "internal",
+    const namespace = namespaceForTaskId(taskId);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = await this.munin.read(namespace, "feedback");
+      let existing: Record<string, unknown> | null = null;
+      if (current) {
+        const parsed = JSON.parse(current.content) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("stored feedback is not a JSON object");
+        }
+        existing = parsed as Record<string, unknown>;
+      }
+      const folded = foldQualityReceipt(existing, receipt);
+      if (!folded.changed) return { changed: false };
+      const receiptVersionTags = [...new Set(
+        folded.ledger.receipts.map((item) => `quality:receipt-v${item.schemaVersion}`),
+      )];
+      const expectedConflictReason = current ? "version_mismatch" : "already_exists";
+      try {
+        const result = await this.munin.write(
+          namespace,
+          "feedback",
+          JSON.stringify(folded.ledger),
+          envelope
+            ? ["broker:mcp-v2", "feedback", ...receiptVersionTags]
+            : ["feedback", ...receiptVersionTags],
+          current?.updated_at,
+          envelope?.sensitivity === "private"
+            ? "client-restricted"
+            : current?.classification ?? status?.classification ?? "internal",
+          current === null ? true : undefined,
+        );
+        if (current === null && result.status !== "created") {
+          throw new Error(
+            "Munin create_if_absent did not return status created; refusing to trust first-write atomicity",
+          );
+        }
+        return { changed: true };
+      } catch (err) {
+        const expectedConflict = err instanceof MuninWriteRejectedError &&
+          err.errorCode === "conflict" &&
+          err.conflictReason === expectedConflictReason;
+        if (!expectedConflict || attempt === 2) throw err;
+      }
+    }
+    throw new Error("quality receipt update lost repeated CAS races");
+  }
+
+  /**
+   * Persist a friction signal through the authenticated Broker surface.
+   *
+   * This deliberately reuses the standalone friction MCP's schema and Munin
+   * shape so API, MCP and CLI reports land in one corpus. The Broker principal
+   * is retained as a tag even when the caller supplies a more specific model id.
+   */
+  async writeFriction(
+    input: ReportFrictionInput,
+    reporter: string,
+    recordedAt: Date,
+  ): Promise<FrictionWriteResult> {
+    // Taxonomy, provenance, task, and classification tags are server-owned.
+    // Keep arbitrary routing tags (for example repo:* and issue:*) while
+    // preventing callers from adding a second authoritative value.
+    const trustedInput: ReportFrictionInput = {
+      ...input,
+      ...(input.tags ? { tags: keepCallerFrictionTags(input.tags) } : {}),
+    };
+    const resolvedTaskId = trustedInput.task_id?.trim()
+      ? sanitiseTaskId(trustedInput.task_id)
+      : undefined;
+    const modelId = trustedInput.model_id?.trim() || reporter.trim() || "unknown";
+    const namespace = buildFrictionNamespace();
+    const authenticatedReporter = reporter || "unknown";
+    const reporterTag = brokerReporterTag(authenticatedReporter);
+    const { key, payloadHash } = buildBrokerFrictionIdentity(
+      trustedInput,
+      authenticatedReporter,
+      resolvedTaskId,
+      modelId,
     );
+    // Munin has update-CAS but no create-only CAS. Serialize one key inside the
+    // single Broker process so simultaneous retries cannot overwrite a payload
+    // conflict before either request observes the durable event.
+    while (this.frictionWritesInFlight.has(key)) {
+      try {
+        await this.frictionWritesInFlight.get(key);
+      } catch {
+        // The waiting request must re-run the durable read after a failed write.
+      }
+    }
+
+    const write = (async (): Promise<FrictionWriteResult> => {
+      const existing = await this.munin.read(namespace, key);
+      if (existing) {
+        try {
+          const existingPayload = JSON.parse(existing.content) as Record<string, unknown>;
+          if (existingPayload.broker_event_payload_sha256 === payloadHash) {
+            return { ok: true, dropped: false, namespace, key, deduplicated: true };
+          }
+        } catch {
+          // A corrupt/conflicting durable record must never be mistaken for a
+          // successful retry.
+        }
+        throw new FrictionIdempotencyConflictError(trustedInput.event_id!);
+      }
+      const tags = [...new Set([
+        ...buildFrictionTags({
+          input: trustedInput,
+          modelId,
+          resolvedTaskId,
+          source: "broker-api",
+        }),
+        `reporter:${reporterTag}`,
+      ])];
+      const contentPayload = JSON.parse(buildFrictionContent({
+        input: trustedInput,
+        modelId,
+        resolvedTaskId,
+        recordedAt,
+      })) as Record<string, unknown>;
+      const content = JSON.stringify({
+        ...contentPayload,
+        broker_event_payload_sha256: payloadHash,
+      }, null, 2);
+      const linkedTask = resolvedTaskId
+        ? await this.munin.read(namespaceForTaskId(resolvedTaskId), STATUS_KEY)
+        : null;
+      await this.munin.write(
+        namespace,
+        key,
+        content,
+        tags,
+        undefined,
+        frictionClassification(linkedTask?.classification),
+      );
+      return { ok: true, dropped: false, namespace, key, deduplicated: false };
+    })();
+    this.frictionWritesInFlight.set(key, write);
+    try {
+      return await write;
+    } finally {
+      if (this.frictionWritesInFlight.get(key) === write) {
+        this.frictionWritesInFlight.delete(key);
+      }
+    }
   }
 
   /**
@@ -242,42 +473,54 @@ export class BrokerTaskStore {
    * unique namespace's `status` entry directly rather than relying on it
    * having survived inside the raw query window.
    *
-   * Always queries Munin at its real per-query cap (`MUNIN_QUERY_MAX`),
-   * independent of how many rows the caller ultimately wants — the final
-   * row count is enforced downstream by the handler's own slice(). A caller-
-   * requested small output limit narrowing this raw candidate window would
-   * reintroduce the same crowding-out risk this fix closes, just triggered
-   * by `?limit=1` instead of a rating event (caught in review of #181).
+   * Candidate discovery uses the shared capped-window paginator (#183). It
+   * selects Munin's temporally ordered filter-only mode, walks backward by
+   * updated_at, and probes exact timestamp boundaries so more than 50 tasks
+   * (including tasks owned by another principal) cannot crowd out matches.
+   * A same-millisecond bucket of 50+ remains explicitly `truncated` because
+   * Munin has no `(updated_at,id)` cursor with which to prove it complete.
    */
   async listCanonical(principal: string, sinceTs?: string): Promise<CanonicalListResult> {
     const baseOpts = {
-      query: "task",
       namespace: "tasks/",
       entry_type: "state" as const,
-      limit: MUNIN_QUERY_MAX,
       ...(sinceTs ? { since: sinceTs } : {}),
     };
     const [tagged, homeserver] = await Promise.all([
-      this.munin.query({ ...baseOpts, tags: ["broker:mcp-v2"] }),
-      this.munin.query({ ...baseOpts, tags: ["runtime:homeserver"] }),
+      queryAllMuninEntries(
+        this.munin,
+        { ...baseOpts, tags: ["broker:mcp-v2"] },
+        CANONICAL_HISTORY_SCAN_BUDGET,
+      ),
+      queryAllMuninEntries(
+        this.munin,
+        { ...baseOpts, tags: ["runtime:homeserver"] },
+        CANONICAL_HISTORY_SCAN_BUDGET,
+      ),
     ]);
-    // Munin exposes no cursor/offset and its `total` is only the number of
-    // formatted rows returned, not a pre-limit count. A result set at the
-    // server cap is therefore indistinguishable from an exactly-full set.
-    // Mark it conservatively: a timestamp walk-back is not safe because the
-    // ranked query is not guaranteed to expose every omitted row in time order.
-    const truncated =
-      tagged.results.length >= MUNIN_QUERY_MAX ||
-      homeserver.results.length >= MUNIN_QUERY_MAX;
+    const truncated = tagged.truncated || homeserver.truncated;
     const namespaces = new Set<string>();
     for (const result of [...tagged.results, ...homeserver.results]) {
       if (typeof result.namespace === "string") namespaces.add(result.namespace);
     }
 
     const namespaceList = [...namespaces];
-    const entries = await Promise.all(
-      namespaceList.map((namespace) => this.munin.read(namespace, STATUS_KEY)),
-    );
+    const entries = [];
+    for (
+      let offset = 0;
+      offset < namespaceList.length;
+      offset += CANONICAL_HISTORY_READ_CONCURRENCY
+    ) {
+      const chunk = namespaceList.slice(
+        offset,
+        offset + CANONICAL_HISTORY_READ_CONCURRENCY,
+      );
+      entries.push(
+        ...(await Promise.all(
+          chunk.map((namespace) => this.munin.read(namespace, STATUS_KEY)),
+        )),
+      );
+    }
 
     const rows = [];
     for (const entry of entries) {

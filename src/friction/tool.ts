@@ -17,6 +17,7 @@ import {
   buildFrictionKey,
   buildFrictionNamespace,
   buildFrictionTags,
+  keepCallerFrictionTags,
   sanitiseTaskId,
 } from "./munin-key.js";
 import {
@@ -113,6 +114,10 @@ export function buildFrictionTool(deps: FrictionToolDeps): FrictionTool {
       let input: ReportFrictionInput;
       try {
         input = reportFrictionInputSchema.parse(rawInput);
+        input = {
+          ...input,
+          ...(input.tags ? { tags: keepCallerFrictionTags(input.tags) } : {}),
+        };
       } catch (err) {
         return asResult(errorPayload(err), true);
       }
@@ -126,6 +131,7 @@ export function buildFrictionTool(deps: FrictionToolDeps): FrictionTool {
         input,
         modelId: resolvedModelId,
         resolvedTaskId,
+        source: "model-self-report",
       });
       const content = buildFrictionContent({
         input,

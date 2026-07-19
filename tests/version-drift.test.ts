@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   buildVersionSnapshot,
   compareVersionSnapshots,
+  hydrateVersionDriftAlertLifecycle,
+  recordVersionDriftFiring,
+  recordVersionDriftResolutionAttempt,
+  VERSION_DRIFT_DEDUP_KEY,
+  versionDriftStartupResolution,
   type VersionSnapshot,
 } from "../src/version-drift.js";
 
@@ -127,5 +132,44 @@ describe("compareVersionSnapshots", () => {
     const result = compareVersionSnapshots(zeroBaseline, current);
     expect(result.drifted).toBe(true);
     expect(result.changedFields).toEqual(["cliSizeBytes"]);
+  });
+});
+
+describe("version-drift alert lifecycle", () => {
+  it("resolves a previously firing alert after a successful fresh baseline", () => {
+    const lifecycle = hydrateVersionDriftAlertLifecycle(true, true);
+    expect(versionDriftStartupResolution(lifecycle)).toEqual({
+      state: "resolved",
+      dedup_key: VERSION_DRIFT_DEDUP_KEY,
+    });
+  });
+
+  it("does not resolve when fresh baseline capture failed", () => {
+    const lifecycle = hydrateVersionDriftAlertLifecycle(true, false);
+    expect(versionDriftStartupResolution(lifecycle)).toBeNull();
+  });
+
+  it("does not emit a resolution when no drift alert was active", () => {
+    const lifecycle = hydrateVersionDriftAlertLifecycle(false, true);
+    expect(versionDriftStartupResolution(lifecycle)).toBeNull();
+  });
+
+  it("never resolves a firing created by the current process", () => {
+    const lifecycle = recordVersionDriftFiring();
+    expect(lifecycle).toEqual({ active: true, restartResolutionPending: false });
+    expect(versionDriftStartupResolution(lifecycle)).toBeNull();
+  });
+
+  it("retains restart resolution for retry until delivery and persistence both succeed", () => {
+    const hydrated = hydrateVersionDriftAlertLifecycle(true, true);
+    const deliveryFailed = recordVersionDriftResolutionAttempt(hydrated, false, false);
+    expect(versionDriftStartupResolution(deliveryFailed)).not.toBeNull();
+
+    const persistenceFailed = recordVersionDriftResolutionAttempt(hydrated, true, false);
+    expect(versionDriftStartupResolution(persistenceFailed)).not.toBeNull();
+
+    const cleared = recordVersionDriftResolutionAttempt(hydrated, true, true);
+    expect(cleared).toEqual({ active: false, restartResolutionPending: false });
+    expect(versionDriftStartupResolution(cleared)).toBeNull();
   });
 });

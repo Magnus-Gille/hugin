@@ -17,7 +17,8 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveContext, normalizeRoot, DEFAULT_REPOS_ROOT } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt } from "./task-helpers.js";
+import { queryAllMuninEntries } from "./munin-pagination.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
 import {
   classifyClaudeFailure,
@@ -26,14 +27,31 @@ import {
   DEPS_DRIFT_FAILURE_KIND,
 } from "./failure-classification.js";
 import {
+  buildCodexSandboxFrictionEvent,
+  CODEX_SANDBOX_FAILURE_KIND,
+  codexSandboxFailureClassification,
+  probeCodexSandbox,
+  type CodexSandboxProbeResult,
+} from "./codex-sandbox.js";
+import {
   decideAuthAlarm,
+  alertDeliveryCommitsTransition,
+  hydratePersistedAuthAlarmState,
   INITIAL_AUTH_ALARM_STATE,
   type AlertEnvelope,
+  type AlertDeliveryStatus,
   type AuthAlarmState,
 } from "./auth-alarm.js";
 import {
   buildVersionSnapshot,
   compareVersionSnapshots,
+  hydrateVersionDriftAlertLifecycle,
+  INITIAL_VERSION_DRIFT_ALERT_LIFECYCLE,
+  recordVersionDriftFiring,
+  recordVersionDriftResolutionAttempt,
+  VERSION_DRIFT_DEDUP_KEY,
+  versionDriftStartupResolution,
+  type VersionDriftAlertLifecycle,
   type VersionDriftResult,
   type VersionSnapshot,
 } from "./version-drift.js";
@@ -103,6 +121,7 @@ import {
   getPersistentStatusTags,
 } from "./task-status-tags.js";
 import { LearningLoopCollector } from "./learning-loop-collector.js";
+import { LearningExperimentStore } from "./learning/experiment-store.js";
 import { sanitizeProviderTokenCount } from "./m5-provenance.js";
 import {
   buildStructuredTaskResult,
@@ -270,8 +289,8 @@ const CANCEL_WATCH_INTERVAL_MS = 2000;
 // interval settings so a malformed env var (e.g. `NaN`) cannot produce an
 // immortal task or a tight-loop `setInterval` (review MED).
 function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
-  const n = parseInt((raw ?? "").trim(), 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
+  const n = Number((raw ?? "").trim());
+  return Number.isSafeInteger(n) && n > 0 ? n : fallback;
 }
 
 /**
@@ -287,19 +306,31 @@ function parseChatIdEnv(raw: string | undefined): number | null {
 }
 
 const config = {
-  port: parseInt(process.env.HUGIN_PORT || "3032"),
+  port: parseBoundedPositiveInt(process.env.HUGIN_PORT, 3032, 65_535),
   host: process.env.HUGIN_HOST || "127.0.0.1",
   muninUrl: process.env.MUNIN_URL || "http://localhost:3030",
   muninApiKey: process.env.MUNIN_API_KEY || "",
-  pollIntervalMs: parseInt(process.env.HUGIN_POLL_INTERVAL_MS || "30000"),
-  defaultTimeoutMs: parseInt(process.env.HUGIN_DEFAULT_TIMEOUT_MS || "300000"),
+  pollIntervalMs: parseBoundedPositiveInt(
+    process.env.HUGIN_POLL_INTERVAL_MS,
+    30_000,
+    3_600_000,
+  ),
+  defaultTimeoutMs: parseBoundedPositiveInt(
+    process.env.HUGIN_DEFAULT_TIMEOUT_MS,
+    300_000,
+    MAX_TASK_TIMEOUT_MS,
+  ),
   workspace: process.env.HUGIN_WORKSPACE || "/home/magnus/workspace",
   // Root under which `repo:<name>` aliases resolve and task branches are cut
   // (#139). Point this at an isolated tree to keep hugin tasks off the
   // production deploy checkouts under /home/magnus/repos. Default preserves
   // the historical hardcoded behavior.
   reposRoot: normalizeRoot(process.env.HUGIN_REPOS_ROOT || DEFAULT_REPOS_ROOT),
-  maxOutputChars: parseInt(process.env.HUGIN_MAX_OUTPUT_CHARS || "50000"),
+  maxOutputChars: parseBoundedPositiveInt(
+    process.env.HUGIN_MAX_OUTPUT_CHARS,
+    50_000,
+    1_000_000,
+  ),
   allowedSubmitters: (process.env.HUGIN_ALLOWED_SUBMITTERS || "Codex,Codex-desktop,ratatoskr,Codex-web,Codex-mobile,claude-code,claude-desktop,claude-web,claude-mobile,hugin")
     .split(",")
     .map((s) => s.trim())
@@ -345,8 +376,10 @@ const config = {
   submitterKeys: loadKeyStoreFromEnv() as KeyStore,
   exfilPolicy: parseExfilPolicy(process.env.HUGIN_EXFIL_POLICY),
   externalPolicy: parseExternalPolicy(process.env.HUGIN_EXTERNAL_POLICY),
-  brokerReconciliationIntervalMs: parseInt(
-    process.env.HUGIN_BROKER_RECONCILIATION_INTERVAL_MS || "60000",
+  brokerReconciliationIntervalMs: parseBoundedPositiveInt(
+    process.env.HUGIN_BROKER_RECONCILIATION_INTERVAL_MS,
+    60_000,
+    3_600_000,
   ),
   // Runtime-owned artefact delivery (issue #68). `parseDeliveryPolicy` and
   // `loadDeliveryTargets` throw on malformed input — fail fast at startup
@@ -584,6 +617,10 @@ const reaperMunin = createMuninClient();
 // queue behind — or be queued behind by — task-completion writes on the main
 // client's serial request slot.
 const orchVerdictMunin = createMuninClient();
+// Champion/challenger observations are operator-plane writes. Keep them off the
+// dispatcher's serial Munin request slot so an experiment upload cannot delay a
+// task claim, completion checkpoint, or lease renewal.
+const learningExperimentMunin = createMuninClient();
 
 // Verdict layer (docs/orchestrator-verdict-layer.md, V4/V7). Gated on a
 // single master switch (HUGIN_ORCH_VERDICT_STORE, default "on") — when
@@ -614,6 +651,8 @@ interface TaskConfig {
   runtime: "claude" | "codex" | "ollama" | "opencode" | "homeserver" | "orchestrator";
   workingDir: string;
   context?: string;
+  baseBranch?: string;
+  baseBranchError?: string;
   timeoutMs: number;
   submittedBy: string;
   submittedAt: string;
@@ -651,7 +690,7 @@ interface TaskConfig {
   artifactManifestGrammarViolation?: boolean;
   homeserverTaskType?: string;
   homeserverVerifier?: HomeserverVerifierSpec;
-  homeserverMaxTokens?: number;
+  maxOutputTokens?: number;
   homeserverPolicyError?: string;
 }
 
@@ -718,6 +757,7 @@ function parseTask(content: string): TaskConfig | null {
   const contextRaw = content.match(
     /\*\*Context:\*\*\s*(.+)/i
   )?.[1]?.trim();
+  const baseBranchOverride = parseBaseBranchOverride(content);
   const timeoutStr = content.match(/\*\*Timeout:\*\*\s*(\d+)/i)?.[1];
   const submittedBy = content.match(
     /\*\*Submitted by:\*\*\s*(.+)/i
@@ -821,9 +861,10 @@ function parseTask(content: string): TaskConfig | null {
   if ((!prompt && !canonicalBrokerEnvelope) || (!runtime && !isAutoRoute)) return null;
 
   // Resolution priority: Context > Working dir > config.workspace
-  const resolvedDir = contextRaw
-    ? resolveContext(contextRaw, { reposRoot: config.reposRoot, workspace: config.workspace })
-    : workingDir || config.workspace;
+  const resolvedDir = resolveTaskWorkingDirectory(contextRaw, workingDir, {
+    reposRoot: config.reposRoot,
+    workspace: config.workspace,
+  });
 
   // Runtime-owned artefact delivery manifest (issue #68). Parsed unconditionally
   // so submit-time validation can reject a malformed/placeholder-leaking
@@ -847,7 +888,13 @@ function parseTask(content: string): TaskConfig | null {
     runtime: runtime || "claude",  // temporary for auto — overwritten by router
     workingDir: resolvedDir,
     context: contextRaw || undefined,
-    timeoutMs: canonicalBrokerEnvelope?.timeout_ms ?? (timeoutStr ? parseInt(timeoutStr) : config.defaultTimeoutMs),
+    baseBranch: baseBranchOverride.baseBranch,
+    baseBranchError: baseBranchOverride.error,
+    timeoutMs: parseBoundedPositiveInt(
+      canonicalBrokerEnvelope?.timeout_ms ?? timeoutStr,
+      config.defaultTimeoutMs,
+      MAX_TASK_TIMEOUT_MS,
+    ),
     submittedBy: submittedBy || "unknown",
     submittedAt: submittedAt || new Date().toISOString(),
     replyTo: replyTo || undefined,
@@ -882,8 +929,13 @@ function parseTask(content: string): TaskConfig | null {
     homeserverVerifier: canonicalBrokerEnvelope?.acceptance.mode === "verifier"
       ? canonicalBrokerEnvelope.acceptance.verifier
       : homeserverVerifier,
-    homeserverMaxTokens: canonicalBrokerEnvelope?.max_output_tokens
-      ?? (homeserverMaxTokensRaw ? Number(homeserverMaxTokensRaw) : undefined),
+    maxOutputTokens: homeserverMaxTokensRaw || canonicalBrokerEnvelope?.max_output_tokens
+      ? parseBoundedPositiveInt(
+          canonicalBrokerEnvelope?.max_output_tokens ?? homeserverMaxTokensRaw,
+          4_096,
+          MAX_TASK_OUTPUT_TOKENS,
+        )
+      : undefined,
     homeserverPolicyError,
     pipeline:
       pipelineId && pipelinePhase
@@ -1560,9 +1612,11 @@ async function probeClaudeUsage(): Promise<{
    * failed refresh / logout) to alarm. Prevents an ~8h false-alarm loop.
    */
   expiresAtMs: number | null;
+  expiryEvidence: "known" | "not-applicable" | "unknown";
 }> {
   const none: QuotaSnapshot = { q5: null, q7: null };
   let expiresAtMs: number | null = null;
+  let expiryEvidence: "known" | "not-applicable" | "unknown" = "unknown";
   try {
     const credPath = path.join(process.env.HOME || "/home/magnus", ".claude", ".credentials.json");
     const creds = JSON.parse(fs.readFileSync(credPath, "utf-8"));
@@ -1571,14 +1625,17 @@ async function probeClaudeUsage(): Promise<{
     const hasRefreshToken =
       typeof creds?.claudeAiOauth?.refreshToken === "string" &&
       creds.claudeAiOauth.refreshToken.length > 0;
-    if (
+    if (hasRefreshToken) {
+      expiryEvidence = "not-applicable";
+    } else if (
       !hasRefreshToken &&
       typeof rawExpiry === "number" &&
       Number.isFinite(rawExpiry)
     ) {
       expiresAtMs = rawExpiry;
+      expiryEvidence = "known";
     }
-    if (!token) return { auth: "unknown", snapshot: none, expiresAtMs };
+    if (!token) return { auth: "unknown", snapshot: none, expiresAtMs, expiryEvidence };
 
     const res = await fetch("https://api.anthropic.com/api/oauth/usage", {
       headers: {
@@ -1600,9 +1657,10 @@ async function probeClaudeUsage(): Promise<{
         auth: hasRefreshToken ? "unknown" : "unauthorized",
         snapshot: none,
         expiresAtMs,
+        expiryEvidence,
       };
     }
-    if (!res.ok) return { auth: "unknown", snapshot: none, expiresAtMs };
+    if (!res.ok) return { auth: "unknown", snapshot: none, expiresAtMs, expiryEvidence };
     const data = await res.json() as Record<string, Record<string, number>>;
     return {
       auth: "ok",
@@ -1611,9 +1669,10 @@ async function probeClaudeUsage(): Promise<{
         q7: data?.seven_day?.utilization ?? null,
       },
       expiresAtMs,
+      expiryEvidence,
     };
   } catch {
-    return { auth: "unknown", snapshot: none, expiresAtMs };
+    return { auth: "unknown", snapshot: none, expiresAtMs, expiryEvidence };
   }
 }
 
@@ -1704,10 +1763,64 @@ function checkVersionDrift(): VersionDriftResult | null {
 // Edge-triggered like the auth alarm (#131): once the drift alert has been
 // successfully delivered (or there is no send target configured), don't
 // re-push it on every subsequent refused task — the worker still refuses
-// EVERY task while drifted, only the Telegram push is deduped. Reset only by
-// a process restart (which re-takes the baseline and clears this).
+// EVERY task while drifted, only the alert push is deduped. A process restart
+// re-takes the baseline and may resolve a previously persisted firing alert.
 let versionDriftAlerted = false;
-const VERSION_DRIFT_DEDUP_KEY = "hugin-version-drift";
+let versionDriftAlarmLifecycle: VersionDriftAlertLifecycle =
+  INITIAL_VERSION_DRIFT_ALERT_LIFECYCLE;
+let versionDriftFiringPersistencePending = false;
+const VERSION_DRIFT_ALARM_NS = "tasks/_version_drift_alarm";
+
+async function hydrateVersionDriftAlarmState(): Promise<void> {
+  try {
+    const entry = await reaperMunin.read(VERSION_DRIFT_ALARM_NS, "state");
+    if (!entry) return;
+    const parsed = JSON.parse(entry.content) as { active?: unknown };
+    versionDriftAlarmLifecycle = hydrateVersionDriftAlertLifecycle(
+      parsed.active === true,
+      versionDriftBaseline !== null,
+    );
+  } catch {
+    // Missing/malformed state means there is no proven external firing alert.
+  }
+}
+
+async function persistVersionDriftAlarmState(active: boolean): Promise<boolean> {
+  try {
+    await reaperMunin.write(
+      VERSION_DRIFT_ALARM_NS,
+      "state",
+      JSON.stringify({ active }),
+      ["version-drift-alarm"],
+    );
+    return true;
+  } catch (err) {
+    console.error("[version-drift] Failed to persist alert state:", err);
+    return false;
+  }
+}
+
+async function maybeResolveVersionDriftAlert(): Promise<void> {
+  const resolution = versionDriftStartupResolution(versionDriftAlarmLifecycle);
+  if (!resolution) return;
+  const status = await sendRatatoskrAlert(resolution);
+  if (status !== "delivered") return;
+  // Persist before clearing in-memory state. If persistence fails, the next
+  // poll retries the idempotent resolution rather than forgetting it.
+  const persisted = await persistVersionDriftAlarmState(false);
+  versionDriftAlarmLifecycle = recordVersionDriftResolutionAttempt(
+    versionDriftAlarmLifecycle,
+    true,
+    persisted,
+  );
+}
+
+async function flushVersionDriftFiringState(): Promise<void> {
+  if (!versionDriftFiringPersistencePending) return;
+  if (await persistVersionDriftAlarmState(true)) {
+    versionDriftFiringPersistencePending = false;
+  }
+}
 
 async function maybeAlertVersionDrift(drift: VersionDriftResult): Promise<void> {
   if (versionDriftAlerted) return;
@@ -1720,7 +1833,14 @@ async function maybeAlertVersionDrift(drift: VersionDriftResult): Promise<void> 
     dedup_key: VERSION_DRIFT_DEDUP_KEY,
   };
   const status = await sendRatatoskrAlert(alert);
-  if (status !== "failed") {
+  if (status === "delivered") {
+    versionDriftAlarmLifecycle = recordVersionDriftFiring();
+    versionDriftFiringPersistencePending =
+      !(await persistVersionDriftAlarmState(true));
+    versionDriftAlerted = true;
+  } else if (status === "skipped") {
+    // Nothing external was opened, but avoid repeating the local log for every
+    // refused task in this process.
     versionDriftAlerted = true;
   }
 }
@@ -1918,10 +2038,31 @@ interface SpawnContext {
   muninClient: MuninClient;
 }
 
+interface SpawnRuntimeResult {
+  exitCode: number | "TIMEOUT";
+  output: string;
+  logFile: string;
+  preflightFailureKind?: typeof CODEX_SANDBOX_FAILURE_KIND;
+  preflightFailureReason?: string;
+}
+
+let codexSandboxStatus: CodexSandboxProbeResult | null = null;
+
+async function refreshCodexSandboxStatus(): Promise<CodexSandboxProbeResult> {
+  const result = await probeCodexSandbox();
+  codexSandboxStatus = result;
+  if (result.available) {
+    console.log(`[codex-sandbox] ready (${result.command})`);
+  } else {
+    console.error(`[codex-sandbox] unavailable: ${result.reason}`);
+  }
+  return result;
+}
+
 function spawnRuntime(
   task: TaskConfig,
   ctx: SpawnContext
-): Promise<{ exitCode: number | "TIMEOUT"; output: string; logFile: string }> {
+): Promise<SpawnRuntimeResult> {
   if (task.runtime !== "codex") {
     throw new Error(`Spawn executor no longer supports runtime "${task.runtime}"`);
   }
@@ -2061,6 +2202,47 @@ function spawnRuntime(
       });
     });
   });
+}
+
+async function executeCodexWithPreflightChecks(
+  task: TaskConfig,
+  ctx: SpawnContext,
+): Promise<SpawnRuntimeResult> {
+  const probe = await refreshCodexSandboxStatus();
+  if (probe.available) return spawnRuntime(task, ctx);
+
+  const taskId = extractTaskId(ctx.taskNs);
+  const logFile = path.join(LOG_DIR, `${taskId}.log`);
+  const reason = probe.reason || "Codex sandbox self-test failed without a diagnostic";
+  try {
+    fs.writeFileSync(
+      logFile,
+      [
+        "=== Hugin Task Log (Codex preflight) ===",
+        `Task: ${ctx.taskNs}`,
+        `Started: ${new Date().toISOString()}`,
+        "===",
+        reason,
+        "",
+        "===",
+        "Exit code: 1",
+        `Failure kind: ${CODEX_SANDBOX_FAILURE_KIND}`,
+        "No model was invoked.",
+        "===",
+        "",
+      ].join("\n"),
+      { encoding: "utf8" },
+    );
+  } catch {
+    /* log is best-effort — never turn a known infra refusal into a crash */
+  }
+  return {
+    exitCode: 1,
+    output: reason,
+    logFile,
+    preflightFailureKind: CODEX_SANDBOX_FAILURE_KIND,
+    preflightFailureReason: reason,
+  };
 }
 
 // --- Lease helpers ---
@@ -2515,15 +2697,52 @@ async function reconcileDeliveryPending(
   await refreshPipelineSummaryFromContent(entry.content, client);
 }
 
-async function recoverStaleTasks(): Promise<void> {
-  try {
-    const { results } = await munin.query({
-      query: "task",
-      tags: ["running"],
+// Operational sweeps must see beyond Munin's 50-row response cap, but they
+// also run on timers and cannot be allowed to turn one backlog into unbounded
+// network/read work. Repeated sweeps drain the bounded window as lifecycle
+// tags are cleared. `truncated` is logged so operators know the pass was a
+// lower bound rather than a complete census.
+const OPERATIONAL_SCAN_BUDGET = { maxPages: 4, maxResults: 200 } as const;
+const operationalScanCursors = new Map<string, string>();
+
+async function queryOperationalTaskEntries(
+  client: MuninClient,
+  tags: string[],
+  label: string,
+): Promise<import("./munin-client.js").MuninQueryResult[]> {
+  const cursorKey = `${label}\0${tags.join("\0")}`;
+  const until = operationalScanCursors.get(cursorKey);
+  const page = await queryAllMuninEntries(
+    client,
+    {
+      tags,
       namespace: "tasks/",
       entry_type: "state",
-      limit: 20,
-    });
+      ...(until ? { until } : {}),
+    },
+    OPERATIONAL_SCAN_BUDGET,
+  );
+  if (page.budgetExhausted) {
+    if (page.continuationUntil) {
+      operationalScanCursors.set(cursorKey, page.continuationUntil);
+    } else {
+      operationalScanCursors.delete(cursorKey);
+    }
+    console.warn(
+      `${label}: operational scan reached its ${OPERATIONAL_SCAN_BUDGET.maxResults}-entry budget; ` +
+        "this pass is a lower bound and the next sweep will continue from the oldest scanned timestamp",
+    );
+  } else {
+    // The older tail is exhausted. Restart at the newest edge next time so
+    // entries created or retagged while this scan rotated are observed.
+    operationalScanCursors.delete(cursorKey);
+  }
+  return page.results;
+}
+
+async function recoverStaleTasks(): Promise<void> {
+  try {
+    const results = await queryOperationalTaskEntries(munin, ["running"], "startup recovery");
 
     for (const result of results) {
       if (!result.key || result.key !== "status") continue;
@@ -2628,13 +2847,11 @@ async function recoverStaleTasks(): Promise<void> {
 
 async function reapExpiredLeases(): Promise<void> {
   try {
-    const { results } = await reaperMunin.query({
-      query: "task",
-      tags: ["running"],
-      namespace: "tasks/",
-      entry_type: "state",
-      limit: 20,
-    });
+    const results = await queryOperationalTaskEntries(
+      reaperMunin,
+      ["running"],
+      "lease reaper",
+    );
 
     const now = Date.now();
 
@@ -2798,13 +3015,11 @@ function stopLeaseReaper(): void {
 async function reapDeferredDeliveries(): Promise<void> {
   if (config.deliveryPolicy !== "defer") return;
   try {
-    const { results } = await reaperMunin.query({
-      query: "task",
-      tags: ["running", "delivery:pending"],
-      namespace: "tasks/",
-      entry_type: "state",
-      limit: 20,
-    });
+    const results = await queryOperationalTaskEntries(
+      reaperMunin,
+      ["running", "delivery:pending"],
+      "delivery retry reaper",
+    );
     for (const result of results) {
       if (!result.key || result.key !== "status") continue;
       // Never touch the live in-process delivery (mirrors the lease reaper's
@@ -2857,10 +3072,10 @@ const AUTH_ALARM_NS = "tasks/_auth_alarm";
 // configured, nothing more we can do (treated as terminal so we don't re-log
 // every tick). `failed` — configured but the push errored/non-2xx, so the
 // caller must NOT advance the edge state and should retry next tick.
-type AlertDeliveryStatus = "delivered" | "skipped" | "failed";
-
 async function sendRatatoskrAlert(alert: AlertEnvelope): Promise<AlertDeliveryStatus> {
-  const logLine = `[auth-alarm] ${alert.severity ?? "info"}: ${alert.title}`;
+  const logLine = alert.state === "resolved"
+    ? `[alert-bus] resolved: ${alert.dedup_key ?? "unknown"}`
+    : `[alert-bus] ${alert.severity ?? "info"}: ${alert.title ?? "untitled"}`;
   if (alert.severity === "error" || alert.severity === "critical") {
     console.error(logLine);
   } else {
@@ -2903,14 +3118,7 @@ async function hydrateAuthAlarmState(): Promise<void> {
   try {
     const entry = await reaperMunin.read(AUTH_ALARM_NS, "state");
     if (!entry) return;
-    const parsed = JSON.parse(entry.content) as Partial<AuthAlarmState>;
-    authAlarmState = {
-      lastAuth:
-        parsed.lastAuth === "ok" || parsed.lastAuth === "unauthorized"
-          ? parsed.lastAuth
-          : null,
-      expiryWarned: parsed.expiryWarned === true,
-    };
+    authAlarmState = hydratePersistedAuthAlarmState(JSON.parse(entry.content));
   } catch {
     // Keep INITIAL_AUTH_ALARM_STATE.
   }
@@ -2954,6 +3162,7 @@ function withAuthAlarmLock(fn: () => Promise<void>): Promise<void> {
 async function applyAuthReadingLocked(reading: {
   auth: "ok" | "unauthorized" | "unknown";
   expiresAtMs: number | null;
+  expiryEvidence?: "known" | "not-applicable" | "unknown";
 }): Promise<void> {
   const prevState = authAlarmState;
   const { alerts, nextState } = decideAuthAlarm(prevState, reading, {
@@ -2964,7 +3173,12 @@ async function applyAuthReadingLocked(reading: {
   let allDelivered = true;
   for (const alert of alerts) {
     const status = await sendRatatoskrAlert(alert);
-    if (status === "failed") allDelivered = false;
+    // A firing alert may commit when no transport is configured (the existing
+    // anti-spam behavior). A resolution is an external state mutation: only a
+    // confirmed Ratatoskr 2xx may clear the persisted firing state.
+    if (!alertDeliveryCommitsTransition(alert, status)) {
+      allDelivered = false;
+    }
   }
   if (alerts.length > 0 && !allDelivered) {
     // Hold the old state; retry the undelivered alert on the next reading.
@@ -2973,7 +3187,8 @@ async function applyAuthReadingLocked(reading: {
 
   const changed =
     nextState.lastAuth !== prevState.lastAuth ||
-    nextState.expiryWarned !== prevState.expiryWarned;
+    nextState.expiryWarned !== prevState.expiryWarned ||
+    nextState.expiryAlertLifecycleVersion !== prevState.expiryAlertLifecycleVersion;
   authAlarmState = nextState;
   if (changed) {
     await persistAuthAlarmState();
@@ -2983,6 +3198,7 @@ async function applyAuthReadingLocked(reading: {
 function processAuthReading(reading: {
   auth: "ok" | "unauthorized" | "unknown";
   expiresAtMs: number | null;
+  expiryEvidence?: "known" | "not-applicable" | "unknown";
 }): Promise<void> {
   return withAuthAlarmLock(() => applyAuthReadingLocked(reading));
 }
@@ -2995,7 +3211,11 @@ async function runAuthAlarmProbe(): Promise<void> {
   // order and the probe reflect reality at apply time.
   await withAuthAlarmLock(async () => {
     const probe = await probeClaudeUsage();
-    await applyAuthReadingLocked({ auth: probe.auth, expiresAtMs: probe.expiresAtMs });
+    await applyAuthReadingLocked({
+      auth: probe.auth,
+      expiresAtMs: probe.expiresAtMs,
+      expiryEvidence: probe.expiryEvidence,
+    });
   });
 }
 
@@ -3010,7 +3230,7 @@ async function runAuthAlarmProbe(): Promise<void> {
  */
 async function noteClaudeAuthOutcome(auth: "ok" | "unauthorized"): Promise<void> {
   if (!config.authAlarm) return;
-  await processAuthReading({ auth, expiresAtMs: null });
+  await processAuthReading({ auth, expiresAtMs: null, expiryEvidence: "unknown" });
 }
 
 function startAuthAlarmReaper(): void {
@@ -3150,13 +3370,11 @@ async function promoteDependents(
   client: MuninClient = munin,
 ): Promise<void> {
   try {
-    const { results, total } = await client.query({
-      query: "task",
-      tags: ["blocked", `depends-on:${completedTaskId}`],
-      namespace: "tasks/",
-      entry_type: "state",
-      limit: 100,
-    });
+    const results = await queryOperationalTaskEntries(
+      client,
+      ["blocked", `depends-on:${completedTaskId}`],
+      `dependency scan for ${completedTaskId}`,
+    );
 
     let promoted = 0;
     let failed = 0;
@@ -3171,9 +3389,9 @@ async function promoteDependents(
       }
     }
 
-    if (promoted > 0 || failed > 0 || total > results.length) {
+    if (promoted > 0 || failed > 0) {
       console.log(
-        `Dependency scan for ${completedTaskId}: promoted=${promoted}, failed=${failed}, scanned=${results.length}, total_matches=${total}`
+        `Dependency scan for ${completedTaskId}: promoted=${promoted}, failed=${failed}, scanned=${results.length}`
       );
     }
   } catch (err) {
@@ -3183,13 +3401,11 @@ async function promoteDependents(
 
 async function reconcileBlockedTasks(): Promise<void> {
   try {
-    const { results, total } = await munin.query({
-      query: "task",
-      tags: ["blocked"],
-      namespace: "tasks/",
-      entry_type: "state",
-      limit: 100,
-    });
+    const results = await queryOperationalTaskEntries(
+      munin,
+      ["blocked"],
+      "blocked-task reconciliation",
+    );
 
     let promoted = 0;
     let failed = 0;
@@ -3204,9 +3420,9 @@ async function reconcileBlockedTasks(): Promise<void> {
       }
     }
 
-    if (promoted > 0 || failed > 0 || total > results.length) {
+    if (promoted > 0 || failed > 0) {
       console.log(
-        `Blocked-task reconciliation: promoted=${promoted}, failed=${failed}, scanned=${results.length}, total_blocked=${total}`
+        `Blocked-task reconciliation: promoted=${promoted}, failed=${failed}, scanned=${results.length}`
       );
     }
   } catch (err) {
@@ -3514,13 +3730,11 @@ async function gatePendingTaskForApproval(
 }
 
 async function processApprovalDecisions(): Promise<boolean> {
-  const { results } = await munin.query({
-    query: "task",
-    tags: ["awaiting-approval"],
-    namespace: "tasks/",
-    entry_type: "state",
-    limit: 50,
-  });
+  const results = await queryOperationalTaskEntries(
+    munin,
+    ["awaiting-approval"],
+    "approval decisions",
+  );
 
   let processed = false;
   for (const result of results) {
@@ -3656,13 +3870,11 @@ async function processPipelineCancellationRequest(
 }
 
 async function processCancellationRequests(): Promise<boolean> {
-  const { results } = await munin.query({
-    query: "task",
-    tags: [CANCEL_REQUESTED_TAG],
-    namespace: "tasks/",
-    entry_type: "state",
-    limit: 50,
-  });
+  const results = await queryOperationalTaskEntries(
+    munin,
+    [CANCEL_REQUESTED_TAG],
+    "cancellation requests",
+  );
 
   let processed = false;
   for (const result of results) {
@@ -3701,13 +3913,11 @@ async function processCancellationRequests(): Promise<boolean> {
 }
 
 async function processResumeRequests(): Promise<boolean> {
-  const { results } = await munin.query({
-    query: "task",
-    tags: [RESUME_REQUESTED_TAG],
-    namespace: "tasks/",
-    entry_type: "state",
-    limit: 50,
-  });
+  const results = await queryOperationalTaskEntries(
+    munin,
+    [RESUME_REQUESTED_TAG],
+    "resume requests",
+  );
 
   let processed = false;
   for (const result of results) {
@@ -3812,32 +4022,29 @@ async function emitHeartbeat(queueDepth: number, blockedTasks: number): Promise<
 
 // --- Poll loop ---
 
-/**
- * Given a batch of Munin query results, return the pending task with the
- * earliest created_at timestamp (FIFO ordering).  Only "status" entries are
- * considered — other keys are internal bookkeeping entries that the dispatcher
- * should not act on.
- *
- * ISO-8601 timestamps sort correctly as strings, so a plain lexicographic
- * compare is sufficient.
- */
+/** Enumerate the complete pending window and claim the oldest eligible task. */
 async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
-  const { results, total } = await munin.query({
-    query: "task",
-    tags: ["pending"],
-    namespace: "tasks/",
-    entry_type: "state",
-    limit: 10,
-  });
-
-  // Query running tasks to support group sequencing checks
-  const { results: runningResults } = await munin.query({
-    query: "task",
-    tags: ["running"],
-    namespace: "tasks/",
-    entry_type: "state",
-    limit: 50,
-  });
+  const [pendingPage, runningPage] = await Promise.all([
+    queryAllMuninEntries(munin, {
+      tags: ["pending"],
+      namespace: "tasks/",
+      entry_type: "state",
+    }),
+    // Query running tasks to support group sequencing checks.
+    queryAllMuninEntries(munin, {
+      tags: ["running"],
+      namespace: "tasks/",
+      entry_type: "state",
+    }),
+  ]);
+  const results = pendingPage.results;
+  const runningResults = runningPage.results;
+  if (pendingPage.truncated || runningPage.truncated) {
+    console.warn(
+      "Task queue enumeration contains a >=50-entry same-millisecond timestamp bucket; " +
+      "queue depth is a lower bound, but repeated claims remain starvation-free",
+    );
+  }
 
   // Orchestrator v1 tasks (broker-submitted, tagged "orch-v1") are dispatched
   // by the Pi-side broker, not by the legacy in-process poller. Filter them
@@ -3847,13 +4054,13 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   const dispatchableResults = results.filter(
     (r) => !r.tags.includes("orch-v1"),
   );
+  const queueDepth = results.filter((result) => result.key === "status").length;
 
   // Select the next eligible task respecting Group/Sequence ordering (FIFO within eligible set)
   const taskResult = selectNextTask(dispatchableResults, runningResults);
-  if (!taskResult) return { hadTask: false, queueDepth: 0 };
+  if (!taskResult) return { hadTask: false, queueDepth };
 
   const taskNs = taskResult.namespace;
-  const queueDepth = total;
   const entry = await munin.read(taskNs, "status");
   if (!entry) return { hadTask: false, queueDepth };
 
@@ -3949,6 +4156,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       declaredRuntime === "pipeline" ? "runtime:pipeline" : undefined,
     );
     await munin.log(taskNs, `Task rejected by signing policy: ${signingVerdict.message}`);
+    await promoteDependents(extractTaskId(taskNs));
+    await refreshPipelineSummaryFromContent(entry.content);
+    return { hadTask: true, queueDepth };
+  }
+
+  if (parsedTask?.baseBranchError) {
+    const rejection = `Repository base branch invalid: ${parsedTask.baseBranchError}`;
+    console.warn(`Rejecting task ${taskNs}: ${rejection}`);
+    await failTaskWithMessage(taskNs, entry, rejection);
+    await munin.log(taskNs, `Task rejected before execution: ${rejection}`);
     await promoteDependents(extractTaskId(taskNs));
     await refreshPipelineSummaryFromContent(entry.content);
     return { hadTask: true, queueDepth };
@@ -4266,11 +4483,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       throw new Error(`Internal dispatcher error: parsed task missing for ${taskNs}`);
     }
 
-    // Pre-task: checkout a fresh hugin/<taskId> branch from origin/main (#47)
+    // Pre-task: checkout a fresh hugin/<taskId> branch from the repository's
+    // resolved default branch (or validated explicit override, #217).
     let branchResult: Awaited<ReturnType<typeof checkoutTaskBranch>> = { action: "skipped" };
     if (task.runtime !== "homeserver") {
       branchResult = await checkoutTaskBranch(task.workingDir, taskId, {
         reposRoot: config.reposRoot,
+        baseBranchOverride: task.baseBranch,
+        captureBaseCommit: true,
       });
       if (branchResult.action === "fetch-failed") {
         console.warn(`Pre-task branch checkout failed for ${taskNs} (non-fatal, proceeding without branch): ${branchResult.error}`);
@@ -4278,6 +4498,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         console.log(`Pre-task: branch ${branchResult.branchName} ready in ${task.workingDir}`);
       }
     }
+    let repositoryOutcome: StructuredTaskResult["repositoryOutcome"] =
+      deriveRepositoryOutcome(branchResult);
 
     currentTaskConfig = task;
     const taskClassification = getTaskArtifactClassification(task);
@@ -4313,6 +4535,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
     const isOllama = task.runtime === "ollama";
     const isClaude = task.runtime === "claude";
+    const isCodex = task.runtime === "codex";
     const isOpencode = task.runtime === "opencode";
     const isHomeserver = task.runtime === "homeserver";
     const isOrchestrator = task.runtime === "orchestrator";
@@ -4320,13 +4543,15 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       ? "ollama"
       : isClaude
         ? "agent-sdk"
-        : isHomeserver
-          ? "homeserver-delegate"
-        : isOpencode
-          ? "opencode"
-          : isOrchestrator
-            ? "orchestrator"
-            : "spawn";
+        : isCodex
+          ? "codex-spawn"
+          : isHomeserver
+            ? "homeserver-delegate"
+            : isOpencode
+              ? "opencode"
+              : isOrchestrator
+                ? "orchestrator"
+                : "spawn";
 
     // Capture quota before task execution (skip for ollama — it's Claude-specific)
     const quotaBefore = isOllama || isHomeserver ? { q5: null, q7: null } : await fetchQuota();
@@ -4361,6 +4586,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // refused the task itself, so the classification below never has to
     // regex-sniff synthetic output.
     let sdkPreflightFailureKind: typeof AUTH_FAILURE_KIND | typeof DEPS_DRIFT_FAILURE_KIND | undefined;
+    let codexPreflightFailureReason: string | undefined;
     let fallbackTriggered = false;
     let fallbackReason: string | null = null;
 
@@ -4432,6 +4658,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           ollamaBaseUrl: host.baseUrl,
           timeoutMs: task.timeoutMs,
           maxOutputChars: config.maxOutputChars,
+          maxOutputTokens: task.maxOutputTokens,
           injectedContext: contextResolution?.content || undefined,
           reasoning: task.reasoning,
         },
@@ -4565,7 +4792,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         apiKey: gateway.apiKey,
         path: "delegate",
         taskType: task.homeserverTaskType,
-        maxTokens: task.homeserverMaxTokens,
+        maxTokens: task.maxOutputTokens,
         verifier: task.homeserverVerifier,
         timeoutMs: task.timeoutMs,
         maxOutputChars: config.maxOutputChars,
@@ -4744,10 +4971,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     orchOutcomes = orchResult.outcomes;
     orchSavings = orchResult.savings;
     } else {
-      const spawnResult = await spawnRuntime(task, { taskNs, muninClient: munin });
+      const spawnResult = await executeCodexWithPreflightChecks(task, {
+        taskNs,
+        muninClient: munin,
+      });
       exitCode = spawnResult.exitCode;
       output = spawnResult.output;
       logFile = spawnResult.logFile;
+      if (spawnResult.preflightFailureKind === CODEX_SANDBOX_FAILURE_KIND) {
+        codexPreflightFailureReason = spawnResult.preflightFailureReason;
+      }
     }
 
     // The agent run is done. Lease renewal is stopped HERE, before the
@@ -4809,17 +5042,43 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // discriminator (sdkPreflightFailureKind) — only a REAL SDK run (no
     // discriminator) falls back to regex-classifying its output (Codex
     // review, #123: DEPS_DRIFT is never inferred from output text).
-    const failureClassification =
-      !ok && !isTimeout && !isCancelled && (isClaude || fallbackTriggered)
-        ? sdkPreflightFailureKind === DEPS_DRIFT_FAILURE_KIND
-          ? driftFailureClassification()
-          : classifyClaudeFailure(output)
-        : null;
+    const failureClassification = !ok && !isTimeout && !isCancelled
+      ? isCodex && codexPreflightFailureReason
+        ? codexSandboxFailureClassification(codexPreflightFailureReason)
+        : isClaude || fallbackTriggered
+          ? sdkPreflightFailureKind === DEPS_DRIFT_FAILURE_KIND
+            ? driftFailureClassification()
+            : classifyClaudeFailure(output)
+          : null
+      : null;
     if (failureClassification) {
       await munin.log(
         taskNs,
         `Task failed (${failureClassification.kind}): ${failureClassification.reason}`,
       );
+    }
+    if (failureClassification?.kind === CODEX_SANDBOX_FAILURE_KIND) {
+      const friction = buildCodexSandboxFrictionEvent({
+        taskId,
+        modelId: task.model,
+        reason: failureClassification.reason,
+        recordedAt: new Date(),
+      });
+      try {
+        await munin.write(
+          friction.namespace,
+          friction.key,
+          friction.content,
+          friction.tags,
+          undefined,
+          taskClassification,
+        );
+      } catch (err) {
+        console.error(
+          `[codex-sandbox] failed to persist infrastructure friction for ${taskNs}:`,
+          err,
+        );
+      }
     }
 
     // #131: feed the CONFIRMED Claude auth outcome into the proactive alarm. A
@@ -4844,6 +5103,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
     // Post-task: finalize branch — auto-commit leftovers, push, open PR (#47)
     let prUrl: string | undefined;
+    let repositoryChange: StructuredTaskResult["repositoryChange"];
     if (ok && !isCancelled && branchResult.action === "created" && branchResult.branchName) {
       const prBody = [
         `Automated changes from Hugin task \`${taskId}\`.`,
@@ -4859,7 +5119,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         branchResult.branchName,
         prBody,
         egressPolicy.allowedHosts,
+        {
+          captureRepositoryChange: true,
+          baseBranch: branchResult.baseBranch,
+          baseCommit: branchResult.baseCommit,
+        },
       );
+      repositoryChange = finalizeResult.repositoryChange;
+      repositoryOutcome = deriveRepositoryOutcome(branchResult, finalizeResult.action);
       if (finalizeResult.action === "pr-created" && finalizeResult.prUrl) {
         prUrl = finalizeResult.prUrl;
         await munin.log(taskNs, `PR created: ${prUrl}`);
@@ -5431,6 +5698,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             sequence: task.sequence,
             costUsd: costUsd ?? undefined,
             prUrl,
+            repositoryOutcome,
+            repositoryChange,
             bodyKind: structuredBodyKind,
             bodyText: structuredBodyText,
             errorMessage: ok
@@ -5574,6 +5843,14 @@ async function pollLoop(): Promise<void> {
   await primeTrackedPipelineSummaries();
   await reconcileTrackedPipelineSummaries();
 
+  // A clean process restart is the recovery action for dependency drift. Only
+  // a successfully captured fresh baseline may resolve the prior firing alert;
+  // a failed baseline remains inconclusive and leaves it open.
+  await hydrateVersionDriftAlarmState();
+  await maybeResolveVersionDriftAlert().catch((err) =>
+    console.error("[version-drift] Failed to resolve prior drift alert:", err),
+  );
+
   // Clean up old log files
   await rotateOldLogs();
 
@@ -5604,6 +5881,8 @@ async function pollLoop(): Promise<void> {
     let queueDepth = 0;
     try {
       pollCount++;
+      await flushVersionDriftFiringState();
+      await maybeResolveVersionDriftAlert();
       await reconcileTrackedPipelineSummaries();
       const processedCancellation = await processCancellationRequests();
       const processedResume = await processResumeRequests();
@@ -5657,6 +5936,18 @@ app.get("/health", (_req, res) => {
       enabled: egressPolicy.enabled,
       allowed_hosts: egressPolicy.allowedHosts,
     },
+    codex_sandbox: codexSandboxStatus
+      ? {
+          available: codexSandboxStatus.available,
+          checked_at: codexSandboxStatus.checkedAt,
+          command: codexSandboxStatus.command,
+          failure_kind: codexSandboxStatus.failureKind,
+          reason: codexSandboxStatus.reason,
+        }
+      : {
+          available: false,
+          state: "checking",
+        },
   });
 });
 
@@ -5863,6 +6154,7 @@ if (brokerEnv.enabled) {
   const brokerHome = path.join(HUGIN_HOME, "delegation-events.jsonl");
   const journal = new DelegationJournal({ path: brokerHome });
   const taskStore = new BrokerTaskStore(munin);
+  const learningStore = new LearningExperimentStore(learningExperimentMunin);
   const idempotency = new IdempotencyIndex();
   const homeserverReady = loadHomeserverGatewayConfig(process.env) !== null;
   const executorCapabilities = brokerExecutorCapabilities({
@@ -5872,6 +6164,7 @@ if (brokerEnv.enabled) {
     host: brokerEnv.host,
     port: brokerEnv.port,
     keys: brokerEnv.keys,
+    learningStore,
     deps: { taskStore, journal, idempotency, executorCapabilities },
   })
     .then((rb) => {
@@ -5893,8 +6186,10 @@ if (brokerEnv.enabled) {
   console.log("Broker: disabled (set HUGIN_BROKER_KEYS to enable)");
 }
 
-// Check Munin is reachable before starting poll loop
-munin.health().then((ok) => {
+// Check Munin and the zero-token Codex sandbox concurrently before polling.
+// The HTTP server is already listening so deploy acceptance can observe the
+// probe's transient `checking` state, then its definitive result.
+Promise.all([munin.health(), refreshCodexSandboxStatus()]).then(([ok]) => {
   if (!ok) {
     console.warn("WARNING: Munin health check failed — will retry on first poll");
   } else {

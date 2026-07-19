@@ -289,6 +289,81 @@ export type TaskSubmissionProvenance = z.infer<
   typeof taskSubmissionProvenanceSchema
 >;
 
+// Exact, content-blind repository binding for completed managed-checkout work.
+// This is deliberately optional for historical/non-code tasks and contains no
+// prompt, answer, diff, credential, or file contents. It lets the offline exam
+// factory reconstruct the exact before/after trees from Git without trusting
+// an agent's prose claim that it edited or tested something.
+export const repositoryChangeEvidenceSchema = z.object({
+  // Optional only for historical schema-v1 results. Every current managed
+  // repository writer supplies the resolved/validated branch (#217).
+  baseBranch: z.string()
+    .min(1)
+    .max(255)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/)
+    .refine(
+      (value) =>
+        value.toUpperCase() !== "HEAD" &&
+        !value.startsWith("origin/") &&
+        !value.startsWith("refs/") &&
+        !value.includes("..") &&
+        !value.includes("//") &&
+        !value.split("/").some(
+          (component) => component.startsWith(".") || component.endsWith(".lock"),
+        ),
+      "invalid repository base branch",
+    )
+    .optional(),
+  baseCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+  headCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+  changedFiles: z.array(z.string().min(1)).min(1).max(10_000),
+  diffSha256: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict().superRefine((value, ctx) => {
+  if (value.baseCommit === value.headCommit) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["headCommit"],
+      message: "head commit must differ from base commit",
+    });
+  }
+  value.changedFiles.forEach((file, index) => {
+    if (file.startsWith("/") || file.split("/").includes("..") || file.includes("\0")) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["changedFiles", index],
+        message: "changed file must be a safe repository-relative path",
+      });
+    }
+  });
+});
+export type RepositoryChangeEvidence = z.infer<typeof repositoryChangeEvidenceSchema>;
+
+// Execution and publication are separate facts from semantic acceptance.
+// Current writers always emit this content-blind repository outcome, including
+// an explicit no-op. It remains optional so historical schema-v1 results parse.
+export const repositoryOutcomeSchema = z.object({
+  state: z.enum([
+    "not-managed",
+    "checkout-failed",
+    "not-finalized",
+    "no-changes",
+    "changes-present",
+    "publication-failed",
+  ]),
+  baseBranch: repositoryChangeEvidenceSchema.shape.baseBranch,
+  baseCommit: z.string().regex(/^[0-9a-f]{40,64}$/).optional(),
+}).strict().superRefine((value, ctx) => {
+  if (["no-changes", "changes-present", "publication-failed"].includes(value.state)) {
+    if (!value.baseBranch) {
+      ctx.addIssue({ code: "custom", path: ["baseBranch"], message: "managed outcome requires baseBranch" });
+    }
+    if (!value.baseCommit) {
+      ctx.addIssue({ code: "custom", path: ["baseCommit"], message: "managed outcome requires baseCommit" });
+    }
+  }
+});
+export type RepositoryOutcome = z.infer<typeof repositoryOutcomeSchema>;
+
 export const structuredTaskResultSchema = z.object({
   schemaVersion: z.literal(1),
   taskId: z.string().min(1),
@@ -316,6 +391,8 @@ export const structuredTaskResultSchema = z.object({
   bodyText: z.string(),
   errorMessage: z.string().min(1).optional(),
   prUrl: z.string().url().optional(),
+  repositoryOutcome: repositoryOutcomeSchema.optional(),
+  repositoryChange: repositoryChangeEvidenceSchema.optional(),
   runtimeMetadata: taskExecutionRuntimeMetadataSchema.optional(),
   pipeline: taskExecutionPipelineContextSchema.optional(),
   approval: taskExecutionApprovalMetadataSchema.optional(),

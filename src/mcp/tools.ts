@@ -1,8 +1,13 @@
 /**
  * Tool definitions for hugin-mcp.
  *
- * Five tools mirror the broker's `/v1/delegate/*` endpoints:
+ * Five delegation tools mirror the broker's `/v1/delegate/*` endpoints:
  *   hugin_submit, hugin_await, hugin_rate, hugin_list, hugin_models.
+ * Five learning tools expose the durable champion/challenger loop:
+ *   hugin_experiment_create, hugin_experiment_observe,
+ *   hugin_experiment_rate, hugin_experiment_status, hugin_experiment_promote.
+ * One shared friction tool writes into the same corpus as friction-mcp:
+ *   hugin_report_friction.
  *
  * The MCP layer is the only place that fills in protocol envelope
  * fields (`envelope_version`, `alias_map_version`, `idempotency_key`,
@@ -17,6 +22,7 @@ import {
   aliasSchema,
   type Alias,
   ratingSchema,
+  qualityCorrectionRequestSchema,
   sensitivitySchema,
   taskTypeSchema,
   verificationOutcomeSchema,
@@ -28,6 +34,22 @@ import {
   BrokerNetworkError,
   type BrokerClient,
 } from "./broker-client.js";
+import {
+  learningExperimentCreateInputShape,
+  learningExperimentCreateSchema,
+  learningExperimentPromoteInputShape,
+  learningExperimentPromoteSchema,
+  learningExperimentRateInputShape,
+  learningExperimentRateSchema,
+  learningExperimentStatusInputShape,
+  learningExperimentStatusSchema,
+  learningObservationInputShape,
+  learningObservationSchema,
+} from "../learning/experiment-schema.js";
+import {
+  reportFrictionInputSchema,
+  reportFrictionInputShape,
+} from "../friction/schema.js";
 
 export const ALIAS_MAP_VERSION = 2;
 export const ENVELOPE_VERSION = 2 as const;
@@ -127,6 +149,16 @@ export const rateInputShape = {
   rating_reason: z.string().min(1),
   verification_outcome: verificationOutcomeSchema,
   retries_count: z.number().int().nonnegative().optional(),
+  reviewer_role: z.enum(["independent", "self"]).optional()
+    .describe("Authenticated reviewer attestation. Same-task owners cannot claim independent."),
+  correction: qualityCorrectionRequestSchema.optional().describe(
+    "Append-only native v2 correction shape. Names the predecessor and carries content-blind rubric, failure, configuration, and successor provenance. The Broker currently fails closed until authoritative execution-attempt evidence lands; callers cannot provide or infer it.",
+  ),
+  expected_binding: z.object({
+    task_document_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    structured_result_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    repository_diff_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  }).strict().optional().describe("Optional exact hashes reviewed by the caller; stale hashes are rejected."),
 };
 const rateInputSchema = z.object(rateInputShape);
 
@@ -140,6 +172,13 @@ const listInputSchema = z.object(listInputShape);
 
 export const modelsInputShape = {};
 const modelsInputSchema = z.object(modelsInputShape);
+
+export const frictionInputShape = reportFrictionInputShape;
+
+export const experimentCreateInputShape = learningExperimentCreateInputShape;
+export const experimentObserveInputShape = learningObservationInputShape;
+export const experimentStatusInputShape = learningExperimentStatusInputShape;
+export const experimentPromoteInputShape = learningExperimentPromoteInputShape;
 
 export interface HuginTool<I extends Record<string, unknown>> {
   name: string;
@@ -211,6 +250,12 @@ export function buildTools(deps: ToolDeps): {
   rate: HuginTool<z.infer<typeof rateInputSchema>>;
   list: HuginTool<z.infer<typeof listInputSchema>>;
   models: HuginTool<z.infer<typeof modelsInputSchema>>;
+  friction: HuginTool<z.infer<typeof reportFrictionInputSchema>>;
+  experimentCreate: HuginTool<z.infer<typeof learningExperimentCreateSchema>>;
+  experimentObserve: HuginTool<z.infer<typeof learningObservationSchema>>;
+  experimentRate: HuginTool<z.infer<typeof learningExperimentRateSchema>>;
+  experimentStatus: HuginTool<z.infer<typeof learningExperimentStatusSchema>>;
+  experimentPromote: HuginTool<z.infer<typeof learningExperimentPromoteSchema>>;
 } {
   const newId = deps.newId ?? randomUUID;
   const executableAliases = deps.executableAliases ?? ["m5"];
@@ -295,9 +340,9 @@ export function buildTools(deps: ToolDeps): {
 
   const rate: HuginTool<z.infer<typeof rateInputSchema>> = {
     name: "hugin_rate",
-    title: "Rate the outcome of a delegated task",
+    title: "Record an exact-bound task quality review",
     description:
-      "Store a product-usefulness rating for a terminal task. This is Hugin product evidence; it does not directly modify M5's capability ledger.",
+      "Append an authenticated quality receipt for a terminal Hugin task, bound to its current task/result/repository evidence. This does not directly modify M5's capability ledger.",
     inputShape: rateInputShape,
     handler: async (rawInput) => {
       try {
@@ -343,5 +388,113 @@ export function buildTools(deps: ToolDeps): {
     },
   };
 
-  return { submit, await_, rate, list, models };
+  const friction: HuginTool<z.infer<typeof reportFrictionInputSchema>> = {
+    name: "hugin_report_friction",
+    title: "Report friction encountered while solving a task",
+    description:
+      "Persist one concrete capability, environment, or specification friction event in Hugin's shared signals/friction corpus. Use task_id when the event came from a Hugin task. This is operational evidence, not a semantic task rating.",
+    inputShape: frictionInputShape,
+    handler: async (rawInput) => {
+      try {
+        const input = reportFrictionInputSchema.parse(rawInput);
+        return asResult(await deps.broker.reportFriction(input));
+      } catch (err) {
+        return asResult(errorPayload(err), true);
+      }
+    },
+  };
+
+  const experimentCreate: HuginTool<z.infer<typeof learningExperimentCreateSchema>> = {
+    name: "hugin_experiment_create",
+    title: "Create a versioned learning experiment",
+    description:
+      "Create or idempotently reopen one content-blind champion/challenger experiment. Exactly one logging, test-harness, prompt, harness, model, model-config, or routing axis may differ. Prompts and fixtures stay in their owning repos; only versions and SHA-256 fingerprints are stored.",
+    inputShape: experimentCreateInputShape,
+    handler: async (rawInput) => {
+      try {
+        const input = learningExperimentCreateSchema.parse(rawInput);
+        return asResult(await deps.broker.experimentCreate(input));
+      } catch (err) {
+        return asResult(errorPayload(err), true);
+      }
+    },
+  };
+
+  const experimentObserve: HuginTool<z.infer<typeof learningObservationSchema>> = {
+    name: "hugin_experiment_observe",
+    title: "Record one experiment-arm observation",
+    description:
+      "Append idempotent evidence for one champion or challenger run. Matching uses sample_id; promotion is evaluated only from matched pairs, requires holdout and independent verification coverage, and automatically rejects measured regressions.",
+    inputShape: experimentObserveInputShape,
+    handler: async (rawInput) => {
+      try {
+        const input = learningObservationSchema.parse(rawInput);
+        return asResult(await deps.broker.experimentObserve(input));
+      } catch (err) {
+        return asResult(errorPayload(err), true);
+      }
+    },
+  };
+
+  const experimentRate: HuginTool<z.infer<typeof learningExperimentRateSchema>> = {
+    name: "hugin_experiment_rate",
+    title: "Add a product rating to an experiment run",
+    description:
+      "Enrich one already-recorded unrated run with its human/downstream usefulness outcome and optional review time. The transition is one-way and idempotent; an existing rating can never be overwritten.",
+    inputShape: learningExperimentRateInputShape,
+    handler: async (rawInput) => {
+      try {
+        const input = learningExperimentRateSchema.parse(rawInput);
+        return asResult(await deps.broker.experimentRate(input));
+      } catch (err) {
+        return asResult(errorPayload(err), true);
+      }
+    },
+  };
+
+  const experimentStatus: HuginTool<z.infer<typeof learningExperimentStatusSchema>> = {
+    name: "hugin_experiment_status",
+    title: "Read a learning experiment and its promotion gate",
+    description:
+      "Read the durable experiment state, matched-pair metrics, guard failures, dominant failure signals, and next action. A promotion-ready state is evidence for operator review, never an uncontrolled production mutation.",
+    inputShape: experimentStatusInputShape,
+    handler: async (rawInput) => {
+      try {
+        const input = learningExperimentStatusSchema.parse(rawInput);
+        return asResult(await deps.broker.experimentStatus(input));
+      } catch (err) {
+        return asResult(errorPayload(err), true);
+      }
+    },
+  };
+
+  const experimentPromote: HuginTool<z.infer<typeof learningExperimentPromoteSchema>> = {
+    name: "hugin_experiment_promote",
+    title: "Record reviewed promotion of a winning challenger",
+    description:
+      "After the owning configuration repository has applied and reviewed a promotion-ready challenger, advance the scope's durable champion pointer. Requires the exact evaluated fingerprint and an applied commit/config reference. Future experiments for the scope must start from this champion.",
+    inputShape: experimentPromoteInputShape,
+    handler: async (rawInput) => {
+      try {
+        const input = learningExperimentPromoteSchema.parse(rawInput);
+        return asResult(await deps.broker.experimentPromote(input));
+      } catch (err) {
+        return asResult(errorPayload(err), true);
+      }
+    },
+  };
+
+  return {
+    submit,
+    await_,
+    rate,
+    list,
+    models,
+    friction,
+    experimentCreate,
+    experimentObserve,
+    experimentRate,
+    experimentStatus,
+    experimentPromote,
+  };
 }

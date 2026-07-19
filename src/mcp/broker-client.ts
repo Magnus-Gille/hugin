@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
+
 /**
  * HTTP client for the Pi-side orchestrator broker.
  *
- * Used by the hugin-mcp server (laptop-side). Wraps the five
- * `/v1/delegate/*` endpoints with typed methods, bearer-token auth,
+ * Used by the hugin-mcp server (laptop-side). Wraps the delegation and
+ * learning-loop endpoints with typed methods, bearer-token auth,
  * and bounded timeouts.
  *
  * The broker is exposed only on the Tailscale interface (per
@@ -96,12 +98,50 @@ export class BrokerClient {
     return this.post("/v1/delegate/rate", payload);
   }
 
+  async reportFriction(payload: Record<string, unknown>): Promise<unknown> {
+    const event = {
+      ...payload,
+      event_id: typeof payload.event_id === "string" && payload.event_id.trim()
+        ? payload.event_id
+        : randomUUID(),
+    };
+    try {
+      return await this.post("/v1/friction/report", event);
+    } catch (err) {
+      // A connection reset can happen after the Broker committed the write.
+      // Retry once with the same event_id; the server will return the existing
+      // key instead of recording a second occurrence.
+      if (!(err instanceof BrokerNetworkError)) throw err;
+      return this.post("/v1/friction/report", event);
+    }
+  }
+
   async list(payload: Record<string, unknown>): Promise<unknown> {
     return this.post("/v1/delegate/list", payload);
   }
 
   async models(): Promise<unknown> {
     return this.get("/v1/delegate/models");
+  }
+
+  async experimentCreate(payload: Record<string, unknown>): Promise<unknown> {
+    return this.post("/v1/learning/experiments/create", payload);
+  }
+
+  async experimentObserve(payload: Record<string, unknown>): Promise<unknown> {
+    return this.post("/v1/learning/experiments/observe", payload);
+  }
+
+  async experimentRate(payload: Record<string, unknown>): Promise<unknown> {
+    return this.post("/v1/learning/experiments/rate", payload);
+  }
+
+  async experimentStatus(payload: Record<string, unknown>): Promise<unknown> {
+    return this.post("/v1/learning/experiments/status", payload);
+  }
+
+  async experimentPromote(payload: Record<string, unknown>): Promise<unknown> {
+    return this.post("/v1/learning/experiments/promote", payload);
   }
 
   private async post(path: string, body: unknown): Promise<unknown> {

@@ -17,6 +17,33 @@ DEPLOY_USER="${DEPLOY_USER:-magnus}"
 REMOTE="$DEPLOY_USER@$PI_HOST"
 REMOTE_DIR="/home/$DEPLOY_USER/repos/hugin"
 
+read_clean_deploy_sha() {
+  local repo_root source_status source_sha
+  if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    echo "ERROR: deploy source is not an addressable Git checkout." >&2
+    return 1
+  fi
+  if [ "$(pwd -P)" != "$(cd "$repo_root" && pwd -P)" ]; then
+    echo "ERROR: run deploy-pi.sh from the Hugin repository root." >&2
+    return 1
+  fi
+  if ! source_sha="$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" ||
+    [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "ERROR: deploy source HEAD is not an addressable full commit." >&2
+    return 1
+  fi
+  if ! source_status="$(git status --porcelain=v1 --untracked-files=normal)"; then
+    echo "ERROR: could not verify deploy-source cleanliness." >&2
+    return 1
+  fi
+  if [ -n "$source_status" ]; then
+    echo "ERROR: deploy source must be clean; refusing to stamp uncommitted content." >&2
+    printf '%s\n' "$source_status" >&2
+    return 1
+  fi
+  printf '%s\n' "$source_sha"
+}
+
 echo "==> Checking deploy source..."
 # rsync distinguishes a directory from a symlink to a directory. The trailing-
 # slash node_modules exclusion below therefore does not match the common
@@ -28,9 +55,27 @@ if [ -L node_modules ]; then
   echo "  unlink node_modules && npm ci" >&2
   exit 1
 fi
+DEPLOY_SHA="$(read_clean_deploy_sha)" || exit 1
 
 echo "==> Building locally..."
 npm run build
+
+# Re-read both HEAD and cleanliness after the build. Build output is ignored;
+# any tracked/untracked source drift means the payload no longer represents the
+# single commit whose SHA would be stamped.
+if ! POST_BUILD_SHA="$(read_clean_deploy_sha)"; then
+  echo "ERROR: deploy source changed during build; refusing remote mutation." >&2
+  exit 1
+fi
+if [ "$POST_BUILD_SHA" != "$DEPLOY_SHA" ]; then
+  echo "ERROR: deploy source HEAD changed during build; refusing remote mutation." >&2
+  exit 1
+fi
+
+echo "==> Invalidating prior deployment marker..."
+# This is deliberately the first remote mutation. Every later failure leaves
+# the service markerless; only the final accepted health gate may stamp it.
+ssh "$REMOTE" "rm -f '$REMOTE_DIR/.deployed-commit' '$REMOTE_DIR/.deployed-commit.tmp'"
 
 echo "==> Syncing to $REMOTE:$REMOTE_DIR..."
 rsync -av --delete \
@@ -39,12 +84,25 @@ rsync -av --delete \
   --exclude='.git' \
   --exclude='.git/' \
   --exclude='.env' \
+  --exclude='.deployed-commit' \
   --exclude='tests/' \
   --exclude='.DS_Store' \
   ./ "$REMOTE:$REMOTE_DIR/"
 
+# Close the small race between the post-build check and rsync reading the
+# source. If anything changed while the payload was transferred, stop before
+# install/restart and leave the already-invalidated deployment marker absent.
+if ! POST_SYNC_SHA="$(read_clean_deploy_sha)"; then
+  echo "ERROR: deploy source changed during sync; refusing acceptance." >&2
+  exit 1
+fi
+if [ "$POST_SYNC_SHA" != "$DEPLOY_SHA" ]; then
+  echo "ERROR: deploy source HEAD changed during sync; refusing acceptance." >&2
+  exit 1
+fi
+
 echo "==> Installing dependencies on Pi..."
-ssh "$REMOTE" "cd $REMOTE_DIR && npm install --omit=dev"
+ssh "$REMOTE" "cd $REMOTE_DIR && npm ci --omit=dev"
 
 echo "==> Removing legacy system-level service (one-time migration, idempotent)..."
 ssh "$REMOTE" "
@@ -59,12 +117,15 @@ ssh "$REMOTE" "
   fi
 "
 
-echo "==> Installing user-level systemd service..."
+echo "==> Installing user-level systemd services..."
 ssh "$REMOTE" "
-  mkdir -p ~/.config/systemd/user
+  mkdir -p ~/.config/systemd/user ~/.hugin/daily-exam-candidates
   cp $REMOTE_DIR/hugin.service ~/.config/systemd/user/hugin.service
+  cp $REMOTE_DIR/systemd/hugin-daily-exam-factory.service ~/.config/systemd/user/hugin-daily-exam-factory.service
+  cp $REMOTE_DIR/systemd/hugin-daily-exam-factory.timer ~/.config/systemd/user/hugin-daily-exam-factory.timer
   XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
   XDG_RUNTIME_DIR=/run/user/1000 systemctl --user enable hugin.service
+  XDG_RUNTIME_DIR=/run/user/1000 systemctl --user enable --now hugin-daily-exam-factory.timer
   loginctl enable-linger magnus 2>/dev/null || true
 "
 
@@ -115,28 +176,20 @@ else
   echo "  NAS reachability are fixed (else delivery-capable tasks will fail)."
 fi
 
-echo "==> Codex sandbox preflight (issue #59)..."
-# Codex's `codex exec` sandboxes shell commands and apply_patch through
-# bubblewrap. When the system `bwrap` is missing, Codex silently falls back to a
-# VENDORED bwrap that is incompatible with the Pi kernel: every shell command and
-# file write fails with `bwrap: loopback: Failed to create NETLINK_ROUTE socket`,
-# yet the task still exits 0 — so codex tasks "succeed" while delivering nothing
-# (issue #59). Ensure the system bwrap exists AND can actually create the
-# network namespace + loopback that Codex relies on. Non-fatal WARNING: this only
-# affects the codex runtime, so it must not block a deploy that runs claude/ollama
-# tasks. The runtime fix is `sudo apt install bubblewrap`.
+echo "==> Host-side Codex sandbox preflight (issues #59/#218)..."
+# Exercise Codex's own zero-token sandbox entry point, not merely whichever
+# bwrap happens to be first on PATH. This catches a missing/incompatible system
+# bwrap before restart. It is still outside hugin.service confinement; the
+# post-restart /health gate below is authoritative because Hugin repeats this
+# exact command from inside the live unit before polling or any Codex task.
 if ssh "$REMOTE" "
-  command -v bwrap >/dev/null 2>&1 || { echo 'NO_BWRAP'; exit 1; }
-  # Mirror codex's usage: unshare the network namespace and bring up loopback.
-  # This is the exact path that fails with the vendored bwrap on the Pi kernel.
-  bwrap --unshare-net --ro-bind / / --dev /dev /bin/true 2>/dev/null || { echo 'BWRAP_NETNS_FAIL'; exit 1; }
+  command -v codex >/dev/null 2>&1 || { echo 'NO_CODEX'; exit 1; }
+  codex sandbox -- /bin/true >/dev/null 2>&1 || { echo 'CODEX_SANDBOX_FAIL'; exit 1; }
 "; then
-  echo "  OK: system bwrap present and network-namespace probe passed (codex sandbox healthy)"
+  echo "  OK: Codex zero-token sandbox command passed on the host"
 else
-  echo "  WARNING: codex sandbox preflight FAILED."
-  echo "  Codex tasks will exit 0 but deliver nothing (vendored-bwrap fallback is"
-  echo "  incompatible with the Pi kernel). Fix on the Pi: sudo apt install bubblewrap"
-  echo "  then re-run this probe. Until then, do not route code-capable tasks to codex."
+  echo "  WARNING: host-side Codex sandbox preflight FAILED."
+  echo "  The post-restart in-service health acceptance will remain authoritative."
 fi
 
 echo "==> Refreshing Claude config on the Pi (claude-config bootstrap)..."
@@ -157,9 +210,6 @@ echo "  Cron installed: daily at 04:00"
 echo "==> Ensuring workspace directory exists..."
 ssh "$REMOTE" "mkdir -p /home/$DEPLOY_USER/workspace"
 
-echo "==> Syncing Pi git repo..."
-ssh "$REMOTE" "cd $REMOTE_DIR && git fetch origin && git reset --hard origin/main"
-
 echo "==> Killing orphan Hugin processes..."
 ssh "$REMOTE" "SYSPID=\$(XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show hugin.service --property=MainPID --value 2>/dev/null || echo 0)
 for pid in \$(pgrep -f 'node dist/index.js'); do
@@ -175,9 +225,37 @@ echo "==> Restarting service..."
 ssh "$REMOTE" "XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart hugin.service && sleep 2 && XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status hugin.service --no-pager"
 
 echo "==> Health check..."
-ssh "$REMOTE" "curl -fsS http://127.0.0.1:3032/health"
+ssh "$REMOTE" "
+  for attempt in \$(seq 1 15); do
+    if curl -fsS http://127.0.0.1:3032/health | /usr/bin/node -e '
+      let raw = \"\";
+      process.stdin.on(\"data\", (chunk) => raw += chunk).on(\"end\", () => {
+        const health = JSON.parse(raw);
+        if (health.codex_sandbox?.available !== true) process.exit(1);
+        process.stdout.write(raw);
+      });
+    '; then
+      exit 0
+    fi
+    sleep 1
+  done
+  echo 'in-service Codex sandbox self-test unavailable after 15 attempts' >&2
+  exit 1
+"
+
+echo "==> Daily exam factory acceptance..."
+ssh "$REMOTE" "
+  XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start hugin-daily-exam-factory.service
+  test -s /home/$DEPLOY_USER/.hugin/daily-exam-candidates/latest.json
+  /usr/bin/node -e 'const m=JSON.parse(require(\"node:fs\").readFileSync(process.argv[1],\"utf8\")); if(m.schemaVersion!==2) throw new Error(\"daily exam manifest must be schema v2\"); if(m.candidates.some((c)=>c.lane===\"provisional-holdout\"&&c.crossClientExposure?.state!==\"unseen-covered\")) throw new Error(\"provisional candidate lacks complete cross-client exposure coverage\"); const states=Object.fromEntries([\"not-checked\",\"seen\",\"unseen-covered\",\"incomplete\",\"error\"].map((s)=>[s,m.candidates.filter((c)=>c.crossClientExposure?.state===s).length])); process.stdout.write(JSON.stringify({schemaVersion:m.schemaVersion,generatedAt:m.generatedAt,inspectedTasks:m.inspectedTasks,historyComplete:m.historyComplete,counts:m.counts,crossClientExposureStates:states})+\"\\n\")' /home/$DEPLOY_USER/.hugin/daily-exam-candidates/latest.json
+"
 
 echo ""
-echo "Deploy complete!"
+echo "Acceptance gates passed; finalizing deployment."
 echo "Health check: curl http://$PI_HOST:3032/health"
 echo "Logs: ssh $PI_HOST journalctl --user -u hugin.service -f"
+echo "==> Recording accepted deployment $DEPLOY_SHA..."
+# The remote tree is intentionally markerless and has no .git checkout. Stamp
+# the exact local commit atomically only after restart/status and health both
+# succeeded. No fallible deployment steps follow this boundary.
+ssh "$REMOTE" "printf '%s\n' '$DEPLOY_SHA' > '$REMOTE_DIR/.deployed-commit.tmp' && mv '$REMOTE_DIR/.deployed-commit.tmp' '$REMOTE_DIR/.deployed-commit'"

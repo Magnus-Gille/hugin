@@ -23,6 +23,17 @@ import type { Ledger } from "./orchestrator/ledger-client.js";
 import type { ProductTaskEvidence } from "./learning-loop-health.js";
 import { parseStoredEnvelope } from "./broker/task-store.js";
 import type { AwaitObservation } from "./broker/await-observation.js";
+import {
+  learningExperimentStateSchema,
+  type LearningExperimentState,
+} from "./learning/experiment-schema.js";
+import { MUNIN_QUERY_MAX, queryAllMuninEntries } from "./munin-pagination.js";
+import {
+  buildQualityBinding,
+  qualityBindingsEqual,
+  qualityReceiptLedgerSchema,
+  summarizeQualityReceipts,
+} from "./quality-receipt.js";
 
 /** Dashboard-facing data: refresh a few times an hour, not every 60s poll. */
 export const DEFAULT_COLLECT_TTL_MS = 300_000;
@@ -49,6 +60,9 @@ export interface LearningLoopEvidence {
   readFailures: number;
   /** The corpus walk hit its cap — counts derived from this are a lower bound. */
   truncated: boolean;
+  experiments: LearningExperimentState[];
+  experimentsAvailable: boolean;
+  experimentsTruncated: boolean;
 }
 
 const UNAVAILABLE: LearningLoopEvidence = {
@@ -57,6 +71,9 @@ const UNAVAILABLE: LearningLoopEvidence = {
   available: false,
   readFailures: 0,
   truncated: false,
+  experiments: [],
+  experimentsAvailable: false,
+  experimentsTruncated: false,
 };
 
 interface CorpusResult {
@@ -135,13 +152,66 @@ export class LearningLoopCollector {
   }
 
   private async collectUncached(): Promise<LearningLoopEvidence> {
-    const [ledger, corpus] = await Promise.all([
+    const [ledger, corpus, experiments] = await Promise.all([
       this.ledgerClient.getLedger().catch(() => null),
       this.collectTasks().catch(
         (): CorpusResult => ({ tasks: [], available: false, readFailures: 0, truncated: false })
       ),
+      this.collectExperiments().catch(() => ({
+        states: [] as LearningExperimentState[],
+        available: false,
+        truncated: false,
+      })),
     ]);
-    return { ledger, ...corpus };
+    return {
+      ledger,
+      ...corpus,
+      experiments: experiments.states,
+      experimentsAvailable: experiments.available,
+      experimentsTruncated: experiments.truncated,
+    };
+  }
+
+  private async collectExperiments(): Promise<{
+    states: LearningExperimentState[];
+    available: boolean;
+    truncated: boolean;
+  }> {
+    const result = await this.munin.query({
+      // JSON state carries the exact key `experimentId`; query by that lexical
+      // token rather than the looser "experiment", which FTS tokenizers need
+      // not derive from camelCase.
+      query: "experimentId",
+      tags: ["learning:experiment"],
+      namespace: "experiments/hugin/",
+      entry_type: "state",
+      limit: 50,
+    });
+    const namespaces = [
+      ...new Set(
+        result.results
+          .map((entry) => entry.namespace)
+          .filter((namespace): namespace is string => typeof namespace === "string"),
+      ),
+    ];
+    const states: LearningExperimentState[] = [];
+    for (const namespace of namespaces) {
+      const entry = await this.munin.read(namespace, "state").catch(() => null);
+      if (!entry) continue;
+      try {
+        states.push(learningExperimentStateSchema.parse(JSON.parse(entry.content)));
+      } catch {
+        // One corrupt experiment is omitted; it must not blank the dashboard.
+      }
+    }
+    states.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return {
+      states,
+      available: true,
+      // Munin exposes no query cursor; an exactly-full result is conservatively
+      // treated as truncated rather than pretending it is complete.
+      truncated: result.results.length >= 50,
+    };
   }
 
   /**
@@ -163,25 +233,31 @@ export class LearningLoopCollector {
     // A FAILED query is not an empty corpus. If we cannot enumerate the tasks,
     // say the corpus is unavailable — never let it collapse into a confident
     // zero downstream.
+    const budget = {
+      maxPages: Math.max(1, Math.ceil(this.maxTasks / MUNIN_QUERY_MAX)),
+      maxResults: this.maxTasks,
+    };
     const [tagged, homeserver] = await Promise.all([
-      this.munin
-        .query({
-          query: "task",
+      queryAllMuninEntries(
+        this.munin,
+        {
           tags: ["broker:mcp-v2"],
           namespace: "tasks/",
           entry_type: "state",
-          limit: this.maxTasks,
-        })
+        },
+        budget,
+      )
         .then((r) => ({ ok: true as const, r }))
         .catch(() => ({ ok: false as const })),
-      this.munin
-        .query({
-          query: "task",
+      queryAllMuninEntries(
+        this.munin,
+        {
           tags: ["runtime:homeserver"],
           namespace: "tasks/",
           entry_type: "state",
-          limit: this.maxTasks,
-        })
+        },
+        budget,
+      )
         .then((r) => ({ ok: true as const, r }))
         .catch(() => ({ ok: false as const })),
     ]);
@@ -199,7 +275,12 @@ export class LearningLoopCollector {
     ];
     const namespaces = all.slice(0, this.maxTasks);
     // A cap that hides what it dropped turns a lower bound into a fact.
-    const truncated = all.length > namespaces.length || !tagged.ok || !homeserver.ok;
+    const truncated =
+      all.length > namespaces.length ||
+      !tagged.ok ||
+      !homeserver.ok ||
+      (tagged.ok && tagged.r.truncated) ||
+      (homeserver.ok && homeserver.r.truncated);
 
     const tasks: ProductTaskEvidence[] = [];
     let readFailures = 0;
@@ -235,19 +316,36 @@ export class LearningLoopCollector {
     let verificationOutcome: string | null = null;
     if (feedback) {
       try {
-        const parsed = JSON.parse(feedback.content) as {
-          rating?: string;
-          verification_outcome?: string;
-        };
-        if (
-          parsed.rating === "pass" ||
-          parsed.rating === "partial" ||
-          parsed.rating === "redo" ||
-          parsed.rating === "wrong"
-        ) {
-          rating = parsed.rating;
+        const raw = JSON.parse(feedback.content) as unknown;
+        const ledger = qualityReceiptLedgerSchema.safeParse(raw);
+        if (ledger.success && structured) {
+          const binding = buildQualityBinding({
+            statusContent: status.content,
+            structuredResultContent: structured.content,
+          });
+          const summary = summarizeQualityReceipts(feedback.content, binding);
+          const current = ledger.data.receipts
+            .filter((receipt) => qualityBindingsEqual(receipt.binding, binding))
+            .sort((left, right) => right.ratedAt.localeCompare(left.ratedAt))[0];
+          if (current && ["accepted", "partial", "rejected"].includes(summary.state)) {
+            rating = current.rating;
+            verificationOutcome = current.verificationOutcome;
+          }
+        } else {
+          const parsed = raw as {
+            rating?: string;
+            verification_outcome?: string;
+          };
+          if (
+            parsed.rating === "pass" ||
+            parsed.rating === "partial" ||
+            parsed.rating === "redo" ||
+            parsed.rating === "wrong"
+          ) {
+            rating = parsed.rating;
+          }
+          verificationOutcome = parsed.verification_outcome ?? null;
         }
-        verificationOutcome = parsed.verification_outcome ?? null;
       } catch {
         // A corrupt feedback doc is one lost data point, not a broken panel.
       }

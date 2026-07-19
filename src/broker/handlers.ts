@@ -7,13 +7,14 @@
  *   - rate    (§5)
  *   - list    (§5 projection)
  *   - models  (§2 alias map + §6 registry view)
+ *   - friction (shared operational evidence corpus)
  *
- * All five endpoints assume `brokerAuthMiddleware` has already populated
+ * All handlers assume `brokerAuthMiddleware` has already populated
  * `req.brokerPrincipal`.
  */
 
 import type { Request, Response } from "express";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import {
   ACTIVE_ALIAS_MAP,
   RUNTIME_REGISTRY,
@@ -30,7 +31,12 @@ import { projectDelegations } from "./journal.js";
 import type { IdempotencyIndex } from "./idempotency.js";
 import { hashPayload } from "./idempotency.js";
 import type { BrokerTaskStore } from "./task-store.js";
-import { generateBrokerTaskId, parseCanonicalEnvelope, parseStoredEnvelope } from "./task-store.js";
+import {
+  FrictionIdempotencyConflictError,
+  generateBrokerTaskId,
+  parseCanonicalEnvelope,
+  parseStoredEnvelope,
+} from "./task-store.js";
 import {
   awaitRequestSchema,
   delegationRequestSchema,
@@ -41,6 +47,17 @@ import {
 import type { AwaitLifecycle } from "./await-observation.js";
 import type { AuthenticatedRequest } from "./auth.js";
 import { computeSubmitWarnings } from "./submit-warnings.js";
+import { reportFrictionInputSchema } from "../friction/schema.js";
+import {
+  QualityReceiptConflictError,
+  buildQualityBinding,
+  buildQualityReceipt,
+} from "../quality-receipt.js";
+import { structuredTaskResultSchema } from "../task-result-schema.js";
+
+const brokerFrictionInputSchema = reportFrictionInputSchema.extend({
+  event_id: z.string().uuid(),
+}).strict();
 
 export interface BrokerHandlerDependencies {
   taskStore: BrokerTaskStore;
@@ -429,6 +446,11 @@ export function createAwaitHandler(deps: BrokerHandlerDependencies) {
 
 export function createRateHandler(deps: BrokerHandlerDependencies) {
   return async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    const authenticatedPrincipal = req.brokerPrincipal;
+    if (!authenticatedPrincipal) {
+      res.status(500).json({ error: "internal", message: "principal missing" });
+      return;
+    }
     let parsed;
     try {
       parsed = rateRequestSchema.parse(req.body);
@@ -445,7 +467,9 @@ export function createRateHandler(deps: BrokerHandlerDependencies) {
       });
       return;
     }
-    if (!requireOwnedBrokerTask(req, res, status)) return;
+    const canonical = parseCanonicalEnvelope(status.content);
+    const historicalBrokerTask = status.tags.includes("orch-v1");
+    if ((canonical.ok || historicalBrokerTask) && !requireOwnedBrokerTask(req, res, status)) return;
     if (!status.tags.some((tag) => ["completed", "failed", "cancelled"].includes(tag))) {
       res.status(409).json({
         error: "policy_rejected",
@@ -454,21 +478,154 @@ export function createRateHandler(deps: BrokerHandlerDependencies) {
       return;
     }
 
+    const structuredEntry = await deps.taskStore.readStructuredResult(parsed.task_id);
+    if (!structuredEntry) {
+      res.status(409).json({
+        error: "policy_rejected",
+        message: "task has no structured result to bind the quality receipt to",
+      });
+      return;
+    }
+    let structuredTaskId: string;
+    let verifiedSubmitter: string | null;
+    let binding;
     try {
-      await deps.taskStore.writeFeedback(parsed.task_id, {
-        ...parsed,
-        rated_at: nowFn(deps)().toISOString(),
-        rated_by: req.brokerPrincipal ?? "unknown",
+      const raw = JSON.parse(structuredEntry.content) as unknown;
+      const current = structuredTaskResultSchema.safeParse(raw);
+      if (current.success) {
+        structuredTaskId = current.data.taskId;
+        verifiedSubmitter = current.data.provenance?.verifiedSubmitter ?? null;
+      } else {
+        const legacy = z.object({
+          task_id: z.string().min(1),
+          result_schema_version: z.literal(1),
+        }).passthrough().parse(raw);
+        structuredTaskId = legacy.task_id;
+        verifiedSubmitter = null;
+      }
+      binding = buildQualityBinding({
+        statusContent: status.content,
+        structuredResultContent: structuredEntry.content,
       });
     } catch (err) {
-      res.status(500).json({
-        error: "internal",
+      res.status(409).json({
+        error: "policy_rejected",
+        message: `task structured result cannot be bound: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    if (structuredTaskId !== parsed.task_id) {
+      res.status(409).json({ error: "policy_rejected", message: "structured result task id mismatch" });
+      return;
+    }
+    const expected = parsed.expected_binding;
+    if (expected && (
+      expected.task_document_sha256 !== binding.taskDocumentSha256 ||
+      expected.structured_result_sha256 !== binding.structuredResultSha256 ||
+      (expected.repository_diff_sha256 !== undefined &&
+        expected.repository_diff_sha256 !== binding.repository.diffSha256)
+    )) {
+      res.status(409).json({ error: "policy_rejected", message: "reviewed binding is stale or mismatched" });
+      return;
+    }
+    // LearningTaskContract v1 distinguishes the durable task instance from an
+    // execution attempt. Hugin's current structured result has no
+    // authoritative attempt identity: the per-claim MCP session UUID is not
+    // persisted as attempt evidence, and startup/lease recovery can finalize a
+    // task after that process has disappeared. Native v2 requires the exact
+    // attempt, so using `task_id` here would fabricate provenance. Issue #240
+    // owns creation and persistence of that evidence; until it lands, retain
+    // the schema/storage seam but fail closed before emitting a v2 receipt.
+    if (parsed.correction) {
+      res.status(409).json({
+        error: "policy_rejected",
+        message: "native v2 correction requires authoritative execution attempt evidence; this task result does not provide it",
+      });
+      return;
+    }
+    const principal = authenticatedPrincipal;
+    const brokerOwner = canonical.ok
+      ? canonical.envelope.broker_principal
+      : historicalBrokerTask
+        ? storedBrokerPrincipal(status.content)
+        : null;
+    const reviewerIsOwner = brokerOwner === principal || verifiedSubmitter === principal;
+    if (parsed.reviewer_role === "independent" && reviewerIsOwner) {
+      res.status(409).json({
+        error: "policy_rejected",
+        message: "task owner cannot attest that this review is independent",
+      });
+      return;
+    }
+    const independence: "independent" | "self" | "unknown" = parsed.reviewer_role === "independent"
+      ? "independent"
+      : parsed.reviewer_role === "self" || reviewerIsOwner
+        ? "self"
+        : "unknown";
+    const commonReceipt = {
+      taskId: parsed.task_id,
+      reviewerPrincipal: principal,
+      reviewerIndependence: independence,
+      rating: parsed.rating,
+      ratingReason: parsed.rating_reason,
+      verificationOutcome: parsed.verification_outcome,
+      retriesCount: parsed.retries_count,
+      ratedAt: nowFn(deps)().toISOString(),
+      bindingAttestation: expected ? "reviewer-confirmed" as const : "server-bound" as const,
+      binding,
+    };
+    const receipt = buildQualityReceipt(commonReceipt);
+    try {
+      await deps.taskStore.writeQualityReceipt(parsed.task_id, receipt);
+    } catch (err) {
+      res.status(err instanceof QualityReceiptConflictError ? 409 : 500).json({
+        error: err instanceof QualityReceiptConflictError ? "policy_rejected" : "internal",
         message: `feedback write failed: ${err instanceof Error ? err.message : String(err)}`,
       });
       return;
     }
 
     res.status(204).send();
+  };
+}
+
+export function createFrictionHandler(deps: BrokerHandlerDependencies) {
+  return async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    const principal = req.brokerPrincipal;
+    if (!principal) {
+      res.status(500).json({ error: "internal", message: "principal missing" });
+      return;
+    }
+
+    let parsed;
+    try {
+      parsed = brokerFrictionInputSchema.parse(req.body);
+    } catch (err) {
+      respondZodError(res, err);
+      return;
+    }
+
+    try {
+      const result = await deps.taskStore.writeFriction(
+        parsed,
+        principal,
+        nowFn(deps)(),
+      );
+      res.status(201).json(result);
+    } catch (err) {
+      if (err instanceof FrictionIdempotencyConflictError) {
+        res.status(409).json({
+          error: "idempotency_collision",
+          message: err.message,
+        });
+        return;
+      }
+      res.status(500).json({
+        error: "internal",
+        message: "friction write failed",
+      });
+      console.error("[broker] friction write failed:", err);
+    }
   };
 }
 
@@ -504,7 +661,8 @@ export function createListHandler(deps: BrokerHandlerDependencies) {
       if (parsed.alias && (row.alias ?? row.envelope?.alias_requested) !== parsed.alias) return false;
       if (parsed.since_ts) {
         const submittedAt = row.submitted_at ?? "";
-        if (submittedAt < parsed.since_ts) return false;
+        const submittedAtMs = Date.parse(submittedAt);
+        if (!Number.isFinite(submittedAtMs) || submittedAtMs < Date.parse(parsed.since_ts)) return false;
       }
       return true;
     });

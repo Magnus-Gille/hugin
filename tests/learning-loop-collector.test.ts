@@ -2,6 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { LearningLoopCollector } from "../src/learning-loop-collector.js";
 import type { MuninClient } from "../src/munin-client.js";
 import type { Ledger, LedgerClientLike } from "../src/orchestrator/ledger-client.js";
+import { evaluateLearningExperiment } from "../src/learning/experiment-evaluator.js";
+import { makeExperimentInput } from "./fixtures/learning.js";
+import { buildStructuredTaskResult } from "../src/task-result-schema.js";
+import {
+  buildQualityBinding,
+  buildQualityReceipt,
+  foldQualityReceipt,
+} from "../src/quality-receipt.js";
 
 const ENVELOPE = (submitter: string) =>
   `## Task\n\n### Broker envelope\n\`\`\`json\n${JSON.stringify({
@@ -36,6 +44,52 @@ const fakeLedgerClient = (ledger: Ledger | null): LedgerClientLike => ({
 });
 
 describe("LearningLoopCollector", () => {
+  it("collects versioned experiment decisions for the operator panel", async () => {
+    const input = makeExperimentInput();
+    const state = {
+      schemaVersion: 1 as const,
+      experimentId: input.experiment_id,
+      scope: input.scope,
+      taskType: input.task_type,
+      ownerPrincipal: "codex",
+      hypothesis: input.hypothesis,
+      changeAxis: input.change_axis,
+      champion: input.champion,
+      challenger: input.challenger,
+      gates: input.gates,
+      status: "running" as const,
+      revision: 1,
+      createdAt: "2026-07-13T12:00:00.000Z",
+      updatedAt: "2026-07-13T12:00:00.000Z",
+      observations: [],
+      evaluation: evaluateLearningExperiment({ observations: [], gates: input.gates }),
+    };
+    const munin = {
+      query: vi.fn(async (query: { tags?: string[] }) =>
+        query.tags?.includes("learning:experiment")
+          ? {
+              results: [{ namespace: "experiments/hugin/wave-six-abc", key: "state" }],
+              total: 1,
+            }
+          : { results: [], total: 0 },
+      ),
+      read: vi.fn(async (namespace: string, key: string) =>
+        namespace === "experiments/hugin/wave-six-abc" && key === "state"
+          ? { content: JSON.stringify(state), tags: ["learning:experiment"] }
+          : null,
+      ),
+    } as unknown as MuninClient;
+
+    const evidence = await new LearningLoopCollector({
+      munin,
+      ledgerClient: fakeLedgerClient(null),
+    }).refresh();
+
+    expect(evidence.experimentsAvailable).toBe(true);
+    expect(evidence.experiments).toHaveLength(1);
+    expect(evidence.experiments[0]!.experimentId).toBe("wave-six-edit-deadline");
+  });
+
   it("collects rating, durable-handoff and route-policy provenance for a broker task", async () => {
     const munin = fakeMunin({
       "tasks/mcp-m5-1/status": { content: ENVELOPE("claude-code"), tags: ["completed", "broker:mcp-v2"] },
@@ -66,6 +120,94 @@ describe("LearningLoopCollector", () => {
     expect(t.durableHandoff).toBe(true);
     expect(t.delegation?.policyMode).toBe("shadow");
     expect(evidence.ledger).toEqual(okLedger);
+  });
+
+  it("collects only a receipt bound to the current task and structured result", async () => {
+    const statusContent = ENVELOPE("claude-code");
+    const structuredContent = JSON.stringify(buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "mcp-m5-receipt",
+      taskNamespace: "tasks/mcp-m5-receipt",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "homeserver",
+      executor: "homeserver-delegate",
+      resultSource: "homeserver-delegate",
+      exitCode: 0,
+      completedAt: "2026-07-15T10:00:00.000Z",
+      bodyKind: "response",
+      bodyText: "ok",
+      repositoryOutcome: { state: "not-managed" },
+    }));
+    const receipt = buildQualityReceipt({
+      taskId: "mcp-m5-receipt",
+      reviewerPrincipal: "codex-review",
+      reviewerIndependence: "independent",
+      rating: "partial",
+      ratingReason: "Useful but needs an edit.",
+      verificationOutcome: "minor_edit",
+      ratedAt: "2026-07-15T10:05:00.000Z",
+      bindingAttestation: "reviewer-confirmed",
+      binding: buildQualityBinding({ statusContent, structuredResultContent: structuredContent }),
+    });
+    const munin = fakeMunin({
+      "tasks/mcp-m5-receipt/status": { content: statusContent, tags: ["completed"] },
+      "tasks/mcp-m5-receipt/result-structured": { content: structuredContent },
+      "tasks/mcp-m5-receipt/feedback": {
+        content: JSON.stringify(foldQualityReceipt(null, receipt).ledger),
+      },
+    });
+
+    const evidence = await new LearningLoopCollector({
+      munin,
+      ledgerClient: fakeLedgerClient(null),
+    }).refresh();
+    expect(evidence.tasks[0]).toMatchObject({
+      rating: "partial",
+      verificationOutcome: "minor_edit",
+    });
+  });
+
+  it("does not turn conflicting exact-bound reviews into a useful product rating", async () => {
+    const statusContent = ENVELOPE("claude-code");
+    const structuredContent = JSON.stringify(buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "mcp-m5-conflict",
+      taskNamespace: "tasks/mcp-m5-conflict",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "homeserver",
+      executor: "homeserver-delegate",
+      resultSource: "homeserver-delegate",
+      exitCode: 0,
+      completedAt: "2026-07-15T10:00:00.000Z",
+      bodyKind: "response",
+      bodyText: "ok",
+      repositoryOutcome: { state: "not-managed" },
+    }));
+    const binding = buildQualityBinding({ statusContent, structuredResultContent: structuredContent });
+    const accepted = buildQualityReceipt({
+      taskId: "mcp-m5-conflict", reviewerPrincipal: "reviewer-a",
+      reviewerIndependence: "independent", rating: "pass", ratingReason: "accepted",
+      verificationOutcome: "accepted_unchanged", ratedAt: "2026-07-15T10:05:00.000Z",
+      bindingAttestation: "reviewer-confirmed", binding,
+    });
+    const rejected = buildQualityReceipt({
+      taskId: "mcp-m5-conflict", reviewerPrincipal: "reviewer-b",
+      reviewerIndependence: "independent", rating: "wrong", ratingReason: "rejected",
+      verificationOutcome: "discarded", ratedAt: "2026-07-15T10:06:00.000Z",
+      bindingAttestation: "reviewer-confirmed", binding,
+    });
+    const ledger = foldQualityReceipt(foldQualityReceipt(null, accepted).ledger, rejected).ledger;
+    const evidence = await new LearningLoopCollector({
+      munin: fakeMunin({
+        "tasks/mcp-m5-conflict/status": { content: statusContent, tags: ["completed"] },
+        "tasks/mcp-m5-conflict/result-structured": { content: structuredContent },
+        "tasks/mcp-m5-conflict/feedback": { content: JSON.stringify(ledger) },
+      }),
+      ledgerClient: fakeLedgerClient(null),
+    }).refresh();
+    expect(evidence.tasks[0]).toMatchObject({ rating: null, verificationOutcome: null });
   });
 
   // Caught against REAL production data: the one existing broker task predates
@@ -204,8 +346,8 @@ describe("LearningLoopCollector", () => {
     collector.collect();
     collector.collect();
 
-    // Cached reads do no further corpus walks (one walk = two queries).
-    expect(munin.query).toHaveBeenCalledTimes(2);
+    // Cached reads do no further walks (two task queries + one experiment query).
+    expect(munin.query).toHaveBeenCalledTimes(3);
   });
 
   it("coalesces concurrent collections into a single corpus walk", async () => {
@@ -216,8 +358,8 @@ describe("LearningLoopCollector", () => {
 
     await Promise.all([collector.refresh(), collector.refresh(), collector.refresh()]);
 
-    // One corpus walk (two queries), not three.
-    expect(munin.query).toHaveBeenCalledTimes(2);
+    // One collection (two task queries + one experiment query), not three collections.
+    expect(munin.query).toHaveBeenCalledTimes(3);
   });
 
   it("survives a corrupt feedback document without losing the whole task", async () => {

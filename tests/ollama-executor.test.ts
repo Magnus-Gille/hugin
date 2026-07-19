@@ -103,6 +103,22 @@ describe("executeOllamaTask — endpoint selection", () => {
     expect(body.think).toBeUndefined();
   });
 
+  it("forwards an output-token cap to the OpenAI-compatible endpoint", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(sseResponse(["data: [DONE]\n\n"]));
+
+    await executeOllamaTask(
+      makeTaskConfig({ model: "qwen2.5:3b", maxOutputTokens: 192 }),
+      "test-openai-token-cap",
+      tmpLogDir,
+    );
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.max_tokens).toBe(192);
+  });
+
   it("routes reasoning-family models to /api/chat with think:false by default", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
@@ -139,6 +155,26 @@ describe("executeOllamaTask — endpoint selection", () => {
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.think).toBe(false);
     expect(body.stream).toBe(true);
+  });
+
+  it("forwards an output-token cap as num_predict on native chat", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        ndjsonResponse([
+          `${JSON.stringify({ message: { content: "ok" }, done: true })}\n`,
+        ]),
+      );
+
+    await executeOllamaTask(
+      makeTaskConfig({ model: "qwen3:4b", maxOutputTokens: 256 }),
+      "test-native-token-cap",
+      tmpLogDir,
+    );
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.options).toEqual({ num_predict: 256 });
   });
 
   it("honours explicit reasoning:true on any model via /api/chat", async () => {

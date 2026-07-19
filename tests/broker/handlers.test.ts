@@ -9,13 +9,24 @@ import { DelegationJournal } from "../../src/broker/journal.js";
 import { IdempotencyIndex } from "../../src/broker/idempotency.js";
 import { brokerExecutorCapabilities } from "../../src/broker/executor-capabilities.js";
 import type { MuninClient } from "../../src/munin-client.js";
+import { buildStructuredTaskResult } from "../../src/task-result-schema.js";
 
 const SECRET = "a".repeat(64);
 const OTHER_SECRET = "b".repeat(64);
+const UNSAFE_PRINCIPAL_SECRET = "c".repeat(64);
+const SAFE_PRINCIPAL_SECRET = "d".repeat(64);
+const FRICTION_EVENT_ID = "11111111-2222-4333-8444-555555555555";
 
 class FakeMunin {
-  writes: Array<{ namespace: string; key: string; content: string; tags?: string[] }> = [];
+  writes: Array<{
+    namespace: string;
+    key: string;
+    content: string;
+    tags?: string[];
+    classification?: string;
+  }> = [];
   reads: Record<string, unknown> = {};
+  queryCalls = 0;
   queryReturn: { results: unknown[]; total: number } = { results: [], total: 0 };
   async write(
     namespace: string,
@@ -23,20 +34,23 @@ class FakeMunin {
     content: string,
     tags?: string[],
     _expectedUpdatedAt?: string,
-    _classification?: string,
+    classification?: string,
+    createIfAbsent?: boolean,
   ): Promise<Record<string, unknown>> {
-    this.writes.push({ namespace, key, content, tags });
+    this.writes.push({ namespace, key, content, tags, classification });
     this.reads[`${namespace}/${key}`] = {
       namespace, key, content, tags: tags ?? [],
+      classification,
       created_at: "2026-07-11T12:00:00.000Z",
       updated_at: "2026-07-11T12:00:00.000Z",
     };
-    return { ok: true };
+    return { ok: true, status: createIfAbsent ? "created" : "updated" };
   }
   async read(namespace: string, key: string): Promise<unknown> {
     return this.reads[`${namespace}/${key}`] ?? null;
   }
   async query(): Promise<{ results: unknown[]; total: number }> {
+    this.queryCalls += 1;
     return this.queryReturn;
   }
 }
@@ -61,7 +75,12 @@ beforeEach(async () => {
   const broker = await startBroker({
     host: "127.0.0.1",
     port: 0,
-    keys: { "claude-code": SECRET, codex: OTHER_SECRET },
+    keys: {
+      "claude-code": SECRET,
+      codex: OTHER_SECRET,
+      "alice/bob": UNSAFE_PRINCIPAL_SECRET,
+      alice_bob: SAFE_PRINCIPAL_SECRET,
+    },
     deps: {
       taskStore,
       journal,
@@ -101,6 +120,24 @@ function otherAuthHeader(): Record<string, string> {
 
 function historicalBrokerStatus(principal = "claude-code"): string {
   return JSON.stringify({ broker_principal: principal });
+}
+
+function structuredTaskResultContent(taskId: string): string {
+  return JSON.stringify(buildStructuredTaskResult({
+    schemaVersion: 1,
+    taskId,
+    taskNamespace: `tasks/${taskId}`,
+    lifecycle: "completed",
+    outcome: "completed",
+    runtime: "homeserver",
+    executor: "homeserver-delegate",
+    resultSource: "homeserver-delegate",
+    exitCode: 0,
+    completedAt: "2026-07-15T10:00:00.000Z",
+    bodyKind: "response",
+    bodyText: "ok",
+    repositoryOutcome: { state: "not-managed" },
+  }));
 }
 
 function validRequest(overrides: Record<string, unknown> = {}) {
@@ -785,6 +822,12 @@ describe("POST /v1/delegate/rate", () => {
       created_at: "ts",
       updated_at: "ts",
     };
+    harness.munin.reads["tasks/t1/result-structured"] = {
+      content: JSON.stringify({ task_id: "t1", result_schema_version: 1, response: "ok" }),
+      tags: ["type:task-result-structured"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
     const res = await fetch(`${harness.url}/v1/delegate/rate`, {
       method: "POST",
       headers: authHeader(),
@@ -798,10 +841,244 @@ describe("POST /v1/delegate/rate", () => {
     expect(res.status).toBe(204);
     expect(harness.munin.writes.at(-1)?.key).toBe("feedback");
     expect(JSON.parse(harness.munin.writes.at(-1)!.content)).toMatchObject({
-      task_id: "t1",
-      rating: "pass",
-      rated_by: "claude-code",
+      schemaVersion: 1,
+      taskId: "t1",
+      receipts: [{
+        rating: "pass",
+        reviewer: { principal: "claude-code", independence: "self" },
+      }],
     });
+  });
+
+  it("rates an ordinary terminal Hugin task and rejects a stale reviewed binding", async () => {
+    harness.munin.reads["tasks/general-1/status"] = {
+      content: "## Task: general\n\n### Prompt\nFix it.",
+      tags: ["completed", "runtime:codex"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    harness.munin.reads["tasks/general-1/result-structured"] = {
+      content: structuredTaskResultContent("general-1"),
+      tags: ["type:task-result-structured"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    const stale = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        task_id: "general-1",
+        rating: "pass",
+        rating_reason: "reviewed exact result",
+        verification_outcome: "accepted_unchanged",
+        reviewer_role: "independent",
+        expected_binding: {
+          task_document_sha256: "a".repeat(64),
+          structured_result_sha256: "b".repeat(64),
+        },
+      }),
+    });
+    expect(stale.status).toBe(409);
+
+    const accepted = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        task_id: "general-1",
+        rating: "pass",
+        rating_reason: "reviewed current server-bound result",
+        verification_outcome: "accepted_unchanged",
+        reviewer_role: "independent",
+      }),
+    });
+    expect(accepted.status).toBe(204);
+    expect(JSON.parse(harness.munin.writes.at(-1)!.content).receipts[0]).toMatchObject({
+      reviewer: { principal: "claude-code", independence: "independent" },
+      bindingAttestation: "server-bound",
+    });
+  });
+
+  it("makes an identical rating retry idempotent and rejects a changed verdict", async () => {
+    harness.munin.reads["tasks/general-retry/status"] = {
+      content: "## Task: retry\n\n### Prompt\nFix it.",
+      tags: ["completed", "runtime:codex"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    harness.munin.reads["tasks/general-retry/result-structured"] = {
+      content: structuredTaskResultContent("general-retry"),
+      tags: ["type:task-result-structured"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    const payload = {
+      task_id: "general-retry",
+      rating: "pass",
+      rating_reason: "exact result accepted",
+      verification_outcome: "accepted_unchanged",
+      reviewer_role: "independent",
+    };
+    for (let index = 0; index < 2; index += 1) {
+      const response = await fetch(`${harness.url}/v1/delegate/rate`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(payload),
+      });
+      expect(response.status).toBe(204);
+    }
+    expect(harness.munin.writes.filter((write) => write.key === "feedback")).toHaveLength(1);
+
+    const conflict = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        ...payload,
+        rating: "wrong",
+        rating_reason: "changed verdict",
+        verification_outcome: "discarded",
+      }),
+    });
+    expect(conflict.status).toBe(409);
+    expect(harness.munin.writes.filter((write) => write.key === "feedback")).toHaveLength(1);
+  });
+
+  it("fails closed instead of fabricating a task id as native-v2 attempt identity", async () => {
+    harness.munin.reads["tasks/general-correction/status"] = {
+      content: "## Task: correction\n\n### Prompt\nFix it.",
+      tags: ["completed", "runtime:codex"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    harness.munin.reads["tasks/general-correction/result-structured"] = {
+      content: structuredTaskResultContent("general-correction"),
+      tags: ["type:task-result-structured"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    const initial = {
+      task_id: "general-correction",
+      rating: "pass",
+      rating_reason: "Initially accepted.",
+      verification_outcome: "accepted_unchanged",
+      reviewer_role: "independent",
+    };
+    expect((await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(initial),
+    })).status).toBe(204);
+    const firstLedger = JSON.parse(harness.munin.writes.at(-1)!.content);
+    const predecessor = firstLedger.receipts[0];
+    // Make the immutable lineage clock deterministic rather than relying on
+    // two loopback HTTP requests landing in different milliseconds.
+    predecessor.ratedAt = "2026-07-18T10:00:00.000Z";
+    (harness.munin.reads["tasks/general-correction/feedback"] as { content: string }).content =
+      JSON.stringify(firstLedger);
+
+    const correctionPayload = {
+      ...initial,
+      rating: "wrong",
+      rating_reason: "Unicode regression remained.",
+      verification_outcome: "discarded",
+      correction: {
+        predecessor_receipt_id: predecessor.receiptId,
+        rubric: {
+          id: "code-review",
+          version: "2.1.0",
+          config_digest: {
+            algorithm: "sha256",
+            canonicalization: "jcs-rfc8785-utf8-v1",
+            source_ref: "source-doc:rubric/code-review-2.1.0",
+            source_type: "rubric-config",
+            source_version: "rubric-source-2.1.0",
+            digest: "d".repeat(64),
+          },
+        },
+        verifier: { id: "claude-opus", version: "2026-07-19" },
+        failure: {
+          taxonomy: { id: "hugin-quality-failure", version: "1" },
+          code: "incorrect-answer",
+        },
+        producing_configuration: {
+          harness: { id: "codex", version: "1", sha256: "e".repeat(64) },
+          model: { id: "gpt-5", configuration_sha256: "f".repeat(64) },
+        },
+        references: {
+          corrected_successor: {
+            task_id: "general-correction-fix",
+            structured_result_sha256: "1".repeat(64),
+          },
+          pull_request_url: "https://github.com/Magnus-Gille/demo/pull/2",
+          replacement_commit: "2".repeat(40),
+        },
+      },
+    };
+    const correctionResponse = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(correctionPayload),
+    });
+    expect(correctionResponse.status).toBe(409);
+    expect(await correctionResponse.json()).toMatchObject({
+      error: "policy_rejected",
+      message: expect.stringContaining("authoritative execution attempt"),
+    });
+    expect(harness.munin.writes.filter((write) => write.key === "feedback")).toHaveLength(1);
+    expect(JSON.parse(
+      (harness.munin.reads["tasks/general-correction/feedback"] as { content: string }).content,
+    )).toEqual(firstLedger);
+  });
+
+  it("enforces failure code none iff a v2 correction is accepted unchanged", async () => {
+    const correction = {
+      predecessor_receipt_id: "qr-" + "a".repeat(24),
+      rubric: {
+        id: "code-review",
+        version: "2",
+        config_digest: {
+          algorithm: "sha256",
+          canonicalization: "jcs-rfc8785-utf8-v1",
+          source_ref: "source-doc:rubric/code-review-2",
+          source_type: "rubric-config",
+          source_version: "rubric-source-2",
+          digest: "b".repeat(64),
+        },
+      },
+      verifier: { id: "claude-opus", version: "2026-07-19" },
+      failure: {
+        taxonomy: { id: "hugin-quality-failure", version: "1" },
+        code: "none",
+      },
+    };
+    const missingFailure = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        task_id: "missing-is-not-reached",
+        rating: "wrong",
+        rating_reason: "Bad output.",
+        verification_outcome: "discarded",
+        correction,
+      }),
+    });
+
+    expect(missingFailure.status).toBe(400);
+    const contradictoryFailure = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        task_id: "missing-is-not-reached",
+        rating: "pass",
+        rating_reason: "Accepted output.",
+        verification_outcome: "accepted_unchanged",
+        correction: {
+          ...correction,
+          failure: { ...correction.failure, code: "verification-failure" },
+        },
+      }),
+    });
+    expect(contradictoryFailure.status).toBe(400);
+    expect(harness.munin.writes).toHaveLength(0);
   });
 
   it("returns 404 if task not found", async () => {
@@ -852,7 +1129,370 @@ describe("POST /v1/delegate/rate", () => {
   });
 });
 
+describe("POST /v1/friction/report", () => {
+  it("writes a shared friction event with authenticated reporter provenance", async () => {
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "tool_failure",
+        severity: "blocking",
+        summary: "Codex sandbox could not start",
+        detail: "The systemd address-family allowlist omitted AF_NETLINK.",
+        event_id: FRICTION_EVENT_ID,
+        task_id: "cassette/task-1",
+        model_id: "gpt-5.4-codex",
+        tool_name: "codex-exec",
+        tags: [
+          "reporter:spoofed",
+          "source:standalone-mcp",
+          "Severity:low",
+          "model:spoofed",
+          "friction:ambiguity",
+          "task:spoofed",
+          "tool:spoofed",
+          "classification:public",
+          "repo:cassette-ai",
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const response = await res.json() as Record<string, unknown>;
+    expect(response).toMatchObject({
+      ok: true,
+      dropped: false,
+      deduplicated: false,
+      namespace: "signals/friction",
+    });
+    const write = harness.munin.writes.at(-1)!;
+    expect(write.namespace).toBe("signals/friction");
+    expect(write.classification).toBe("internal");
+    expect(write.key).toMatch(/^friction-broker-[0-9a-f]{32}$/);
+    expect(write.tags).toEqual(expect.arrayContaining([
+      "friction:tool_failure",
+      "severity:blocking",
+      "model:gpt-5.4-codex",
+      "source:broker-api",
+      "reporter:claude-code",
+      "task:cassette_task-1",
+      "repo:cassette-ai",
+    ]));
+    expect(write.tags).not.toContain("reporter:spoofed");
+    expect(write.tags).not.toContain("reporter:gpt-5.4-codex");
+    expect(write.tags).not.toContain("source:standalone-mcp");
+    expect(write.tags).not.toContain("source:model-self-report");
+    expect(write.tags).not.toContain("Severity:low");
+    expect(write.tags).not.toContain("model:spoofed");
+    expect(write.tags).not.toContain("friction:ambiguity");
+    expect(write.tags).not.toContain("task:spoofed");
+    expect(write.tags).not.toContain("tool:spoofed");
+    expect(write.tags).not.toContain("classification:public");
+    expect(JSON.parse(write.content)).toMatchObject({
+      model_id: "gpt-5.4-codex",
+      event_id: FRICTION_EVENT_ID,
+      task_id_resolved: "cassette_task-1",
+      friction_type: "tool_failure",
+      user_tags: ["repo:cassette-ai"],
+    });
+  });
+
+  it("inherits the restricted classification of a linked private task", async () => {
+    harness.munin.reads["tasks/private-task/status"] = {
+      namespace: "tasks/private-task",
+      key: "status",
+      content: "private task",
+      tags: ["running"],
+      classification: "client-restricted",
+      created_at: "2026-07-11T12:00:00.000Z",
+      updated_at: "2026-07-11T12:00:00.000Z",
+    };
+
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "tool_failure",
+        severity: "high",
+        summary: "private task tool failed",
+        detail: "Only operational metadata is included.",
+        event_id: "44444444-5555-4666-8777-888888888888",
+        task_id: "private-task",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(harness.munin.writes.at(-1)?.classification).toBe("client-restricted");
+  });
+
+  it("maps a linked private task to client-confidential friction", async () => {
+    harness.munin.reads["tasks/confidential-task/status"] = {
+      namespace: "tasks/confidential-task",
+      key: "status",
+      content: "private task",
+      tags: ["completed"],
+      classification: "private",
+      created_at: "2026-07-11T12:00:00.000Z",
+      updated_at: "2026-07-11T12:00:00.000Z",
+    };
+
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "tool_failure",
+        severity: "high",
+        summary: "confidential task tool failed",
+        detail: "Only operational metadata is included.",
+        event_id: "77777777-8888-4999-8aaa-bbbbbbbbbbbb",
+        task_id: "confidential-task",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(harness.munin.writes.at(-1)?.classification).toBe("client-confidential");
+  });
+
+  it("deduplicates an identical authenticated retry onto one Munin event", async () => {
+    const body = JSON.stringify({
+      friction_type: "connectivity",
+      severity: "medium",
+      summary: "M5 connection reset",
+      detail: "The first response was ambiguous after the request was sent.",
+      event_id: "22222222-3333-4444-8555-666666666666",
+      task_id: "task-1",
+      tags: ["repo:hugin", "phase:dogfood"],
+    });
+
+    const first = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body,
+    });
+    const second = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        ...JSON.parse(body) as Record<string, unknown>,
+        tags: ["phase:dogfood", "repo:hugin"],
+      }),
+    });
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    const firstResult = await first.json() as Record<string, unknown>;
+    const secondResult = await second.json() as Record<string, unknown>;
+    expect(firstResult).toMatchObject({ deduplicated: false });
+    expect(secondResult).toMatchObject({
+      deduplicated: true,
+      key: firstResult.key,
+    });
+    expect(harness.munin.writes.filter(
+      (write) => write.namespace === "signals/friction" && write.key === firstResult.key,
+    )).toHaveLength(1);
+  });
+
+  it("serializes overlapping identical and conflicting event retries", async () => {
+    const eventId = "88888888-9999-4aaa-8bbb-cccccccccccc";
+    const event = {
+      friction_type: "connectivity",
+      severity: "high",
+      summary: "overlapping retry",
+      detail: "original evidence",
+      event_id: eventId,
+      task_id: "task-overlap",
+    };
+    const originalWrite = harness.munin.write.bind(harness.munin);
+    let releaseWrite = (): void => {};
+    let markStarted = (): void => {};
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const writeStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+    let blocked = false;
+    const spy = vi.spyOn(harness.munin, "write").mockImplementation(async (
+      namespace,
+      key,
+      content,
+      tags,
+      expectedUpdatedAt,
+      classification,
+    ) => {
+      if (namespace === "signals/friction" && !blocked) {
+        blocked = true;
+        markStarted();
+        await writeGate;
+      }
+      return originalWrite(
+        namespace,
+        key,
+        content,
+        tags,
+        expectedUpdatedAt,
+        classification,
+      );
+    });
+
+    try {
+      const firstPromise = fetch(`${harness.url}/v1/friction/report`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(event),
+      });
+      await writeStarted;
+      const retryPromise = fetch(`${harness.url}/v1/friction/report`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(event),
+      });
+      const conflictPromise = fetch(`${harness.url}/v1/friction/report`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify({ ...event, detail: "conflicting evidence" }),
+      });
+      releaseWrite();
+
+      const [first, retry, conflict] = await Promise.all([
+        firstPromise,
+        retryPromise,
+        conflictPromise,
+      ]);
+      expect(first.status).toBe(201);
+      expect(retry.status).toBe(201);
+      expect(await retry.json()).toMatchObject({ deduplicated: true });
+      expect(conflict.status).toBe(409);
+      expect(await conflict.json()).toMatchObject({ error: "idempotency_collision" });
+      expect(harness.munin.writes.filter(
+        (write) => write.namespace === "signals/friction",
+      )).toHaveLength(1);
+    } finally {
+      releaseWrite();
+      spy.mockRestore();
+    }
+  });
+
+  it("rejects reuse of an event identity with different evidence", async () => {
+    const eventId = "33333333-4444-4555-8666-777777777777";
+    const original = {
+      friction_type: "tool_failure",
+      severity: "high",
+      summary: "tool failed",
+      detail: "first evidence",
+      event_id: eventId,
+      task_id: "task-2",
+    };
+    const first = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(original),
+    });
+    const collision = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        ...original,
+        detail: "conflicting evidence",
+        task_id: "changed-task-id",
+      }),
+    });
+
+    expect(first.status).toBe(201);
+    expect(collision.status).toBe(409);
+    expect(await collision.json()).toMatchObject({ error: "idempotency_collision" });
+    expect(harness.munin.writes.filter(
+      (write) => write.namespace === "signals/friction",
+    )).toHaveLength(1);
+  });
+
+  it("requires an event identity on the authenticated API", async () => {
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "ambiguity",
+        severity: "low",
+        summary: "unclear wording",
+        detail: "needed an assumption",
+      }),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("keeps colliding readable principal names in distinct provenance keyspaces", async () => {
+    const body = JSON.stringify({
+      friction_type: "ambiguity",
+      severity: "low",
+      summary: "same event id",
+      detail: "reported by two authenticated principals",
+      event_id: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+    });
+    const postAs = (token: string) => fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      body,
+    });
+
+    const unsafe = await postAs(UNSAFE_PRINCIPAL_SECRET);
+    const safe = await postAs(SAFE_PRINCIPAL_SECRET);
+    expect(unsafe.status).toBe(201);
+    expect(safe.status).toBe(201);
+    const [unsafeWrite, safeWrite] = harness.munin.writes.filter(
+      (write) => write.namespace === "signals/friction",
+    );
+    expect(unsafeWrite?.key).not.toBe(safeWrite?.key);
+    expect(unsafeWrite?.tags).toContainEqual(expect.stringMatching(
+      /^reporter:alice_bob-[0-9a-f]{16}$/,
+    ));
+    expect(safeWrite?.tags).toContain("reporter:alice_bob");
+  });
+
+  it("rejects unknown authenticated API fields instead of silently dropping them", async () => {
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "ambiguity",
+        severity: "low",
+        summary: "unclear wording",
+        detail: "needed an assumption",
+        event_id: "55555555-6666-4777-8888-999999999999",
+        severty: "high",
+      }),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects malformed friction without writing", async () => {
+    const writesBefore = harness.munin.writes.length;
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "made_up",
+        severity: "blocking",
+        summary: "bad",
+        detail: "bad",
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(harness.munin.writes).toHaveLength(writesBefore);
+  });
+});
+
 describe("GET /v1/delegate/list", () => {
+  it("rejects a malformed since_ts instead of applying inconsistent time filters", async () => {
+    const res = await fetch(
+      `${harness.url}/v1/delegate/list?since_ts=not-a-timestamp`,
+      { headers: { authorization: `Bearer ${SECRET}` } },
+    );
+
+    expect(res.status).toBe(400);
+    expect(harness.munin.queryCalls).toBe(0);
+  });
+
   it("returns empty rows when journal is empty", async () => {
     const res = await fetch(`${harness.url}/v1/delegate/list`, {
       headers: { authorization: `Bearer ${SECRET}` },
@@ -992,6 +1632,12 @@ describe("GET /v1/delegate/list", () => {
     };
     // Mark it terminal so hugin_rate is allowed to write feedback.
     harness.munin.reads[`tasks/${task_id}/status`] = { ...statusEntry, tags: ["completed"] };
+    harness.munin.reads[`tasks/${task_id}/result-structured`] = {
+      content: structuredTaskResultContent(task_id),
+      tags: ["type:task-result-structured"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
 
     const rate = await fetch(`${harness.url}/v1/delegate/rate`, {
       method: "POST",

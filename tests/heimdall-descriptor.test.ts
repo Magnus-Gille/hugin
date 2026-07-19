@@ -64,10 +64,11 @@ describe("HEIMDALL_DESCRIPTOR", () => {
       kind: "http-service",
       status: "pass",
       links: {
-        self: "/heimdall.json",
-        health: "/health",
         repo: "https://github.com/Magnus-Gille/hugin",
       },
+    });
+    expect(HEIMDALL_DESCRIPTOR.links).toEqual({
+      repo: "https://github.com/Magnus-Gille/hugin",
     });
   });
 });

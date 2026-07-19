@@ -9,6 +9,7 @@ import {
   BrokerNetworkError,
   type BrokerClient,
 } from "../../src/mcp/broker-client.js";
+import { makeExperimentInput, makeObservation } from "../fixtures/learning.js";
 
 function fakeBroker(overrides: Partial<BrokerClient> = {}): BrokerClient {
   const noop = vi.fn(async () => ({}));
@@ -16,8 +17,14 @@ function fakeBroker(overrides: Partial<BrokerClient> = {}): BrokerClient {
     submit: noop,
     await_: noop,
     rate: noop,
+    reportFriction: noop,
     list: noop,
     models: noop,
+    experimentCreate: noop,
+    experimentObserve: noop,
+    experimentRate: noop,
+    experimentStatus: noop,
+    experimentPromote: noop,
     ...overrides,
   } as unknown as BrokerClient;
 }
@@ -398,6 +405,87 @@ describe("buildTools — hugin_rate", () => {
       verification_outcome: "accepted_unchanged",
     });
   });
+
+  it("forwards native v2 correction provenance", async () => {
+    const rate = vi.fn(async () => ({}));
+    const broker = fakeBroker({ rate });
+    const tools = buildTools({ broker, sessionId: "sess", submitter: "claude-code" });
+    const correction = {
+      predecessor_receipt_id: "qr-" + "a".repeat(24),
+      rubric: {
+        id: "code-review",
+        version: "2",
+        config_digest: {
+          algorithm: "sha256" as const,
+          canonicalization: "jcs-rfc8785-utf8-v1" as const,
+          source_ref: "source-doc:rubric/code-review-2",
+          source_type: "rubric-config" as const,
+          source_version: "rubric-source-2",
+          digest: "b".repeat(64),
+        },
+      },
+      verifier: { id: "claude-opus", version: "2026-07-19" },
+      failure: {
+        taxonomy: { id: "hugin-quality-failure", version: "1" },
+        code: "incorrect-answer" as const,
+      },
+      references: {
+        corrected_successor: {
+          task_id: "t-2",
+          structured_result_sha256: "c".repeat(64),
+        },
+      },
+    };
+
+    const result = await tools.rate.handler({
+      task_id: "t-1",
+      rating: "wrong",
+      rating_reason: "The correction is required.",
+      verification_outcome: "discarded",
+      correction,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(rate).toHaveBeenCalledWith(expect.objectContaining({ correction }));
+  });
+});
+
+describe("buildTools — hugin_report_friction", () => {
+  it("validates and forwards the shared friction payload", async () => {
+    const reportFriction = vi.fn(async () => ({
+      ok: true,
+      dropped: false,
+      namespace: "signals/friction",
+      key: "t-1-stamp",
+    }));
+    const broker = fakeBroker({ reportFriction });
+    const tools = buildTools({ broker, sessionId: "sess", submitter: "codex" });
+
+    const result = await tools.friction.handler({
+      friction_type: "tool_failure",
+      severity: "blocking",
+      summary: "bubblewrap could not start",
+      detail: "AF_NETLINK was blocked by the outer service sandbox",
+      task_id: "t-1",
+      tool_name: "codex-exec",
+      tags: ["repo:cassette-ai"],
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(reportFriction).toHaveBeenCalledWith({
+      friction_type: "tool_failure",
+      severity: "blocking",
+      summary: "bubblewrap could not start",
+      detail: "AF_NETLINK was blocked by the outer service sandbox",
+      task_id: "t-1",
+      tool_name: "codex-exec",
+      tags: ["repo:cassette-ai"],
+    });
+    expect(parseResult(result)).toMatchObject({
+      ok: true,
+      namespace: "signals/friction",
+    });
+  });
 });
 
 describe("buildTools — hugin_list", () => {
@@ -426,5 +514,83 @@ describe("buildTools — hugin_models", () => {
       alias_map: { tiny: "ollama-pi" },
       runtimes: [],
     });
+  });
+});
+
+describe("buildTools — continuous learning loop", () => {
+  it("forwards a validated one-axis experiment contract", async () => {
+    const experimentCreate = vi.fn(async () => ({ state: { status: "running" } }));
+    const tools = buildTools({
+      broker: fakeBroker({ experimentCreate }),
+      sessionId: "sess",
+      submitter: "codex",
+    });
+    const input = makeExperimentInput();
+
+    const result = await tools.experimentCreate.handler(input);
+
+    expect(result.isError).toBeUndefined();
+    expect(experimentCreate).toHaveBeenCalledWith(input);
+  });
+
+  it("forwards observations and reads the resulting promotion state", async () => {
+    const experimentObserve = vi.fn(async () => ({ state: { status: "running" } }));
+    const experimentStatus = vi.fn(async () => ({ state: { status: "promotion-ready" } }));
+    const tools = buildTools({
+      broker: fakeBroker({ experimentObserve, experimentStatus }),
+      sessionId: "sess",
+      submitter: "codex",
+    });
+    const observation = makeObservation("case-1", "challenger");
+
+    await tools.experimentObserve.handler(observation);
+    const status = await tools.experimentStatus.handler({
+      experiment_id: "wave-six-edit-deadline",
+    });
+
+    expect(experimentObserve).toHaveBeenCalledWith(observation);
+    expect(experimentStatus).toHaveBeenCalledWith({
+      experiment_id: "wave-six-edit-deadline",
+    });
+    expect(parseResult(status)).toMatchObject({ state: { status: "promotion-ready" } });
+  });
+
+  it("forwards one-way product rating enrichment", async () => {
+    const experimentRate = vi.fn(async () => ({ state: { status: "running" } }));
+    const tools = buildTools({
+      broker: fakeBroker({ experimentRate }),
+      sessionId: "sess",
+      submitter: "codex",
+    });
+    const input = {
+      experiment_id: "wave-six-edit-deadline",
+      run_id: "case-1-champion",
+      product_outcome: "minor-edit" as const,
+      human_review_seconds: 30,
+    };
+
+    const result = await tools.experimentRate.handler(input);
+
+    expect(result.isError).toBeUndefined();
+    expect(experimentRate).toHaveBeenCalledWith(input);
+  });
+
+  it("forwards an explicit reviewed promotion reference", async () => {
+    const experimentPromote = vi.fn(async () => ({ state: { status: "promoted" } }));
+    const tools = buildTools({
+      broker: fakeBroker({ experimentPromote }),
+      sessionId: "sess",
+      submitter: "codex",
+    });
+    const input = {
+      experiment_id: "wave-six-edit-deadline",
+      configuration_fingerprint: "b".repeat(64),
+      applied_ref: "gille-inference@abc123",
+    };
+
+    const result = await tools.experimentPromote.handler(input);
+
+    expect(result.isError).toBeUndefined();
+    expect(experimentPromote).toHaveBeenCalledWith(input);
   });
 });

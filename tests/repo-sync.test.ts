@@ -10,6 +10,7 @@ let spawnBehaviors: Array<{
   stderr?: string;
 }> = [];
 let spawnCallIndex = 0;
+let autoResolveMain = true;
 
 class MockChildProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -18,10 +19,19 @@ class MockChildProcess extends EventEmitter {
 
 vi.mock("node:child_process", () => ({
   spawn: (cmd: string, args: string[], opts: Record<string, unknown>) => {
-    spawnCalls.push({ cmd, args, opts });
     const child = new MockChildProcess();
-    const behavior = spawnBehaviors[spawnCallIndex] ?? { exitCode: 0 };
-    spawnCallIndex++;
+    const autoBehavior = autoResolveMain && cmd === "git"
+      ? args[0] === "symbolic-ref"
+        ? { exitCode: 0, stdout: "origin/main\n" }
+        : args[0] === "rev-parse" && args.includes("refs/remotes/origin/main^{commit}")
+          ? { exitCode: 0, stdout: `${"a".repeat(40)}\n` }
+          : null
+      : null;
+    const behavior = autoBehavior ?? spawnBehaviors[spawnCallIndex] ?? { exitCode: 0 };
+    if (!autoBehavior) {
+      spawnCalls.push({ cmd, args, opts });
+      spawnCallIndex++;
+    }
 
     // Emit stdout/stderr and close asynchronously
     setImmediate(() => {
@@ -39,19 +49,46 @@ vi.mock("node:child_process", () => ({
 }));
 
 // Import after mocking
-const { checkoutTaskBranch, finalizeTaskBranch } = await import("../src/task-helpers.js");
+const {
+  checkoutTaskBranch,
+  deriveRepositoryOutcome,
+  finalizeTaskBranch,
+  isValidBaseBranchName,
+  parseBaseBranchOverride,
+} = await import("../src/task-helpers.js");
 
 beforeEach(() => {
   spawnCalls.length = 0;
   spawnBehaviors = [];
   spawnCallIndex = 0;
+  autoResolveMain = true;
+});
+
+describe("deriveRepositoryOutcome", () => {
+  const managed = {
+    action: "created" as const,
+    branchName: "hugin/t1",
+    baseBranch: "master",
+    baseCommit: "a".repeat(40),
+  };
+
+  it("distinguishes managed no-op, changes, and publication failure", () => {
+    expect(deriveRepositoryOutcome(managed, "no-changes").state).toBe("no-changes");
+    expect(deriveRepositoryOutcome(managed, "pr-created").state).toBe("changes-present");
+    expect(deriveRepositoryOutcome(managed, "push-failed").state).toBe("publication-failed");
+  });
+
+  it("fails closed when a created branch lacks pinned base evidence", () => {
+    expect(deriveRepositoryOutcome({ action: "created", branchName: "hugin/t2" }, "no-changes"))
+      .toEqual({ state: "not-finalized" });
+  });
 });
 
 // Sequences for checkoutTaskBranch:
 //   1. git rev-parse --git-dir
 //   2. git remote get-url origin
 //   3. git fetch origin  (+ retries)
-//   4. git checkout -b hugin/<taskId> origin/main
+//   4+. resolve + verify the base, then git checkout -b hugin/<taskId> origin/<base>
 
 describe("checkoutTaskBranch", () => {
   it("skips directories outside /home/magnus/repos/", async () => {
@@ -101,6 +138,31 @@ describe("checkoutTaskBranch", () => {
     expect(spawnCalls).toHaveLength(4);
     const checkoutCall = spawnCalls[3];
     expect(checkoutCall.args).toEqual(["checkout", "-b", "hugin/task-123", "origin/main"]);
+  });
+
+  it("pins origin/main before checkout when repository evidence is requested", async () => {
+    const base = "a".repeat(40);
+    spawnBehaviors = [
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 0, stdout: `${base}\n` },
+      { exitCode: 0 },
+    ];
+    const result = await checkoutTaskBranch(
+      "/home/magnus/repos/grimnir",
+      "task-pinned",
+      { fetchRetryDelaysMs: [0, 0], captureBaseCommit: true },
+    );
+    expect(result).toEqual({
+      action: "created",
+      branchName: "hugin/task-pinned",
+      baseBranch: "main",
+      baseCommit: base,
+    });
+    expect(spawnCalls[3].args).toEqual([
+      "checkout", "-b", "hugin/task-pinned", "origin/main",
+    ]);
   });
 
   it("honors a configured reposRoot: treats it as managed (#139)", async () => {
@@ -241,11 +303,128 @@ describe("checkoutTaskBranch", () => {
       expect(call.opts.cwd).toBe(dir);
     }
   });
+
+  it("resolves origin/HEAD and works when the repository has master but no main", async () => {
+    autoResolveMain = false;
+    const base = "b".repeat(40);
+    spawnBehaviors = [
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 0, stdout: "origin/master\n" },
+      { exitCode: 0, stdout: `${base}\n` },
+      { exitCode: 0 },
+    ];
+
+    const result = await checkoutTaskBranch(
+      "/home/magnus/repos/cassette-ai",
+      "task-master",
+      { fetchRetryDelaysMs: [0, 0], captureBaseCommit: true },
+    );
+
+    expect(result).toEqual({
+      action: "created",
+      branchName: "hugin/task-master",
+      baseBranch: "master",
+      baseCommit: base,
+    });
+    expect(spawnCalls[3].args).toEqual([
+      "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD",
+    ]);
+    expect(spawnCalls[4].args).toEqual([
+      "rev-parse", "--verify", "refs/remotes/origin/master^{commit}",
+    ]);
+    expect(spawnCalls[5].args).toEqual([
+      "checkout", "-b", "hugin/task-master", "origin/master",
+    ]);
+    expect(spawnCalls.flatMap((call) => call.args)).not.toContain("origin/main");
+  });
+
+  it("falls back to the remote HEAD symref when origin/HEAD is stale", async () => {
+    autoResolveMain = false;
+    const base = "c".repeat(40);
+    spawnBehaviors = [
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 0, stdout: "origin/main\n" },
+      { exitCode: 128, stderr: "unknown revision" },
+      { exitCode: 0, stdout: "ref: refs/heads/master\tHEAD\n" },
+      { exitCode: 0, stdout: `${base}\n` },
+      { exitCode: 0 },
+    ];
+
+    const result = await checkoutTaskBranch(
+      "/home/magnus/repos/cassette-ai",
+      "task-remote-head",
+      { fetchRetryDelaysMs: [0, 0], captureBaseCommit: true },
+    );
+
+    expect(result.baseBranch).toBe("master");
+    expect(result.baseCommit).toBe(base);
+    expect(spawnCalls[5].args).toEqual([
+      "ls-remote", "--symref", "origin", "HEAD",
+    ]);
+    expect(spawnCalls[7].args.at(-1)).toBe("origin/master");
+  });
+
+  it("uses a validated override with an existing ref when fetch is unavailable", async () => {
+    autoResolveMain = false;
+    const base = "d".repeat(40);
+    spawnBehaviors = [
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 128, stderr: "offline" },
+      { exitCode: 128, stderr: "offline" },
+      { exitCode: 128, stderr: "offline" },
+      { exitCode: 0, stdout: `${base}\n` },
+      { exitCode: 0 },
+    ];
+
+    const result = await checkoutTaskBranch(
+      "/home/magnus/repos/cassette-ai",
+      "task-explicit",
+      {
+        fetchRetryDelaysMs: [0, 0],
+        captureBaseCommit: true,
+        baseBranchOverride: "release/stable",
+      },
+    );
+
+    expect(result).toMatchObject({
+      action: "created",
+      baseBranch: "release/stable",
+      baseCommit: base,
+    });
+    expect(spawnCalls[5].args).toEqual([
+      "rev-parse", "--verify", "refs/remotes/origin/release/stable^{commit}",
+    ]);
+    expect(spawnCalls[6].args.at(-1)).toBe("origin/release/stable");
+  });
+
+  it("validates Base branch task overrides before Git execution", async () => {
+    expect(parseBaseBranchOverride("- **Base branch:** release/stable")).toEqual({
+      baseBranch: "release/stable",
+    });
+    expect(parseBaseBranchOverride("- **Base branch:** origin/main").error).toContain(
+      "invalid Base branch",
+    );
+    expect(parseBaseBranchOverride(`## Task\n### Prompt\nDiscuss **Base branch:** evil`)).toEqual({});
+    expect(isValidBaseBranchName("main; touch owned")).toBe(false);
+
+    const result = await checkoutTaskBranch(
+      "/home/magnus/repos/demo",
+      "task-invalid",
+      { baseBranchOverride: "../main" },
+    );
+    expect(result.action).toBe("fetch-failed");
+    expect(spawnCalls).toHaveLength(0);
+  });
 });
 
 // Sequences for finalizeTaskBranch (happy path — commits exist):
 //   1. git status --porcelain  (dirty check)
-//   2. git rev-list --count origin/main..HEAD
+//   2. git rev-list --count <pinned-base>..HEAD
 //   3. git remote get-url --push origin
 //   4. git push -u origin <branch>
 //   5. gh pr create ...
@@ -254,6 +433,7 @@ describe("finalizeTaskBranch", () => {
   const allowedHosts = ["github.com"];
 
   it("returns no-changes and cleans up when no commits and clean tree", async () => {
+    const base = "e".repeat(40);
     spawnBehaviors = [
       { exitCode: 0, stdout: "" },  // git status --porcelain: clean
       { exitCode: 0, stdout: "0\n" }, // git rev-list: 0 ahead
@@ -265,9 +445,32 @@ describe("finalizeTaskBranch", () => {
       "hugin/task-123",
       "pr body",
       allowedHosts,
+      { baseBranch: "master", baseCommit: base },
     );
     expect(result.action).toBe("no-changes");
-    expect(spawnCalls[1].args).toContain("origin/main..HEAD");
+    expect(spawnCalls[1].args).toContain(`${base}..HEAD`);
+    expect(spawnCalls[2].args).toEqual(["checkout", "--detach", base]);
+  });
+
+  it("preserves the task branch when comparison with the pinned base fails", async () => {
+    const base = "f".repeat(40);
+    spawnBehaviors = [
+      { exitCode: 0, stdout: "" },
+      { exitCode: 128, stderr: "bad revision" },
+    ];
+
+    const result = await finalizeTaskBranch(
+      "/home/magnus/repos/grimnir",
+      "hugin/task-compare-failed",
+      "body",
+      allowedHosts,
+      { baseBranch: "master", baseCommit: base },
+    );
+
+    expect(result.action).toBe("push-failed");
+    expect(result.error).toContain("pinned base");
+    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls.some((call) => call.args.includes("branch"))).toBe(false);
   });
 
   it("auto-commits dirty tree and creates PR when commits exist after commit", async () => {
@@ -293,6 +496,12 @@ describe("finalizeTaskBranch", () => {
     const commitCall = spawnCalls[2];
     expect(commitCall.args).toContain("commit");
     expect(commitCall.args).toContain("-m");
+    expect(commitCall.args).toEqual([
+      "commit",
+      "-m",
+      "hugin: auto-commit task output",
+    ]);
+    expect(commitCall.args.join(" ")).not.toContain("skip ci");
   });
 
   it("creates PR when commits exist without dirty tree", async () => {
@@ -315,6 +524,45 @@ describe("finalizeTaskBranch", () => {
     const pushCall = spawnCalls.find((c) => c.args.includes("push"));
     expect(pushCall?.args).toContain("-u");
     expect(pushCall?.args).toContain("hugin/task-xyz");
+  });
+
+  it("captures exact content-blind repository evidence when requested", async () => {
+    const base = "a".repeat(40);
+    const head = "b".repeat(40);
+    spawnBehaviors = [
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: "1\n" },
+      { exitCode: 0, stdout: `${head}\n` },
+      { exitCode: 0, stdout: "src/parser.ts\0tests/parser.test.ts\0" },
+      { exitCode: 0, stdout: "diff --git a/src/parser.ts b/src/parser.ts\n" },
+      { exitCode: 0, stdout: "git@github.com:Magnus-Gille/grimnir.git\n" },
+      { exitCode: 0 },
+      { exitCode: 0, stdout: "https://github.com/Magnus-Gille/grimnir/pull/8\n" },
+    ];
+    const result = await finalizeTaskBranch(
+      "/home/magnus/repos/grimnir",
+      "hugin/task-evidence",
+      "body",
+      allowedHosts,
+      { captureRepositoryChange: true, baseBranch: "master", baseCommit: base },
+    );
+    expect(result.action).toBe("pr-created");
+    expect(result.repositoryChange).toEqual(expect.objectContaining({
+      baseBranch: "master",
+      baseCommit: base,
+      headCommit: head,
+      changedFiles: ["src/parser.ts", "tests/parser.test.ts"],
+      diffSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    }));
+    expect(spawnCalls[3].args).toEqual([
+      "diff", "--name-only", "-z", "--no-ext-diff", `${base}..${head}`,
+    ]);
+    expect(spawnCalls[4].args).toEqual([
+      "diff", "--binary", "--no-ext-diff", "--no-textconv", `${base}..${head}`,
+    ]);
+    expect(spawnCalls[1].args).toContain(`${base}..HEAD`);
+    const ghCall = spawnCalls.find((call) => call.cmd === "gh");
+    expect(ghCall?.args).toEqual(expect.arrayContaining(["--base", "master"]));
   });
 
   it("returns push-failed when remote is not in egress allowlist", async () => {

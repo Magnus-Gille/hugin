@@ -27,6 +27,7 @@
  */
 
 import type { Ledger } from "./orchestrator/ledger-client.js";
+import type { LearningExperimentState } from "./learning/experiment-schema.js";
 
 /** How much can be concluded from a row's evidence. */
 export type EvidenceMaturity =
@@ -532,6 +533,11 @@ export function buildLearningLoopPanels(input: {
   capability: CapabilityPlane;
   product: ProductPlane;
   policy: RoutePolicy;
+  experiments?: {
+    available: boolean;
+    states: LearningExperimentState[];
+    truncated?: boolean;
+  };
 }): TypedPanel[] {
   const { capability, product, policy } = input;
 
@@ -630,5 +636,73 @@ export function buildLearningLoopPanels(input: {
     value: product.available ? product.durableHandoffs : "—",
   };
 
-  return [capabilityPanel, gatePanel, policyPanel, handoffPanel];
+  const experimentPanel: TypedPanel | null = input.experiments
+    ? {
+        id: "hugin-learning-experiments",
+        label: "Continuous improvement experiments",
+        kind: "table",
+        fullWidth: true,
+        refresh: 300,
+        cols: ["Experiment", "Scope", "Axis", "State", "Matched", "Primary", "Next"],
+        rows: input.experiments.available
+          ? input.experiments.states.length > 0
+            ? [
+                ...input.experiments.states.slice(0, 15).map(
+                  (state): TableRow => ({
+                    Experiment: state.experimentId,
+                    Scope: `${state.taskType} / ${state.scope}`,
+                    Axis: state.changeAxis,
+                    State: state.status,
+                    Matched: `${state.evaluation.matchedPairs} (${state.evaluation.holdoutPairs} holdout)`,
+                    Primary:
+                      state.evaluation.primaryImprovement === null
+                        ? `${state.evaluation.primaryMetric}: not measured`
+                        : `${state.evaluation.primaryMetric}: ${Math.round(
+                            state.evaluation.primaryImprovement * 1_000,
+                          ) / 10}% normalized improvement`,
+                    Next: state.evaluation.nextAction,
+                  }),
+                ),
+                ...(input.experiments.truncated || input.experiments.states.length > 15
+                  ? [{
+                      Experiment: "… more experiments not shown",
+                      Scope: "",
+                      Axis: "",
+                      State: "",
+                      Matched: "",
+                      Primary: "",
+                      Next: input.experiments.truncated
+                        ? "Munin query reached its cap; this table is incomplete."
+                        : `${input.experiments.states.length - 15} lower-ranked row(s) omitted.`,
+                    }]
+                  : []),
+              ]
+            : [{
+                Experiment: "No versioned experiment recorded yet",
+                Scope: "",
+                Axis: "",
+                State: "gathering",
+                Matched: "0",
+                Primary: "not measured",
+                Next: "Create the first matched champion/challenger experiment through hugin-mcp.",
+              }]
+          : [{
+              Experiment: "Experiment ledger unavailable",
+              Scope: "",
+              Axis: "",
+              State: "unavailable",
+              Matched: "not measured",
+              Primary: "not measured",
+              Next: "Retry after Munin is reachable; this is not evidence of zero experiments.",
+            }],
+      }
+    : null;
+
+  return [
+    capabilityPanel,
+    gatePanel,
+    policyPanel,
+    handoffPanel,
+    ...(experimentPanel ? [experimentPanel] : []),
+  ];
 }

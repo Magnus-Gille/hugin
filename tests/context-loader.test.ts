@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { resolveContextRefs } from "../src/context-loader.js";
+import {
+  MAX_CONTEXT_BUDGET_CHARS,
+  MAX_CONTEXT_REFS,
+  resolveContextRefs,
+} from "../src/context-loader.js";
 
 type BatchRef = { namespace: string; key: string };
 type BatchEntry =
@@ -114,6 +118,53 @@ describe("context-loader", () => {
     expect(batchCallCount).toBe(1);
     expect(resolution.refsResolved).toHaveLength(3);
     expect(resolution.refsMissing).toHaveLength(0);
+  });
+
+  it("bounds context ref fan-out and discloses the omitted tail", async () => {
+    let requested = 0;
+    const refs = Array.from({ length: MAX_CONTEXT_REFS + 10 }, (_, index) =>
+      `projects/p${index}/status`,
+    );
+    const resolution = await resolveContextRefs(
+      refs,
+      8_000,
+      {
+        async readBatch(batch: BatchRef[]): Promise<BatchEntry[]> {
+          requested = batch.length;
+          return batch.map(({ namespace, key }) =>
+            makeEntry(namespace, key, "ok", "internal"),
+          );
+        },
+      } as never,
+    );
+
+    expect(requested).toBe(MAX_CONTEXT_REFS);
+    expect(resolution.refsRequested).toHaveLength(MAX_CONTEXT_REFS);
+    expect(resolution.truncated).toBe(true);
+  });
+
+  it("clamps an oversized context character budget", async () => {
+    const resolution = await resolveContextRefs(
+      ["projects/large/status"],
+      MAX_CONTEXT_BUDGET_CHARS * 10,
+      {
+        async readBatch(): Promise<BatchEntry[]> {
+          return [
+            makeEntry(
+              "projects/large",
+              "status",
+              "x".repeat(MAX_CONTEXT_BUDGET_CHARS + 1_000),
+              "internal",
+            ),
+          ];
+        },
+      } as never,
+    );
+
+    expect(resolution.content.length).toBeLessThanOrEqual(
+      MAX_CONTEXT_BUDGET_CHARS + "\n\n[...truncated]".length,
+    );
+    expect(resolution.truncated).toBe(true);
   });
 
   it("handles a mix of found and missing refs", async () => {

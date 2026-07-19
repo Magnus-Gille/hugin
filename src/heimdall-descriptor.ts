@@ -41,8 +41,6 @@ export const HEIMDALL_DESCRIPTOR = {
   ],
   alerts: { rules: [], active_count: 0, firing: [] },
   links: {
-    self: "/heimdall.json",
-    health: "/health",
     repo: "https://github.com/Magnus-Gille/hugin",
   },
   ui: { icon: "cpu", category: "infra" },
@@ -65,11 +63,29 @@ export function buildLearningLoopHealthPanels(
   // Synchronous by design: `collect()` is stale-while-revalidate and returns
   // immediately. The descriptor must never wait on a cold corpus walk — hanging
   // /heimdall.json blanks Hugin's whole Heimdall page (#135).
-  const { ledger, tasks, available, readFailures, truncated } = collector.collect();
+  const {
+    ledger,
+    tasks,
+    available,
+    readFailures,
+    truncated,
+    experiments,
+    experimentsAvailable,
+    experimentsTruncated,
+  } = collector.collect();
   const capability = computeCapabilityPlane(ledger);
   const product = computeProductPlane(tasks, { available, readFailures, truncated });
   const policy = deriveRoutePolicy(tasks, capability);
-  return buildLearningLoopPanels({ capability, product, policy });
+  return buildLearningLoopPanels({
+    capability,
+    product,
+    policy,
+    experiments: {
+      available: experimentsAvailable,
+      states: experiments,
+      truncated: experimentsTruncated,
+    },
+  });
 }
 
 /**

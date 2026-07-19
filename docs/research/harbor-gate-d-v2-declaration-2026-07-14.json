@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "status": "declared-not-run",
+  "declared_at": "2026-07-14T19:58:00+02:00",
+  "campaign_id": "gate-d-fresh-v2-20260714",
+  "pilot_version": "harbor-0.18.0-gate-d-v2",
+  "harbor_version": "0.18.0",
+  "runner_source": "the clean merged Hugin commit containing this declaration; pilot-report.json records its exact SHA",
+  "source_commit": "a9b92211d18a039a5893c4bdb3a51e177b3efaa9",
+  "task_ids": [
+    "11-node-path-containment",
+    "12-add-csv-cli-format",
+    "13-type-safe-slug-tests",
+    "14-shared-handle-validation"
+  ],
+  "holdout_ids": [
+    "11-node-path-containment",
+    "12-add-csv-cli-format"
+  ],
+  "holdout_revision": "sha256-lowest-two-of-four-v1",
+  "holdout_selection": {
+    "method": "lexicographically lowest two SHA-256 digests of the four task IDs",
+    "ordered_task_id_hashes": [
+      "10c1c22933fe1363bd01660e4b67a336cb89680240d3c3b7a4187d0dd51bf99b  11-node-path-containment",
+      "716f4db52d4f970bd910401898fb473fe33bd59c8929b058000ccc28fd371de8  12-add-csv-cli-format",
+      "9bbb78558ab5b5fd5eaf738baaa5614a1891a43a7edbf48ce57560572d330f9d  14-shared-handle-validation",
+      "b52ece9c7811eb1c51560e2eed12b23ba34c7705741cdf5dfa495ad004ceb614  13-type-safe-slug-tests"
+    ]
+  },
+  "corpus_sha256": "02ab9ee7e00f9670a803c55f2540e3b64a6ac01d5d647256c6c0ff7e2ceef4ac",
+  "verifier_sha256": "bda62f9f61098adba89a2f309e5abfb95b3b71840cbb4307397cf2c5ab9eb77b",
+  "harbor_verifier_sha256": "cae35089c094d13f2b8c328e7f56628d9636811a1bc8e7c826f092eb04b628a7",
+  "model": "qwen3-coder-next-80b",
+  "harness_version": "code-loop-pi-2026-07-14-v4",
+  "caps": {
+    "wall_s": 600,
+    "turns": 13,
+    "completion_tokens": 60000
+  },
+  "required_capabilities": {
+    "start_idempotency": "client-run-id-v1",
+    "agent_checks": "pi-bash-events-v1"
+  },
+  "network_mode": "no-network",
+  "base_image": "node:22.17.0-bookworm-slim@sha256:b04ce4ae4e95b522112c2e5c52f781471a5cbc3b594527bcddedee9bc48c03a0",
+  "harbor_concurrency": 1,
+  "attempts_per_task": 1,
+  "model_calls_at_declaration": 0,
+  "promotion_policy": "never automatic; reviewed content-blind import only"
+}

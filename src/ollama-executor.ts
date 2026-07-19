@@ -17,6 +17,8 @@ export interface OllamaTaskConfig {
   ollamaBaseUrl: string;
   timeoutMs: number;
   maxOutputChars: number;
+  /** Hard generation cap forwarded to Ollama. */
+  maxOutputTokens?: number;
   injectedContext?: string;
   /**
    * Control hybrid-reasoning behaviour for models that generate internal
@@ -103,6 +105,7 @@ export async function executeOllamaTask(
       `Model: ${task.model}`,
       `Host: ${task.ollamaBaseUrl}`,
       `Timeout: ${task.timeoutMs}ms`,
+      `Max output tokens: ${task.maxOutputTokens ?? "default"}`,
       `Context injected: ${task.injectedContext ? `${task.injectedContext.length} chars` : "none"}`,
       `Free memory: ${freeMemBeforeMb} MB`,
       `Started: ${startedAt}`,
@@ -171,9 +174,14 @@ export async function executeOllamaTask(
     };
     if (needsNativeChat) {
       body.think = thinkValue;
+      if (task.maxOutputTokens !== undefined) {
+        body.options = { num_predict: task.maxOutputTokens };
+      }
       // Log-only metadata — must not go through appendOutput(), which would
       // pollute output/resultText and corrupt tasks that expect clean JSON.
       logStream.write(`[Ollama native /api/chat, think:${thinkValue}]\n`);
+    } else if (task.maxOutputTokens !== undefined) {
+      body.max_tokens = task.maxOutputTokens;
     }
 
     const res = await fetch(`${task.ollamaBaseUrl}${endpoint}`, {

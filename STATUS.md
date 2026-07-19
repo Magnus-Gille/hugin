@@ -1,5 +1,553 @@
 # Hugin — Status
 
+**Latest session:** 2026-07-15 (Codex) — **Quality Receipt v1 merged,
+deployed, and live**
+**Production feature tree:** `935a10abb6adc00d1fbf6715569295f335d2245d`
+via merged PR [#227](https://github.com/Magnus-Gille/hugin/pull/227), closing
+[#216](https://github.com/Magnus-Gille/hugin/issues/216). The session-close
+record itself was merged separately in documentation-only PR #228.
+
+## Latest — execution success and semantic acceptance are separate signals
+
+- Current normal task results now carry an explicit repository outcome,
+  including managed no-op and publication-failure states. A successful process
+  exit is therefore preserved as execution evidence without being mislabeled as
+  a useful repository change or an accepted answer.
+- `hugin_rate` and `POST /v1/delegate/rate` append authenticated Quality Receipt
+  v1 verdicts bound to the exact task-status bytes, structured-result bytes,
+  repository base/head, and diff hash. Identical retries are idempotent;
+  changed verdicts from the same reviewer conflict; stale bindings, malformed
+  ledgers, and disagreeing receipts fail closed.
+- Reviewer independence is explicit (`independent`, `self`, or `unknown`). The
+  server prevents a verified task submitter/Broker owner from claiming
+  independence. For other principals it remains an authenticated attestation,
+  not proof of organizational separation.
+- The learning collector and daily exam factory consume only exact-bound receipt
+  summaries. Independent acceptance is retained as product-quality evidence but
+  does not automatically turn a task into a golden exam oracle. Experiment
+  promotion now requires at least one independently accepted challenger
+  observation even when configured rated coverage is zero.
+- Historical Broker results and legacy flat feedback remain readable, but legacy
+  feedback is never promoted to bound quality evidence. There is no multi-key
+  Munin transaction across status/result/feedback; exact hash matching makes a
+  later mismatch ineligible rather than silently joining it.
+- Review fixed canonical hashing of optional fields, corrupt-ledger handling,
+  conflicting-receipt aggregation, candidate-readiness overclaim,
+  classification preservation, and repository-outcome derivation. Claude Fable
+  was unavailable because of its spend limit and Opus returned no bounded review
+  output, so the final adversarial review was performed with Codex.
+- Acceptance passed: TypeScript build; 112 files / 1,842 tests; deployment and
+  bootstrap shell suites; `git diff --check`; GitHub CI; exact-SHA Pi deployment;
+  active service; loopback health green, polling and idle with queue depth zero;
+  Codex sandbox available; post-deploy daily factory schema v2 with complete
+  history and 1 provisional / 1 regression / 6 quarantine candidates.
+
+**Next:** dogfood the live receipt path on a real managed-repository task, obtain
+an authenticated independent verdict, and verify the collector plus daily exam
+join end to end. Then implement
+[#225](https://github.com/Magnus-Gille/hugin/issues/225) so managed-repository
+publication failures are durable and recoverable, before feeding qualified
+receipt-backed outcomes into the matched M5 champion/challenger loop. Execution,
+product quality, and friction remain separate signals.
+
+**Non-blocking operations debt:** Ratatoskr still carries independent substantive
+instruction files. The deploy host-shell probe can report `NO_CODEX` while the
+authoritative in-service Codex sandbox probe is green. Stale worktrees should be
+cleaned only with explicit cleanup authorization.
+
+---
+
+**Latest session:** 2026-07-15 (Codex) — **fail-closed cross-client exposure contract merged, deployed, and live**
+**Production/deployed:** `a03c829f766d51d15a628c694a69b7e33b96b777`
+via merged PR [#214](https://github.com/Magnus-Gille/hugin/pull/214). The
+owner-only lookup producer remains live from gille-inference
+`832e6c467f65aef3b5fa345f91d6f9b595466dc8`.
+**Status handoff:** `codex/hugin-exposure-final-status` in
+`/private/tmp/hugin-exposure-integration-final`, based on deployed merge
+`a03c829f766d51d15a628c694a69b7e33b96b777`.
+
+## Latest — real daily task harvest now fails closed on global M5 freshness
+
+- PR #214 traceably replaced the overlapping PR #212 implementation with the
+  negotiated, independently reviewed tree. GitHub CI passed and the actual
+  squash merge—not a branch SHA—was deployed to Hugin-Munin.
+- Live acceptance passed: exact deploy marker; active Hugin service; active and
+  enabled daily factory timer; `/health` ok, polling, queue depth zero; private
+  manifest mode `0600`; schema v2; complete source history; 10 inspected tasks;
+  0 provisional / 1 regression / 9 quarantine; 9 `not-checked` ineligible
+  candidates plus 1 safely `incomplete`; zero eligible `not-checked` and zero
+  malformed provisional states.
+- A direct fixed-sentinel lookup under the deployed EnvironmentFile proved the
+  minted owner credential, exact fingerprint binding, a negative match,
+  complete live coverage, and all six required lanes. No secret, prompt, or
+  task-derived fingerprint was printed or persisted; acceptance exposed only
+  content-blind contract metadata.
+- Overlapping PR #212 merged and deployed while the negotiated implementation
+  was under review. Its live `ae92906` factory queried all nine prompt-bearing
+  sources before eligibility, including candidates later quarantined, and used
+  a divergent per-candidate schema without duplicate quarantine or the empty-day
+  owner-auth smoke. Service, timer, and health were green, but that tree was not
+  accepted as the integration contract.
+- STATUS-only PR #213 truthfully recorded the exact `ae92906` deploy marker,
+  active service/timer, healthy polling with queue depth zero, complete six-lane
+  coverage, and the 0 provisional / 1 regression / 8 quarantine result. Its
+  privacy interpretation was wrong: all nine lookups were unnecessary—eight
+  candidates were later quarantined, while the ninth was already a local
+  regression and also required no lookup. This follow-up preserves the runtime
+  facts and corrects that conclusion.
+- The follow-up is deliberately traceable on top of PR #213: revert runtime
+  merge `ae92906`, then replay the three reviewed implementation/hardening
+  commits. Its complete source, docs, and tests tree is byte-equivalent to
+  reviewed `11953e` except for this overlap/deployment handoff in `STATUS.md`;
+  no third architecture was invented.
+
+- The daily factory now emits strict schema-v2 manifests with the original
+  Munin `taskCreatedAt` and an orthogonal `crossClientExposure` snapshot. It
+  uses the exact `trim-utf8-sha256-v1` contract and the deployed owner-only
+  `/admin/task-exposures/lookup`; schema-v1 files are legacy/non-runnable.
+- A negative match clears only the cross-client freshness prerequisite when
+  capture is complete, `taskCreatedAt` is inside the inclusive coverage window,
+  and all six gateway lanes are present. Positive matches become regression
+  candidates regardless of negative-coverage completeness. Every auth,
+  network, schema, version, timestamp, lane, or cardinality ambiguity is
+  quarantined.
+- Only provisional candidate hashes leave Hugin. Requests are deduplicated and
+  batched to 100; private/quarantined/local-regression hashes are not sent.
+  Empty days use one fixed non-task smoke digest so dead minted-owner auth
+  cannot look green. For duplicate prompts, every provisional occurrence is
+  quarantined and every occurrence is labeled; candidates already in regression
+  or quarantine keep that safer lane.
+- The snapshot records `checkedAt` plus `coverage.through` but is explicitly not
+  a seal. Any future Harbor packager/runner must re-query immediately before
+  freezing and again before execution. The factory still does not run Harbor or
+  a model, import learning evidence, change routing, or promote anything.
+- Deployment acceptance now requires schema v2 and proves every remaining
+  `provisional-holdout` is `unseen-covered`. Lookup failure first atomically
+  writes a safe quarantined manifest, then fails the oneshot/deployment gate so
+  a stale successful snapshot cannot survive silently.
+- Native Codex review found and fixed redirect leakage, snapshot-to-candidate
+  binding, mixed-lane duplicate handling, idempotent audit evidence, and
+  fail-closed runtime normalization for missing/non-string Munin creation
+  timestamps. Independent re-review then found that invalid timestamps were
+  quarantined only after their task-derived hashes entered the M5 request;
+  candidate construction now quarantines them as `not-checked`, before lookup,
+  while the snapshot join keeps the timestamp check as defense in depth.
+  Claude Opus returned no review text / an execution error and Fable reported
+  its monthly spend limit. Independent Codex approved the exact PR #214 source
+  tree and the rebased parity/status head with no findings.
+- Validation on the rebased exact head: TypeScript build; focused 3 files / 30
+  tests; full suite 109 files / 1,796 tests; both CI shell suites; Bash syntax;
+  `git diff --check`; production dependency audit 0 vulnerabilities; GitHub CI
+  green on exact PR head.
+
+**Next boundary:** automatic content-blind candidate harvest is live and needs
+no Magnus action. New eligible managed-repository tasks can become provisional
+only after the owner-wide freshness gate passes. The independent-verifier
+packager remains the next required slice before any holdout freeze or Harbor
+execution; it must re-query immediately before packaging and again before use.
+No Harbor run, model call, learning import, route change, or promotion occurred.
+
+---
+
+**Latest session:** 2026-07-14/15 (Codex) — **durable M5 check-evidence contract merged and live**
+**Production/deployed:** `da50c804ae0c92c1ae7f311afd048dec1af80b5b` via merged PR [#210](https://github.com/Magnus-Gille/hugin/pull/210). The matching M5 producer is deployed from gille-inference merge `286f46b4181ccd31a7ebcb8c3e10b6194aaa6d01`.
+
+## Latest — Hugin can safely learn from fully bound M5 agent-check evidence
+
+- Hugin now refuses paid experiment/Harbor starts unless M5 advertises the
+  exact `code-loop-pi-2026-07-14-v6` / `pi-bash-events-v3` / schema 3 contract
+  and its tool schema contains durable `client_run_id` plus
+  `edit_deadline_turn` inputs.
+- Ambiguous mutating starts retry only the byte-identical request under the
+  same bounded caller ID. Recovered work/result IDs, request fingerprints,
+  effective execution, and agent-check evidence are cross-bound before Hugin
+  writes an observation. Read-only transport failures are not mislabeled as
+  ambiguous mutations.
+- Agent-side checks preserve passed/failed/execution-error attempts and keep
+  `none`, `unobservable`, and `partial` coverage distinct. A new optional,
+  default-off challenger coverage gate counts only fully observed real check
+  attempts, so partial event streams cannot manufacture attribution.
+- The consumed Harbor Gate D v2 declaration and official no-go result remain
+  unchanged. The active runner now requires an explicit fresh reviewed
+  declaration and the deployed v6/v3 producer; no model run, Harbor import,
+  route change, or promotion occurred in this release.
+- Native Codex review found and fixed structural contract-preflight,
+  declaration-reuse, and transport-classification gaps. External Claude/Opus
+  review was unavailable because execution policy blocks disclosure of private
+  repository diffs. Exact-head validation passed GitHub CI, TypeScript build,
+  108 test files / 1,778 tests, both shell suites, Python syntax, historical
+  JSON parsing, and `git diff --check`.
+- Deployment acceptance and independent post-deploy checks passed: exact SHA
+  marker, active Hugin service and daily-exam timer, loopback health green with
+  queue depth zero, and the v6/v3 contract present in the deployed bundle. The
+  first current 48-hour harvest now contains 1 provisional-holdout candidate,
+  1 regression candidate, and 20 quarantined candidates.
+
+**Next:** package independent verifiers and complete the content-blind
+cross-client exposure lookup in gille-inference#257 before sealing any daily
+candidate as a holdout. Any future model-bearing Harbor campaign needs a new
+pre-inference declaration and separate review.
+
+---
+
+**Latest session:** 2026-07-14 (Codex) — **automatic daily-use exam candidate factory live and accepted**
+**Production/deployed:** `81624bb6972c902d6c194eb27be36778bfd6dcba` via merged PRs [#207](https://github.com/Magnus-Gille/hugin/pull/207) and [#208](https://github.com/Magnus-Gille/hugin/pull/208).
+
+## Latest — real Hugin code work can feed quarantined Harbor exam candidates
+
+- Successful managed-repository tasks now pin `origin/main` before the agent
+  runs, then bind the final commit, changed-file paths, and SHA-256 of the
+  binary/no-textconv Git diff into optional `result-structured.repositoryChange`.
+  An agent-mutated remote ref therefore cannot redefine the exam's before tree.
+- `npm run harvest:daily-exams` performs a read-only, paginated Munin sweep and
+  emits a mode-0600, content-blind manifest. It copies neither prompt/answer nor
+  diff/file contents and performs no model call, Harbor run, learning import,
+  route change, or promotion.
+- Candidates are separated into `provisional-holdout` (no Hugin-local M5
+  evidence), `regression` (M5 provenance exists), and `quarantine` (missing
+  reproducibility/privacy/completion/exposure evidence). Every usable candidate
+  still requires an independent verifier; private tasks are quarantined and
+  omit repository metadata.
+- "No Hugin-local M5 evidence" deliberately does not claim global freshness.
+  The owner-side, content-blind cross-client exposure lookup is routed to
+  [gille-inference#257](https://github.com/Magnus-Gille/gille-inference/issues/257).
+- Documentation: `docs/daily-exam-factory.md`. Validation: TypeScript build;
+  focused 4 files / 55 tests; full suite 108 files / 1,768 tests; both exact CI
+  shell suites; CLI help; `git diff --check`.
+- The first post-deploy sweep correctly exposed that production omits the `tsx`
+  dev dependency; sourcing all of `.env` also attempted to execute non-shell
+  values. The focused fix moves the CLI under `src/` so `tsc` ships runnable JS,
+  adds a sandboxed 05:30 systemd timer with a rolling 48-hour window, and makes
+  a content-blind sweep a deployment acceptance gate using `EnvironmentFile=`.
+- The corrected deployment passed the real factory gate: 32 tasks inspected,
+  complete 48-hour history, all 32 quarantined, zero provisional holdouts and
+  zero regressions. Every historical row lacked exact repository-change, GitHub
+  PR, and portable repo-context bindings, as expected for tasks completed before
+  #207. The private manifest is mode `0600`; the timer is active for 05:30 daily
+  with jitter. Future successful managed-repository tasks now collect the exact
+  evidence automatically.
+
+**Next:** let the daily harvester accumulate evidence without user work. Build
+the independent-verifier packager and complete gille-inference#257 before any
+candidate may become a sealed holdout. No Harbor run, learning import, route
+change, or promotion is automatic.
+
+---
+
+**Latest session:** 2026-07-14 (Codex) — **fresh four-case Harbor campaign completed; official result no-go**
+**Main:** `465ad19e88c2d691447bce1d7644e3340db29515`; runner/declaration PR [#204](https://github.com/Magnus-Gille/hugin/pull/204) and no-go/fix PR [#205](https://github.com/Magnus-Gille/hugin/pull/205) are merged.
+
+## Latest — v2 run preserved as no-go; verifier packaging fixed for next declaration
+
+- The predeclared cases 11–14 ran on exact gille-inference `a9b92211` with
+  cases 11/12 held out. Eight new model calls occurred: four host baselines and
+  four independent Harbor live samples. A corrected worker invocation recovered
+  the original four baseline work IDs through `client-run-id-v1`; it did not
+  repeat their inference.
+- The M5 owner credential never entered the Docker-socket worker. Magnus
+  explicitly approved a temporary split-capability bridge: the host held the
+  owner token without Docker access; the worker received a random token limited
+  to the eight declared client IDs, unchanged retries, exact caps, and their
+  status/result reads. A forbidden tool was rejected. The bridge is stopped,
+  its mode-0600 token is deleted, and no listener remains.
+- The first worker path used `/output` inside nested Docker and failed before
+  every Harbor agent. Re-running with an identical host/container
+  `/private/tmp/...` path recovered all baselines for free and completed all
+  live trials with zero Harbor exceptions.
+- Official result: **no-go**. Host baselines were 3/4 (11 fail; 12–14 pass),
+  but replay was 1/4 parity because the generated verifier copied `check.sh`
+  without its fresh `check-ts-contract.mjs` dependency. Live-adapter bindings
+  completed 4/4; its declared rewards are not adopted because the same verifier
+  package was incomplete. No learning import or promotion was attempted.
+- A separate no-network, no-credential, no-Docker-socket model-free regrade of
+  the exact recorded artifacts reproduced host replay parity 4/4 and graded the
+  live artifacts 3/4 (11–13 pass; 14 fail). This diagnoses the packaging bug but
+  does **not** supersede the predeclared no-go report.
+- The packager now copies every top-level `check-*.mjs` verifier support file,
+  binds their hashes into both host and Harbor verifier digests, and restores a
+  `/tests/node_modules` link so the ESM helpers resolve pinned TypeScript. An
+  end-to-end no-network Harbor replay of the four recorded diffs then produced
+  the exact expected 0/1/1/1 rewards, all diff/work IDs matched, and zero
+  exceptions or model calls. The content-blind record is
+  `docs/research/harbor-gate-d-v2-result-2026-07-14.json`.
+- Validation: TypeScript build; focused 3 files / 26 tests; full suite 106 files
+  / 1,753 tests; both CI shell suites; JSON parse; importer rejects the official
+  no-go report; credential value/name scan clean; bridge/token absent;
+  `git diff --check`.
+
+**Next:** add and predeclare genuinely fresh cases before another model-bearing
+Harbor run. Do not import the v2 no-go report, reuse these cases as holdouts, or
+promote automatically.
+
+---
+
+**Latest session:** 2026-07-14 (Codex) — **Harbor/M5 Linux acceptance completed; go for the offline evaluation lane**
+**Main:** `052dd71e94dfedc8561f6be960dc2aa0fada278e`; Harbor pilot PR [#201](https://github.com/Magnus-Gille/hugin/pull/201) and Linux acceptance/preflight PR [#202](https://github.com/Magnus-Gille/hugin/pull/202) are merged.
+
+## Latest — Harbor 0.18.0 proof-of-fit with the existing M5 code_loop
+
+- Added a pinned Harbor 0.18.0 pilot that converts two representative Gate D
+  tasks (`01-make-failing-test-pass`, `04-add-cli-flag`) into isolated Harbor
+  tasks, calls the existing M5 `code_loop` through a host-side external agent,
+  validates effective model/harness/caps with Hugin's existing schema/client,
+  collects the edited tree, and grades it in a fresh deterministic verifier
+  container. Credentials stay host-side; reports import only content-blind
+  metadata.
+- Direct M5 baselines both passed the original host Gate D verifier. Corrected
+  Harbor replay of those exact diffs passed 2/2 with exact reward and diff-hash
+  parity and zero exceptions. Both live Harbor adapter calls completed with the
+  pinned `qwen3-coder-next-80b` / `code-loop-pi-2026-07-13-v2` execution
+  binding; corrected model-free grading of those live artifacts passed task 01
+  and failed task 04 at G3 typecheck (undefined `formatJson`). This is semantic
+  sample quality, not an adapter failure.
+- The first verifier attempt produced four false zeroes because Harbor's
+  separate-verifier `/app` mount hid the image-layer dependency symlink and the
+  custom offline image lacked `@types/node`. The task generator now recreates
+  that symlink at verifier runtime, pins Node types in the standard image, and
+  preflights every custom image before live M5 work. Corrected replay then passed
+  2/2. The superseding content-blind record is
+  `docs/research/harbor-gate-d-pilot-2026-07-14.json`.
+- Claude Code's headless multi-agent review verified one nit: the custom-image
+  preflight required container-side Git even though the adapter applies patches
+  host-side and the documented offline image correctly omitted Git. The
+  requirement was removed, the actual task/verifier tools are now checked, and
+  a regression test plus a run against the pinned image passed. Claude refuted
+  its only other candidate finding.
+- PR #201 passed Claude's headless review plus GitHub CI and was squash-merged
+  as `7916a17`. The frozen corpus was then repeated in a disposable Linux ARM64
+  Harbor worker against Docker Desktop's LinuxKit daemon with all task, agent,
+  and verifier policies set to `no-network` and the standard
+  `node:22.17.0-bookworm-slim` image at digest `b04ce4ae...03a0`.
+- The Linux run's first host-baseline grade incorrectly linked the laptop
+  checkout's Darwin `esbuild`, while Harbor's isolated replay passed 2/2. A
+  model-free correction installed dependencies natively, re-applied the same
+  recorded diffs, and ran the original verifier: both baselines passed, both
+  hashes were unchanged, exact Harbor parity was 2/2, and no M5 calls were
+  repeated. The pilot now checks source-local `tsx`/`tsc`, runs a real `esbuild`
+  transform, and invokes `tsc --version` as a fail-fast platform check before
+  any live M5 call.
+- Both independent Linux live-adapter trials passed their separate verifiers,
+  all effective model/harness/caps matched, and Harbor reported zero exceptions.
+  The superseding content-blind record is
+  `docs/research/harbor-gate-d-linux-acceptance-2026-07-14.json`.
+- Recommendation is now go only for the explicit offline evaluation/control
+  plane. Harbor still does not replace Hugin dispatch, Broker/Munin lifecycle,
+  M5 model routing, or the reviewed learning promotion gate. Two tasks prove
+  the execution boundary, not a capability rate; expand to a predeclared
+  matched corpus before routing conclusions.
+- Harbor core and the installed wheel declare Apache-2.0. This local run made no
+  Hub upload and Harbor reported $0.00 model API cost; electricity, hardware,
+  operator time, Docker licensing, and any optional cloud sandbox/model costs
+  remain outside that figure. No public Harbor Hub price schedule was found.
+- Security checks found zero M5 credential-prefix matches and zero
+  `M5_API_KEY` names in generated task/job outputs. The Gate D source checkout
+  remained clean at exact commit `d2d2541dd01519ddf50a9bbba8903d02fcea5284`.
+- Validation: Linux corrected baseline 2/2; exact Harbor replay and diff parity
+  2/2; Linux live artifacts 2/2; zero infrastructure exceptions; credential
+  scan clean; cross-platform preflight reproduced red on Darwin dependencies and
+  green after Linux-native `npm ci`; TypeScript build; focused 6 tests; full
+  suite 106 files / 1,745 tests; both CI shell suites; JSON parse;
+  `git diff --check`.
+
+**Next:** predeclare and run a larger matched Gate D corpus. Connect only
+reviewed, content-blind Harbor summaries to Hugin's existing learning
+experiment endpoints. Do not deploy Harbor in the dispatcher, publish the
+dataset, or enable automatic promotion.
+
+---
+
+**Previous session:** 2026-07-13 (Codex) — **GitHub-independent overnight dev screen completed; evaluator and transport recovery hardened locally**
+**Branch/worktree:** `codex/gate-d-prompt-prefix` in `/private/tmp/hugin-gate-d-prompt-prefix`, based on exact `origin/main@d5eb909267111590c7b4b2442794197334fbedb2` (#199). Implementation commits `56ba7b0` (bound prompt prefixes) and `79db404` (durable observation recovery + numeric gate fix), plus the STATUS handoff, were merged as PR [#200](https://github.com/Magnus-Gille/hugin/pull/200) in `71e7963`.
+
+## Latest — development prompt evidence plus two failures converted into harness improvements
+
+- The production-scope experiment `gate-d-edit-deadline-v1-20260713` remains
+  safely rejected. Its turn-6 challenger improved edit-start by 11.08% but
+  reduced quality/usefulness from 0.9 to 0.8 and increased rescue from 0.1 to
+  0.2. The production champion remains unchanged and no promotion was attempted.
+- A separate, explicitly non-production experiment,
+  `gate-d-typecheck-prompt-dev-v1-20260713` (`scope: m5-code-edit-dev`), screened
+  the content-bound pre-finish TypeScript-check prefix on the already observed,
+  contaminated ten-case Gate D corpus. All 20 matched
+  `qwen3-coder-next-80b` arms completed with independent verification and
+  mechanical ratings. Challenger quality/usefulness was 10/10 versus champion
+  9/10; mean latency was 22,863.0 versus 36,969.9 ms and edit-start was 12,472.1
+  versus 15,801.9 ms. This is candidate-screening evidence only and must never
+  drive production promotion.
+- Hugin nevertheless recorded that dev experiment as `rejected`: exact +0.10
+  quality became `0.09999999999999998` under IEEE-754 and missed the configured
+  `0.1` threshold. Local commit `79db404` makes all evaluator boundary
+  comparisons tolerant only to a handful of machine epsilons and adds both an
+  exact-boundary promotion regression and a materially-below-threshold negative
+  regression. The already terminal dev experiment was not rewritten or promoted.
+- The lone champion failure (sample 09) exhausted the turn cap and left the word
+  `widget` in a comment; Gate D's structural oracle correctly rejected it. The
+  prompt asked for TypeScript verification, so this win does not prove the
+  prefix caused the improvement. In the decisive results M5 reported
+  `check.ran:false` even when the agent summary claimed TypeScript/tests passed;
+  Hugin currently cannot prove which agent-side check command actually ran.
+  Fresh unseen cases from gille-inference #250 and content-blind agent tool/check
+  execution telemetry are required before causal or promotion claims.
+- Two real transport failures sharpened the runner. An M5 start response was
+  lost after the work had completed; the job was identified as
+  `cl-20260713-33167799`, independently reverified, and recorded exactly once.
+  A later Broker observation response timed out after the final observation had
+  committed; durable status showed all 20 observations. `79db404` now reconciles
+  ambiguous observation writes by exact `run_id` + evidence before retrying and
+  marks mutating M5 transport failures as ambiguous. Because M5 start has no
+  client idempotency key/request fingerprint, the runner now stops with the
+  bound experiment run ID and explicitly forbids a blind rerun.
+- Prompt support in `56ba7b0` remains intact: local-only per-arm
+  `prompt_prefix_file`, exact prompt-byte SHA-256 binding, unchanged passthrough
+  compatibility, and fail-closed tamper detection. Dev artifacts are under
+  `/tmp/gate-d-typecheck-prompt-dev-v1/` while that temporary directory exists.
+- Final local verification: TypeScript build, manifest dry-run with exact corpus
+  `341cebdb...e8b3b`, `git diff --check`, focused recovery/evaluator/client tests,
+  and the full suite (105 files / 1,739 tests) pass. Production remains exact
+  `d5eb909267111590c7b4b2442794197334fbedb2`. GitHub authentication is healthy;
+  draft PR #200 is open and its initial CI run is in progress. No merge, deploy,
+  or production champion mutation occurred.
+
+**Next:** (1) let draft PR #200 complete CI and obtain independent review; (2)
+have the gille-inference owner land #250's fresh, model-unseen deterministic
+cases; (3) add M5-side idempotent `client_run_id` + request binding and
+content-blind agent check-execution telemetry in the owning repo; (4) after
+both owning-repo changes merge, predeclare fresh holdouts, regenerate/dry-run a
+prompt-only manifest, and run a production-scope experiment exactly once. Keep
+the current champion unless every strict gate passes on uncontaminated evidence.
+
+---
+
+**Previous session:** 2026-07-13 (Codex) — **legacy auth-expiry alert lifecycle migration merged as PR #198 (`6c8428c`)**
+**Branch:** `codex/hugin-auth-alert-migration` from exact `origin/main@8b444adc3996a0e01095b5dc381a6ed9646de20c`.
+
+## Latest — reconcile pre-resolution expiry alerts without weakening auth evidence
+
+- Production showed a pre-#197 split-brain state: the persisted producer state
+  was `{lastAuth:"ok",expiryWarned:false}`, while Heimdall still held the active
+  `hugin-claude-auth-expiry` dedup from 2026-07-03. #197 could resolve that key
+  only when `expiryWarned` was true, so fresh refresh-token
+  `expiryEvidence:"not-applicable"` could not reconcile the external stale alert.
+- `AuthAlarmState` now persists an expiry-alert lifecycle generation. A missing
+  Munin entry starts at the current generation and sends nothing; only an
+  existing pre-generation state hydrates as legacy. The next positively safe
+  expiry reading (`not-applicable`, or a known expiry beyond the warning window)
+  sends one idempotent resolved envelope even when the legacy boolean is false.
+- Unknown evidence and a known already-past expiry remain fail-open and do not
+  migrate state. A new firing warning can establish current lifecycle ownership;
+  an already-active legacy warning does not advance ownership without an
+  external transition.
+- The existing delivery gate remains load-bearing: a legacy resolution advances
+  and persists the generation only after Ratatoskr returns 2xx. Skipped/failed
+  resolutions leave the old state for an idempotent retry. No credential probe,
+  auth classification, transport timeout, or authorization behavior changed.
+- Validation: red/green focused suite (23 auth-alarm tests), TypeScript build,
+  standalone Gate D runner typecheck, full suite (103 files / 1,729 tests), both
+  CI shell suites, Bash/Node syntax, error-severity shellcheck, `git diff --check`,
+  and full plus production-only npm audit (0 vulnerabilities). Default shellcheck
+  still reports only pre-existing warning/info findings in untouched scripts.
+
+**Next:** parent agent reviews the clean local commit, publishes it as a PR,
+merges only with green CI, then deploys from an exact merged worktree and verifies
+that the producer-owned resolved envelope naturally clears the stale Heimdall
+dedup. No push, PR, deploy, alert send, Munin write, or other live mutation
+occurred in this implementation session.
+
+---
+
+**Previous session:** 2026-07-13 (Codex) — **general hardening implementation complete locally; awaiting parent review/publish/deploy**
+**Branch:** `codex/hugin-hardening-20260713` rebased onto `origin/main@bb66fcd` (includes merged starvation/pagination fix #193 and continuous M5 harness #196).
+
+## Latest — bounded operations, honest alert lifecycle, and Daily Analysis reliability
+
+- Recovery/control scans now paginate past Munin's 50-row cap under a 200-entry
+  per-pass budget and retain a timestamp continuation so repeated sweeps rotate
+  through old work. Canonical Broker history is capped at 1,000 candidates per
+  discovery channel, reads status with concurrency 25, and reports truncation.
+- `Working dir` now uses the same normalized `/home/magnus` path guard as
+  `Context`; task timeout/output-token/env settings and context ref/character
+  fan-out have hard ceilings.
+- Daily Analysis no longer sends raw 24-hour JSONL to the Pi model. A streaming
+  deterministic pre-aggregation keeps the evidence below 5,000 characters even
+  for the 2,000-row regression fixture, and the existing Ollama task is capped
+  at 192 output tokens. Malformed/non-object journal rows and invalid, negative,
+  or overflowing duration/cost samples are ignored without aborting or emitting
+  misleading JSON `null` aggregates. Production evidence motivating this:
+  2026-07-13 had 116 rows / 46,091 prompt characters and timed out before output;
+  2026-07-12 also timed out at 5,675 prompt characters while streaming an
+  overlong answer.
+- Ratatoskr/Heimdall alert lifecycle now resolves the existing exact dedup keys:
+  confirmed auth recovery resolves `hugin-claude-auth`; expiry resolves only on
+  known-safe expiry or refresh-token N/A evidence (never unknown null); version
+  drift resolves only from persisted prior-process firing state after a fresh
+  startup baseline. Resolution state commits only after Ratatoskr delivery; the
+  drift path additionally retries until state persistence succeeds.
+- Heimdall usefulness was checked against the live descriptor: Tasks and Task
+  history remain the concrete operational views; capability evidence discloses
+  verified n and omitted rows; the trial gate shows targets/state/notes; route
+  policy is explicitly warn/shadow; uninstrumented metrics say so. No Hugin view
+  should be removed. The misleading relative descriptor links to `/health` and
+  `/heimdall.json` were removed because Heimdall resolved them against itself;
+  the unambiguous repository link remains. Resolution events prevent stale
+  auth/drift incidents from degrading that at-a-glance signal.
+- Compatible lockfile updates clear Hono, qs, Vitest/Vite, and esbuild advisories.
+  Final validation after rebasing onto `bb66fcd`: clean `npm ci`; TypeScript
+  build; standalone Gate D runner typecheck; 103 files / 1,721 tests; both CI
+  shell suites; Bash/Node syntax; `git diff --check`; and full plus
+  production-only `npm audit` (0 vulnerabilities).
+
+**Next:** parent agent publishes the local commit as a PR, obtains independent
+review, merges only with green CI, deploys from clean `main`, and verifies Pi
+health plus alert-resolution delivery. No live alerts, Munin writes, deploy, or
+production mutation occurred in this implementation session.
+
+---
+
+**Previous session (2026-07-13, Codex) — continuous Hugin/M5 improvement loop + Gate D adapter,
+merged as [#196](https://github.com/Magnus-Gille/hugin/pull/196) in `bb66fcd`.** Implementation
+commit `916b689` was originally reconciled with `origin/main@8b1bfdd`; it was not deployed during
+that session.
+
+Hugin now has a durable, principal-isolated champion/challenger experiment ledger under
+`experiments/hugin/*`, exposed through five authenticated Broker/MCP operations: create, observe,
+rate, status, and explicit reviewed promotion. Automated observations may be enriched exactly once
+from `unrated` to a human/downstream product outcome; existing ratings cannot be overwritten.
+Experiments are content-blind but version logging, test
+harness/corpus/oracle/holdout, agent prompt, agent harness/budgets, model identity/configuration,
+and routing. Hugin recomputes configuration fingerprints and permits exactly one changed semantic
+axis per iteration. Evidence is idempotent, configuration-bound, matched by sample, and records
+independent verification, product usefulness, latency/cost/review time, time-to-edit,
+inspect/edit/check timing, test state, and failure signals.
+
+The pure evaluator requires matched/holdout evidence, independent-verifier and product-rating
+coverage, and paired scalar measurements. It rejects correctness/usefulness/rescue/infra/latency/
+cost regressions; a challenger must also clear its predeclared primary-improvement threshold.
+Judge-only evidence never counts as verified. A reviewed promotion advances a CAS-guarded per-scope
+champion pointer with an applied repo/config ref; future experiments must start from that exact
+fingerprint, and crash recovery handles a pointer write that lands before the experiment-state
+write. Heimdall now shows experiment state, sample maturity, normalized primary improvement, and
+the evidence-derived next action. Full design: `docs/continuous-learning-loop.md`.
+
+The Hugin-side M5 adapter/client and resumable `scripts/run-m5-code-loop-experiment.ts` runner are
+also present. The runner hashes every Gate D task/verifier asset, refuses config-fingerprint drift,
+requires M5 to report effective model/harness/caps, counterbalances arm order, applies each returned
+diff to a pristine local seed, runs Gate D's hidden-oracle/typecheck/anti-cheat `check.sh`, and sends
+only content-blind evidence to Hugin. Old M5 results remain recordable but edit timing stays
+explicitly unmeasured.
+
+Correction discovered during live preparation: there is no Wave 5 code-loop corpus, and
+gille-inference #201 is an unrelated chat-replay issue. The reproducible matched corpus is the
+existing ten-case Gate D battery. The owning M5 work (phase telemetry, immutable effective-execution
+metadata, and optional edit-deadline policy) is filed as gille-inference #247 and added to the
+Grimnir Roadmap with the exact wire contract.
+
+The first live Gate D run remains blocked on #247 and an owner key provisioned through `m5-auth`;
+neither boundary was bypassed. After those prerequisites and Hugin deployment, dry-run the ten-case
+Gate D manifest with two holdouts, then compare the current 13-turn champion against the identical
+turn-6 edit-deadline challenger. Keep the champion unless every protected paired gate passes.
+
+---
+
 **Latest session:** 2026-07-13 (Claude) — **M5-harvest campaign (`m5h-2026-07`): 9 tickets, 10 PRs, ~92 graded delegations, shadow lane live**
 **Branch:** `main` @ `977e851` + this handoff; hugin deployed to Pi (health `ok`, polling, queue 0).
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * hugin-mcp — stdio MCP server that exposes the Pi-side broker's
- * `/v1/delegate/*` endpoints to a local Claude Code or Claude Desktop
- * session.
+ * delegation and versioned-learning endpoints to a local Claude Code or
+ * Claude Desktop session.
  *
  * Wiring:
  *   stdio  ↔  McpServer  ↔  buildTools()  ↔  BrokerClient  ↔  HTTP /v1/delegate
@@ -131,6 +131,12 @@ export async function main(): Promise<void> {
     tools.rate as HuginTool<Record<string, unknown>>,
     tools.list as HuginTool<Record<string, unknown>>,
     tools.models as HuginTool<Record<string, unknown>>,
+    tools.friction as HuginTool<Record<string, unknown>>,
+    tools.experimentCreate as HuginTool<Record<string, unknown>>,
+    tools.experimentObserve as HuginTool<Record<string, unknown>>,
+    tools.experimentRate as HuginTool<Record<string, unknown>>,
+    tools.experimentStatus as HuginTool<Record<string, unknown>>,
+    tools.experimentPromote as HuginTool<Record<string, unknown>>,
   ];
   for (const tool of allTools) {
     server.registerTool(

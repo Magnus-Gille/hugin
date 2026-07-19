@@ -45,6 +45,37 @@ export type MuninReadResult =
   | (MuninEntry & { found: true })
   | { namespace: string; key: string; found: false };
 
+export type MuninWriteConflictReason = "already_exists" | "version_mismatch";
+
+export interface MuninWriteRejection {
+  error: string;
+  message?: string;
+  conflict_reason?: unknown;
+  current_updated_at?: unknown;
+  [key: string]: unknown;
+}
+
+/** Typed application-level rejection returned by Munin's memory_write tool. */
+export class MuninWriteRejectedError extends Error {
+  readonly errorCode: string;
+  readonly conflictReason?: MuninWriteConflictReason;
+  readonly currentUpdatedAt?: string;
+
+  constructor(namespace: string, key: string, rejection: MuninWriteRejection) {
+    const detail = rejection.message ?? JSON.stringify(rejection);
+    super(`Munin write rejected for ${namespace}/${key}: ${rejection.error} — ${detail}`);
+    this.name = "MuninWriteRejectedError";
+    this.errorCode = rejection.error;
+    this.conflictReason = rejection.conflict_reason === "already_exists" ||
+      rejection.conflict_reason === "version_mismatch"
+      ? rejection.conflict_reason
+      : undefined;
+    this.currentUpdatedAt = typeof rejection.current_updated_at === "string"
+      ? rejection.current_updated_at
+      : undefined;
+  }
+}
+
 let rpcId = 0;
 
 function sleep(ms: number): Promise<void> {
@@ -256,22 +287,27 @@ export class MuninClient {
     tags?: string[],
     expectedUpdatedAt?: string,
     classification?: string,
+    createIfAbsent?: boolean,
   ): Promise<Record<string, unknown>> {
+    if (createIfAbsent === true && expectedUpdatedAt !== undefined) {
+      throw new Error("Munin write preconditions createIfAbsent and expectedUpdatedAt are mutually exclusive");
+    }
     const args: Record<string, unknown> = { namespace, key, content };
     if (tags) args.tags = tags;
     if (expectedUpdatedAt) args.expected_updated_at = expectedUpdatedAt;
     if (classification) args.classification = classification;
+    if (createIfAbsent === true) args.create_if_absent = true;
     const result = (await this.callTool("memory_write", args)) as
       | Record<string, unknown>
       | undefined
       | null;
     if (result && result.ok === false) {
       const error = typeof result.error === "string" ? result.error : "unknown";
-      const message =
-        typeof result.message === "string" ? result.message : JSON.stringify(result);
-      throw new Error(
-        `Munin write rejected for ${namespace}/${key}: ${error} — ${message}`,
-      );
+      throw new MuninWriteRejectedError(namespace, key, {
+        ...result,
+        error,
+        ...(typeof result.message === "string" ? { message: result.message } : {}),
+      });
     }
     return (result ?? {}) as Record<string, unknown>;
   }
@@ -325,19 +361,27 @@ export class MuninClient {
   }
 
   async query(opts: {
-    query: string;
+    /**
+     * Omit for filter-only browsing. Munin orders filter-only results by
+     * updated_at DESC, which is the ordering required by the capped-window
+     * paginator. Supplying a search query switches to relevance ordering.
+     */
+    query?: string;
     tags?: string[];
     namespace?: string;
     limit?: number;
     entry_type?: string;
     since?: string;
+    until?: string;
   }): Promise<{ results: MuninQueryResult[]; total: number }> {
-    const args: Record<string, unknown> = { query: opts.query };
+    const args: Record<string, unknown> = {};
+    if (opts.query) args.query = opts.query;
     if (opts.tags) args.tags = opts.tags;
     if (opts.namespace) args.namespace = opts.namespace;
     if (opts.limit) args.limit = opts.limit;
     if (opts.entry_type) args.entry_type = opts.entry_type;
     if (opts.since) args.since = opts.since;
+    if (opts.until) args.until = opts.until;
     return (await this.callTool("memory_query", args)) as {
       results: MuninQueryResult[];
       total: number;

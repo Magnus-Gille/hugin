@@ -2,6 +2,62 @@ import { describe, expect, it } from "vitest";
 import { buildStructuredTaskResult } from "../src/task-result-schema.js";
 
 describe("structured task result schema", () => {
+  it("preserves exact content-blind repository change evidence", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1, taskId: "daily-1", taskNamespace: "tasks/daily-1",
+      lifecycle: "completed", outcome: "completed", runtime: "claude",
+      executor: "claude-sdk", resultSource: "sdk-result", exitCode: 0,
+      completedAt: "2026-07-14T12:00:00Z", bodyKind: "response", bodyText: "ok",
+      repositoryChange: {
+        baseBranch: "master",
+        baseCommit: "a".repeat(40),
+        headCommit: "b".repeat(40),
+        changedFiles: ["src/parser.ts", "tests/parser.test.ts"],
+        diffSha256: "c".repeat(64),
+      },
+      repositoryOutcome: {
+        state: "changes-present",
+        baseBranch: "master",
+        baseCommit: "a".repeat(40),
+      },
+    });
+    expect(result.repositoryChange?.changedFiles).toEqual([
+      "src/parser.ts",
+      "tests/parser.test.ts",
+    ]);
+    expect(result.repositoryChange?.baseBranch).toBe("master");
+    expect(result.repositoryOutcome?.state).toBe("changes-present");
+  });
+
+  it("makes a managed-repository no-op explicit without inventing change evidence", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "noop",
+      taskNamespace: "tasks/noop",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "codex",
+      executor: "codex-spawn",
+      resultSource: "stdout",
+      exitCode: 0,
+      completedAt: "2026-07-15T12:00:00Z",
+      bodyKind: "response",
+      bodyText: "No changes needed.",
+      repositoryOutcome: {
+        state: "no-changes",
+        baseBranch: "master",
+        baseCommit: "a".repeat(40),
+      },
+    });
+
+    expect(result.repositoryOutcome).toEqual({
+      state: "no-changes",
+      baseBranch: "master",
+      baseCommit: "a".repeat(40),
+    });
+    expect(result.repositoryChange).toBeUndefined();
+  });
+
   it("preserves M5 delegation provenance on canonical homeserver results", () => {
     const result = buildStructuredTaskResult({
       schemaVersion: 1, taskId: "mcp-m5-abc", taskNamespace: "tasks/mcp-m5-abc",

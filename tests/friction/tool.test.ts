@@ -32,6 +32,7 @@ describe("report_friction tool — happy path", () => {
       detail: "Tried two simplifications, both wrong.",
       resource_assessment: "under-resourced",
       alias_suggested: "large-reasoning",
+      tags: ["source:broker-api", "reporter:spoofed", "repo:hugin"],
     });
 
     expect(result.isError).toBeUndefined();
@@ -46,6 +47,10 @@ describe("report_friction tool — happy path", () => {
     expect(tags).toContain("severity:high");
     expect(tags).toContain("model:claude-sonnet-4-6");
     expect(tags).toContain("source:model-self-report");
+    expect(tags).not.toContain("source:standalone-mcp");
+    expect(tags).toContain("repo:hugin");
+    expect(tags).not.toContain("source:broker-api");
+    expect(tags).not.toContain("reporter:spoofed");
     expect(tags).toContain("alias-suggested:large-reasoning");
     expect(tags).toContain("task:t-abc");
 
@@ -53,6 +58,7 @@ describe("report_friction tool — happy path", () => {
     expect(parsed.schema_version).toBe(1);
     expect(parsed.task_id_resolved).toBe("t-abc");
     expect(parsed.summary).toBe("Hit ceiling on algebra step.");
+    expect(parsed.user_tags).toEqual(["repo:hugin"]);
 
     const body = parseResult(result) as {
       ok: boolean;
