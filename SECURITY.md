@@ -36,3 +36,9 @@ database snapshots, `.env` files, IP addresses, Tailnet details, or credentials.
 Before publishing a fork, scan the entire Git history plus issues, pull requests,
 Actions logs, releases, and attachments; cleaning the current branch is not
 history erasure.
+
+The repository's `.gitleaks.toml` extends the default rules. Its exceptions are
+constrained by both exact file paths and distinctive fabricated values used to
+test Hugin's secret detectors; it does not allowlist fixture directories or
+generic credential shapes. Run Gitleaks against both the current tree and full
+history before every public release.

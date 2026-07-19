@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 // Mock child_process.spawn before importing the module
 const spawnCalls: Array<{ cmd: string; args: string[]; opts: Record<string, unknown> }> = [];
@@ -238,6 +241,29 @@ describe("checkoutTaskBranch", () => {
     );
     expect(result.action).toBe("skipped");
     expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("canonicalizes symlinks: rejects a managed-root entry that resolves outside the root", async () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "hugin-repo-sync-"));
+    const reposRoot = path.join(fixture, "managed");
+    const productionCheckout = path.join(fixture, "production-checkout");
+    const linkedCheckout = path.join(reposRoot, "linked-checkout");
+    fs.mkdirSync(reposRoot);
+    fs.mkdirSync(productionCheckout);
+    fs.symlinkSync(productionCheckout, linkedCheckout, "dir");
+
+    try {
+      // Lexically this path is below reposRoot, but the OS resolves it to the
+      // production checkout. No git command may run through that symlink.
+      const result = await checkoutTaskBranch(linkedCheckout, "task-symlink", {
+        reposRoot,
+        fetchRetryDelaysMs: [0, 0],
+      });
+      expect(result.action).toBe("skipped");
+      expect(spawnCalls).toHaveLength(0);
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
   });
 
   it("tolerates a trailing slash on the configured reposRoot (#139)", async () => {

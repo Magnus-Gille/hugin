@@ -66,7 +66,7 @@ describe("pii-regex-baseline — structured rules pre-empt noisy heuristics", ()
 describe("pii-regex-baseline — unstructured PII (illustratively weak)", () => {
   it("catches TitleCase multi-word names but is known to over/under-fire", () => {
     // It SHOULD catch this two-word name…
-    expect(detect("met Daniel Norin today").some((s) => s.label === "private_person")).toBe(true);
+    expect(detect("met Alex Example today").some((s) => s.label === "private_person")).toBe(true);
     // …and it predictably MISSES a lowercase mononym — the regex ceiling that
     // motivates a learned model (documented in the README).
     expect(detect("ping from kasia").some((s) => s.label === "private_person")).toBe(false);

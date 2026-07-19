@@ -98,9 +98,11 @@ settings are:
 | `HOMESERVER_GATEWAY_URL` | Optional operator-controlled OpenAI-compatible gateway root. |
 | `HUGIN_DELIVERY_TARGETS` | Explicit JSON tuple allowlist for artifact delivery. No target is implied. |
 
-Artifact delivery is disabled by an empty target list even though the validation
-policy defaults to `require`. A configured tuple binds the SSH user, host,
-remote path prefix, and local staging prefix:
+The empty target list is intentionally fail-closed: ordinary tasks without an
+artifact manifest still run, but a task that declares artifacts is rejected
+before execution until at least one explicit target is configured. The
+`require` default then makes any delivery failure terminal. A configured tuple
+binds the SSH user, host, remote path prefix, and local staging prefix:
 
 ```dotenv
 HUGIN_DELIVERY_TARGETS=[{"user":"hugin","host":"files.internal.example","remotePathPrefix":"/srv/mimir/inbox/","localStagingPrefix":"/var/lib/hugin/staging/"}]

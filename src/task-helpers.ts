@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MuninEntry, MuninQueryResult, MuninReadResult } from "./munin-client.js";
 
@@ -736,14 +737,30 @@ export async function checkoutTaskBranch(
       error: `Invalid base-branch override ${JSON.stringify(options.baseBranchOverride)}`,
     };
   }
-  // Canonicalize both sides before the prefix check: a raw `startsWith` guard
-  // can be bypassed with `..` segments that string-match the isolated root but
-  // resolve (via the OS `cwd`) onto a production checkout — the exact
-  // re-pointing #139 exists to prevent. `path.sep`-anchoring also stops a
-  // sibling dir that merely shares the root's string prefix (e.g.
-  // `<root>-evil`).
-  const reposRoot = path.resolve(normalizeRoot(options.reposRoot ?? DEFAULT_REPOS_ROOT));
-  if (!path.resolve(workingDir).startsWith(`${reposRoot}${path.sep}`)) {
+  // Canonicalize both sides before the containment check. `path.resolve`
+  // removes `..` but does not resolve symlinks, so a link below the isolated
+  // root could otherwise point at a production checkout and be branched. An
+  // absent synthetic path falls back to its lexical form (the following Git
+  // probe will reject it in production); other realpath failures fail closed.
+  const canonicalize = (candidate: string): string | null => {
+    const resolved = path.resolve(candidate);
+    try {
+      return fs.realpathSync(resolved);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return resolved;
+      return null;
+    }
+  };
+  const reposRoot = canonicalize(normalizeRoot(options.reposRoot ?? DEFAULT_REPOS_ROOT));
+  const checkout = canonicalize(workingDir);
+  if (reposRoot === null || checkout === null) return { action: "skipped" };
+  const relativeCheckout = path.relative(reposRoot, checkout);
+  if (
+    relativeCheckout === "" ||
+    relativeCheckout === ".." ||
+    relativeCheckout.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeCheckout)
+  ) {
     return { action: "skipped" };
   }
 
