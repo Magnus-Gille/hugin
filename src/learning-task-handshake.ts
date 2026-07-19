@@ -717,8 +717,8 @@ export interface LearningTaskRequestContext {
     request: LearningTaskPreflightRequest;
     response: LearningTaskPreflightResponse;
   };
-  /** Deterministic clock injection for fixtures; production omits it. */
-  stampedAt?: string;
+  /** Frozen once after accepted preflight and reused for every serialization. */
+  stampedAt: string;
 }
 
 export type LearningTaskPreparation =
@@ -885,7 +885,7 @@ export function buildLearningTaskRequestStamp(input: {
     sha256: sha256Utf8(input.renderedPrompt),
     task_binding: context.attempt.taskId,
   };
-  const stampedAt = timestampSchema.parse(context.stampedAt ?? new Date().toISOString());
+  const stampedAt = timestampSchema.parse(context.stampedAt);
   const started = Date.parse(context.attempt.startedAt);
   const accepted = Date.parse(context.source.accepted_at);
   const requested = Date.parse(context.preflight.request.requested_at);
@@ -1262,6 +1262,7 @@ export function createLearningTaskRequestContext(input: {
   attemptStartRef: LearningTaskEvidenceRef;
   source: LearningTaskSource;
   preflight: Awaited<ReturnType<typeof fetchLearningTaskPreflight>>;
+  stampedAt: string;
   randomUuid?: () => string;
 }): LearningTaskRequestContext {
   const uuid = input.randomUuid ?? randomUUID;
@@ -1273,6 +1274,7 @@ export function createLearningTaskRequestContext(input: {
     requestId: opaqueId(uuid()),
     source: sourceSchema.parse(input.source),
     preflight: input.preflight.preflight,
+    stampedAt: timestampSchema.parse(input.stampedAt),
   };
 }
 
@@ -1318,6 +1320,7 @@ export async function prepareDurableLearningTaskAttempt(input: {
   preparation: LearningTaskPreparation;
 }> {
   const uuid = input.randomUuid ?? randomUUID;
+  const now = input.now ?? (() => new Date());
   const attempt = createLearningTaskAttemptStart({
     taskId: input.taskId,
     attemptId: `hugin-attempt:${uuid()}`,
@@ -1340,15 +1343,20 @@ export async function prepareDurableLearningTaskAttempt(input: {
       gatewayBaseUrl: input.gatewayBaseUrl,
       apiKey: input.apiKey,
       attemptStartedAt: attempt.startedAt,
-      now: input.now,
+      now,
       randomUuid: uuid,
       fetchImpl: input.fetchImpl,
     });
+    // The accepted preflight establishes the earliest safe point to freeze the
+    // request stamp. Every later defensive serialization must reuse this exact
+    // timestamp rather than sample wall-clock time again.
+    const stampedAt = timestampSchema.parse(now().toISOString());
     const context = createLearningTaskRequestContext({
       attempt,
       attemptStartRef,
       source,
       preflight,
+      stampedAt,
       randomUuid: uuid,
     });
     const prepared = input.buildPreparedDispatch(context);

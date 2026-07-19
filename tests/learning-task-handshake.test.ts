@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -22,6 +24,7 @@ import {
 import {
   buildHomeserverRequestBody,
   buildFreshHomeserverDelegateRequestBody,
+  executeHomeserverTask,
   renderHomeserverUserMessage,
   type HomeserverTaskConfig,
 } from "../src/homeserver-executor.js";
@@ -178,6 +181,7 @@ describe("LearningTaskContract v1 producer handshake", () => {
     const clock = [
       new Date("2026-07-19T10:00:01.500Z"),
       new Date("2026-07-19T10:00:02.250Z"),
+      new Date("2026-07-19T10:00:02.250Z"),
     ];
     const fetchImpl = vi.fn(async (url: string) => {
       events.push(url.endsWith("/portal/me") ? "principal" : "preflight");
@@ -210,7 +214,6 @@ describe("LearningTaskContract v1 producer handshake", () => {
         expect(JSON.stringify(record)).not.toContain("raw task bytes");
       },
       buildPreparedDispatch: (ctx) => {
-        ctx.stampedAt = "2026-07-19T10:00:02.250Z";
         const task = {
           prompt: "raw task bytes",
           gatewayBaseUrl: "https://m5.test",
@@ -240,6 +243,111 @@ describe("LearningTaskContract v1 producer handshake", () => {
     expect(events).toEqual(["persist", "principal", "preflight", "replay", "prepared"]);
     expect(result.startPersisted).toBe(true);
     expect(result.preparation.kind).toBe("ready");
+    expect(result.preparation.kind === "ready" && result.preparation.context.stampedAt)
+      .toBe("2026-07-19T10:00:02.250Z");
+  });
+
+  it("keeps the prepared request byte-identical when execution starts later", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-19T10:00:02.500Z"));
+    const logDir = mkdtempSync(join(tmpdir(), "hugin-learning-stamp-"));
+    try {
+      const task = {
+        prompt: "raw task bytes",
+        gatewayBaseUrl: "https://m5.test",
+        apiKey: "private-owner-key",
+        path: "delegate" as const,
+        taskType: "summarize",
+        timeoutMs: 30_000,
+        maxOutputChars: 4_096,
+      };
+      const uuids = [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
+      ];
+      const clock = [
+        new Date("2026-07-19T10:00:01.500Z"),
+        new Date("2026-07-19T10:00:02.250Z"),
+        new Date("2026-07-19T10:00:02.500Z"),
+      ];
+      const preflightFetch = vi.fn(async (url: string) => {
+        if (url.endsWith("/portal/me")) {
+          return response({ alias: "service:hugin", tier: "owner" });
+        }
+        return response({
+          advertisement_id: "opaque:55555555-5555-4555-8555-555555555555",
+          endpoint: "/v1/capabilities/learning-task",
+          protocol_version: "learning-task-preflight/v1",
+          advertised_at: advertisedAt,
+          expires_at: "2026-07-19T10:15:02.000Z",
+          authenticated_principal_id: "service:gille-inference",
+          authentication: "service-auth",
+          capabilities: structuredClone(LEARNING_TASK_CAPABILITIES),
+        });
+      });
+
+      const prepared = await prepareDurableLearningTaskAttempt({
+        taskId: "task-001",
+        startedAt,
+        rawTaskText: task.prompt,
+        renderedPrompt: renderHomeserverUserMessage(task),
+        gatewayBaseUrl: task.gatewayBaseUrl,
+        apiKey: task.apiKey,
+        buildSource: () => structuredClone(context().source),
+        persistStart: async () => {},
+        buildPreparedDispatch: (requestContext) => {
+          const requestBody = buildFreshHomeserverDelegateRequestBody(
+            task,
+            "task-001",
+            requestContext,
+          );
+          return createPreparedLearningTaskDispatch({
+            context: requestContext,
+            requestStamp: requestBody.learningTaskStamp!,
+            requestBody,
+          });
+        },
+        persistReplayPayload: async () => {},
+        persistPrepared: async () => {},
+        now: () => clock.shift()!,
+        randomUuid: () => uuids.shift()!,
+        fetchImpl: preflightFetch as typeof fetch,
+      });
+      expect(prepared.preparation.kind).toBe("ready");
+      if (prepared.preparation.kind !== "ready") throw new Error("preparation failed");
+
+      const expectedBody = prepared.preparation.replayPayload.requestBody;
+      const echo = gatewayEchoFor(prepared.preparation.preparedDispatch.requestStamp);
+      vi.setSystemTime(new Date("2026-07-19T10:00:05.000Z"));
+      const delegateFetch = vi.spyOn(globalThis, "fetch").mockImplementationOnce(
+        async (_url, init) => {
+          expect((init as RequestInit).body).toBe(JSON.stringify(expectedBody));
+          return response({
+            outcome: "pass",
+            output: "ok",
+            learningTaskGatewayEcho: echo,
+          });
+        },
+      );
+
+      const result = await executeHomeserverTask({
+        ...task,
+        learningTask: prepared.preparation,
+      }, "task-001", logDir);
+
+      expect(delegateFetch).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({
+        exitCode: 0,
+        resultText: "ok",
+        learningTask: { state: "m5-admitted", evidenceAccepted: true },
+      });
+    } finally {
+      rmSync(logDir, { recursive: true, force: true });
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
   });
 
   it("fails closed without touching M5 when durable start persistence fails", async () => {
