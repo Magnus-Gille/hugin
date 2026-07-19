@@ -15,7 +15,9 @@ import { MuninWriteRejectedError, type MuninClient } from "../../src/munin-clien
 import type { DelegationEnvelope } from "../../src/broker/types.js";
 import {
   buildQualityBinding,
+  buildQualityCorrectionReceipt,
   buildQualityReceipt,
+  foldQualityReceipt,
 } from "../../src/quality-receipt.js";
 
 interface WriteCall {
@@ -640,9 +642,12 @@ describe("BrokerTaskStore.writeQualityReceipt — concurrent append safety (#231
     sensitivity: "internal",
   })}\n\`\`\`\n`;
 
-  function concurrentMunin() {
+  function concurrentMunin(initialFeedback?: string) {
     const entries: Record<string, { content: string; updated_at: string }> = {
       "tasks/t1/status": { content: ENVELOPE_CONTENT, updated_at: "s1" },
+      ...(initialFeedback
+        ? { "tasks/t1/feedback": { content: initialFeedback, updated_at: "v0" } }
+        : {}),
     };
     let feedbackReads = 0;
     let releaseFirstReads!: () => void;
@@ -654,10 +659,11 @@ describe("BrokerTaskStore.writeQualityReceipt — concurrent append safety (#231
       writes,
       read: async (namespace: string, key: string) => {
         if (key === "feedback" && feedbackReads < 2) {
+          const snapshot = entries[`${namespace}/${key}`] ?? null;
           feedbackReads += 1;
           if (feedbackReads === 2) releaseFirstReads();
           await firstReadsReady;
-          return null;
+          return snapshot;
         }
         return entries[`${namespace}/${key}`] ?? null;
       },
@@ -744,6 +750,71 @@ describe("BrokerTaskStore.writeQualityReceipt — concurrent append safety (#231
     expect(results.map((result) => result.changed).sort()).toEqual([false, true]);
     const ledger = JSON.parse(munin.entries["tasks/t1/feedback"]!.content) as { receipts: unknown[] };
     expect(ledger.receipts).toHaveLength(1);
+  });
+
+  it("preserves one native-v2 artifact when different server clocks race", async () => {
+    const predecessor = qualityReceipt("reviewer-a");
+    const initialLedger = foldQualityReceipt(null, predecessor).ledger;
+    const munin = concurrentMunin(JSON.stringify(initialLedger));
+    const store = new BrokerTaskStore(munin as unknown as MuninClient);
+    const correctionInput = {
+      taskId: "t1",
+      attemptId: "hugin-attempt:11111111-1111-4111-8111-111111111111",
+      correctsReceiptId: predecessor.receiptId,
+      reviewerPrincipal: predecessor.reviewer.principal,
+      reviewerIndependence: predecessor.reviewer.independence,
+      rating: "wrong" as const,
+      ratingReason: "The accepted result still fails the Unicode case.",
+      verificationOutcome: "discarded" as const,
+      ratedAt: predecessor.ratedAt,
+      bindingAttestation: predecessor.bindingAttestation,
+      binding: predecessor.binding,
+      rubric: {
+        id: "code-review",
+        version: "2.1.0",
+        config_digest: {
+          algorithm: "sha256" as const,
+          canonicalization: "jcs-rfc8785-utf8-v1" as const,
+          source_ref: "source-doc:rubric/code-review-2.1.0",
+          source_type: "rubric-config" as const,
+          source_version: "rubric-source-2.1.0",
+          digest: "d".repeat(64),
+        },
+      },
+      verifier: { id: "claude-opus", version: "2026-07-19" },
+      failure: {
+        taxonomy: { id: "hugin-quality-failure", version: "1" },
+        code: "incorrect-answer" as const,
+      },
+    };
+
+    const results = await Promise.all([
+      store.writeQualityCorrection("t1", correctionInput),
+      store.writeQualityCorrection("t1", {
+        ...correctionInput,
+        ratedAt: "2026-07-19T10:00:01.000Z",
+      }),
+    ]);
+
+    expect(results.map((result) => result.changed).sort()).toEqual([false, true]);
+    const storedBytes = munin.entries["tasks/t1/feedback"]!.content;
+    const ledger = JSON.parse(storedBytes) as { receipts: Array<{ schemaVersion: number }> };
+    expect(ledger.receipts).toHaveLength(2);
+    expect(ledger.receipts[1]!.schemaVersion).toBe(2);
+    expect(munin.writes.filter((write) => write.key === "feedback")).toHaveLength(1);
+
+    const storedCorrection = (JSON.parse(storedBytes) as { receipts: unknown[] }).receipts[1];
+    const candidates = [
+      buildQualityCorrectionReceipt({
+        ...correctionInput,
+        ratedAt: "2026-07-19T10:00:00.001Z",
+      }),
+      buildQualityCorrectionReceipt({
+        ...correctionInput,
+        ratedAt: "2026-07-19T10:00:01.000Z",
+      }),
+    ];
+    expect(candidates).toContainEqual(storedCorrection);
   });
 
   it("fails closed on a typed conflict that does not match the attempted write mode", async () => {

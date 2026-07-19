@@ -709,6 +709,31 @@ export function buildQualityCorrectionReceipt(
   });
 }
 
+/**
+ * Corrections use a server-owned clock, but the immutable predecessor may have
+ * been rated in the same millisecond. Resolve the candidate clock while the
+ * current CAS snapshot is in hand so the first append is always strictly later.
+ * Missing/invalid predecessors remain the fold's responsibility.
+ */
+export function advancingQualityCorrectionRatedAt(
+  current: QualityReceiptLedger | Record<string, unknown> | null,
+  correctsReceiptId: string,
+  proposedRatedAt: string,
+): string {
+  const ledger = qualityReceiptLedgerSchema.safeParse(current);
+  if (!ledger.success) return proposedRatedAt;
+  const predecessor = ledger.data.receipts.find(
+    (receipt) => receipt.receiptId === correctsReceiptId,
+  );
+  if (!predecessor) return proposedRatedAt;
+  const predecessorMs = Date.parse(predecessor.ratedAt);
+  const proposedMs = Date.parse(proposedRatedAt);
+  if (!Number.isFinite(predecessorMs) || !Number.isFinite(proposedMs) || proposedMs > predecessorMs) {
+    return proposedRatedAt;
+  }
+  return new Date(predecessorMs + 1).toISOString();
+}
+
 export class QualityReceiptConflictError extends Error {
   constructor(message: string) {
     super(message);
@@ -812,11 +837,27 @@ export function foldQualityReceipt(
         "quality correction predecessor must retain task, reviewer, and binding",
       );
     }
-    if (ledger.receipts.some(
+    const existingSuccessor = ledger.receipts.find(
       (receipt) =>
         receipt.schemaVersion === 2 &&
         receipt.correctsReceiptId === next.correctsReceiptId,
-    )) {
+    );
+    if (existingSuccessor) {
+      const {
+        receiptId: _storedReceiptId,
+        ratedAt: _storedRatedAt,
+        ...storedRequest
+      } = existingSuccessor;
+      const {
+        receiptId: _nextReceiptId,
+        ratedAt: _nextRatedAt,
+        ...nextRequest
+      } = next;
+      if (canonicalizeJcs(storedRequest) === canonicalizeJcs(nextRequest)) {
+        // `ratedAt` and its derived receipt id are server-owned. A retry after
+        // a lost success response must preserve the exact first artifact.
+        return { ledger, changed: false };
+      }
       throw new QualityReceiptConflictError(
         `quality correction predecessor ${next.correctsReceiptId} already has a successor`,
       );

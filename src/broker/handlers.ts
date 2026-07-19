@@ -488,11 +488,13 @@ export function createRateHandler(deps: BrokerHandlerDependencies) {
     }
     let structuredTaskId: string;
     let verifiedSubmitter: string | null;
+    let currentStructuredResult: z.infer<typeof structuredTaskResultSchema> | null = null;
     let binding;
     try {
       const raw = JSON.parse(structuredEntry.content) as unknown;
       const current = structuredTaskResultSchema.safeParse(raw);
       if (current.success) {
+        currentStructuredResult = current.data;
         structuredTaskId = current.data.taskId;
         verifiedSubmitter = current.data.provenance?.verifiedSubmitter ?? null;
       } else {
@@ -528,20 +530,51 @@ export function createRateHandler(deps: BrokerHandlerDependencies) {
       res.status(409).json({ error: "policy_rejected", message: "reviewed binding is stale or mismatched" });
       return;
     }
-    // LearningTaskContract v1 distinguishes the durable task instance from an
-    // execution attempt. Hugin's current structured result has no
-    // authoritative attempt identity: the per-claim MCP session UUID is not
-    // persisted as attempt evidence, and startup/lease recovery can finalize a
-    // task after that process has disappeared. Native v2 requires the exact
-    // attempt, so using `task_id` here would fabricate provenance. Issue #240
-    // owns creation and persistence of that evidence; until it lands, retain
-    // the schema/storage seam but fail closed before emitting a v2 receipt.
+    let authoritativeAttemptId: string | null = null;
     if (parsed.correction) {
-      res.status(409).json({
-        error: "policy_rejected",
-        message: "native v2 correction requires authoritative execution attempt evidence; this task result does not provide it",
-      });
-      return;
+      // The successful structured-result parse above is the trust boundary:
+      // its nested LearningTask schema cross-validates the task/attempt stamp,
+      // gateway echo, digests, and every durable evidence reference. Never
+      // accept an attempt identity from the request or infer one from task_id.
+      const learning = currentStructuredResult?.runtimeMetadata?.learningTask;
+      if (!currentStructuredResult || !learning) {
+        res.status(409).json({
+          error: "policy_rejected",
+          message: "native v2 correction requires schema-valid authoritative execution attempt evidence",
+        });
+        return;
+      }
+      if (
+        currentStructuredResult.taskId !== parsed.task_id ||
+        currentStructuredResult.taskNamespace !== `tasks/${parsed.task_id}` ||
+        learning.taskId !== parsed.task_id
+      ) {
+        res.status(409).json({
+          error: "policy_rejected",
+          message: "native v2 correction attempt evidence does not match the rated task",
+        });
+        return;
+      }
+      if (learning.state !== "m5-admitted" || learning.evidenceAccepted !== true) {
+        res.status(409).json({
+          error: "policy_rejected",
+          message: "native v2 correction requires an accepted m5-admitted execution attempt",
+        });
+        return;
+      }
+      if (
+        !learning.attemptStartRef ||
+        !learning.preparedDispatchRef ||
+        !learning.replayPayloadRef ||
+        !learning.attemptOutcomeRef
+      ) {
+        res.status(409).json({
+          error: "policy_rejected",
+          message: "native v2 correction requires complete durable execution-attempt references",
+        });
+        return;
+      }
+      authoritativeAttemptId = learning.attemptId;
     }
     const principal = authenticatedPrincipal;
     const brokerOwner = canonical.ok
@@ -574,9 +607,74 @@ export function createRateHandler(deps: BrokerHandlerDependencies) {
       bindingAttestation: expected ? "reviewer-confirmed" as const : "server-bound" as const,
       binding,
     };
-    const receipt = buildQualityReceipt(commonReceipt);
+    const correction = parsed.correction;
+    const correctionReceiptInput = correction
+      ? {
+          ...commonReceipt,
+          attemptId: authoritativeAttemptId!,
+          correctsReceiptId: correction.predecessor_receipt_id,
+          rubric: correction.rubric,
+          verifier: correction.verifier,
+          failure: correction.failure,
+          ...(correction.producing_configuration
+            ? {
+                producingConfiguration: {
+                  ...(correction.producing_configuration.prompt
+                    ? { prompt: correction.producing_configuration.prompt }
+                    : {}),
+                  ...(correction.producing_configuration.harness
+                    ? { harness: correction.producing_configuration.harness }
+                    : {}),
+                  ...(correction.producing_configuration.model
+                    ? {
+                        model: {
+                          id: correction.producing_configuration.model.id,
+                          configurationSha256:
+                            correction.producing_configuration.model.configuration_sha256,
+                        },
+                      }
+                    : {}),
+                  ...(correction.producing_configuration.tool_policy
+                    ? { toolPolicy: correction.producing_configuration.tool_policy }
+                    : {}),
+                },
+              }
+            : {}),
+          ...(correction.references
+            ? {
+                references: {
+                  ...(correction.references.corrected_successor
+                    ? {
+                        correctedSuccessor: {
+                          taskId: correction.references.corrected_successor.task_id,
+                          structuredResultSha256:
+                            correction.references.corrected_successor.structured_result_sha256,
+                        },
+                      }
+                    : {}),
+                  ...(correction.references.follow_up_task_id
+                    ? { followUpTaskId: correction.references.follow_up_task_id }
+                    : {}),
+                  ...(correction.references.pull_request_url
+                    ? { pullRequestUrl: correction.references.pull_request_url }
+                    : {}),
+                  ...(correction.references.replacement_commit
+                    ? { replacementCommit: correction.references.replacement_commit }
+                    : {}),
+                },
+              }
+            : {}),
+        }
+      : null;
     try {
-      await deps.taskStore.writeQualityReceipt(parsed.task_id, receipt);
+      if (correctionReceiptInput) {
+        await deps.taskStore.writeQualityCorrection(parsed.task_id, correctionReceiptInput);
+      } else {
+        await deps.taskStore.writeQualityReceipt(
+          parsed.task_id,
+          buildQualityReceipt(commonReceipt),
+        );
+      }
     } catch (err) {
       res.status(err instanceof QualityReceiptConflictError ? 409 : 500).json({
         error: err instanceof QualityReceiptConflictError ? "policy_rejected" : "internal",
