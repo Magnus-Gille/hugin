@@ -22,10 +22,9 @@ regexes = [
 description = "Historical generated predictions over the same synthetic PII corpus"
 condition = "AND"
 regexTarget = "secret"
-paths = [
-  '''^eval/privacy-filter/results/huginmunin/predictions-all-huginmunin\.jsonl$''',
-  '''^eval/privacy-filter/results/huginmunin/predictions-huginmunin\.jsonl$''',
-]
+# This path pattern exists solely for deleted historical generated-result files.
+# Exact fabricated values are still required by the AND condition below.
+paths = ['''^eval/privacy-filter/results/[^/]+/predictions-(?:all-)?[^/]+\.jsonl$''']
 regexes = [
   '''AKIA4Z9QXWPLMN72BVTQ''',
   '''ghp_Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56Qr78''',
