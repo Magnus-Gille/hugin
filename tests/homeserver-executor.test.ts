@@ -399,12 +399,25 @@ describe("executeHomeserverTask — backpressure & errors", () => {
       new Response("owner preempted the GPU", { status: 503, headers: { "Retry-After": "5" } }),
     );
 
-    const result = await executeHomeserverTask(makeTaskConfig(), "bp-503", tmpLogDir);
+    const result = await executeHomeserverTask(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "bp-503",
+      tmpLogDir,
+    );
 
     expect(result.exitCode).toBe(1);
     expect(result.backpressure).toBe("admission");
     expect(result.retryAfterS).toBe(5);
     expect(result.resultText).toBeNull();
+    expect(result.huginTaskIdentity).toEqual(expect.objectContaining({
+      taskId: "bp-503",
+      rawTaskFingerprint: expect.objectContaining({
+        version: "trim-utf8-sha256-v1",
+      }),
+      renderedPromptFingerprint: expect.objectContaining({
+        version: "hugin-delegate-prompt-utf8-sha256-v1",
+      }),
+    }));
   });
 
   it("flags 429 as quota backpressure", async () => {
