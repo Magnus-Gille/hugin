@@ -8,6 +8,11 @@
  */
 
 import { z } from "zod";
+import {
+  qualityFailureCodeSchema,
+  qualityRubricSchema,
+  qualityVerifierIdentitySchema,
+} from "../quality-receipt.js";
 
 export const aliasSchema = z.enum([
   "m5",
@@ -173,6 +178,49 @@ export const verificationOutcomeSchema = z.enum([
   "escalated_to_claude",
 ]);
 
+const qualityWireConfigurationIdentitySchema = z.object({
+  id: z.string().min(1).max(200),
+  version: z.string().min(1).max(200),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict();
+
+export const qualityCorrectionRequestSchema = z.object({
+  predecessor_receipt_id: z.string().regex(/^qr-[0-9a-f]{24}$/),
+  rubric: qualityRubricSchema,
+  verifier: qualityVerifierIdentitySchema,
+  failure: z.object({
+    taxonomy: z.object({
+      id: z.string().min(1).max(200),
+      version: z.string().min(1).max(200),
+    }).strict(),
+    code: qualityFailureCodeSchema,
+  }).strict(),
+  producing_configuration: z.object({
+    prompt: qualityWireConfigurationIdentitySchema.optional(),
+    harness: qualityWireConfigurationIdentitySchema.optional(),
+    model: z.object({
+      id: z.string().min(1).max(200),
+      configuration_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    }).strict().optional(),
+    tool_policy: qualityWireConfigurationIdentitySchema.optional(),
+  }).strict().refine(
+    (value) => Object.values(value).some((child) => child !== undefined),
+    "producing_configuration must contain at least one identity",
+  ).optional(),
+  references: z.object({
+    corrected_successor: z.object({
+      task_id: z.string().min(1).max(200),
+      structured_result_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    }).strict().optional(),
+    follow_up_task_id: z.string().min(1).max(200).optional(),
+    pull_request_url: z.string().url().optional(),
+    replacement_commit: z.string().regex(/^[0-9a-f]{40,64}$/).optional(),
+  }).strict().refine(
+    (value) => Object.values(value).some((child) => child !== undefined),
+    "references must contain at least one reference",
+  ).optional(),
+}).strict();
+
 export const rateRequestSchema = z.object({
   task_id: z.string().min(1),
   rating: ratingSchema,
@@ -180,12 +228,30 @@ export const rateRequestSchema = z.object({
   verification_outcome: verificationOutcomeSchema,
   retries_count: z.number().int().nonnegative().optional(),
   reviewer_role: z.enum(["independent", "self"]).optional(),
+  correction: qualityCorrectionRequestSchema.optional(),
   expected_binding: z.object({
     task_document_sha256: z.string().regex(/^[0-9a-f]{64}$/),
     structured_result_sha256: z.string().regex(/^[0-9a-f]{64}$/),
     repository_diff_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   }).strict().optional(),
-}).strict();
+}).strict().superRefine((value, ctx) => {
+  const fullyAccepted = value.rating === "pass" &&
+    value.verification_outcome === "accepted_unchanged";
+  if (value.correction && !fullyAccepted && value.correction.failure.code === "none") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["correction", "failure", "code"],
+      message: "a non-accepted correction requires a structured failure code",
+    });
+  }
+  if (value.correction && fullyAccepted && value.correction.failure.code !== "none") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["correction", "failure", "code"],
+      message: "an accepted unchanged correction must use failure code none",
+    });
+  }
+});
 export type RateRequest = z.infer<typeof rateRequestSchema>;
 
 export const awaitRequestSchema = z.object({

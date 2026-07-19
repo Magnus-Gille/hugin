@@ -14,6 +14,7 @@ import {
 import { buildStructuredTaskResult } from "../src/task-result-schema.js";
 import {
   buildQualityBinding,
+  buildQualityCorrectionReceipt,
   buildQualityReceipt,
   foldQualityReceipt,
 } from "../src/quality-receipt.js";
@@ -226,6 +227,72 @@ describe("daily task exam factory", () => {
     expect(candidate.lane).toBe("quarantine");
     expect(candidate.readiness).toBe("quarantined");
     expect(candidate.reasons).toContain("quality-receipt-rejected");
+  });
+
+  it("preserves actionable v2 correction provenance in content-blind harvested quality", () => {
+    const correctedSource = addQualityReceipt(source("claude"));
+    const firstLedger = JSON.parse(correctedSource.feedback!.content);
+    const predecessor = firstLedger.receipts[0];
+    const correction = buildQualityCorrectionReceipt({
+      taskId: "daily-1",
+      attemptId: "daily-1",
+      correctsReceiptId: predecessor.receiptId,
+      reviewerPrincipal: predecessor.reviewer.principal,
+      reviewerIndependence: predecessor.reviewer.independence,
+      rating: "wrong",
+      ratingReason: "The delivered parser still mishandles decomposed Unicode.",
+      verificationOutcome: "discarded",
+      ratedAt: "2026-07-14T12:00:00.000Z",
+      bindingAttestation: predecessor.bindingAttestation,
+      binding: predecessor.binding,
+      rubric: {
+        id: "parser-review",
+        version: "2",
+        config_digest: {
+          algorithm: "sha256",
+          canonicalization: "jcs-rfc8785-utf8-v1",
+          source_ref: "source-doc:rubric/parser-review-2",
+          source_type: "rubric-config",
+          source_version: "rubric-source-2",
+          digest: "d".repeat(64),
+        },
+      },
+      verifier: { id: "claude-opus", version: "2026-07-19" },
+      failure: {
+        taxonomy: { id: "hugin-quality-failure", version: "1" },
+        code: "incorrect-answer",
+      },
+      producingConfiguration: {
+        harness: { id: "claude-code", version: "1", sha256: "e".repeat(64) },
+      },
+      references: {
+        correctedSuccessor: {
+          taskId: "daily-1-fix",
+          structuredResultSha256: "f".repeat(64),
+        },
+      },
+    });
+    correctedSource.feedback!.content = JSON.stringify(
+      foldQualityReceipt(firstLedger, correction).ledger,
+    );
+
+    const candidate = buildDailyExamCandidate(correctedSource);
+    expect(candidate.quality).toMatchObject({
+      state: "rejected",
+      receiptIds: [correction.receiptId],
+      effectiveReceipts: [{
+        nativeSchemaVersion: 2,
+        rubric: correction.rubric,
+        verifier: correction.verifier,
+        failure: correction.failure,
+        producingConfiguration: correction.producingConfiguration,
+        references: correction.references,
+      }],
+    });
+    const serialized = JSON.stringify(candidate);
+    expect(serialized).not.toContain(correction.ratingReason);
+    expect(serialized).toContain("parser-review");
+    expect(serialized).toContain("daily-1-fix");
   });
 
   it("quarantines historical tasks without exact repository evidence", () => {

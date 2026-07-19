@@ -355,9 +355,13 @@ interface DelegationRatedEvent {
 ```
 
 > Historical note: this section specifies the retired orch-v1 JSONL event.
-> Current canonical tasks persist schema-v1 append-only quality receipts in
-> Munin `feedback`, bound to the exact task/result/repository evidence. Legacy
-> flat feedback remains readable but is never treated as bound acceptance.
+> Current canonical tasks persist append-only native Quality Receipts in Munin
+> `feedback`, bound to the exact task/result/repository evidence. Native v1 is
+> frozen; same-reviewer corrections use native v2 with a new id and explicit
+> predecessor/correction group. Emission currently fails closed until #240
+> persists an authoritative attempt id; `task_id` is not substituted for it.
+> Legacy flat feedback remains readable but is
+> never treated as bound acceptance. See `docs/quality-receipts.md`.
 
 **Forward-compat rule:** projection code MUST tolerate unknown `event_schema_version` values by skipping the event (with a logged warning) rather than crashing. Producers MUST bump the version on any breaking shape change; additive field changes do not require a bump.
 

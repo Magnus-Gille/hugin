@@ -528,6 +528,21 @@ export function createRateHandler(deps: BrokerHandlerDependencies) {
       res.status(409).json({ error: "policy_rejected", message: "reviewed binding is stale or mismatched" });
       return;
     }
+    // LearningTaskContract v1 distinguishes the durable task instance from an
+    // execution attempt. Hugin's current structured result has no
+    // authoritative attempt identity: the per-claim MCP session UUID is not
+    // persisted as attempt evidence, and startup/lease recovery can finalize a
+    // task after that process has disappeared. Native v2 requires the exact
+    // attempt, so using `task_id` here would fabricate provenance. Issue #240
+    // owns creation and persistence of that evidence; until it lands, retain
+    // the schema/storage seam but fail closed before emitting a v2 receipt.
+    if (parsed.correction) {
+      res.status(409).json({
+        error: "policy_rejected",
+        message: "native v2 correction requires authoritative execution attempt evidence; this task result does not provide it",
+      });
+      return;
+    }
     const principal = authenticatedPrincipal;
     const brokerOwner = canonical.ok
       ? canonical.envelope.broker_principal
@@ -542,12 +557,12 @@ export function createRateHandler(deps: BrokerHandlerDependencies) {
       });
       return;
     }
-    const independence = parsed.reviewer_role === "independent"
+    const independence: "independent" | "self" | "unknown" = parsed.reviewer_role === "independent"
       ? "independent"
       : parsed.reviewer_role === "self" || reviewerIsOwner
         ? "self"
         : "unknown";
-    const receipt = buildQualityReceipt({
+    const commonReceipt = {
       taskId: parsed.task_id,
       reviewerPrincipal: principal,
       reviewerIndependence: independence,
@@ -556,9 +571,10 @@ export function createRateHandler(deps: BrokerHandlerDependencies) {
       verificationOutcome: parsed.verification_outcome,
       retriesCount: parsed.retries_count,
       ratedAt: nowFn(deps)().toISOString(),
-      bindingAttestation: expected ? "reviewer-confirmed" : "server-bound",
+      bindingAttestation: expected ? "reviewer-confirmed" as const : "server-bound" as const,
       binding,
-    });
+    };
+    const receipt = buildQualityReceipt(commonReceipt);
     try {
       await deps.taskStore.writeQualityReceipt(parsed.task_id, receipt);
     } catch (err) {
