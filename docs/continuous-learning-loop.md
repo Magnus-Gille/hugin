@@ -182,7 +182,7 @@ tokens in the manifest:
 
 ```bash
 eval "$(m5-auth --env --tailnet)"
-HUGIN_BROKER_URL=http://huginmunin.<tailnet>.ts.net:3035 \
+HUGIN_BROKER_URL=http://hugin-node.<tailnet>.ts.net:3035 \
 HUGIN_BROKER_TOKEN=<keychain-or-env-token> \
 npm run experiment:m5-code-loop -- /path/to/gate-d-wave.json --dry-run
 

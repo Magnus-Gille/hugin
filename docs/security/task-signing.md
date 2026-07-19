@@ -160,7 +160,7 @@ ln -sf "$PWD/scripts/hugin-sign" ~/.local/bin/hugin-sign   # run from the hugin 
 security add-generic-password -s hugin-signing -a claude-code -U -w "$(openssl rand -hex 32)"
 
 # 2. Register the SAME secret on the Pi as the `claude-code` keyId (verifier side),
-#    merging into the existing HUGIN_SUBMITTER_KEYS in /home/magnus/repos/hugin/.env,
+#    merging into the existing HUGIN_SUBMITTER_KEYS in /var/lib/hugin/app/.env,
 #    then restart Hugin. An operator with Pi access reads the value back from the
 #    Keychain at that moment (e.g. `hugin-sign`) — it never transits the repo or a log.
 ```

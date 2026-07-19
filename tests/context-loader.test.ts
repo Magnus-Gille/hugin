@@ -43,8 +43,8 @@ function makeEntry(
 describe("context-loader", () => {
   it("returns per-ref classification metadata and max sensitivity", async () => {
     const store: Record<string, BatchEntry> = {
-      "people/magnus/profile": makeEntry(
-        "people/magnus",
+      "people/example-owner/profile": makeEntry(
+        "people/example-owner",
         "profile",
         "Private profile",
         "client-confidential",
@@ -67,20 +67,20 @@ describe("context-loader", () => {
     };
 
     const resolution = await resolveContextRefs(
-      ["people/magnus/profile", "projects/hugin/status"],
+      ["people/example-owner/profile", "projects/hugin/status"],
       8_000,
       munin as never,
     );
 
     expect(resolution.refsResolved).toEqual([
-      "people/magnus/profile",
+      "people/example-owner/profile",
       "projects/hugin/status",
     ]);
     expect(resolution.maxSensitivity).toBe("private");
     expect(resolution.refs).toMatchObject([
       {
-        ref: "people/magnus/profile",
-        namespace: "people/magnus",
+        ref: "people/example-owner/profile",
+        namespace: "people/example-owner",
         key: "profile",
         classification: "client-confidential",
         sensitivity: "private",
@@ -263,12 +263,12 @@ describe("context-loader", () => {
 
     it("in block mode does not let quarantined refs raise maxSensitivity", async () => {
       const resolution = await resolveContextRefs(
-        ["people/magnus/profile", "projects/hugin/status"],
+        ["people/example-owner/profile", "projects/hugin/status"],
         8_000,
         {
           async readBatch(refs: BatchRef[]): Promise<BatchEntry[]> {
             return refs.map(({ namespace, key }) => {
-              if (namespace === "people/magnus") {
+              if (namespace === "people/example-owner") {
                 return makeEntry(
                   namespace,
                   key,
@@ -282,7 +282,7 @@ describe("context-loader", () => {
         } as never,
         { injectionPolicy: "block" },
       );
-      expect(resolution.refsQuarantined).toEqual(["people/magnus/profile"]);
+      expect(resolution.refsQuarantined).toEqual(["people/example-owner/profile"]);
       // Quarantined content is dropped, so its `private` sensitivity must
       // not leak into the routing decision.
       expect(resolution.maxSensitivity).toBe("internal");

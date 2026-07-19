@@ -23,7 +23,7 @@ Both `/etc/systemd/system/hugin.service` (system-level, installed by `deploy-pi.
 | C02 ReadWritePaths | Assumption / may be problem | Confirmed real bug: user-level service can't write to `.hugin/logs/` — tasks will fail |
 | C03 Fix 3 shutdown | Add process.exit at end of shutdown() | Must await child exit first; hard timer is the only unconditional exit path |
 | C05 Migration atomicity | Manual one-time step | deploy-pi.sh needs idempotent system-service removal block |
-| C09 Repo service file | Not discussed | hugin.service (repo) has wrong directives for user-level (`User=magnus`, `WantedBy=multi-user.target`) |
+| C09 Repo service file | Not discussed | hugin.service (repo) has wrong directives for user-level (`User=<service-user>`, `WantedBy=multi-user.target`) |
 
 ---
 
@@ -38,7 +38,7 @@ Both `/etc/systemd/system/hugin.service` (system-level, installed by `deploy-pi.
 
 ## Unresolved / open questions
 
-- **ReadWritePaths scope** (C08): Option A (`/home/magnus`) vs Option B (`/home/magnus/repos/hugin /home/magnus/.hugin`). Needs write-path audit. Use Option A as safe default until audited.
+- **ReadWritePaths scope** (C08): Option A (`/var/lib/hugin`) vs Option B (`/var/lib/hugin/repos/hugin /var/lib/hugin/.hugin`). Needs write-path audit. Use Option A as safe default until audited.
 - **munin-memory.service scope** (C04): Is it user-level or system-level? `After=` dependency may be silently ignored. Worth verifying but non-blocking.
 
 ---
@@ -49,7 +49,7 @@ Both `/etc/systemd/system/hugin.service` (system-level, installed by `deploy-pi.
 |---|--------|----------|-------|
 | 1 | Remove system-level hugin + ratatoskr services from Pi (one-time) | Critical | `sudo systemctl stop/disable/rm` both |
 | 2 | Fix `scripts/deploy-pi.sh`: user-level install, idempotent legacy-removal block, `systemctl --user` for restart | Critical | Single commit |
-| 3 | Fix repo `hugin.service`: remove `User=magnus`, change `WantedBy=default.target`, fix `ReadWritePaths` (use `/home/magnus /tmp` for now) | Critical | Part of same commit |
+| 3 | Fix repo `hugin.service`: remove `User=<service-user>`, change `WantedBy=default.target`, fix `ReadWritePaths` (use `/var/lib/hugin /tmp` for now) | Critical | Part of same commit |
 | 4 | Fix `src/index.ts` `shutdown()`: await child exit before process.exit; hard 30s timer as only unconditional exit | Major | Follow-up commit |
 | 5 | Audit Hugin write paths to determine correct `ReadWritePaths` | Major | `strace` or code grep; resolve C08 |
 | 6 | Verify munin-memory.service scope; clean up `After=` if needed | Minor | SSH check |

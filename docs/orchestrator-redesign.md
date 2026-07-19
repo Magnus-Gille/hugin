@@ -70,7 +70,7 @@ makes the price savings safe.
 
 ### D7 — Host split
 
-- **Pi (huginmunin):** always-on control plane (poll/claim/heartbeat/CAS) + Munin memory.
+- **Pi (hugin-node):** always-on control plane (poll/claim/heartbeat/CAS) + Munin memory.
   Keep it — Munin must be always-available; the dispatcher loop wants a stable base.
 - **BosGame / M5:** heavy fanout execution host + local inference, on demand. Workflow
   fanout caps at `min(16, cores−2)` → Pi ≈ 2, Strix ≈ 14. Orchestrator **execution host

@@ -65,7 +65,7 @@ const labelled: LabelledExample[] = [
       " eller ",
       pii("private_email", "anna.lindqvist@uddevallaenergi.example.se"),
       ".\n\nVänliga hälsningar,\n",
-      pii("private_person", "Magnus Gille"),
+      pii("private_person", "Nils Berg"),
     ],
     { lang: "sv", category: "email" },
   ),
@@ -173,7 +173,7 @@ const labelled: LabelledExample[] = [
       "Broker not connecting. My .env has HUGIN_BROKER_TOKEN=",
       pii("secret", "sk-" + "proj-9Qa3xKmZ7bV2tLpRfWnE4cYhUiOaSdF6"),
       " and HUGIN_BROKER_URL=",
-      pii("private_url", "https://huginmunin.tail9af2.ts.net:3033"),
+      pii("private_url", "https://hugin.example.com:3033"),
       ". Should it be the Tailscale name?",
     ],
     { lang: "en", category: "support" },
@@ -444,7 +444,7 @@ const clean: LabelledExample[] = [
     "grimnir_clean_05",
     [
       "poll cycle complete: queueDepth=0, heartbeat written, no pending tasks. " +
-        "Worker hugin-huginmunin idle. Lease renewal stopped.",
+        "Worker hugin-hugin-node idle. Lease renewal stopped.",
     ],
     { lang: "en", category: "log" },
   ),

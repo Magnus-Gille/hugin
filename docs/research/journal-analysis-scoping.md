@@ -27,7 +27,7 @@ This document scopes the analysis that produces the evidence to evaluate the fir
 
 ## Inputs
 
-- **Journal:** `~/.hugin/invocation-journal.jsonl` on `huginmunin.local` (Pi). 261 entries as of 2026-04-25 (172 claude, 89 ollama).
+- **Journal:** `~/.hugin/invocation-journal.jsonl` on `hugin-node.local` (Pi). 261 entries as of 2026-04-25 (172 claude, 89 ollama).
 - **Append site:** `src/index.ts:3465-3484`.
 - **Per-runtime fields available:**
   - **All:** `ts, task_id, repo, runtime, executor, model_requested, exit_code, duration_s, timeout_ms, cost_usd, group, quota_before, quota_after, cancellation_reason, cancellation_source`.

@@ -60,7 +60,7 @@ new corpus entry.
 ## CLI example
 
 ```bash
-export HUGIN_BROKER_URL=http://huginmunin:3033
+export HUGIN_BROKER_URL=http://hugin-node:3033
 export HUGIN_BROKER_TOKEN="$(your-keychain-helper)"
 
 hugin-friction \

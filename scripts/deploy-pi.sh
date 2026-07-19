@@ -1,21 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 
-# Deploy Hugin to the Hugin-Munin Pi
+# Deploy Hugin to a configured Linux host
 # Usage: ./scripts/deploy-pi.sh [hostname]
 
-TAILSCALE_IP="100.97.117.37"
 if [ -n "${1:-}" ]; then
   PI_HOST="$1"
-elif ping -c1 -W1 huginmunin.local >/dev/null 2>&1; then
-  PI_HOST="huginmunin.local"
 else
-  echo "  mDNS unavailable, falling back to Tailscale IP"
-  PI_HOST="$TAILSCALE_IP"
+  PI_HOST="${HUGIN_DEPLOY_HOST:-hugin.local}"
 fi
-DEPLOY_USER="${DEPLOY_USER:-magnus}"
+DEPLOY_USER="${DEPLOY_USER:-hugin}"
 REMOTE="$DEPLOY_USER@$PI_HOST"
-REMOTE_DIR="/home/$DEPLOY_USER/repos/hugin"
+REMOTE_DIR="${HUGIN_DEPLOY_DIR:-/var/lib/hugin/app}"
 
 read_clean_deploy_sha() {
   local repo_root source_status source_sha
@@ -123,10 +119,11 @@ ssh "$REMOTE" "
   cp $REMOTE_DIR/hugin.service ~/.config/systemd/user/hugin.service
   cp $REMOTE_DIR/systemd/hugin-daily-exam-factory.service ~/.config/systemd/user/hugin-daily-exam-factory.service
   cp $REMOTE_DIR/systemd/hugin-daily-exam-factory.timer ~/.config/systemd/user/hugin-daily-exam-factory.timer
-  XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
-  XDG_RUNTIME_DIR=/run/user/1000 systemctl --user enable hugin.service
-  XDG_RUNTIME_DIR=/run/user/1000 systemctl --user enable --now hugin-daily-exam-factory.timer
-  loginctl enable-linger magnus 2>/dev/null || true
+  user_id=\$(id -u)
+  XDG_RUNTIME_DIR=/run/user/\$user_id systemctl --user daemon-reload
+  XDG_RUNTIME_DIR=/run/user/\$user_id systemctl --user enable hugin.service
+  XDG_RUNTIME_DIR=/run/user/\$user_id systemctl --user enable --now hugin-daily-exam-factory.timer
+  loginctl enable-linger "$DEPLOY_USER" 2>/dev/null || true
 "
 
 echo "==> Checking for .env file..."
@@ -139,41 +136,45 @@ else
 fi
 
 echo "==> Artefact-delivery preflight (issue #68)..."
-# The deliverer runs ON the Pi and ships to the NAS over SSH+rsync from the
-# systemd-user environment. Probe SSH (BatchMode, no prompts), rsync, and a
-# write/read/delete round-trip BEFORE enabling HUGIN_DELIVERY_POLICY=require.
+# The deliverer runs on the service host and ships to an explicitly configured
+# SSH/rsync target from the systemd-user environment. Probe SSH (BatchMode, no
+# prompts), rsync, and a write/read/delete round-trip before enabling
+# HUGIN_DELIVERY_POLICY=require.
 # Non-fatal: the runtime checkpoint + failure handling are the real safety net
-# (a probe can pass while the long-running unit later loses env/keys/NAS), so a
+# (a probe can pass while the long-running unit later loses connectivity), so a
 # probe failure is a loud WARNING, not a hard deploy stop.
 # Single source of truth: derive the probe target from the first
 # HUGIN_DELIVERY_TARGETS tuple (same allowlist the runtime enforces), so the
 # preflight cannot drift from the actual delivery target (Codex review #6).
-# Falls back to the built-in default NAS when the env var is unset.
-read -r DELIVERY_NAS_USER DELIVERY_NAS_HOST DELIVERY_NAS_DIR <<EOF
-$(HUGIN_DELIVERY_TARGETS="${HUGIN_DELIVERY_TARGETS:-}" node -e '
-  const raw = process.env.HUGIN_DELIVERY_TARGETS;
-  let t = { user: "magnus", host: "100.99.119.52", remotePathPrefix: "/home/magnus/mimir-inbox/" };
-  if (raw && raw.trim()) {
-    const arr = JSON.parse(raw);
-    if (Array.isArray(arr) && arr[0]) t = arr[0];
-  }
-  const dir = String(t.remotePathPrefix).replace(/\/$/, "");
-  process.stdout.write(`${t.user} ${t.host} ${dir}`);
-' 2>/dev/null || echo "magnus 100.99.119.52 /home/magnus/mimir-inbox")
+# No implicit target exists. Skip this optional probe when the operator has not
+# supplied the same explicit tuple allowlist used by the runtime.
+DELIVERY_TARGET_JSON="${HUGIN_DELIVERY_TARGETS:-}"
+if [ -z "$DELIVERY_TARGET_JSON" ]; then
+  echo "  Skipped: set HUGIN_DELIVERY_TARGETS to preflight artifact delivery"
+elif ! read -r DELIVERY_REMOTE_USER DELIVERY_REMOTE_HOST DELIVERY_REMOTE_DIR <<EOF
+$(HUGIN_DELIVERY_TARGETS="$DELIVERY_TARGET_JSON" node -e '
+  const arr = JSON.parse(process.env.HUGIN_DELIVERY_TARGETS || "[]");
+  if (!Array.isArray(arr) || !arr[0]) process.exit(2);
+  const t = arr[0];
+  if (![t.user, t.host, t.remotePathPrefix].every((v) => typeof v === "string" && v)) process.exit(3);
+  process.stdout.write(`${t.user} ${t.host} ${t.remotePathPrefix.replace(/\/$/, "")}`);
+')
 EOF
-if ssh "$REMOTE" "
+then
+  echo "  WARNING: HUGIN_DELIVERY_TARGETS is not a valid non-empty target array"
+elif ssh "$REMOTE" "
   set -e
-  export HOME=/home/$DEPLOY_USER
+  export HOME=/var/lib/hugin
   command -v rsync >/dev/null || { echo 'rsync missing on Pi'; exit 1; }
   ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 \
-    $DELIVERY_NAS_USER@$DELIVERY_NAS_HOST -- \
-    \"mkdir -p $DELIVERY_NAS_DIR && touch $DELIVERY_NAS_DIR/.hugin-preflight && rm -f $DELIVERY_NAS_DIR/.hugin-preflight\"
+    $DELIVERY_REMOTE_USER@$DELIVERY_REMOTE_HOST -- \
+    \"mkdir -p $DELIVERY_REMOTE_DIR && touch $DELIVERY_REMOTE_DIR/.hugin-preflight && rm -f $DELIVERY_REMOTE_DIR/.hugin-preflight\"
 "; then
-  echo "  OK: Pi → NAS SSH/rsync write/read/delete probe passed"
+  echo "  OK: remote SSH/rsync write/read/delete probe passed"
 else
   echo "  WARNING: artefact-delivery preflight FAILED."
   echo "  Do NOT set HUGIN_DELIVERY_POLICY=require until SSH keys / BatchMode /"
-  echo "  NAS reachability are fixed (else delivery-capable tasks will fail)."
+  echo "  remote reachability are fixed (else delivery-capable tasks will fail)."
 fi
 
 echo "==> Host-side Codex sandbox preflight (issues #59/#218)..."
@@ -192,26 +193,12 @@ else
   echo "  The post-restart in-service health acceptance will remain authoritative."
 fi
 
-echo "==> Refreshing Claude config on the Pi (claude-config bootstrap)..."
-# Config now lives in the versioned Magnus-Gille/claude-config repo (+ claude-skills,
-# skills-private), consumed via symlinks. Pull latest + re-run bootstrap instead of the
-# old rsync (which would clobber the symlinks with real dirs). See claude-config/README.md.
-# See scripts/lib/claude-config-bootstrap.sh (issue #153): missing checkout is optional
-# infra and informational, a broken existing checkout stays a real WARNING.
-# shellcheck source=lib/claude-config-bootstrap.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/claude-config-bootstrap.sh"
-claude_config_bootstrap "$REMOTE"
-
-echo "==> Installing CLI update cron job..."
-CRON_CMD="0 4 * * * $REMOTE_DIR/scripts/update-cli.sh 2>&1 | logger -t hugin-update"
-ssh "$REMOTE" "crontab -l 2>/dev/null | grep -v 'update-cli.sh' | { cat; echo '$CRON_CMD'; } | crontab -"
-echo "  Cron installed: daily at 04:00"
-
 echo "==> Ensuring workspace directory exists..."
-ssh "$REMOTE" "mkdir -p /home/$DEPLOY_USER/workspace"
+ssh "$REMOTE" "mkdir -p /var/lib/hugin/workspace"
 
 echo "==> Killing orphan Hugin processes..."
-ssh "$REMOTE" "SYSPID=\$(XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show hugin.service --property=MainPID --value 2>/dev/null || echo 0)
+ssh "$REMOTE" "user_id=\$(id -u)
+SYSPID=\$(XDG_RUNTIME_DIR=/run/user/\$user_id systemctl --user show hugin.service --property=MainPID --value 2>/dev/null || echo 0)
 for pid in \$(pgrep -f 'node dist/index.js'); do
   if [ \"\$pid\" = \"\$SYSPID\" ]; then continue; fi
   CWD=\$(readlink /proc/\$pid/cwd 2>/dev/null || echo '')
@@ -222,7 +209,7 @@ for pid in \$(pgrep -f 'node dist/index.js'); do
 done"
 
 echo "==> Restarting service..."
-ssh "$REMOTE" "XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart hugin.service && sleep 2 && XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status hugin.service --no-pager"
+ssh "$REMOTE" "user_id=\$(id -u); XDG_RUNTIME_DIR=/run/user/\$user_id systemctl --user restart hugin.service && sleep 2 && XDG_RUNTIME_DIR=/run/user/\$user_id systemctl --user status hugin.service --no-pager"
 
 echo "==> Health check..."
 ssh "$REMOTE" "
@@ -245,9 +232,10 @@ ssh "$REMOTE" "
 
 echo "==> Daily exam factory acceptance..."
 ssh "$REMOTE" "
-  XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start hugin-daily-exam-factory.service
-  test -s /home/$DEPLOY_USER/.hugin/daily-exam-candidates/latest.json
-  /usr/bin/node -e 'const m=JSON.parse(require(\"node:fs\").readFileSync(process.argv[1],\"utf8\")); if(m.schemaVersion!==2) throw new Error(\"daily exam manifest must be schema v2\"); if(m.candidates.some((c)=>c.lane===\"provisional-holdout\"&&c.crossClientExposure?.state!==\"unseen-covered\")) throw new Error(\"provisional candidate lacks complete cross-client exposure coverage\"); const states=Object.fromEntries([\"not-checked\",\"seen\",\"unseen-covered\",\"incomplete\",\"error\"].map((s)=>[s,m.candidates.filter((c)=>c.crossClientExposure?.state===s).length])); process.stdout.write(JSON.stringify({schemaVersion:m.schemaVersion,generatedAt:m.generatedAt,inspectedTasks:m.inspectedTasks,historyComplete:m.historyComplete,counts:m.counts,crossClientExposureStates:states})+\"\\n\")' /home/$DEPLOY_USER/.hugin/daily-exam-candidates/latest.json
+  user_id=\$(id -u)
+  XDG_RUNTIME_DIR=/run/user/\$user_id systemctl --user start hugin-daily-exam-factory.service
+  test -s /var/lib/hugin/.hugin/daily-exam-candidates/latest.json
+  /usr/bin/node -e 'const m=JSON.parse(require(\"node:fs\").readFileSync(process.argv[1],\"utf8\")); if(m.schemaVersion!==2) throw new Error(\"daily exam manifest must be schema v2\"); if(m.candidates.some((c)=>c.lane===\"provisional-holdout\"&&c.crossClientExposure?.state!==\"unseen-covered\")) throw new Error(\"provisional candidate lacks complete cross-client exposure coverage\"); const states=Object.fromEntries([\"not-checked\",\"seen\",\"unseen-covered\",\"incomplete\",\"error\"].map((s)=>[s,m.candidates.filter((c)=>c.crossClientExposure?.state===s).length])); process.stdout.write(JSON.stringify({schemaVersion:m.schemaVersion,generatedAt:m.generatedAt,inspectedTasks:m.inspectedTasks,historyComplete:m.historyComplete,counts:m.counts,crossClientExposureStates:states})+\"\\n\")' /var/lib/hugin/.hugin/daily-exam-candidates/latest.json
 "
 
 echo ""

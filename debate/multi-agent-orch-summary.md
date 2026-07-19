@@ -54,13 +54,11 @@
 - [ ] Write a concrete worked example: a multi-agent workflow (e.g., code review pipeline) showing how parent/child joins + workers would flow
 - [ ] Decide on authenticated submitter mechanism that actually works given env inheritance
 
-## All Debate Files
+## Public debate record
 
-- [draft](multi-agent-orch-claude-draft.md)
-- [self-review](multi-agent-orch-claude-self-review.md)
-- [codex-critique](multi-agent-orch-codex-critique.md)
-- [claude-response-1](multi-agent-orch-claude-response-1.md)
-- [codex-rebuttal-1](multi-agent-orch-codex-rebuttal-1.md)
+The raw model transcripts are intentionally excluded. The retained public
+record consists of:
+
 - [critique-log](multi-agent-orch-critique-log.json)
 - [summary](multi-agent-orch-summary.md)
 

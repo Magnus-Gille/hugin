@@ -1,8 +1,8 @@
 # Step 3 Follow-up Fix Validation
 
-**Date:** 2026-04-02  
-**Environment:** `huginmunin` Pi, deployed from branch `codex/step1-live-eval`  
-**Service worker observed:** `hugin-huginmunin-747189`
+**Date:** 2026-04-02
+**Environment:** `hugin-node` Pi, deployed from branch `codex/step1-live-eval`
+**Service worker observed:** `hugin-hugin-node-747189`
 
 ## Goal
 

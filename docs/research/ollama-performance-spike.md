@@ -5,7 +5,7 @@
 
 ## Hardware
 
-| | **Pi (huginmunin)** | **Laptop (M4 MacBook)** |
+| | **Pi (hugin-node)** | **Laptop (M4 MacBook)** |
 |--|--|--|
 | CPU | ARM64, 4 cores | Apple M4, 10 cores |
 | RAM | 7.9 GB | 32 GB |

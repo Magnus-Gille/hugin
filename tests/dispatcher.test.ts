@@ -15,7 +15,7 @@ import {
 type RuntimeCapability = "tools" | "code" | "structured-output";
 type TaskPermissionProfile = "read-only" | "trusted-code";
 
-function parseTask(content: string, workspace = "/home/magnus/workspace") {
+function parseTask(content: string, workspace = "/var/lib/hugin/workspace") {
   const declaredRuntimeRaw =
     content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|opencode|auto)/i)?.[1]?.toLowerCase();
   const isAutoRoute = declaredRuntimeRaw === "auto";
@@ -123,61 +123,61 @@ function parseTask(content: string, workspace = "/home/magnus/workspace") {
 }
 
 describe("resolveContext", () => {
-  it("should resolve repo: prefix to /home/magnus/repos/<name>", () => {
-    expect(resolveContext("repo:heimdall")).toBe("/home/magnus/repos/heimdall");
-    expect(resolveContext("repo:hugin")).toBe("/home/magnus/repos/hugin");
+  it("should resolve repo: prefix to /var/lib/hugin/repos/<name>", () => {
+    expect(resolveContext("repo:heimdall")).toBe("/var/lib/hugin/repos/heimdall");
+    expect(resolveContext("repo:hugin")).toBe("/var/lib/hugin/repos/hugin");
   });
 
   it("should resolve 'scratch' alias", () => {
-    expect(resolveContext("scratch")).toBe("/home/magnus/scratch");
+    expect(resolveContext("scratch")).toBe("/var/lib/hugin/scratch");
   });
 
   it("should resolve 'files' alias", () => {
-    expect(resolveContext("files")).toBe("/home/magnus/mimir");
+    expect(resolveContext("files")).toBe("/var/lib/hugin/mimir");
   });
 
-  it("should pass through absolute paths under /home/magnus/", () => {
-    expect(resolveContext("/home/magnus/workspace")).toBe("/home/magnus/workspace");
-    expect(resolveContext("/home/magnus/custom/dir")).toBe("/home/magnus/custom/dir");
+  it("should pass through absolute paths under /var/lib/hugin/", () => {
+    expect(resolveContext("/var/lib/hugin/workspace")).toBe("/var/lib/hugin/workspace");
+    expect(resolveContext("/var/lib/hugin/custom/dir")).toBe("/var/lib/hugin/custom/dir");
   });
 
-  it("should reject absolute paths outside /home/magnus/", () => {
-    expect(resolveContext("/tmp/test")).toBe("/home/magnus/workspace");
-    expect(resolveContext("/etc/passwd")).toBe("/home/magnus/workspace");
-    expect(resolveContext("/")).toBe("/home/magnus/workspace");
+  it("should reject absolute paths outside /var/lib/hugin/", () => {
+    expect(resolveContext("/tmp/test")).toBe("/var/lib/hugin/workspace");
+    expect(resolveContext("/etc/passwd")).toBe("/var/lib/hugin/workspace");
+    expect(resolveContext("/")).toBe("/var/lib/hugin/workspace");
   });
 
   it("should trim whitespace", () => {
-    expect(resolveContext("  repo:heimdall  ")).toBe("/home/magnus/repos/heimdall");
-    expect(resolveContext("  scratch  ")).toBe("/home/magnus/scratch");
+    expect(resolveContext("  repo:heimdall  ")).toBe("/var/lib/hugin/repos/heimdall");
+    expect(resolveContext("  scratch  ")).toBe("/var/lib/hugin/scratch");
   });
 
   it("should reject path traversal in repo: prefix", () => {
-    expect(resolveContext("repo:../../tmp")).toBe("/home/magnus/workspace");
-    expect(resolveContext("repo:../../../etc")).toBe("/home/magnus/workspace");
+    expect(resolveContext("repo:../../tmp")).toBe("/var/lib/hugin/workspace");
+    expect(resolveContext("repo:../../../etc")).toBe("/var/lib/hugin/workspace");
   });
 
   it("should reject relative paths as fallback", () => {
-    expect(resolveContext("foo")).toBe("/home/magnus/workspace");
-    expect(resolveContext("relative/path")).toBe("/home/magnus/workspace");
+    expect(resolveContext("foo")).toBe("/var/lib/hugin/workspace");
+    expect(resolveContext("relative/path")).toBe("/var/lib/hugin/workspace");
   });
 
   it("normalizes absolute paths before enforcing the home boundary", () => {
-    expect(resolveContext("/home/magnus/../../etc")).toBe("/home/magnus/workspace");
-    expect(resolveContext("/home/magnus/workspace/../scratch")).toBe(
-      "/home/magnus/scratch",
+    expect(resolveContext("/var/lib/hugin/../../etc")).toBe("/var/lib/hugin/workspace");
+    expect(resolveContext("/var/lib/hugin/workspace/../scratch")).toBe(
+      "/var/lib/hugin/scratch",
     );
   });
 
   it("applies the context path policy to legacy Working dir values", () => {
     expect(resolveTaskWorkingDirectory(undefined, "/etc")).toBe(
-      "/home/magnus/workspace",
+      "/var/lib/hugin/workspace",
     );
     expect(resolveTaskWorkingDirectory(undefined, "relative/path")).toBe(
-      "/home/magnus/workspace",
+      "/var/lib/hugin/workspace",
     );
-    expect(resolveTaskWorkingDirectory(undefined, "/home/magnus/scratch/job")).toBe(
-      "/home/magnus/scratch/job",
+    expect(resolveTaskWorkingDirectory(undefined, "/var/lib/hugin/scratch/job")).toBe(
+      "/var/lib/hugin/scratch/job",
     );
   });
 
@@ -192,51 +192,51 @@ describe("resolveContext", () => {
 
 describe("resolveContext with configurable roots (#139)", () => {
   const roots = {
-    reposRoot: "/home/magnus/hugin-workspace",
-    workspace: "/home/magnus/hugin-workspace/_default",
+    reposRoot: "/var/lib/hugin/hugin-workspace",
+    workspace: "/var/lib/hugin/hugin-workspace/_default",
   };
 
   it("resolves repo: aliases under the configured repos root", () => {
     expect(resolveContext("repo:heimdall", roots)).toBe(
-      "/home/magnus/hugin-workspace/heimdall",
+      "/var/lib/hugin/hugin-workspace/heimdall",
     );
     expect(resolveContext("repo:grimnir", roots)).toBe(
-      "/home/magnus/hugin-workspace/grimnir",
+      "/var/lib/hugin/hugin-workspace/grimnir",
     );
   });
 
   it("never resolves a repo: alias into the production repos root", () => {
     // The whole point of #139: with an isolated root configured, a task can
-    // never re-point a production checkout under /home/magnus/repos.
+    // never re-point a production checkout under /var/lib/hugin/repos.
     expect(resolveContext("repo:grimnir", roots)).not.toContain(
-      "/home/magnus/repos",
+      "/var/lib/hugin/repos",
     );
   });
 
   it("tolerates a trailing slash on the configured repos root", () => {
     expect(
-      resolveContext("repo:heimdall", { reposRoot: "/home/magnus/hugin-workspace/" }),
-    ).toBe("/home/magnus/hugin-workspace/heimdall");
+      resolveContext("repo:heimdall", { reposRoot: "/var/lib/hugin/hugin-workspace/" }),
+    ).toBe("/var/lib/hugin/hugin-workspace/heimdall");
   });
 
   it("rejects traversal relative to the configured repos root", () => {
     expect(resolveContext("repo:../../etc", roots)).toBe(
-      "/home/magnus/hugin-workspace/_default",
+      "/var/lib/hugin/hugin-workspace/_default",
     );
   });
 
   it("uses the configured workspace as the fallback", () => {
     expect(resolveContext("relative/path", roots)).toBe(
-      "/home/magnus/hugin-workspace/_default",
+      "/var/lib/hugin/hugin-workspace/_default",
     );
     expect(resolveContext("/tmp/evil", roots)).toBe(
-      "/home/magnus/hugin-workspace/_default",
+      "/var/lib/hugin/hugin-workspace/_default",
     );
   });
 
   it("preserves default behavior when no roots are supplied", () => {
-    expect(resolveContext("repo:heimdall")).toBe("/home/magnus/repos/heimdall");
-    expect(resolveContext("relative/path")).toBe("/home/magnus/workspace");
+    expect(resolveContext("repo:heimdall")).toBe("/var/lib/hugin/repos/heimdall");
+    expect(resolveContext("relative/path")).toBe("/var/lib/hugin/workspace");
   });
 });
 
@@ -245,7 +245,7 @@ describe("task format", () => {
     const content = `## Task: Test task
 
 - **Runtime:** claude
-- **Working dir:** /home/magnus/workspace
+- **Working dir:** /var/lib/hugin/workspace
 - **Timeout:** 60000
 - **Submitted by:** test
 - **Submitted at:** 2026-03-14T10:00:00Z
@@ -256,7 +256,7 @@ Echo hello world`;
     const task = parseTask(content);
     expect(task).not.toBeNull();
     expect(task!.runtime).toBe("claude");
-    expect(task!.workingDir).toBe("/home/magnus/workspace");
+    expect(task!.workingDir).toBe("/var/lib/hugin/workspace");
     expect(task!.timeoutMs).toBe(60000);
     expect(task!.submittedBy).toBe("test");
     expect(task!.prompt).toBe("Echo hello world");
@@ -312,7 +312,7 @@ Do something`;
     const task = parseTask(content);
     expect(task).not.toBeNull();
     expect(task!.runtime).toBe("claude");
-    expect(task!.workingDir).toBe("/home/magnus/workspace"); // falls back to default
+    expect(task!.workingDir).toBe("/var/lib/hugin/workspace"); // falls back to default
     expect(task!.context).toBeUndefined();
     expect(task!.replyTo).toBeUndefined();
     expect(task!.replyFormat).toBeUndefined();
@@ -355,7 +355,7 @@ Check the code`;
 
     const task = parseTask(content);
     expect(task).not.toBeNull();
-    expect(task!.workingDir).toBe("/home/magnus/repos/heimdall");
+    expect(task!.workingDir).toBe("/var/lib/hugin/repos/heimdall");
     expect(task!.context).toBe("repo:heimdall");
   });
 
@@ -369,7 +369,7 @@ Check the code`;
 Research something`;
 
     const task = parseTask(content);
-    expect(task!.workingDir).toBe("/home/magnus/scratch");
+    expect(task!.workingDir).toBe("/var/lib/hugin/scratch");
     expect(task!.context).toBe("scratch");
   });
 
@@ -383,7 +383,7 @@ Research something`;
 Index files`;
 
     const task = parseTask(content);
-    expect(task!.workingDir).toBe("/home/magnus/mimir");
+    expect(task!.workingDir).toBe("/var/lib/hugin/mimir");
     expect(task!.context).toBe("files");
   });
 
@@ -391,13 +391,13 @@ Index files`;
     const content = `## Task: Old-style task
 
 - **Runtime:** claude
-- **Working dir:** /home/magnus/custom-dir
+- **Working dir:** /var/lib/hugin/custom-dir
 
 ### Prompt
 Do work`;
 
     const task = parseTask(content);
-    expect(task!.workingDir).toBe("/home/magnus/custom-dir");
+    expect(task!.workingDir).toBe("/var/lib/hugin/custom-dir");
     expect(task!.context).toBeUndefined();
   });
 
@@ -405,14 +405,14 @@ Do work`;
     const content = `## Task: Both fields
 
 - **Runtime:** claude
-- **Working dir:** /home/magnus/old-dir
+- **Working dir:** /var/lib/hugin/old-dir
 - **Context:** repo:hugin
 
 ### Prompt
 Do work`;
 
     const task = parseTask(content);
-    expect(task!.workingDir).toBe("/home/magnus/repos/hugin");
+    expect(task!.workingDir).toBe("/var/lib/hugin/repos/hugin");
     expect(task!.context).toBe("repo:hugin");
   });
 });
@@ -423,14 +423,14 @@ describe("reply routing fields", () => {
 
 - **Runtime:** claude
 - **Context:** scratch
-- **Reply-to:** telegram:12345678
+- **Reply-to:** telegram:test-chat
 - **Reply-format:** summary
 
 ### Prompt
 Answer this question`;
 
     const task = parseTask(content);
-    expect(task!.replyTo).toBe("telegram:12345678");
+    expect(task!.replyTo).toBe("telegram:test-chat");
     expect(task!.replyFormat).toBe("summary");
   });
 
@@ -503,7 +503,7 @@ describe("full task with all fields", () => {
 - **Timeout:** 120000
 - **Submitted by:** ratatoskr
 - **Submitted at:** 2026-03-23T09:00:00Z
-- **Reply-to:** telegram:99999
+- **Reply-to:** telegram:test-chat
 - **Reply-format:** full
 - **Group:** deploy-batch
 - **Sequence:** 1
@@ -514,11 +514,11 @@ Deploy the service and report status`;
     const task = parseTask(content);
     expect(task).not.toBeNull();
     expect(task!.runtime).toBe("claude");
-    expect(task!.workingDir).toBe("/home/magnus/repos/heimdall"); // Context wins
+    expect(task!.workingDir).toBe("/var/lib/hugin/repos/heimdall"); // Context wins
     expect(task!.context).toBe("repo:heimdall");
     expect(task!.timeoutMs).toBe(120000);
     expect(task!.submittedBy).toBe("ratatoskr");
-    expect(task!.replyTo).toBe("telegram:99999");
+    expect(task!.replyTo).toBe("telegram:test-chat");
     expect(task!.replyFormat).toBe("full");
     expect(task!.group).toBe("deploy-batch");
     expect(task!.sequence).toBe(1);
@@ -702,7 +702,7 @@ Check conventions`;
 - **Context-budget:** 8000
 - **Timeout:** 180000
 - **Submitted by:** hugin
-- **Reply-to:** telegram:12345
+- **Reply-to:** telegram:test-chat
 - **Group:** daily-analysis
 - **Sequence:** 1
 
@@ -952,7 +952,7 @@ Summarize untrusted input`;
 - **Timeout:** 120000
 - **Submitted by:** claude-code
 - **Submitted at:** 2026-04-07T10:00:00Z
-- **Reply-to:** telegram:12345
+- **Reply-to:** telegram:test-chat
 - **Reply-format:** summary
 - **Group:** test-batch
 - **Sequence:** 1
@@ -966,8 +966,8 @@ Implement the feature`;
     expect(task!.capabilities).toEqual(["tools", "code"]);
     expect(task!.model).toBe("qwen2.5:7b");
     expect(task!.context).toBe("repo:hugin");
-    expect(task!.workingDir).toBe("/home/magnus/repos/hugin");
-    expect(task!.replyTo).toBe("telegram:12345");
+    expect(task!.workingDir).toBe("/var/lib/hugin/repos/hugin");
+    expect(task!.replyTo).toBe("telegram:test-chat");
     expect(task!.group).toBe("test-batch");
     expect(task!.sequence).toBe(1);
   });

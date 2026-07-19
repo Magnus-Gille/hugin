@@ -16,7 +16,7 @@ import { z } from "zod";
 
 // --- Policy ---
 
-// `defer` (issue #72): an INFRA delivery failure (NAS unreachable, rsync/verify
+// `defer` (issue #72): an INFRA delivery failure (target unreachable, rsync/verify
 // timeout) leaves the task `running + delivery:pending` instead of terminalizing,
 // and a periodic retry reconciler re-attempts under a retry budget. missing-local
 // / unsafe-local are still ALWAYS terminal — a deferral never resurrects a
@@ -50,24 +50,16 @@ const deliveryTargetSchema = z.object({
   localStagingPrefix: z.string().min(1),
 });
 
-// The single production NAS (research-spike → Mímir inbox). Overridable via
-// HUGIN_DELIVERY_TARGETS so local/test deployments can point elsewhere.
-// Deliberately NOT derived from the fetch egress allowlist (egress-policy.ts):
+// Operators must explicitly configure delivery targets with
+// HUGIN_DELIVERY_TARGETS. An absent value disables delivery by leaving the
+// allowlist empty; it must never select infrastructure owned by a particular
+// installation. Deliberately NOT derived from the fetch egress allowlist:
 // that list is for outbound `fetch` hosts and has broad defaults (GitHub, API
 // hosts); SSH/rsync file delivery needs its own, tighter allowlist.
-export const DEFAULT_DELIVERY_TARGETS: DeliveryTarget[] = [
-  {
-    user: "magnus",
-    host: "100.99.119.52",
-    remotePathPrefix: "/home/magnus/mimir-inbox/",
-    localStagingPrefix: "/home/magnus/scratch/",
-  },
-];
-
 export function loadDeliveryTargets(
   raw: string | undefined,
 ): DeliveryTarget[] {
-  if (!raw || !raw.trim()) return DEFAULT_DELIVERY_TARGETS;
+  if (!raw || !raw.trim()) return [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -422,7 +414,7 @@ function runSpawn(
     // already learned this lesson — see task-helpers.ts runGitFetch).
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
-      HOME: process.env.HOME || "/home/magnus",
+      HOME: process.env.HOME || "/var/lib/hugin",
     };
     const child = spawnFn(cmd, args, {
       stdio: ["ignore", "pipe", "pipe"],

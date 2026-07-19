@@ -157,10 +157,10 @@ assert_contains "$calls" "--exclude=.env" "rsync retains the .env exclusion"
 assert_contains "$calls" "--exclude=.deployed-commit" "rsync excludes the deployment marker"
 assert_contains "$calls" "--exclude=tests/" "rsync retains the tests exclusion"
 assert_contains "$calls" "--exclude=.DS_Store" "rsync retains the .DS_Store exclusion"
-assert_contains "$calls" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "normal deployment invalidates the old marker before rsync"
-assert_order "$calls" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "rsync " "normal deployment invalidates the marker before rsync"
+assert_contains "$calls" "rm -f '/var/lib/hugin/app/.deployed-commit'" "normal deployment invalidates the old marker before rsync"
+assert_order "$calls" "rm -f '/var/lib/hugin/app/.deployed-commit'" "rsync " "normal deployment invalidates the marker before rsync"
 assert_not_contains "$calls" "npm ci --omit=dev" "rsync failure stops before later remote mutation"
-assert_not_contains "$calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "rsync failure remains markerless"
+assert_not_contains "$calls" "mv '/var/lib/hugin/app/.deployed-commit.tmp' '/var/lib/hugin/app/.deployed-commit'" "rsync failure remains markerless"
 
 # A deploy payload must be one clean, addressable local commit. Reject both a
 # dirty source and a build that dirties tracked files before remote mutation.
@@ -208,9 +208,9 @@ export FAKE_RSYNC_RC=42
 [[ "$sync_dirty_rc" -ne 0 ]] || fail "source drift during rsync must fail deployment"
 assert_contains "$sync_dirty_output" "changed during sync" "post-sync failure explains source drift"
 sync_dirty_calls="$(cat "$CALL_LOG")"
-assert_contains "$sync_dirty_calls" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "sync-drift deployment invalidates the old marker"
+assert_contains "$sync_dirty_calls" "rm -f '/var/lib/hugin/app/.deployed-commit'" "sync-drift deployment invalidates the old marker"
 assert_not_contains "$sync_dirty_calls" "npm ci --omit=dev" "source drift during rsync fails before remote install"
-assert_not_contains "$sync_dirty_calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "source drift during rsync remains markerless"
+assert_not_contains "$sync_dirty_calls" "mv '/var/lib/hugin/app/.deployed-commit.tmp' '/var/lib/hugin/app/.deployed-commit'" "source drift during rsync remains markerless"
 
 # Prove the exclusion semantics themselves against a real rsync: even if the
 # preflight is accidentally bypassed in a future refactor, the local symlink
@@ -248,9 +248,9 @@ set -e
 [[ "$full_rc" -eq 0 ]] || fail "clean full deployment should pass the fake acceptance path"
 full_calls="$(cat "$CALL_LOG")"
 full_first_ssh="$(grep -m1 '^ssh ' "$CALL_LOG")"
-assert_contains "$full_first_ssh" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "marker invalidation is the first remote command"
-assert_contains "$full_calls" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "deployment invalidates the old marker"
-assert_order "$full_calls" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "rsync " "marker invalidation precedes payload sync"
+assert_contains "$full_first_ssh" "rm -f '/var/lib/hugin/app/.deployed-commit'" "marker invalidation is the first remote command"
+assert_contains "$full_calls" "rm -f '/var/lib/hugin/app/.deployed-commit'" "deployment invalidates the old marker"
+assert_order "$full_calls" "rm -f '/var/lib/hugin/app/.deployed-commit'" "rsync " "marker invalidation precedes payload sync"
 assert_not_contains "$full_calls" "git fetch origin" "deployment never depends on remote Git fetch"
 assert_not_contains "$full_calls" "git reset" "deployment never depends on a remote Git checkout"
 assert_contains "$full_calls" "npm ci --omit=dev" "deployment installs the shipped lockfile deterministically"
@@ -264,12 +264,12 @@ assert_contains "$full_calls" "start hugin-daily-exam-factory.service" "deployme
 assert_contains "$full_calls" "daily exam manifest must be schema v2" "deployment requires the cross-client exposure manifest contract"
 assert_contains "$full_calls" "provisional candidate lacks complete cross-client exposure coverage" "deployment rejects an unjoined provisional candidate"
 assert_contains "$full_calls" "$full_sha" "deployment stamps the exact local full SHA"
-assert_order "$full_calls" "curl -fsS http://127.0.0.1:3032/health" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "health acceptance precedes atomic marker stamp"
-assert_order "$full_calls" "start hugin-daily-exam-factory.service" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "factory acceptance precedes atomic marker stamp"
+assert_order "$full_calls" "curl -fsS http://127.0.0.1:3032/health" "mv '/var/lib/hugin/app/.deployed-commit.tmp' '/var/lib/hugin/app/.deployed-commit'" "health acceptance precedes atomic marker stamp"
+assert_order "$full_calls" "start hugin-daily-exam-factory.service" "mv '/var/lib/hugin/app/.deployed-commit.tmp' '/var/lib/hugin/app/.deployed-commit'" "factory acceptance precedes atomic marker stamp"
 
 # If the marker cannot be invalidated, the script must not begin payload sync.
 : >"$CALL_LOG"
-export FAKE_SSH_FAIL_MATCH="rm -f '/home/magnus/repos/hugin/.deployed-commit'"
+export FAKE_SSH_FAIL_MATCH="rm -f '/var/lib/hugin/app/.deployed-commit'"
 export FAKE_SSH_FAIL_RC=74
 set +e
 (cd "$FULL_SOURCE" && bash "$DEPLOY_SCRIPT" testhost >/dev/null 2>&1)
@@ -292,8 +292,8 @@ set -e
 export FAKE_SSH_FAIL_MATCH=""
 [[ "$health_fail_rc" -ne 0 ]] || fail "failed health acceptance must fail deployment"
 health_fail_calls="$(cat "$CALL_LOG")"
-assert_contains "$health_fail_calls" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "failed deployment first invalidates the old marker"
-assert_not_contains "$health_fail_calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "failed health acceptance remains markerless"
+assert_contains "$health_fail_calls" "rm -f '/var/lib/hugin/app/.deployed-commit'" "failed deployment first invalidates the old marker"
+assert_not_contains "$health_fail_calls" "mv '/var/lib/hugin/app/.deployed-commit.tmp' '/var/lib/hugin/app/.deployed-commit'" "failed health acceptance remains markerless"
 
 # The automatic factory is part of production acceptance: a broken compiled
 # runner, unit sandbox, Munin credential, or manifest write must also leave the
@@ -309,7 +309,7 @@ export FAKE_SSH_FAIL_MATCH=""
 [[ "$factory_fail_rc" -ne 0 ]] || fail "failed factory acceptance must fail deployment"
 factory_fail_calls="$(cat "$CALL_LOG")"
 assert_contains "$factory_fail_calls" "start hugin-daily-exam-factory.service" "factory failure reaches the new acceptance gate"
-assert_not_contains "$factory_fail_calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "failed factory acceptance remains markerless"
+assert_not_contains "$factory_fail_calls" "mv '/var/lib/hugin/app/.deployed-commit.tmp' '/var/lib/hugin/app/.deployed-commit'" "failed factory acceptance remains markerless"
 
 if [[ "$failures" -gt 0 ]]; then
   echo "$failures assertion(s) failed" >&2

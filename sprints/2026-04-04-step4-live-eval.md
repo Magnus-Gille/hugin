@@ -13,7 +13,7 @@ Hugin now supports human gates for side-effecting pipeline phases:
 - rejection fails the gated phase without executing it
 - approval metadata survives in structured child results and parent pipeline summaries
 
-What the live demo showed on `huginmunin`:
+What the live demo showed on `hugin-node`:
 
 1. A four-phase pipeline reached a gated `deploy` phase and stopped in `awaiting-approval`.
 2. The parent summary surfaced `executionState: awaiting_approval`.
@@ -23,11 +23,11 @@ What the live demo showed on `huginmunin`:
 
 ## Evidence
 
-- [step4-live-evaluation.md](/Users/magnus/repos/hugin/docs/step4-live-evaluation.md)
-- [phase4-human-gates-engineering-plan.md](/Users/magnus/repos/hugin/docs/phase4-human-gates-engineering-plan.md)
-- [pipeline-gates.ts](/Users/magnus/repos/hugin/src/pipeline-gates.ts)
-- [pipeline-summary.ts](/Users/magnus/repos/hugin/src/pipeline-summary.ts)
-- [task-result-schema.ts](/Users/magnus/repos/hugin/src/task-result-schema.ts)
+- [step4-live-evaluation.md](../docs/step4-live-evaluation.md)
+- [phase4-human-gates-engineering-plan.md](../docs/phase4-human-gates-engineering-plan.md)
+- [pipeline-gates.ts](../src/pipeline-gates.ts)
+- [pipeline-summary.ts](../src/pipeline-summary.ts)
+- [task-result-schema.ts](../src/task-result-schema.ts)
 
 ## Feedback
 

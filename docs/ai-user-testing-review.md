@@ -94,7 +94,7 @@ A separate review was conducted by Codex CLI (`codex-cli 0.118.0`) using gpt-5.4
 
 ### Sonnet highlighted
 
-- **Hardcoded `/home/magnus/` paths** appear throughout sensitivity classification. No env var to override. Wrong in any non-Pi deployment.
+- **Hardcoded `/var/lib/hugin/` paths** appear throughout sensitivity classification. No env var to override. Wrong in any non-Pi deployment.
 
 - **`getFoundBatchEntry` and `extractTaskId` are copy-pasted across four files** (`index.ts`, `pipeline-control.ts`, `pipeline-dispatch.ts`, `pipeline-summary-manager.ts`). Not in a shared module.
 
@@ -146,7 +146,7 @@ A separate review was conducted by Codex CLI (`codex-cli 0.118.0`) using gpt-5.4
 
 ### Opus additionally identified
 
-- **No resource limits per task.** SDK executor uses `bypassPermissions`. A task could fill `/home/magnus` or exhaust RAM.
+- **No resource limits per task.** SDK executor uses `bypassPermissions`. A task could fill `/var/lib/hugin` or exhaust RAM.
 - **No cost budget per task.** A task running Opus for 20 minutes has no spending cap.
 - **No way to cancel in-flight Codex tasks gracefully.** SIGTERM during mid-commit could leave repo dirty.
 
@@ -299,7 +299,7 @@ The **Claude reviews** (both code review and hands-on testing) operated with ful
 
 4. **Stale engineering plans actively mislead.** Phase 4 plan says "not implemented"; STATUS.md says it's live. Claude didn't cross-reference docs against implementation.
 
-5. **Path contract is misleading.** Docs say raw absolute paths pass through unchanged; code silently rejects paths outside `/home/magnus/`.
+5. **Path contract is misleading.** Docs say raw absolute paths pass through unchanged; code silently rejects paths outside `/var/lib/hugin/`.
 
 ### Codex's Key Insight
 

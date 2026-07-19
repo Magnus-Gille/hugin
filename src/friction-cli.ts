@@ -31,7 +31,7 @@ Optional:
   --help                  Show this help
 
 Environment:
-  HUGIN_BROKER_URL        Broker base URL, e.g. http://huginmunin:3033
+  HUGIN_BROKER_URL        Broker base URL, e.g. http://hugin-node:3033
   HUGIN_BROKER_TOKEN      Bearer token registered in HUGIN_BROKER_KEYS
 `;
 

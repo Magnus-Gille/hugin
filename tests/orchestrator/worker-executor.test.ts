@@ -267,7 +267,7 @@ describe("DirectModelExecutor — success path", () => {
 
 describe("DirectModelExecutor — homeserver provider (env-resolved base URL)", () => {
   it("resolves the base URL from HOMESERVER_GATEWAY_URL and sends bearer auth", async () => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
 
     let capturedUrl = "";
@@ -288,7 +288,7 @@ describe("DirectModelExecutor — homeserver provider (env-resolved base URL)", 
 
     expect(result.ok).toBe(true);
     expect(result.output).toBe("local answer");
-    expect(capturedUrl).toBe("http://100.76.72.59:8080/v1/chat/completions");
+    expect(capturedUrl).toBe("http://100.64.0.42:8080/v1/chat/completions");
     const headers = capturedInit?.headers as Record<string, string>;
     expect(headers["authorization"]).toBe("Bearer hs-test-key");
     // OpenRouter-only attribution headers must not leak to other providers.
@@ -318,7 +318,7 @@ describe("DirectModelExecutor — homeserver provider (env-resolved base URL)", 
   });
 
   it("forwards an explicit Orin node pin on the non-verified chat path", async () => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
     let capturedBody: Record<string, unknown> = {};
     vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
@@ -381,7 +381,7 @@ describe("DirectModelExecutor — homeserver provider (env-resolved base URL)", 
   });
 
   it("returns ok=false when HOMESERVER_GATEWAY_API_KEY is unset", async () => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", undefined);
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -421,7 +421,7 @@ describe("DirectModelExecutor — homeserver provider (env-resolved base URL)", 
   });
 
   it("costUsd is an explicit 0 (not null) for gateway models in the pricing table", async () => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(successResponse("answer", 100, 200)));
 
@@ -439,7 +439,7 @@ describe("DirectModelExecutor — homeserver provider (env-resolved base URL)", 
 
 describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
   it("posts /delegate with task type, local model, token cap, and delegator model id", async () => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
 
     let capturedUrl = "";
@@ -475,7 +475,7 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
     expect(result.outputTokens).toBe(7);
     expect(result.costUsd).toBe(0);
 
-    expect(capturedUrl).toBe("http://100.76.72.59:8080/delegate");
+    expect(capturedUrl).toBe("http://100.64.0.42:8080/delegate");
     const headers = capturedInit?.headers as Record<string, string>;
     expect(headers["authorization"]).toBe("Bearer hs-test-key");
     expect(headers["http-referer"]).toBeUndefined();
@@ -498,7 +498,7 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
   });
 
   it("preserves the full M5 execution provenance on the worker result (#163)", async () => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
 
     vi.stubGlobal("fetch", vi.fn().mockImplementation(async () =>
@@ -553,7 +553,7 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
   });
 
   it("still preserves provenance when the M5 leaf reports a failed outcome (#163)", async () => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
 
     vi.stubGlobal("fetch", vi.fn().mockImplementation(async () =>
@@ -576,7 +576,7 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
   });
 
   it("drops out-of-contract gateway provenance without failing the leaf (#163)", async () => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
 
     vi.stubGlobal("fetch", vi.fn().mockImplementation(async () =>
@@ -604,7 +604,7 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
   // diagnose the bad response. Provenance is now extracted straight off the
   // parsed body, before operational validation.
   it("keeps provenance when the gateway body fails operational validation (#163)", async () => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
 
     vi.stubGlobal("fetch", vi.fn().mockImplementation(async () =>
@@ -631,7 +631,7 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
   });
 
   it("pins an Orin-routed owner leaf with nodeId and reports the selected node", async () => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
     let capturedBody: Record<string, unknown> = {};
     vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
@@ -668,7 +668,7 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
   });
 
   it.each([502, 503, 504])("reroutes a bounded Orin %i once to M5 and keeps the fallback reason", async (status) => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
     const bodies: Record<string, unknown>[] = [];
     vi.stubGlobal(
@@ -711,7 +711,7 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
   });
 
   it("honors Orin Retry-After before the bounded M5 fallback", async () => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
     vi.useFakeTimers();
     try {
@@ -748,7 +748,7 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
   });
 
   it("forwards verifier and responseFormat when the caller has deterministic specs", async () => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
 
     let capturedBody: Record<string, unknown> = {};
@@ -773,7 +773,7 @@ describe("HomeserverDelegateWorkerExecutor — /delegate worker path", () => {
   });
 
   it("maps fail/error DelegationOutcome values to ok=false", async () => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
     vi.stubGlobal(
       "fetch",
@@ -833,7 +833,7 @@ describe("HomeserverDelegateWorkerExecutor — busy backpressure retry (issue #1
     });
 
   function stubGateway() {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
   }
 

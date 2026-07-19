@@ -9,7 +9,7 @@
 # If gh is unavailable, the check is skipped and a warning is printed.
 #
 # Usage:
-#   MUNIN_API_KEY=<key> ./scripts/submit-dep-bumps.sh [repo1 repo2 ...]
+#   MUNIN_API_KEY=<key> GITHUB_OWNER=<owner> ./scripts/submit-dep-bumps.sh [repo1 repo2 ...]
 #
 #   If no repos are given, all repos found under security/repos/* in Munin are used.
 
@@ -17,6 +17,7 @@ set -euo pipefail
 
 MUNIN_URL="${MUNIN_URL:-http://localhost:3030}"
 MUNIN_API_KEY="${MUNIN_API_KEY:?MUNIN_API_KEY is required}"
+GITHUB_OWNER="${GITHUB_OWNER:-}"
 
 SCAN_DATE="$(date -u +%Y%m%d)"
 SUBMITTED=0
@@ -90,11 +91,15 @@ has_open_audit_pr() {
     echo "  [warn] gh CLI not found — skipping idempotency check for ${repo}" >&2
     return 1  # can't check, assume no PR
   fi
+  if [ -z "$GITHUB_OWNER" ]; then
+    echo "  [warn] GITHUB_OWNER is unset — skipping idempotency check for ${repo}" >&2
+    return 1
+  fi
   # `gh pr list --head` matches an EXACT branch, not a prefix, so list open PRs
   # and match the chore/audit-fix-* branch family ourselves.
   local count
   count=$(gh pr list \
-    --repo "Magnus-Gille/${repo}" \
+    --repo "${GITHUB_OWNER}/${repo}" \
     --state open \
     --json headRefName \
     --jq '[.[] | select(.headRefName | startswith("chore/audit-fix-"))] | length' \

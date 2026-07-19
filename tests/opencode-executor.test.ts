@@ -43,12 +43,12 @@ describe("loadOpencodeGatewayConfig", () => {
 
   it("uses HOMESERVER_GATEWAY_URL and appends /v1 for OpenAI-compatible config", () => {
     const cfg = loadOpencodeGatewayConfig({
-      HOMESERVER_GATEWAY_URL: "http://100.76.72.59:8080/",
+      HOMESERVER_GATEWAY_URL: "http://100.64.0.42:8080/",
       HOMESERVER_GATEWAY_API_KEY: "owner-key",
     } as NodeJS.ProcessEnv);
 
     expect(cfg).toEqual({
-      gatewayBaseUrl: "http://100.76.72.59:8080/v1",
+      gatewayBaseUrl: "http://100.64.0.42:8080/v1",
       apiKey: "owner-key",
       providerId: "m5",
       defaultModel: "qwen3-coder-next-80b",
@@ -77,7 +77,7 @@ describe("loadOpencodeGatewayConfig", () => {
   it("refuses a keyless non-loopback gateway", () => {
     expect(
       loadOpencodeGatewayConfig({
-        HUGIN_OPENCODE_BASE_URL: "http://100.76.72.59:8080/v1",
+        HUGIN_OPENCODE_BASE_URL: "http://100.64.0.42:8080/v1",
       } as NodeJS.ProcessEnv),
     ).toBeNull();
   });
@@ -102,7 +102,7 @@ describe("loadOpencodeGatewayConfig", () => {
     ).toBeNull();
     expect(
       loadOpencodeGatewayConfig({
-        HUGIN_OPENCODE_BASE_URL: "http://100.76.72.59:8080/api",
+        HUGIN_OPENCODE_BASE_URL: "http://100.64.0.42:8080/api",
         HUGIN_OPENCODE_API_KEY: "owner-key",
       } as NodeJS.ProcessEnv),
     ).toBeNull();

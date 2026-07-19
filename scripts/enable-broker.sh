@@ -1,5 +1,5 @@
 #!/bin/bash
-# Enable the durable MCP Broker on the Pi and register hugin-mcp locally.
+# Enable the durable MCP Broker on a configured host and register hugin-mcp locally.
 #
 # Generates (or safely reuses) a 64-char hex token on the Pi, binds the Broker
 # to the Pi's Tailscale IP, restarts hugin, verifies both services, and
@@ -9,26 +9,22 @@
 # echoed. The script prints status only — no secret output.
 #
 # Usage: ./scripts/enable-broker.sh [hostname]
-#   Default hostname: huginmunin.local (or 100.97.117.37 fallback)
+#   Default hostname: $HUGIN_DEPLOY_HOST or hugin.local
 
 set -euo pipefail
 
-PI_HOST="${1:-}"
-if [ -z "$PI_HOST" ]; then
-  if ping -c1 -W1 huginmunin.local >/dev/null 2>&1; then
-    PI_HOST="huginmunin.local"
-  else
-    PI_HOST="100.97.117.37"
-  fi
-fi
-REMOTE="magnus@$PI_HOST"
-REMOTE_ENV="/home/magnus/repos/hugin/.env"
+PI_HOST="${1:-${HUGIN_DEPLOY_HOST:-hugin.local}}"
+DEPLOY_USER="${DEPLOY_USER:-hugin}"
+REMOTE="${DEPLOY_USER}@$PI_HOST"
+REMOTE_DIR="${HUGIN_DEPLOY_DIR:-/var/lib/hugin/app}"
+REMOTE_ENV="$REMOTE_DIR/.env"
 # Heimdall owns 3033 and Ratatoskr owns 3034 on the Pi's tailnet address.
 # Keep Hugin on a dedicated production port; the generic Broker default
 # remains 3033 for other installations.
 BROKER_PORT="3035"
 
-DIST_PATH="/Users/magnus/repos/hugin/dist/mcp-server.js"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIST_PATH="$(cd "$SCRIPT_DIR/.." && pwd)/dist/mcp-server.js"
 if [ ! -f "$DIST_PATH" ]; then
   echo "ERROR: $DIST_PATH not found. Run 'npm run build' first." >&2
   exit 1
@@ -62,14 +58,14 @@ ssh "$REMOTE" "if grep -q '^HUGIN_BROKER_HOST=' '$REMOTE_ENV'; then sed -i 's/^H
 ssh "$REMOTE" "if grep -q '^HUGIN_BROKER_PORT=' '$REMOTE_ENV'; then sed -i 's/^HUGIN_BROKER_PORT=.*/HUGIN_BROKER_PORT=$BROKER_PORT/' '$REMOTE_ENV'; else printf 'HUGIN_BROKER_PORT=$BROKER_PORT\\n' >> '$REMOTE_ENV'; fi"
 
 echo "==> Restarting hugin on Pi..."
-ssh "$REMOTE" 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart hugin'
+ssh "$REMOTE" 'XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart hugin'
 
 echo "==> Verifying hugin came back up..."
 sleep 2
 HEALTH=$(ssh "$REMOTE" 'curl -fsS http://127.0.0.1:3032/health 2>/dev/null || echo FAIL')
 if [[ "$HEALTH" != *'"status":"ok"'* ]]; then
   echo "WARNING: hugin health returned an unhealthy response."
-  echo "Check: ssh $REMOTE 'XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u hugin -n 50'"
+  echo "Check: ssh $REMOTE 'XDG_RUNTIME_DIR=/run/user/\$(id -u) journalctl --user -u hugin -n 50'"
 else
   echo "    hugin health: ok"
 fi

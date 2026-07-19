@@ -134,9 +134,9 @@ function invalidAlert(): AlertEnvelope {
     source: "hugin",
     title: "Pi Claude auth invalid — overnight tasks will fail",
     body:
-      "The Pi's Claude Code credential is no longer valid (HTTP 401). All " +
+      "The service host's Claude Code credential is no longer valid (HTTP 401). All " +
       "`runtime:claude` autonomous tasks will fail until it is refreshed — " +
-      "re-run `/login` in a `claude` session on huginmunin.",
+      "re-run `/login` in a `claude` session on the service host.",
     dedup_key: AUTH_ALARM_DEDUP_KEY,
   };
 }
@@ -152,10 +152,10 @@ function expiryAlert(hoursLeft: number): AlertEnvelope {
   return {
     severity: "warn",
     source: "hugin",
-    title: `Pi Claude auth expires in ~${hoursLeft}h`,
+    title: `Hugin Claude auth expires in ~${hoursLeft}h`,
     body:
-      "The Pi's Claude Code credential is nearing expiry. Refresh it (re-run " +
-      "`/login` on huginmunin) before it lapses to avoid draining the overnight queue.",
+      "The service host's Claude Code credential is nearing expiry. Refresh it " +
+      "before it lapses to avoid draining the queue.",
     dedup_key: AUTH_EXPIRY_DEDUP_KEY,
   };
 }

@@ -1,10 +1,10 @@
 # Phase 5 Engineering Plan: Sensitivity Classification
 
-**Parent plan:** [hugin-v2-engineering-plan.md](/Users/magnus/repos/hugin/docs/hugin-v2-engineering-plan.md)  
-**Status:** Core classification implemented and live (standalone + pipeline sensitivity, prompt/context/refs detection, runtime ceilings). Remaining: corpus evaluation, Phase 6 routing.  
+**Parent plan:** [hugin-v2-engineering-plan.md](../docs/hugin-v2-engineering-plan.md)
+**Status:** Core classification implemented and live (standalone + pipeline sensitivity, prompt/context/refs detection, runtime ceilings). Remaining: corpus evaluation, Phase 6 routing.
 **Date:** 2026-04-04
 
-**Sequencing note:** The first executable slice of this phase was delivered through [security-critical-holes-engineering-plan.md](/Users/magnus/repos/hugin/docs/security-critical-holes-engineering-plan.md): context-ref classification enforcement landed as Phase 5 Step 0 after legacy Claude spawn removal and outbound egress filtering. The remaining sections below are still open.
+**Sequencing note:** The first executable slice of this phase was delivered through [security-critical-holes-engineering-plan.md](../docs/security-critical-holes-engineering-plan.md): context-ref classification enforcement landed as Phase 5 Step 0 after legacy Claude spawn removal and outbound egress filtering. The remaining sections below are still open.
 
 ## Goal
 
@@ -30,13 +30,13 @@ This phase is about classification and propagation, not routing. Its output is a
 
 The codebase already contains some sensitivity substrate, but it is partial:
 
-- [src/pipeline-ir.ts](/Users/magnus/repos/hugin/src/pipeline-ir.ts) defines `public | internal | private`.
-- [src/pipeline-compiler.ts](/Users/magnus/repos/hugin/src/pipeline-compiler.ts) parses top-level pipeline `Sensitivity:` and defaults missing values to `internal`.
+- [src/pipeline-ir.ts](../src/pipeline-ir.ts) defines `public | internal | private`.
+- [src/pipeline-compiler.ts](../src/pipeline-compiler.ts) parses top-level pipeline `Sensitivity:` and defaults missing values to `internal`.
 - `PipelinePhaseIR.effectiveSensitivity` exists, but today it is just copied from the parent pipeline value.
-- [src/pipeline-summary.ts](/Users/magnus/repos/hugin/src/pipeline-summary.ts) and [src/task-result-schema.ts](/Users/magnus/repos/hugin/src/task-result-schema.ts) can carry pipeline sensitivity, but not a full declared-vs-effective audit trail.
-- [src/index.ts](/Users/magnus/repos/hugin/src/index.ts) does not parse standalone task `Sensitivity:` at all.
-- [src/context-loader.ts](/Users/magnus/repos/hugin/src/context-loader.ts) resolves `Context-refs`, but it discards Munin entry classification metadata.
-- [src/munin-client.ts](/Users/magnus/repos/hugin/src/munin-client.ts) does not expose or write Munin `classification`, so Hugin-generated artifacts cannot currently inherit effective sensitivity into Munin’s own security metadata.
+- [src/pipeline-summary.ts](../src/pipeline-summary.ts) and [src/task-result-schema.ts](../src/task-result-schema.ts) can carry pipeline sensitivity, but not a full declared-vs-effective audit trail.
+- [src/index.ts](../src/index.ts) does not parse standalone task `Sensitivity:` at all.
+- [src/context-loader.ts](../src/context-loader.ts) resolves `Context-refs`, but it discards Munin entry classification metadata.
+- [src/munin-client.ts](../src/munin-client.ts) does not expose or write Munin `classification`, so Hugin-generated artifacts cannot currently inherit effective sensitivity into Munin’s own security metadata.
 
 Phase 5 should close those gaps without disturbing the already-validated workflow engine.
 
@@ -157,9 +157,9 @@ These are deterministic and local:
 
 ### Filesystem and context heuristics
 
-- `Context: files` or paths under `/home/magnus/mimir` => `private`
-- paths under `/home/magnus/.claude`, `/home/magnus/.codex`, or credential/config homes => `private`
-- `Context: repo:<name>`, `/home/magnus/repos/...`, `/home/magnus/workspace`, `scratch` => `internal`
+- `Context: files` or paths under `/var/lib/hugin/mimir` => `private`
+- paths under `/var/lib/hugin/.claude`, `/var/lib/hugin/.codex`, or credential/config homes => `private`
+- `Context: repo:<name>`, `/var/lib/hugin/repos/...`, `/var/lib/hugin/workspace`, `scratch` => `internal`
 - unknown or missing local path context => no downgrade below `internal`
 
 ### Context-ref heuristics
@@ -188,7 +188,7 @@ Do not add broad “public-looking” heuristics in the first pass.
 
 Add a new pure module:
 
-- [src/sensitivity.ts](/Users/magnus/repos/hugin/src/sensitivity.ts)
+- [src/sensitivity.ts](../src/sensitivity.ts)
 
 It should contain:
 
@@ -202,7 +202,7 @@ Move sensitivity ownership out of `pipeline-ir.ts` so standalone tasks can use t
 
 ### 2. Extend Munin client types and writes
 
-Update [src/munin-client.ts](/Users/magnus/repos/hugin/src/munin-client.ts) to:
+Update [src/munin-client.ts](../src/munin-client.ts) to:
 
 - expose optional `classification` on read/query results
 - accept optional `classification` in `write()`
@@ -211,7 +211,7 @@ This is required so Hugin-generated artifacts inherit effective sensitivity into
 
 ### 3. Extend context resolution to return classification metadata
 
-Update [src/context-loader.ts](/Users/magnus/repos/hugin/src/context-loader.ts) so it returns:
+Update [src/context-loader.ts](../src/context-loader.ts) so it returns:
 
 - resolved refs
 - missing refs
@@ -222,7 +222,7 @@ The resolver should stay mechanically simple. It is not responsible for policy, 
 
 ### 4. Standalone task config gains sensitivity assessment
 
-Extend `TaskConfig` in [src/index.ts](/Users/magnus/repos/hugin/src/index.ts) to include:
+Extend `TaskConfig` in [src/index.ts](../src/index.ts) to include:
 
 - `declaredSensitivity?: Sensitivity`
 - `effectiveSensitivity: Sensitivity`
@@ -234,7 +234,7 @@ Classification should happen before execution and before artifact writes, so eve
 
 ### 5. Pipeline IR gains declared and effective sensitivity
 
-Update [src/pipeline-ir.ts](/Users/magnus/repos/hugin/src/pipeline-ir.ts):
+Update [src/pipeline-ir.ts](../src/pipeline-ir.ts):
 
 - pipeline root should store both declared and effective sensitivity
 - phases should store both declared and effective sensitivity
@@ -244,7 +244,7 @@ The current `effectiveSensitivity` field on phases can remain, but Phase 5 shoul
 
 ### 6. Structured artifacts surface sensitivity explicitly
 
-Update [src/task-result-schema.ts](/Users/magnus/repos/hugin/src/task-result-schema.ts) and [src/pipeline-summary.ts](/Users/magnus/repos/hugin/src/pipeline-summary.ts) to carry:
+Update [src/task-result-schema.ts](../src/task-result-schema.ts) and [src/pipeline-summary.ts](../src/pipeline-summary.ts) to carry:
 
 - declared sensitivity when present
 - effective sensitivity
@@ -328,7 +328,7 @@ If declared < effective:
 
 ### Standalone execution path
 
-Update [src/index.ts](/Users/magnus/repos/hugin/src/index.ts) so that:
+Update [src/index.ts](../src/index.ts) so that:
 
 - task sensitivity is assessed immediately after parse
 - claimed task status is written with `classification = effectiveSensitivity`
@@ -337,7 +337,7 @@ Update [src/index.ts](/Users/magnus/repos/hugin/src/index.ts) so that:
 
 ### Pipeline compile/decompose path
 
-Update [src/pipeline-compiler.ts](/Users/magnus/repos/hugin/src/pipeline-compiler.ts) and [src/pipeline-dispatch.ts](/Users/magnus/repos/hugin/src/pipeline-dispatch.ts) so that:
+Update [src/pipeline-compiler.ts](../src/pipeline-compiler.ts) and [src/pipeline-dispatch.ts](../src/pipeline-dispatch.ts) so that:
 
 - top-level pipeline `Sensitivity:` remains supported
 - optional phase-level `Sensitivity:` is added
@@ -347,7 +347,7 @@ Update [src/pipeline-compiler.ts](/Users/magnus/repos/hugin/src/pipeline-compile
 
 ### Control paths
 
-Update [src/pipeline-control.ts](/Users/magnus/repos/hugin/src/pipeline-control.ts), [src/pipeline-summary-manager.ts](/Users/magnus/repos/hugin/src/pipeline-summary-manager.ts), and any shutdown/cancellation paths so resumed/cancelled artifacts preserve the same effective sensitivity instead of falling back to today’s implicit defaults.
+Update [src/pipeline-control.ts](../src/pipeline-control.ts), [src/pipeline-summary-manager.ts](../src/pipeline-summary-manager.ts), and any shutdown/cancellation paths so resumed/cancelled artifacts preserve the same effective sensitivity instead of falling back to today’s implicit defaults.
 
 ## Implementation slices
 
@@ -389,7 +389,7 @@ Update [src/pipeline-control.ts](/Users/magnus/repos/hugin/src/pipeline-control.
 
 Add a new test file:
 
-- [tests/sensitivity.test.ts](/Users/magnus/repos/hugin/tests/sensitivity.test.ts)
+- [tests/sensitivity.test.ts](../tests/sensitivity.test.ts)
 
 Cover:
 
@@ -401,17 +401,17 @@ Cover:
 
 ### Existing test expansions
 
-- [tests/dispatcher.test.ts](/Users/magnus/repos/hugin/tests/dispatcher.test.ts)
+- [tests/dispatcher.test.ts](../tests/dispatcher.test.ts)
   standalone task parsing and result/status classification
-- [tests/pipeline-compiler.test.ts](/Users/magnus/repos/hugin/tests/pipeline-compiler.test.ts)
+- [tests/pipeline-compiler.test.ts](../tests/pipeline-compiler.test.ts)
   root and phase sensitivity propagation
-- [tests/pipeline-dispatch.test.ts](/Users/magnus/repos/hugin/tests/pipeline-dispatch.test.ts)
+- [tests/pipeline-dispatch.test.ts](../tests/pipeline-dispatch.test.ts)
   decomposition artifact classification
-- [tests/pipeline-summary.test.ts](/Users/magnus/repos/hugin/tests/pipeline-summary.test.ts)
+- [tests/pipeline-summary.test.ts](../tests/pipeline-summary.test.ts)
   declared/effective summary fields and mismatch visibility
-- [tests/task-result-schema.test.ts](/Users/magnus/repos/hugin/tests/task-result-schema.test.ts)
+- [tests/task-result-schema.test.ts](../tests/task-result-schema.test.ts)
   standalone and pipeline result sensitivity metadata
-- add [tests/context-loader.test.ts](/Users/magnus/repos/hugin/tests/context-loader.test.ts) if the resolver contract changes enough to merit its own file
+- add [tests/context-loader.test.ts](../tests/context-loader.test.ts) if the resolver contract changes enough to merit its own file
 
 ## Live evaluation plan
 
@@ -448,7 +448,7 @@ Do not use real secrets in fixtures. Use synthetic but realistic prompts.
 
 ### Live gate
 
-Run the corpus on `huginmunin` and record:
+Run the corpus on `hugin-node` and record:
 
 - declared sensitivity
 - effective sensitivity

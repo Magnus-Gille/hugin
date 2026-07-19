@@ -4,7 +4,7 @@
 - **Participants:** Claude (Opus 4.7), Codex (gpt-5.5, xhigh)
 - **Rounds:** 2 (converged)
 - **Debate type:** architecture (primary) / protocol (secondary)
-- **Artifact under review:** `/Users/magnus/.claude/plans/imperative-wondering-sedgewick.md`
+- **Artifact under review:** an operator-private planning document (not committed)
 
 ## Problem
 

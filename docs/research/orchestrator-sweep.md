@@ -35,7 +35,7 @@ Grimnir is a personal AI system running across owned hardware on a Tailscale mes
 
 | Host | Arch | Role | Availability |
 |------|------|------|-------------|
-| Raspberry Pi 5 (huginmunin) | ARM64 Linux | Coordinator + execution | Always-on |
+| Raspberry Pi 5 (hugin-node) | ARM64 Linux | Coordinator + execution | Always-on |
 | MacBook Air M4 | ARM64 macOS (Apple Silicon) | Peer execution | Intermittent |
 | Future Mac Studio | ARM64 macOS (Apple Silicon) | Peer execution | Always-on (planned) |
 
@@ -572,8 +572,8 @@ The router already selects a runtime. Extend to also select a host:
 ```typescript
 // In router.ts, after selecting runtime:
 function assignHost(task: Task, runtime: RuntimeCandidate): string {
-  // private tasks -> only huginmunin (Pi)
-  if (task.sensitivity === 'private') return 'huginmunin';
+  // private tasks -> only hugin-node (Pi)
+  if (task.sensitivity === 'private') return 'hugin-node';
   // Match runtime to host where it's available
   return runtime.host; // host field on RuntimeCandidate
 }

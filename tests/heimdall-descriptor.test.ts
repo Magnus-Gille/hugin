@@ -59,7 +59,7 @@ describe("HEIMDALL_DESCRIPTOR", () => {
         name: "hugin",
         label: "Hugin",
         namespace: "grimnir",
-        instance_id: "huginmunin",
+        instance_id: "default",
       },
       kind: "http-service",
       status: "pass",

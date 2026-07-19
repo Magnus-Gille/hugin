@@ -11,7 +11,7 @@ What shipped:
 - cancelled task/result contracts in markdown and `result-structured`
 - cancelled parent pipeline result and summary state
 
-What was shown live on `huginmunin`:
+What was shown live on `hugin-node`:
 1. A two-phase pipeline was submitted and decomposed into `gather -> report`.
 2. The `gather` phase was claimed and started running under `claude-sdk`.
 3. A parent `cancel-requested` tag landed while `gather` was active.
@@ -30,10 +30,10 @@ Why it matters:
 
 ## Evidence
 
-- Live evaluation record: [docs/step3-cancellation-live-evaluation.md](/Users/magnus/repos/hugin/docs/step3-cancellation-live-evaluation.md)
-- Dispatcher cancellation flow: [src/index.ts](/Users/magnus/repos/hugin/src/index.ts)
-- Summary reducer: [src/pipeline-summary.ts](/Users/magnus/repos/hugin/src/pipeline-summary.ts)
-- Structured result schema: [src/task-result-schema.ts](/Users/magnus/repos/hugin/src/task-result-schema.ts)
+- Live evaluation record: [docs/step3-cancellation-live-evaluation.md](../docs/step3-cancellation-live-evaluation.md)
+- Dispatcher cancellation flow: [src/index.ts](../src/index.ts)
+- Summary reducer: [src/pipeline-summary.ts](../src/pipeline-summary.ts)
+- Structured result schema: [src/task-result-schema.ts](../src/task-result-schema.ts)
 
 ## Feedback
 

@@ -9,14 +9,14 @@ import type { MuninEntry, MuninQueryResult, MuninReadResult } from "./munin-clie
  * `reposRoot` is the directory under which `repo:<name>` aliases resolve and
  * which {@link checkoutTaskBranch} treats as "managed" (safe to branch). It is
  * configurable so a deployment can point task execution at an ISOLATED tree
- * (e.g. `/home/magnus/hugin-workspace`) that is disjoint from the production
- * deploy checkouts under `/home/magnus/repos` — a hugin task can then never
+ * (e.g. `/var/lib/hugin/hugin-workspace`) that is disjoint from the production
+ * deploy checkouts under `/var/lib/hugin/repos` — a hugin task can then never
  * re-point a production checkout onto its task branch (grimnir#44 / grimnir#33).
  *
  * Defaults preserve the historical hardcoded behavior.
  */
-export const DEFAULT_REPOS_ROOT = "/home/magnus/repos";
-export const DEFAULT_WORKSPACE = "/home/magnus/workspace";
+export const DEFAULT_REPOS_ROOT = "/var/lib/hugin/repos";
+export const DEFAULT_WORKSPACE = "/var/lib/hugin/workspace";
 
 export interface WorkspaceRoots {
   /** Root for `repo:<name>` resolution. Defaults to {@link DEFAULT_REPOS_ROOT}. */
@@ -40,11 +40,11 @@ export function normalizeRoot(root: string): string {
  * - `repo:<name>` → `<reposRoot>/<name>` (traversal outside `reposRoot` is
  *   rejected to the workspace fallback).
  * - `scratch` / `files` → fixed non-code locations.
- * - An absolute path under `/home/magnus/` passes through; anything else
+ * - An absolute path under `/var/lib/hugin/` passes through; anything else
  *   (relative paths, absolute paths elsewhere) falls back to `workspace`.
  *
  * `reposRoot`/`workspace` are configurable per #139; omitting them preserves
- * the original hardcoded `/home/magnus/repos` + `/home/magnus/workspace`.
+ * the original hardcoded `/var/lib/hugin/repos` + `/var/lib/hugin/workspace`.
  */
 export function resolveContext(raw: string, roots: WorkspaceRoots = {}): string {
   const reposRoot = path.resolve(normalizeRoot(roots.reposRoot ?? DEFAULT_REPOS_ROOT));
@@ -60,16 +60,16 @@ export function resolveContext(raw: string, roots: WorkspaceRoots = {}): string 
     return resolved;
   }
   switch (trimmed) {
-    case "scratch": return "/home/magnus/scratch";
-    case "files": return "/home/magnus/mimir";
+    case "scratch": return "/var/lib/hugin/scratch";
+    case "files": return "/var/lib/hugin/mimir";
     default: {
       // Normalize before checking the prefix. A lexical prefix check alone
-      // accepts `/home/magnus/../../etc`, which later filesystem calls resolve
+      // accepts `/var/lib/hugin/../../etc`, which later filesystem calls resolve
       // outside the intended workspace boundary.
       if (path.isAbsolute(trimmed)) {
         const resolved = path.resolve(trimmed);
-        if (resolved.startsWith(`/home/magnus${path.sep}`)) return resolved;
-        console.warn(`Context path outside /home/magnus/ rejected: ${trimmed}`);
+        if (resolved.startsWith(`/var/lib/hugin${path.sep}`)) return resolved;
+        console.warn(`Context path outside /var/lib/hugin/ rejected: ${trimmed}`);
         return workspace;
       }
       return workspace;
@@ -321,7 +321,7 @@ export interface DeliveryRetryDecision {
  * Decide whether a deferred (`HUGIN_DELIVERY_POLICY=defer`) delivery should be
  * retried again or has exhausted its retry budget (issue #72). Budget is the
  * conjunction of a max-attempts cap and a max-age cap — whichever trips first
- * terminalizes, so a permanently-unreachable NAS still reaches a terminal state.
+ * terminalizes, so a permanently unreachable delivery target still reaches a terminal state.
  *
  * `attempts` is the number of attempts ALREADY made. The decision is whether to
  * make another one: exhausted once `attempts >= maxAttempts`, or once the elapsed
@@ -450,6 +450,18 @@ export interface TaskBranchResult {
   baseBranch?: string;
   baseCommit?: string;
   error?: string;
+}
+
+/**
+ * Return the terminal pre-execution error for a managed repository that could
+ * not be isolated. Unmanaged contexts remain valid, but a checkout failure
+ * must never degrade into running a mutation-capable agent in a reusable tree.
+ */
+export function getManagedCheckoutFailure(
+  result: TaskBranchResult,
+): string | null {
+  if (result.action !== "fetch-failed") return null;
+  return `Managed repository checkout failed: ${result.error || "unknown checkout error"}`;
 }
 
 export interface BranchFinalizeResult {
@@ -679,7 +691,7 @@ async function runGitFetch(
   workingDir: string,
   bypassSystemSshConfig: boolean,
 ): Promise<{ ok: boolean; exitCode: number | null; output: string }> {
-  const home = "/home/magnus";
+  const home = "/var/lib/hugin";
   const env: Record<string, string> = { ...process.env as Record<string, string>, HOME: home };
   if (bypassSystemSshConfig) {
     env.GIT_SSH_COMMAND = `ssh -F ${home}/.ssh/config`;
@@ -704,10 +716,10 @@ async function runGitFetch(
  * `syncRepoBeforeTask` fast-forward approach.
  *
  * - Returns `skipped` for non-managed directories (outside `reposRoot`
- *   (default /home/magnus/repos/), not a git repo, no remote). Task proceeds
+ *   (default /var/lib/hugin/repos/), not a git repo, no remote). Task proceeds
  *   normally.
- * - Returns `fetch-failed` on network errors. Task proceeds without branching
- *   (degraded mode, logged as warning).
+ * - Returns `fetch-failed` on fetch, base-resolution, or checkout errors. The
+ *   dispatcher must terminalize the task before any executor starts.
  * - Returns `created` on success with `branchName` set.
  */
 export async function checkoutTaskBranch(
@@ -788,7 +800,7 @@ export async function checkoutTaskBranch(
   if (!fetchOk && !options.baseBranchOverride) {
     return {
       action: "fetch-failed",
-      error: `git fetch origin failed in ${workingDir} after ${totalAttempts} attempts — proceeding without branch`,
+      error: `git fetch origin failed in ${workingDir} after ${totalAttempts} attempts`,
     };
   }
   if (!fetchOk) {
@@ -817,7 +829,7 @@ export async function checkoutTaskBranch(
     const child = spawn("git", ["checkout", "-b", branchName, baseRef], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...process.env, HOME: "/var/lib/hugin" },
     });
     let output = "";
     child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
@@ -888,7 +900,7 @@ export async function finalizeTaskBranch(
     const child = spawn("git", ["status", "--porcelain"], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...process.env, HOME: "/var/lib/hugin" },
     });
     let out = "";
     child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
@@ -901,7 +913,7 @@ export async function finalizeTaskBranch(
       const child = spawn("git", ["add", "-A"], {
         cwd: workingDir,
         stdio: "ignore",
-        env: { ...process.env, HOME: "/home/magnus" },
+        env: { ...process.env, HOME: "/var/lib/hugin" },
       });
       child.on("close", (code) => resolve(code === 0));
       child.on("error", () => resolve(false));
@@ -915,7 +927,7 @@ export async function finalizeTaskBranch(
           {
             cwd: workingDir,
             stdio: "ignore",
-            env: { ...process.env, HOME: "/home/magnus" },
+            env: { ...process.env, HOME: "/var/lib/hugin" },
           },
         );
         child.on("close", () => resolve());
@@ -929,7 +941,7 @@ export async function finalizeTaskBranch(
     const child = spawn("git", ["rev-list", "--count", `${comparisonBase}..HEAD`], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...process.env, HOME: "/var/lib/hugin" },
     });
     let out = "";
     child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
@@ -982,7 +994,7 @@ export async function finalizeTaskBranch(
     const child = spawn("git", ["remote", "get-url", "--push", "origin"], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "ignore"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...process.env, HOME: "/var/lib/hugin" },
     });
     let out = "";
     child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
@@ -1006,7 +1018,7 @@ export async function finalizeTaskBranch(
     const child = spawn("git", ["push", "-u", "origin", branchName], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...process.env, HOME: "/var/lib/hugin" },
     });
     let output = "";
     child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
@@ -1067,7 +1079,7 @@ async function runGitCapture(
     const child = spawn("git", args, {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...process.env, HOME: "/var/lib/hugin" },
     });
     const stdout: Buffer[] = [];
     let stderr = "";
@@ -1144,7 +1156,7 @@ async function cleanupLocalBranch(
     const child = spawn("git", ["checkout", "--detach", detachTarget], {
       cwd: workingDir,
       stdio: "ignore",
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...process.env, HOME: "/var/lib/hugin" },
     });
     child.on("close", () => resolve());
     child.on("error", () => resolve());
@@ -1154,7 +1166,7 @@ async function cleanupLocalBranch(
     const child = spawn("git", ["branch", "-d", branchName], {
       cwd: workingDir,
       stdio: "ignore",
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...process.env, HOME: "/var/lib/hugin" },
     });
     child.on("close", () => resolve());
     child.on("error", () => resolve());
@@ -1181,7 +1193,7 @@ async function createPullRequest(
       {
         cwd: workingDir,
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, HOME: "/home/magnus" },
+        env: { ...process.env, HOME: "/var/lib/hugin" },
       },
     );
     let out = "";

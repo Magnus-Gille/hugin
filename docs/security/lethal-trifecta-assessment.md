@@ -103,7 +103,7 @@ Munin alone doesn't fully manifest the trifecta because it lacks autonomous exte
 
 ### Architecture Summary
 
-Hugin is a task dispatcher that polls Munin for pending tasks, executes them via Claude (Agent SDK), Codex, or Ollama, and writes results back. It supports multi-phase pipelines with human approval gates. It runs as a systemd service on Raspberry Pi with filesystem access under `/home/magnus/`.
+Hugin is a task dispatcher that polls Munin for pending tasks, executes them via Claude (Agent SDK), Codex, or Ollama, and writes results back. It supports multi-phase pipelines with human approval gates. It runs as a systemd service on Raspberry Pi with filesystem access under `/var/lib/hugin/`.
 
 ### Trifecta Component Analysis
 
@@ -113,7 +113,7 @@ Hugin has extensive private data access:
 
 - **Full Munin read access:** Hugin authenticates to Munin with a bearer token and can read all namespaces up to its transport ceiling (dpa_covered → client-confidential)
 - **Context-refs injection:** Tasks can specify arbitrary Munin references to inject into prompts, including client data, business information, and personal profiles
-- **Filesystem access:** Claude SDK executor runs with access to `/home/magnus/` including all repos, documents, credentials files, SSH keys, etc.
+- **Filesystem access:** Claude SDK executor runs with access to `/var/lib/hugin/` including all repos, documents, credentials files, SSH keys, etc.
 - **Git repositories:** Full access to all source code, commit history, and configuration
 - **Credential files:** Can read `~/.claude/.credentials.json` (OAuth tokens), `~/.hugin/.env` (API keys), SSH keys, etc.
 - **Legacy mode risk:** When `HUGIN_CLAUDE_EXECUTOR=spawn`, executes with `--dangerously-skip-permissions`, giving the Claude CLI unrestricted filesystem and tool access
@@ -133,7 +133,7 @@ This is the critical vector. Hugin is exposed to untrusted content through:
 Hugin has multiple external communication channels:
 
 - **Munin writes:** Results written to Munin are visible to all agents, including Ratatoskr (which relays to Telegram)
-- **Reply-to routing:** Tasks specify `Reply-to: telegram:12345678`, directing output to Telegram via Ratatoskr
+- **Reply-to routing:** Tasks specify `Reply-to: telegram:test-chat`, directing output to Telegram via Ratatoskr
 - **Git push:** After task execution, Hugin auto-pushes commits to remote Git repositories (GitHub)
 - **Claude SDK tool use:** The executing Claude agent can make HTTP requests, create GitHub PRs/issues, send messages, etc.
 - **Pipeline side-effects:** Declared side-effects include `github.pr.create`, `github.pr.merge`, `deploy.service`, `message.telegram.send`, `message.email.send`
@@ -278,7 +278,7 @@ The Munin-Hugin combination creates a particularly dangerous variant of the trif
 | **Path traversal protection** | ✅ Good | `path.resolve()` + `startsWith()` guards on working directory. |
 | **Output ring buffer** | ✅ Good | Prevents OOM from runaway output. |
 | **Timeout enforcement** | ✅ Good | Two-stage termination (SIGTERM → SIGKILL). |
-| **systemd sandboxing** | ⚠️ Limited | `ProtectSystem=strict` and `NoNewPrivileges`, but no network restrictions, no restricted address families, full `/home/magnus` access. |
+| **systemd sandboxing** | ⚠️ Limited | `ProtectSystem=strict` and `NoNewPrivileges`, but no network restrictions, no restricted address families, full `/var/lib/hugin` access. |
 | **Pipeline authority gates** | ✅ Good | Human approval required for gated phases. But not all tasks are pipelines. |
 | **Side-effect taxonomy** | ⚠️ Moderate | Declared side-effects for pipeline phases, but enforcement is at compilation level, not runtime. |
 | **Invocation journal** | ✅ Good | Audit trail of all executions with cost, duration, runtime. |
@@ -363,7 +363,7 @@ Instead of a single bearer token with full access, issue Hugin two tokens: one f
 
 #### 7.10 Runtime-Specific Filesystem Sandboxing
 
-Use Linux namespaces, bind mounts, or container isolation to give each task execution only the filesystem access it needs (the specified working directory, not all of `/home/magnus/`).
+Use Linux namespaces, bind mounts, or container isolation to give each task execution only the filesystem access it needs (the specified working directory, not all of `/var/lib/hugin/`).
 
 #### 7.11 Human-in-the-Loop for External-Context Tasks
 
@@ -403,6 +403,6 @@ The most impactful mitigations are: (1) network egress filtering for Hugin, (2) 
 - [Testing AI's Lethal Trifecta with Promptfoo](https://www.promptfoo.dev/blog/lethal-trifecta-testing/)
 - [Understanding the Lethal Trifecta — Oso](https://www.osohq.com/learn/lethal-trifecta-ai-agent-security)
 - [AI Security in 2026: Prompt Injection, the Lethal Trifecta — Airia](https://airia.com/ai-security-in-2026-prompt-injection-the-lethal-trifecta-and-how-to-defend/)
-- Munin Memory source code: `/home/magnus/munin-memory/src/`
-- Hugin source code: `/home/magnus/repos/hugin/src/`
+- Munin Memory source code: `/var/lib/hugin/munin-memory/src/`
+- Hugin source code: `/var/lib/hugin/repos/hugin/src/`
 - Grimnir architecture: `projects/grimnir` in Munin

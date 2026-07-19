@@ -27,7 +27,7 @@ function makeLedgerResponse(overrides: Partial<Response> = {}): Response {
 
 describe("LedgerClient.getLedger", () => {
   beforeEach(() => {
-    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.76.72.59:8080");
+    vi.stubEnv("HOMESERVER_GATEWAY_URL", "http://100.64.0.42:8080");
     vi.stubEnv("HOMESERVER_GATEWAY_API_KEY", "hs-test-key");
   });
 
@@ -48,7 +48,7 @@ describe("LedgerClient.getLedger", () => {
     expect(ledger!.report[0].modelId).toBe("qwen3-30b-instruct");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe("http://100.76.72.59:8080/ledger");
+    expect(url).toBe("http://100.64.0.42:8080/ledger");
     expect((init.headers as Record<string, string>).authorization).toBe("Bearer hs-test-key");
   });
 

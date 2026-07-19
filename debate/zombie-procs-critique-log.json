@@ -11,7 +11,7 @@
   {
     "id": "zombie-procs-C02",
     "source": "codex-round-1",
-    "text": "User-level service ReadWritePaths=/home/magnus/repos/hugin prevents log writes to /home/magnus/.hugin/logs/ — a real bug that would cause task failures",
+    "text": "User-level service ReadWritePaths=/var/lib/hugin/repos/hugin prevents log writes to /var/lib/hugin/.hugin/logs/ — a real bug that would cause task failures",
     "classification": "valid",
     "impact": "changed",
     "severity": "major",
@@ -74,7 +74,7 @@
   {
     "id": "zombie-procs-C09",
     "source": "codex-round-2",
-    "text": "Repo hugin.service has User=magnus and WantedBy=multi-user.target — wrong for a user-level service template",
+    "text": "Repo hugin.service has User=<service-user> and WantedBy=multi-user.target — wrong for a user-level service template",
     "classification": "valid",
     "impact": "changed",
     "severity": "major",

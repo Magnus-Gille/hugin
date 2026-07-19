@@ -18,7 +18,7 @@ describe("pipeline gate artifacts", () => {
       status: "pending",
       requestedAt: "2026-04-04T10:00:00Z",
       requestedByWorker: "hugin-demo-1",
-      replyTo: "telegram:123",
+      replyTo: "telegram:test-chat",
       replyFormat: "summary",
       operationKey: buildPhaseOperationKey(
         "20260404-demo",

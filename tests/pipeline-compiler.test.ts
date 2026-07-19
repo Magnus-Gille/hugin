@@ -40,7 +40,7 @@ describe("pipeline compiler", () => {
 - **Sensitivity:** internal
 - **Submitted by:** claude-code
 - **Submitted at:** 2026-04-02T22:00:00Z
-- **Reply-to:** telegram:12345678
+- **Reply-to:** telegram:test-chat
 - **Reply-format:** summary
 - **Group:** demo-batch
 - **Sequence:** 4
@@ -62,7 +62,7 @@ Phase: debate
 `);
 
     expect(pipeline.id).toBe("20260402-improve-munin-ux");
-    expect(pipeline.replyTo).toBe("telegram:12345678");
+    expect(pipeline.replyTo).toBe("telegram:test-chat");
     expect(pipeline.replyFormat).toBe("summary");
     expect(pipeline.group).toBe("demo-batch");
     expect(pipeline.sequence).toBe(4);
@@ -296,7 +296,7 @@ Phase: review
 
 - **Runtime:** pipeline
 - **Submitted by:** claude-code
-- **Reply-to:** telegram:12345678
+- **Reply-to:** telegram:test-chat
 - **Reply-format:** summary
 - **Group:** demo-batch
 - **Sequence:** 4
@@ -311,7 +311,7 @@ Phase: explore
 
     const result = buildPipelineDecompositionResult(pipeline);
 
-    expect(result).toContain("- **Reply-to:** telegram:12345678");
+    expect(result).toContain("- **Reply-to:** telegram:test-chat");
     expect(result).toContain("- **Reply-format:** summary");
     expect(result).toContain("- **Group:** demo-batch");
     expect(result).toContain("- **Sequence:** 4");

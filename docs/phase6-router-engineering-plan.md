@@ -323,6 +323,6 @@ Evaluation tasks:
 
 1. `npm run build` — no type errors
 2. `npm test` — all existing + new tests pass
-3. Deploy to `huginmunin.local`
+3. Deploy to `hugin-node.local`
 4. Submit the 7 evaluation tasks above
 5. Verify: zero sensitivity violations, routing metadata in all results, explicit-runtime tasks unaffected

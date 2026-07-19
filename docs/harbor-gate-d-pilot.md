@@ -125,7 +125,7 @@ eval "$(m5-auth --env --tailnet)"
 HARBOR_BIN=/private/tmp/hugin-harbor-pilot/venv/bin/harbor \
   HARBOR_TELEMETRY=off \
   npm run pilot:harbor -- \
-  --source-repo /Users/magnus/repos/gille-inference \
+  --source-repo /path/to/gille-inference \
   --campaign-id <new-campaign-id> \
   --declaration <new-reviewed-declaration.json> \
   --task-ids 11-node-path-containment,12-add-csv-cli-format,13-type-safe-slug-tests,14-shared-handle-validation \

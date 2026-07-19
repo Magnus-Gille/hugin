@@ -6,7 +6,7 @@
 
 ## Summary
 
-Ran 18 synthetic tasks (15 standalone + 3 pipelines) through the live Hugin dispatcher on `huginmunin` to validate the Phase 5 sensitivity classification system. Every task that produced a result had correct sensitivity classification and matching Munin artifact classification.
+Ran 18 synthetic tasks (15 standalone + 3 pipelines) through the live Hugin dispatcher on `hugin-node` to validate the Phase 5 sensitivity classification system. Every task that produced a result had correct sensitivity classification and matching Munin artifact classification.
 
 ## Corpus design
 

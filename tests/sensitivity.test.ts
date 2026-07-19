@@ -13,14 +13,14 @@ import {
 
 describe("sensitivity helpers", () => {
   it("classifies local file archives and config homes conservatively", () => {
-    expect(classifyContextSensitivity("files", "/home/magnus/workspace")).toBe(
+    expect(classifyContextSensitivity("files", "/var/lib/hugin/workspace")).toBe(
       "private",
     );
     expect(
-      classifyContextSensitivity(undefined, "/home/magnus/.codex/automations"),
+      classifyContextSensitivity(undefined, "/var/lib/hugin/.codex/automations"),
     ).toBe("private");
     expect(
-      classifyContextSensitivity("repo:hugin", "/home/magnus/repos/hugin"),
+      classifyContextSensitivity("repo:hugin", "/var/lib/hugin/repos/hugin"),
     ).toBe("internal");
   });
 

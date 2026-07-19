@@ -118,7 +118,7 @@ The rendered markdown `result` is clean and predictable, and the structured sibl
 
 7. **The documented path contract is misleading.**
    - Docs say raw absolute paths are passed through unchanged.
-   - Code rejects paths outside `/home/magnus/` and falls back to `/home/magnus/workspace`.
+   - Code rejects paths outside `/var/lib/hugin/` and falls back to `/var/lib/hugin/workspace`.
    - That creates silent context drift for an autonomous agent.
    - Evidence: `AGENTS.md`, `src/index.ts`.
 

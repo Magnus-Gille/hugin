@@ -33,7 +33,7 @@ const baseDiffInput: FinalizeDiffInput = {
     files_touched: ["src/foo.ts"],
     unified_diff: "diff --git a/src/foo.ts b/src/foo.ts\n@@ -1 +1 @@\n-old\n+new\n",
     stats: { files: 1, insertions: 1, deletions: 1 },
-    worktree_path: "/home/magnus/.hugin/worktrees/20260426-104000-harness",
+    worktree_path: "/var/lib/hugin/.hugin/worktrees/20260426-104000-harness",
   },
   policy_version: "zdr-v1+rlv-v1",
   harness_version: "pi@1.2.3",

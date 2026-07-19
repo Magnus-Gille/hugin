@@ -176,7 +176,7 @@ Given the project context above, what phase is the project in? Reply in one sent
 submit_task "int-4-workspace-path" "## Task: Workspace path task
 
 - **Runtime:** ollama
-- **Working dir:** /home/magnus/workspace
+- **Working dir:** /var/lib/hugin/workspace
 - **Submitted by:** claude-code
 - **Submitted at:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
 - **Group:** ${GROUP}
@@ -210,7 +210,7 @@ submit_task "priv-2-people-context-ref" "## Task: Task with people context-ref
 - **Runtime:** ollama
 - **Context:** scratch
 - **Sensitivity:** private
-- **Context-refs:** people/magnus/profile
+- **Context-refs:** people/example-owner/profile
 - **Submitted by:** claude-code
 - **Submitted at:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
 - **Group:** ${GROUP}
@@ -235,7 +235,7 @@ Explain best practices for storing a salary slip and bank statements securely. K
 submit_task "priv-4-mimir-path" "## Task: Task with mimir path
 
 - **Runtime:** ollama
-- **Working dir:** /home/magnus/mimir
+- **Working dir:** /var/lib/hugin/mimir
 - **Sensitivity:** private
 - **Submitted by:** claude-code
 - **Submitted at:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -257,7 +257,7 @@ submit_task "mis-1-public-but-private-ref" "## Task: Declares public but has pri
 - **Runtime:** ollama
 - **Context:** scratch
 - **Sensitivity:** public
-- **Context-refs:** people/magnus/profile
+- **Context-refs:** people/example-owner/profile
 - **Submitted by:** claude-code
 - **Submitted at:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
 - **Group:** ${GROUP}

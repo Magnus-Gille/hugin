@@ -1,7 +1,7 @@
 # Hugin v2 Engineering Plan
 
-**Source:** [hugin-v2-pipeline-orchestrator.md](/Users/magnus/repos/hugin/docs/hugin-v2-pipeline-orchestrator.md)  
-**Status:** Phases 1-5 complete and live-validated; security precondition closed; Phase 6 in progress  
+**Source:** [hugin-v2-pipeline-orchestrator.md](../docs/hugin-v2-pipeline-orchestrator.md)
+**Status:** Phases 1-5 complete and live-validated; security precondition closed; Phase 6 in progress
 **Date:** 2026-04-04
 
 ## Goal
@@ -35,9 +35,9 @@ Each bet must earn the next one. No later phase starts until the current gate is
 - Expose `blocked_tasks` in heartbeat and health output.
 
 **Code**
-- [src/index.ts](/Users/magnus/repos/hugin/src/index.ts)
-- [src/task-graph.ts](/Users/magnus/repos/hugin/src/task-graph.ts)
-- [tests/task-graph.test.ts](/Users/magnus/repos/hugin/tests/task-graph.test.ts)
+- [src/index.ts](../src/index.ts)
+- [src/task-graph.ts](../src/task-graph.ts)
+- [tests/task-graph.test.ts](../tests/task-graph.test.ts)
 
 **Definition of done**
 - Manual task graphs can be submitted directly to Munin.
@@ -102,7 +102,7 @@ Each bet must earn the next one. No later phase starts until the current gate is
 - Make side-effect retries idempotent.
 
 **Detailed implementation plan**
-- [phase4-human-gates-engineering-plan.md](/Users/magnus/repos/hugin/docs/phase4-human-gates-engineering-plan.md)
+- [phase4-human-gates-engineering-plan.md](../docs/phase4-human-gates-engineering-plan.md)
 
 **Definition of done**
 - Side-effecting phases never execute autonomously unless explicitly allowed.
@@ -112,7 +112,7 @@ Each bet must earn the next one. No later phase starts until the current gate is
 - Yes. This completes the Bet 1 gate.
 
 **Status**
-- Done and live-validated. See [step4-live-evaluation.md](/Users/magnus/repos/hugin/docs/step4-live-evaluation.md).
+- Done and live-validated. See [step4-live-evaluation.md](../docs/step4-live-evaluation.md).
 
 ### Bet 1 gate
 
@@ -133,17 +133,17 @@ Do not start routing work until all of these are true:
 - Implement monotonic sensitivity propagation across pipeline inputs.
 
 **Detailed implementation plan**
-- [phase5-sensitivity-classification-engineering-plan.md](/Users/magnus/repos/hugin/docs/phase5-sensitivity-classification-engineering-plan.md)
+- [phase5-sensitivity-classification-engineering-plan.md](../docs/phase5-sensitivity-classification-engineering-plan.md)
 
 **Security precondition**
-- Before normal Phase 5 implementation, close the critical holes in [security-critical-holes-engineering-plan.md](/Users/magnus/repos/hugin/docs/security-critical-holes-engineering-plan.md).
+- Before normal Phase 5 implementation, close the critical holes in [security-critical-holes-engineering-plan.md](../docs/security-critical-holes-engineering-plan.md).
 - Sequence them as:
   1. remove the legacy Claude spawn executor
   2. apply outbound egress filtering
   3. start Phase 5 with context-ref classification enforcement as Step 0
 
 **Status**
-- Security precondition complete and live-validated. Phase 5 Step 0 is now implemented: shared sensitivity substrate, context-ref classification enforcement, runtime sensitivity limits, and classification-aware Munin artifact writes. See [security-critical-holes-live-evaluation.md](/Users/magnus/repos/hugin/docs/security-critical-holes-live-evaluation.md).
+- Security precondition complete and live-validated. Phase 5 Step 0 is now implemented: shared sensitivity substrate, context-ref classification enforcement, runtime sensitivity limits, and classification-aware Munin artifact writes. See [security-critical-holes-live-evaluation.md](../docs/security-critical-holes-live-evaluation.md).
 
 **Evaluation step required**
 - Yes. Validate on a corpus of representative public, internal, and private tasks before enabling automatic routing.
@@ -157,7 +157,7 @@ Do not start routing work until all of these are true:
 - Keep explicit runtimes as the default path.
 
 **Detailed implementation plan**
-- [phase6-router-engineering-plan.md](/Users/magnus/repos/hugin/docs/phase6-router-engineering-plan.md)
+- [phase6-router-engineering-plan.md](../docs/phase6-router-engineering-plan.md)
 
 **Evaluation step required**
 - Yes. This is the Bet 2 gate: routed tasks must match or beat manually chosen runtimes with zero sensitivity violations.

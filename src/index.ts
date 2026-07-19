@@ -17,7 +17,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, getManagedCheckoutFailure, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt } from "./task-helpers.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
 import {
@@ -275,7 +275,7 @@ function applyExfilPolicy(
   };
 }
 
-const HUGIN_HOME = path.join(process.env.HOME || "/home/magnus", ".hugin");
+const HUGIN_HOME = path.join(process.env.HOME || "/var/lib/hugin", ".hugin");
 const LOG_DIR = path.join(HUGIN_HOME, "logs");
 const HOOK_RESULT_DIR = path.join(HUGIN_HOME, "hook-results");
 const CANCEL_REQUESTED_TAG = "cancel-requested";
@@ -320,10 +320,10 @@ const config = {
     300_000,
     MAX_TASK_TIMEOUT_MS,
   ),
-  workspace: process.env.HUGIN_WORKSPACE || "/home/magnus/workspace",
+  workspace: process.env.HUGIN_WORKSPACE || "/var/lib/hugin/workspace",
   // Root under which `repo:<name>` aliases resolve and task branches are cut
   // (#139). Point this at an isolated tree to keep hugin tasks off the
-  // production deploy checkouts under /home/magnus/repos. Default preserves
+  // production deploy checkouts under /var/lib/hugin/repos. Default preserves
   // the historical hardcoded behavior.
   reposRoot: normalizeRoot(process.env.HUGIN_REPOS_ROOT || DEFAULT_REPOS_ROOT),
   maxOutputChars: parseBoundedPositiveInt(
@@ -565,7 +565,7 @@ function createMuninClient(
 }
 
 // The auth-alarm push (#131) uses the global fetch, which is egress-gated below.
-// The Ratatoskr Alert Bus host (typically `huginmunin` or the Pi Tailscale IP,
+// The Ratatoskr Alert Bus host (typically an internal DNS name or private IP,
 // not loopback — see ratatoskr bind-resilience notes) must therefore be
 // allowlisted or the alarm's own POST would be denied before it leaves the box.
 function hostnameOf(url: string): string | null {
@@ -1618,7 +1618,7 @@ async function probeClaudeUsage(): Promise<{
   let expiresAtMs: number | null = null;
   let expiryEvidence: "known" | "not-applicable" | "unknown" = "unknown";
   try {
-    const credPath = path.join(process.env.HOME || "/home/magnus", ".claude", ".credentials.json");
+    const credPath = path.join(process.env.HOME || "/var/lib/hugin", ".claude", ".credentials.json");
     const creds = JSON.parse(fs.readFileSync(credPath, "utf-8"));
     const token = creds?.claudeAiOauth?.accessToken;
     const rawExpiry = creds?.claudeAiOauth?.expiresAt;
@@ -2096,7 +2096,7 @@ function spawnRuntime(
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
-        HOME: "/home/magnus",
+        HOME: "/var/lib/hugin",
         HUGIN_TASK_ID: taskId,
         HUGIN_TASK_NAMESPACE: ctx.taskNs,
       },
@@ -4492,14 +4492,41 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         baseBranchOverride: task.baseBranch,
         captureBaseCommit: true,
       });
-      if (branchResult.action === "fetch-failed") {
-        console.warn(`Pre-task branch checkout failed for ${taskNs} (non-fatal, proceeding without branch): ${branchResult.error}`);
-      } else if (branchResult.action === "created") {
+      if (branchResult.action === "created") {
         console.log(`Pre-task: branch ${branchResult.branchName} ready in ${task.workingDir}`);
       }
     }
     let repositoryOutcome: StructuredTaskResult["repositoryOutcome"] =
       deriveRepositoryOutcome(branchResult);
+
+    const checkoutFailure = getManagedCheckoutFailure(branchResult);
+    if (checkoutFailure) {
+      console.error(`Refusing to execute ${taskNs}: ${checkoutFailure}`);
+      await failTaskWithMessage(taskNs, entry, checkoutFailure);
+      await writeStructuredTaskResult(
+        taskNs,
+        {
+          ...createFailureStructuredResult(taskNs, task.runtime, checkoutFailure, {
+            executor: "dispatcher",
+            resultSource: "repository-checkout",
+            startedAt,
+            replyTo: task.replyTo,
+            replyFormat: task.replyFormat,
+            group: task.group,
+            sequence: task.sequence,
+            pipeline: task.pipeline,
+            sensitivity: buildTaskSensitivitySnapshot(task.sensitivityAssessment),
+          }),
+          repositoryOutcome,
+          provenance: signingVerdict.provenance,
+        },
+        getTaskArtifactClassification(task),
+      );
+      await munin.log(taskNs, `Task rejected before execution: ${checkoutFailure}`);
+      await promoteDependents(taskId);
+      await refreshPipelineSummaryFromContent(entry.content);
+      return { hadTask: true, queueDepth };
+    }
 
     currentTaskConfig = task;
     const taskClassification = getTaskArtifactClassification(task);

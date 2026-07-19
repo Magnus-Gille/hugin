@@ -25,7 +25,7 @@
 | | |
 |---|---|
 | Host | Hugin-Munin Pi 5, aarch64, 4× Cortex-A76, 8 GB |
-| Install | `pip install -e .` into an isolated venv at `/home/magnus/scratch/opf-eval`; model auto-downloaded (2.8 GB) to `~/.opf/privacy_filter` |
+| Install | `pip install -e .` into an isolated venv at `/var/lib/hugin/scratch/opf-eval`; model auto-downloaded (2.8 GB) to `~/.opf/privacy_filter` |
 | Runtime fix | `torch.backends.mkldnn.enabled=False` via a `usercustomize.py` on `PYTHONPATH` (the A76 lacks bf16; mkldnn's bf16 matmul raises `c10::Error`) |
 | Fixtures | 24 labelled (EN+SV, all 8 OPF labels) + 10 clean — `eval/privacy-filter/fixtures/` |
 | Decode | OPF default (viterbi), `--eval-mode typed` |
@@ -130,4 +130,6 @@ npx tsx scripts/run-pii-eval.ts \
   --md eval/privacy-filter/results/report-<host>.md
 ```
 
-Raw artifacts from this run: [`eval/privacy-filter/results/huginmunin/`](../../eval/privacy-filter/results/huginmunin/).
+Raw host artifacts are intentionally not committed because they can expose
+machine paths, host metadata, and input-derived text. Reproduce the evaluation
+locally with the synthetic fixtures under [`eval/privacy-filter/`](../../eval/privacy-filter/README.md).

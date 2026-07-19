@@ -257,7 +257,7 @@ export async function executeSdkTask(
         command: uvxPath,
         args: ["arxiv-mcp-server"],
         env: {
-          HOME: process.env.HOME ?? "/home/magnus",
+          HOME: process.env.HOME ?? "/var/lib/hugin",
           PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
           ...(process.env.ARXIV_STORAGE_PATH
             ? { ARXIV_STORAGE_PATH: process.env.ARXIV_STORAGE_PATH }
@@ -277,7 +277,7 @@ export async function executeSdkTask(
         ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
         env: {
           ...process.env,
-          HOME: "/home/magnus",
+          HOME: "/var/lib/hugin",
           HUGIN_TASK_ID: taskId,
         },
         // Capture stderr from the spawned Claude Code process.

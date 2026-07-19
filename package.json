@@ -2,6 +2,20 @@
   "name": "hugin",
   "version": "0.1.0",
   "description": "Task dispatcher for the Grimnir AI system — polls Munin for tasks, spawns AI runtimes, reports results",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Magnus-Gille/hugin.git"
+  },
+  "homepage": "https://github.com/Magnus-Gille/hugin#readme",
+  "bugs": {
+    "url": "https://github.com/Magnus-Gille/hugin/issues"
+  },
+  "keywords": [
+    "ai-agents",
+    "mcp",
+    "self-hosted",
+    "task-dispatcher"
+  ],
   "type": "module",
   "bin": {
     "hugin-mcp": "dist/mcp-server.js",

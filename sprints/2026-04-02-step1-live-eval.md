@@ -12,7 +12,7 @@ What shipped:
 - startup and periodic reconciliation for missed promotions
 - `blocked_tasks` in heartbeat and health output
 
-What was shown live on `huginmunin`:
+What was shown live on `hugin-node`:
 1. Two child tasks completed and a blocked continuation promoted only after both were terminal.
 2. A continuation failed immediately when an upstream dependency failed under the default policy.
 3. A continuation with `on-dep-failure:continue` stayed blocked after one failed dependency, then promoted once the remaining dependency completed.
@@ -25,10 +25,10 @@ Why it matters:
 
 ## Evidence
 
-- Engineering plan: [docs/hugin-v2-engineering-plan.md](/Users/magnus/repos/hugin/docs/hugin-v2-engineering-plan.md)
-- Live evaluation record: [docs/step1-live-evaluation.md](/Users/magnus/repos/hugin/docs/step1-live-evaluation.md)
-- Dispatcher implementation: [src/index.ts](/Users/magnus/repos/hugin/src/index.ts)
-- Dependency logic: [src/task-graph.ts](/Users/magnus/repos/hugin/src/task-graph.ts)
+- Engineering plan: [docs/hugin-v2-engineering-plan.md](../docs/hugin-v2-engineering-plan.md)
+- Live evaluation record: [docs/step1-live-evaluation.md](../docs/step1-live-evaluation.md)
+- Dispatcher implementation: [src/index.ts](../src/index.ts)
+- Dependency logic: [src/task-graph.ts](../src/task-graph.ts)
 
 ## Feedback
 
@@ -42,7 +42,7 @@ Summary:
 - Reconciliation is the right crash-recovery design, not a workaround.
 
 Specific concern:
-- [src/task-graph.ts](/Users/magnus/repos/hugin/src/task-graph.ts#L35) removes `depends-on:*` tags during promotion.
+- [src/task-graph.ts](../src/task-graph.ts#L35) removes `depends-on:*` tags during promotion.
 - That means dependency provenance is no longer present on the task's final `status` entry after promotion.
 - This may be acceptable if logs and results carry enough context, but it should be reviewed before Step 2 if downstream auditing matters.
 
