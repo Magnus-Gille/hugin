@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/var/lib/hugin/app
 EnvironmentFile=/var/lib/hugin/app/.env
+Environment=HOME=/var/lib/hugin
 ExecStart=/usr/bin/node dist/daily-exam-harvest-cli.js --lookback-hours 48 --limit 500 --output /var/lib/hugin/.hugin/daily-exam-candidates/latest.json
 TimeoutStartSec=120
 UMask=0077

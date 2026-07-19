@@ -5,6 +5,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_SCRIPT="$SCRIPT_DIR/deploy-pi.sh"
+SERVICE_UNIT="$SCRIPT_DIR/../hugin.service"
+DAILY_FACTORY_UNIT="$SCRIPT_DIR/../systemd/hugin-daily-exam-factory.service"
 ORIGINAL_PATH="$PATH"
 REAL_RSYNC="$(command -v rsync)"
 TMP_DIR="$(mktemp -d)"
@@ -248,7 +250,12 @@ set -e
 [[ "$full_rc" -eq 0 ]] || fail "clean full deployment should pass the fake acceptance path"
 full_calls="$(cat "$CALL_LOG")"
 full_first_ssh="$(grep -m1 '^ssh ' "$CALL_LOG")"
-assert_contains "$full_first_ssh" "rm -f '/var/lib/hugin/app/.deployed-commit'" "marker invalidation is the first remote command"
+assert_contains "$full_first_ssh" "sudo install -d" "fresh-host deployment provisions the service home"
+assert_contains "$full_first_ssh" "/var/lib/hugin" "fresh-host deployment provisions /var/lib/hugin"
+assert_contains "$full_first_ssh" "/var/lib/hugin/app" "fresh-host deployment provisions the application directory"
+assert_contains "$full_first_ssh" "/var/lib/hugin/workspace" "fresh-host deployment provisions the workspace"
+assert_contains "$full_first_ssh" "hugin:hugin" "fresh-host deployment assigns the service user ownership"
+assert_contains "$full_first_ssh" "rm -f '/var/lib/hugin/app/.deployed-commit'" "first remote command invalidates the marker after provisioning"
 assert_contains "$full_calls" "rm -f '/var/lib/hugin/app/.deployed-commit'" "deployment invalidates the old marker"
 assert_order "$full_calls" "rm -f '/var/lib/hugin/app/.deployed-commit'" "rsync " "marker invalidation precedes payload sync"
 assert_not_contains "$full_calls" "git fetch origin" "deployment never depends on remote Git fetch"
@@ -266,6 +273,8 @@ assert_contains "$full_calls" "provisional candidate lacks complete cross-client
 assert_contains "$full_calls" "$full_sha" "deployment stamps the exact local full SHA"
 assert_order "$full_calls" "curl -fsS http://127.0.0.1:3032/health" "mv '/var/lib/hugin/app/.deployed-commit.tmp' '/var/lib/hugin/app/.deployed-commit'" "health acceptance precedes atomic marker stamp"
 assert_order "$full_calls" "start hugin-daily-exam-factory.service" "mv '/var/lib/hugin/app/.deployed-commit.tmp' '/var/lib/hugin/app/.deployed-commit'" "factory acceptance precedes atomic marker stamp"
+assert_contains "$(cat "$SERVICE_UNIT")" "Environment=HOME=/var/lib/hugin" "service and child processes share the provisioned home"
+assert_contains "$(cat "$DAILY_FACTORY_UNIT")" "Environment=HOME=/var/lib/hugin" "daily factory shares the provisioned home"
 
 # If the marker cannot be invalidated, the script must not begin payload sync.
 : >"$CALL_LOG"

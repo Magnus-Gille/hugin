@@ -27,3 +27,5 @@ jobs:
       - run: npm test
 
       - run: bash scripts/deploy-pi.test.sh
+
+      - run: bash scripts/submit-dep-bumps.test.sh

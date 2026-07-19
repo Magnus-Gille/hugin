@@ -10,6 +10,7 @@ ExecStart=/usr/bin/node dist/index.js
 Restart=always
 RestartSec=10
 EnvironmentFile=/var/lib/hugin/app/.env
+Environment=HOME=/var/lib/hugin
 Environment=PATH=/var/lib/hugin/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 
 # Sandboxing

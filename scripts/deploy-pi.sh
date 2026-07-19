@@ -12,6 +12,7 @@ fi
 DEPLOY_USER="${DEPLOY_USER:-hugin}"
 REMOTE="$DEPLOY_USER@$PI_HOST"
 REMOTE_DIR="${HUGIN_DEPLOY_DIR:-/var/lib/hugin/app}"
+HUGIN_HOME="/var/lib/hugin"
 
 read_clean_deploy_sha() {
   local repo_root source_status source_sha
@@ -68,10 +69,29 @@ if [ "$POST_BUILD_SHA" != "$DEPLOY_SHA" ]; then
   exit 1
 fi
 
-echo "==> Invalidating prior deployment marker..."
-# This is deliberately the first remote mutation. Every later failure leaves
-# the service markerless; only the final accepted health gate may stamp it.
-ssh "$REMOTE" "rm -f '$REMOTE_DIR/.deployed-commit' '$REMOTE_DIR/.deployed-commit.tmp'"
+echo "==> Provisioning service home and invalidating prior deployment marker..."
+# Provision the complete service-home layout before rsync so a fresh host does
+# not depend on an already-created /var/lib/hugin. Marker invalidation remains
+# in this first remote command and precedes the first payload mutation. Every
+# later failure therefore leaves the service markerless.
+ssh "$REMOTE" "
+  set -e
+  sudo install -d -m 0750 -o '$DEPLOY_USER' -g '$DEPLOY_USER' \
+    '$HUGIN_HOME' \
+    '$REMOTE_DIR' \
+    '$HUGIN_HOME/workspace' \
+    '$HUGIN_HOME/worktrees' \
+    '$HUGIN_HOME/.hugin' \
+    '$HUGIN_HOME/.hugin/daily-exam-candidates'
+  sudo chown '$DEPLOY_USER:$DEPLOY_USER' \
+    '$HUGIN_HOME' \
+    '$REMOTE_DIR' \
+    '$HUGIN_HOME/workspace' \
+    '$HUGIN_HOME/worktrees' \
+    '$HUGIN_HOME/.hugin' \
+    '$HUGIN_HOME/.hugin/daily-exam-candidates'
+  rm -f '$REMOTE_DIR/.deployed-commit' '$REMOTE_DIR/.deployed-commit.tmp'
+"
 
 echo "==> Syncing to $REMOTE:$REMOTE_DIR..."
 rsync -av --delete \
@@ -164,7 +184,7 @@ then
   echo "  WARNING: HUGIN_DELIVERY_TARGETS is not a valid non-empty target array"
 elif ssh "$REMOTE" "
   set -e
-  export HOME=/var/lib/hugin
+  export HOME=$HUGIN_HOME
   command -v rsync >/dev/null || { echo 'rsync missing on Pi'; exit 1; }
   ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 \
     $DELIVERY_REMOTE_USER@$DELIVERY_REMOTE_HOST -- \
@@ -192,9 +212,6 @@ else
   echo "  WARNING: host-side Codex sandbox preflight FAILED."
   echo "  The post-restart in-service health acceptance will remain authoritative."
 fi
-
-echo "==> Ensuring workspace directory exists..."
-ssh "$REMOTE" "mkdir -p /var/lib/hugin/workspace"
 
 echo "==> Killing orphan Hugin processes..."
 ssh "$REMOTE" "user_id=\$(id -u)

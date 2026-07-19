@@ -3,7 +3,7 @@
 Hugin is a self-hosted task dispatcher for the
 [Grimnir](https://github.com/Magnus-Gille/grimnir) personal-AI ecosystem. It
 turns durable tasks stored in
-[Munin Memory](https://github.com/magnusgille/munin-memory) into bounded runs on
+[Munin Memory](https://github.com/Magnus-Gille/munin-memory) into bounded runs on
 cloud or local agent runtimes, then stores human-readable and structured results
 back in Munin.
 
@@ -94,6 +94,8 @@ settings are:
 | `MUNIN_API_KEY` | Munin bearer token; never commit a real value. |
 | `HUGIN_REPOS_ROOT` | Isolated managed repositories used by `repo:<name>`. |
 | `HUGIN_WORKSPACE` | Fallback working directory for non-repository tasks. |
+| `HUGIN_INSTANCE_ID` | Optional validated Heimdall instance identity; defaults to the runtime hostname and rejects malformed explicit values. |
+| `HUGIN_DEPLOY_HOST` | Optional validated Heimdall deployment host; defaults to the runtime hostname and rejects malformed explicit values. |
 | `HUGIN_ALLOWED_SUBMITTERS` | Claimed submitters accepted before signature checks. |
 | `HUGIN_SIGNING_POLICY` | `off`, `warn`, or `require`; use `require` across trust boundaries. |
 | `OLLAMA_PI_URL` | Optional local Ollama endpoint. |
