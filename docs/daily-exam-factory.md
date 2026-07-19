@@ -47,11 +47,16 @@ classifies them without running a model or writing any learning state:
 
 `completed` means that the executor lifecycle finished successfully; it is not
 proof that the solution was accepted. The factory reads each task's optional
-`feedback` document and joins only schema-v1 quality receipts whose hashes bind
-the exact task document, structured result, and repository state/diff. It
-preserves the receipt IDs, authenticated reviewer principals, and whether an
-independent reviewer explicitly accepted the unchanged result. Legacy flat
-feedback is labeled `legacy-unbound` and never upgraded into acceptance.
+`feedback` document and joins only valid native-v1/v2 quality receipts whose
+hashes bind the exact task document, structured result, and repository
+state/diff. It collapses a valid correction chain to its unique unsuperseded
+leaf. The content-blind quality view preserves receipt IDs, authenticated
+reviewer principals, reason digests, and—on native v2—attempt, predecessor,
+stable correction group, rubric/verifier, structured failure, available
+producing-configuration identities, and successor references. It never copies
+the text rating reason. Native v1 remains exact and does not acquire fabricated
+attempt or rubric fields. Legacy flat feedback is labeled `legacy-unbound` and
+never upgraded into acceptance. See `docs/quality-receipts.md`.
 
 Every non-quarantined candidate remains `needs-independent-verifier`, including
 one whose product output has an exact independent acceptance: accepting the

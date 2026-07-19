@@ -383,6 +383,49 @@ describe("buildTools — hugin_rate", () => {
       verification_outcome: "accepted_unchanged",
     });
   });
+
+  it("forwards native v2 correction provenance", async () => {
+    const rate = vi.fn(async () => ({}));
+    const broker = fakeBroker({ rate });
+    const tools = buildTools({ broker, sessionId: "sess", submitter: "claude-code" });
+    const correction = {
+      predecessor_receipt_id: "qr-" + "a".repeat(24),
+      rubric: {
+        id: "code-review",
+        version: "2",
+        config_digest: {
+          algorithm: "sha256" as const,
+          canonicalization: "jcs-rfc8785-utf8-v1" as const,
+          source_ref: "source-doc:rubric/code-review-2",
+          source_type: "rubric-config" as const,
+          source_version: "rubric-source-2",
+          digest: "b".repeat(64),
+        },
+      },
+      verifier: { id: "claude-opus", version: "2026-07-19" },
+      failure: {
+        taxonomy: { id: "hugin-quality-failure", version: "1" },
+        code: "incorrect-answer" as const,
+      },
+      references: {
+        corrected_successor: {
+          task_id: "t-2",
+          structured_result_sha256: "c".repeat(64),
+        },
+      },
+    };
+
+    const result = await tools.rate.handler({
+      task_id: "t-1",
+      rating: "wrong",
+      rating_reason: "The correction is required.",
+      verification_outcome: "discarded",
+      correction,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(rate).toHaveBeenCalledWith(expect.objectContaining({ correction }));
+  });
 });
 
 describe("buildTools — hugin_report_friction", () => {
