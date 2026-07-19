@@ -8,6 +8,10 @@ import {
   loadHomeserverGatewayConfig,
   type HomeserverTaskConfig,
 } from "../src/homeserver-executor.js";
+import {
+  withLearningTaskContext,
+  withLearningTaskGatewayEcho,
+} from "./helpers/learning-task.js";
 
 function makeTaskConfig(overrides?: Partial<HomeserverTaskConfig>): HomeserverTaskConfig {
   return {
@@ -136,6 +140,7 @@ describe("executeHomeserverTask — chat path", () => {
     expect(result.totalTokens).toBe(14);
     expect(result.backpressure).toBe("none");
     expect(result.delegated).toBeNull(); // chat path carries no delegate metadata
+    expect(result.huginTaskIdentity).toBeNull();
 
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe("http://m5.test:8080/v1/chat/completions");
@@ -161,8 +166,32 @@ describe("executeHomeserverTask — chat path", () => {
 
 describe("executeHomeserverTask — delegate path", () => {
   it("POSTs /delegate and maps the DelegationOutcome", async () => {
+    const task = withLearningTaskContext(makeTaskConfig({
+      path: "delegate",
+      taskType: "extract",
+      systemPrompt: "Return only the extracted year.",
+      maxTokens: 128,
+      modelId: "qwen3-coder",
+      frontierModelId: "anthropic/claude-opus-4-5",
+      verifier: { type: "numeric", expected: 1998 },
+      responseFormat: {
+        type: "json_schema",
+        json_schema: {
+          name: "year_result",
+          schema: {
+            type: "object",
+            properties: { year: { type: "number" } },
+            required: ["year"],
+            additionalProperties: false,
+          },
+          strict: true,
+        },
+      },
+      delegatorModelId: "anthropic/claude-sonnet-4-5",
+      premiumBaselineModelId: "anthropic/claude-opus-4-5",
+    }), "delegate-ok");
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      jsonResponse({
+      jsonResponse(withLearningTaskGatewayEcho(task, "delegate-ok", {
         delegated: true,
         escalate: false,
         taskType: "extract",
@@ -175,34 +204,11 @@ describe("executeHomeserverTask — delegate path", () => {
         ledgerId: "ledger-123",
         verifierNotes: "numeric match",
         metrics: { promptTokens: 45, completionTokens: 3, latencyMs: 820 },
-      }),
+      })),
     );
 
     const result = await executeHomeserverTask(
-      makeTaskConfig({
-        path: "delegate",
-        taskType: "extract",
-        systemPrompt: "Return only the extracted year.",
-        maxTokens: 128,
-        modelId: "qwen3-coder",
-        frontierModelId: "anthropic/claude-opus-4-5",
-        verifier: { type: "numeric", expected: 1998 },
-        responseFormat: {
-          type: "json_schema",
-          json_schema: {
-            name: "year_result",
-            schema: {
-              type: "object",
-              properties: { year: { type: "number" } },
-              required: ["year"],
-              additionalProperties: false,
-            },
-            strict: true,
-          },
-        },
-        delegatorModelId: "anthropic/claude-sonnet-4-5",
-        premiumBaselineModelId: "anthropic/claude-opus-4-5",
-      }),
+      task,
       "delegate-ok",
       tmpLogDir,
     );
@@ -223,6 +229,23 @@ describe("executeHomeserverTask — delegate path", () => {
     expect(result.completionTokens).toBe(3);
     expect(result.totalTokens).toBe(48);
     expect(result.inferenceMs).toBe(820);
+    expect(result.huginTaskIdentity).toEqual(expect.objectContaining({
+      schemaVersion: 1,
+      producer: "hugin",
+      taskId: "delegate-ok",
+      rawTaskFingerprint: expect.objectContaining({
+        version: "trim-utf8-sha256-v1",
+      }),
+      renderedPromptFingerprint: expect.objectContaining({
+        version: "hugin-delegate-prompt-utf8-sha256-v1",
+      }),
+    }));
+    expect(result.learningTask).toMatchObject({
+      state: "m5-admitted",
+      evidenceAccepted: true,
+      taskId: "delegate-ok",
+      gatewayEcho: { echoed_request: { attempt_id: expect.stringMatching(/^hugin-attempt:/) } },
+    });
 
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe("http://m5.test:8080/delegate");
@@ -249,6 +272,7 @@ describe("executeHomeserverTask — delegate path", () => {
     });
     expect(body.delegatorModelId).toBe("anthropic/claude-sonnet-4-5");
     expect(body.premiumBaselineModelId).toBe("anthropic/claude-opus-4-5");
+    expect(body.learningTaskStamp.raw_fingerprint).toEqual(body.huginTaskIdentity.rawTaskFingerprint);
   });
 
   // Issue #163: the direct path already carried the flat delegation fields, but
@@ -256,8 +280,12 @@ describe("executeHomeserverTask — delegate path", () => {
   // response — so a single out-of-contract value could throw inside
   // buildStructuredTaskResult and lose the result of a paid run.
   it("captures the gateway's route-policy and price-catalog provenance (#163)", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "qa-factual" }),
+      "delegate-prov",
+    );
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      jsonResponse({
+      jsonResponse(withLearningTaskGatewayEcho(task, "delegate-prov", {
         delegated: true, escalate: false, outcome: "unverified", output: "PROV_OK",
         nodeId: "m5", modelId: "mellum", taskType: "qa-factual",
         ledgerId: "487bae49-e751-4fc8-a10c-8f12f6aa59a4",
@@ -270,11 +298,11 @@ describe("executeHomeserverTask — delegate path", () => {
           id: "fc5e98f9-2d7c-4792-b2c3-c936d29d44fb",
           priceCatalogVersion: "2026-07-08",
         },
-      }),
+      })),
     );
 
     const result = await executeHomeserverTask(
-      makeTaskConfig({ path: "delegate", taskType: "qa-factual" }), "delegate-prov", tmpLogDir,
+      task, "delegate-prov", tmpLogDir,
     );
 
     const p = result.provenance!;
@@ -293,15 +321,21 @@ describe("executeHomeserverTask — delegate path", () => {
   });
 
   it("drops an out-of-contract gateway score instead of poisoning the result (#163)", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-badscore",
+    );
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       // A non-numeric score would previously flow straight into
       // runtimeMetadata.delegation.score (z.number()) and throw inside
       // buildStructuredTaskResult — losing the whole result of a paid run.
-      jsonResponse({ delegated: true, outcome: "pass", score: "high", output: "ok", ledgerId: "l-1" }),
+      jsonResponse(withLearningTaskGatewayEcho(task, "delegate-badscore", {
+        delegated: true, outcome: "pass", score: "high", output: "ok", ledgerId: "l-1",
+      })),
     );
 
     const result = await executeHomeserverTask(
-      makeTaskConfig({ path: "delegate" }), "delegate-badscore", tmpLogDir,
+      task, "delegate-badscore", tmpLogDir,
     );
 
     expect(result.exitCode).toBe(0);
@@ -312,39 +346,167 @@ describe("executeHomeserverTask — delegate path", () => {
   });
 
   it("omits optional /delegate fields that are not present", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-min",
+    );
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      jsonResponse({ delegated: true, outcome: "unverified", output: "1998" }),
+      jsonResponse(withLearningTaskGatewayEcho(task, "delegate-min", {
+        delegated: true, outcome: "unverified", output: "1998",
+      })),
     );
 
-    await executeHomeserverTask(makeTaskConfig({ path: "delegate", taskType: "extract" }), "delegate-min", tmpLogDir);
+    await executeHomeserverTask(task, "delegate-min", tmpLogDir);
 
     const [, init] = fetchMock.mock.calls[0]!;
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body).toEqual({
       prompt: expect.any(String),
       taskType: "extract",
+      huginTaskIdentity: expect.objectContaining({
+        schemaVersion: 1,
+        producer: "hugin",
+        taskId: "delegate-min",
+        rawTaskFingerprint: expect.objectContaining({
+          version: "trim-utf8-sha256-v1",
+        }),
+        renderedPromptFingerprint: expect.objectContaining({
+          version: "hugin-delegate-prompt-utf8-sha256-v1",
+        }),
+      }),
+      learningTaskStamp: expect.objectContaining({
+        task_instance_id: "delegate-min",
+        task_type: expect.objectContaining({ id: "extract" }),
+      }),
     });
   });
 
-  it("maps outcome 'fail'/'error' to a non-zero exit code, but 'unverified' to 0", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      jsonResponse({ delegated: true, outcome: "fail", score: 0, output: "nope" }),
+  it("fails closed before fetch when durable LearningTaskContract context is missing", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const result = await executeHomeserverTask(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-invalid-identity",
+      tmpLogDir,
     );
-    const failR = await executeHomeserverTask(makeTaskConfig({ path: "delegate" }), "delegate-fail", tmpLogDir);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.exitCode).toBe(1);
+    expect(result.huginTaskIdentity).toBeNull();
+    expect(result.output).toContain(
+      "[Gateway error: Direct homeserver delegation requires a durable LearningTaskContract attempt",
+    );
+    expect(fs.readFileSync(result.logFile, "utf8")).toContain(
+      "Direct homeserver delegation requires a durable LearningTaskContract attempt",
+    );
+  });
+
+  it("preserves explicit legacy/ineligible delegate traffic without claiming learning evidence", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse({
+      output: "1998",
+      outcome: "pass",
+    }));
+    const result = await executeHomeserverTask(makeTaskConfig({
+      path: "delegate",
+      taskType: "extract",
+      learningTask: { kind: "ineligible" },
+    }), "delegate-legacy", tmpLogDir);
+    expect(result.exitCode).toBe(0);
+    expect(result.learningTask).toBeNull();
+    const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(body.learningTaskStamp).toBeUndefined();
+    expect(body.huginTaskIdentity.taskId).toBe("delegate-legacy");
+  });
+
+  it("keeps a durable preflight failure model-free and content-blind", async () => {
+    const ready = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-preflight-failed",
+    );
+    const context = ready.learningTask!.kind === "ready" ? ready.learningTask.context : null;
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const result = await executeHomeserverTask({
+      ...ready,
+      learningTask: {
+        kind: "preflight-failed",
+        attempt: context!.attempt,
+        attemptStartRef: context!.attemptStartRef,
+        failureReason: "preflight capability downgrade",
+      },
+    }, "delegate-preflight-failed", tmpLogDir);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.exitCode).toBe(1);
+    expect(result.learningTask).toMatchObject({
+      state: "preflight-failed",
+      evidenceAccepted: false,
+      failureCode: "preflight-failed",
+    });
+    expect(result.output).not.toContain("Extract the year");
+  });
+
+  it("rejects a paid-looking response when the exact gateway echo is absent", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-no-echo",
+    );
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(jsonResponse({
+      delegated: true,
+      outcome: "pass",
+      score: 1,
+      output: "must not be accepted",
+      ledgerId: "untrusted-without-echo",
+    }));
+
+    const result = await executeHomeserverTask(task, "delegate-no-echo", tmpLogDir);
+    expect(result.exitCode).toBe(1);
+    expect(result.resultText).toBeNull();
+    expect(result.provenance).toBeNull();
+    expect(result.learningTask).toMatchObject({
+      state: "join-failed",
+      evidenceAccepted: false,
+      failureCode: "gateway-echo-invalid",
+    });
+    expect(result.output).not.toContain("must not be accepted");
+  });
+
+  it("maps outcome 'fail'/'error' to a non-zero exit code, but 'unverified' to 0", async () => {
+    const failTask = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-fail",
+    );
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse(withLearningTaskGatewayEcho(failTask, "delegate-fail", {
+        delegated: true, outcome: "fail", score: 0, output: "nope",
+      })),
+    );
+    const failR = await executeHomeserverTask(failTask, "delegate-fail", tmpLogDir);
     expect(failR.exitCode).toBe(1);
     expect(failR.outcome).toBe("fail");
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      jsonResponse({ delegated: true, outcome: "error", output: "" }),
+    const errorTask = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-error",
     );
-    const errR = await executeHomeserverTask(makeTaskConfig({ path: "delegate" }), "delegate-error", tmpLogDir);
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse(withLearningTaskGatewayEcho(errorTask, "delegate-error", {
+        delegated: true, outcome: "error", output: "",
+      })),
+    );
+    const errR = await executeHomeserverTask(errorTask, "delegate-error", tmpLogDir);
     expect(errR.exitCode).toBe(1);
 
     // 'unverified' is the gateway's normal success-without-grading case — must stay exit 0.
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      jsonResponse({ delegated: true, outcome: "unverified", output: "ran ok" }),
+    const unverifiedTask = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-unverified",
     );
-    const unvR = await executeHomeserverTask(makeTaskConfig({ path: "delegate" }), "delegate-unverified", tmpLogDir);
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse(withLearningTaskGatewayEcho(unverifiedTask, "delegate-unverified", {
+        delegated: true, outcome: "unverified", output: "ran ok",
+      })),
+    );
+    const unvR = await executeHomeserverTask(unverifiedTask, "delegate-unverified", tmpLogDir);
     expect(unvR.exitCode).toBe(0);
     expect(unvR.resultText).toBe("ran ok");
   });
@@ -356,12 +518,29 @@ describe("executeHomeserverTask — backpressure & errors", () => {
       new Response("owner preempted the GPU", { status: 503, headers: { "Retry-After": "5" } }),
     );
 
-    const result = await executeHomeserverTask(makeTaskConfig(), "bp-503", tmpLogDir);
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "bp-503",
+    );
+    const result = await executeHomeserverTask(
+      task,
+      "bp-503",
+      tmpLogDir,
+    );
 
     expect(result.exitCode).toBe(1);
     expect(result.backpressure).toBe("admission");
     expect(result.retryAfterS).toBe(5);
     expect(result.resultText).toBeNull();
+    expect(result.huginTaskIdentity).toEqual(expect.objectContaining({
+      taskId: "bp-503",
+      rawTaskFingerprint: expect.objectContaining({
+        version: "trim-utf8-sha256-v1",
+      }),
+      renderedPromptFingerprint: expect.objectContaining({
+        version: "hugin-delegate-prompt-utf8-sha256-v1",
+      }),
+    }));
   });
 
   it("flags 429 as quota backpressure", async () => {

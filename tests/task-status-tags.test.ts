@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { BROKER_TASK_TYPE_TAXONOMY_VERSION } from "../src/broker/task-type-metadata.js";
 import {
   buildAwaitingApprovalTags,
   buildPipelineParentCancelledTags,
@@ -15,6 +16,7 @@ describe("task status tag helpers", () => {
       "broker:mcp-v2",
       "alias:m5",
       "task-type:extract",
+      `task-taxonomy:${BROKER_TASK_TYPE_TAXONOMY_VERSION}`,
       "runtime-row:homeserver-m5",
       "idempotency:abc123",
       "claimed_by:hugin-pi",
@@ -25,12 +27,28 @@ describe("task status tag helpers", () => {
       "broker:mcp-v2",
       "alias:m5",
       "task-type:extract",
+      `task-taxonomy:${BROKER_TASK_TYPE_TAXONOMY_VERSION}`,
       "runtime-row:homeserver-m5",
       "idempotency:abc123",
     ];
     expect(getPersistentStatusTags(input)).toEqual(persistent.slice(1));
     expect(buildTerminalStatusTags("completed", input)).toEqual(persistent);
   });
+
+  it.each(["draft", "conversation"])(
+    "preserves the additive M5 task type %s through terminalization",
+    (taskType) => {
+      expect(
+        buildTerminalStatusTags("completed", [
+          "running",
+          "runtime:homeserver",
+          "broker:mcp-v2",
+          `task-type:${taskType}`,
+          "claimed_by:hugin-pi",
+        ]),
+      ).toContain(`task-type:${taskType}`);
+    },
+  );
 
   it("preserves policy tags on terminal child tasks", () => {
     expect(

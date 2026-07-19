@@ -1,8 +1,11 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import { resolveGatewayRootUrl } from "../orchestrator/provider-config.js";
+import {
+  fingerprintRawTask,
+  TASK_EXPOSURE_FINGERPRINT_VERSION,
+} from "../task-identity.js";
 
-export const TASK_EXPOSURE_FINGERPRINT_VERSION = "trim-utf8-sha256-v1" as const;
+export { TASK_EXPOSURE_FINGERPRINT_VERSION } from "../task-identity.js";
 export const TASK_EXPOSURE_LOOKUP_MAX = 100;
 // SHA-256("hugin-task-exposure-lookup-healthcheck-v1"). This is never derived
 // from a task and exists only to prove endpoint/auth/schema health on an empty
@@ -71,7 +74,7 @@ export class TaskExposureLookupError extends Error {
 
 /** Exact shared v1 contract: String.trim(), raw UTF-8, lowercase SHA-256. */
 export function taskTextFingerprint(taskText: string): string {
-  return createHash("sha256").update(taskText.trim(), "utf8").digest("hex");
+  return fingerprintRawTask(taskText).digest;
 }
 
 /**

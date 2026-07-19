@@ -34,6 +34,27 @@ terminal update or result completion time. That distinction is load-bearing: a
 task created before M5's complete capture window cannot become fresh merely
 because it completed after the window opened.
 
+Broker task type has one canonical persisted representation: the pair
+`task-type:<value>` and
+`task-taxonomy:gille-inference-task-types-2026-07-19-v1`. The version is pinned
+to the accepted Grimnir LearningTaskContract v1 taxonomy fixture. The factory
+validates the value against Hugin's mirrored M5 taxonomy and carries it as
+`source.taskType`, `source.taskTypeTaxonomyVersion`, and `source.taskTypeSource`.
+Existing Broker rows with an unversioned `task-type:*` tag and older Hugin rows
+with a single `type:*` tag remain readable as `legacy-unversioned`; they are
+never rewritten in place. Conflicting tags, unknown values, and unsupported
+taxonomy versions quarantine the candidate with a specific reason instead of
+collapsing it into `other`. Hugin #191 separately owns the additive `draft` and
+`conversation` enum mirror; once that schema lands, both values use this same
+v1 persistence path without another format change.
+
+Legacy `type:*` compatibility ignores Hugin's structural marker tags:
+`pipeline`, `pipeline-phase`, `pipeline-spec`, `pipeline-summary`,
+`approval-request`, `pipeline-approval-request`, and the `task-result` family.
+A phase or approval row carrying only those markers has missing task-type
+metadata; it is not misreported as an unknown taxonomy value. A separate valid
+legacy task type may coexist with those markers and is still harvested.
+
 ## Candidate lanes
 
 `npm run harvest:daily-exams` reads completed `tasks/` entries from Munin and
@@ -47,11 +68,16 @@ classifies them without running a model or writing any learning state:
 
 `completed` means that the executor lifecycle finished successfully; it is not
 proof that the solution was accepted. The factory reads each task's optional
-`feedback` document and joins only schema-v1 quality receipts whose hashes bind
-the exact task document, structured result, and repository state/diff. It
-preserves the receipt IDs, authenticated reviewer principals, and whether an
-independent reviewer explicitly accepted the unchanged result. Legacy flat
-feedback is labeled `legacy-unbound` and never upgraded into acceptance.
+`feedback` document and joins only valid native-v1/v2 quality receipts whose
+hashes bind the exact task document, structured result, and repository
+state/diff. It collapses a valid correction chain to its unique unsuperseded
+leaf. The content-blind quality view preserves receipt IDs, authenticated
+reviewer principals, reason digests, and—on native v2—attempt, predecessor,
+stable correction group, rubric/verifier, structured failure, available
+producing-configuration identities, and successor references. It never copies
+the text rating reason. Native v1 remains exact and does not acquire fabricated
+attempt or rubric fields. Legacy flat feedback is labeled `legacy-unbound` and
+never upgraded into acceptance. See `docs/quality-receipts.md`.
 
 Every non-quarantined candidate remains `needs-independent-verifier`, including
 one whose product output has an exact independent acceptance: accepting the
@@ -69,6 +95,12 @@ Hugin computes the exact M5 fingerprint contract:
 2. no Unicode or internal-whitespace normalization;
 3. UTF-8 bytes; then
 4. lowercase SHA-256, version `trim-utf8-sha256-v1`.
+
+The same calculation now lives in Hugin's real homeserver serializer as
+`huginTaskIdentity.rawTaskFingerprint`; see
+[`canonical-task-identity.md`](canonical-task-identity.md). That producer
+projection is deliberately separate from the exact rendered `/delegate.prompt`
+identity, which changes when context is injected.
 
 The CLI deduplicates fingerprints and sends batches of at most 100 to
 `POST /admin/task-exposures/lookup`, using the existing
@@ -109,6 +141,18 @@ and the content-blind match metadata. It is not durable freshness. A task may be
 shown to M5 after the daily sweep. Any future packager or runner **must repeat
 the same owner-only lookup immediately before freezing and again immediately
 before running a holdout**. Nothing in schema v2 is named or treated as sealed.
+
+There is an additional migration boundary for Hugin-delegated traffic. The
+current public Gille capture hashes the rendered `/delegate.prompt`, while the
+factory queries the logical raw-task hash. Hugin's direct homeserver executor
+now emits both identities, but its orchestrator homeserver worker remains
+legacy until #240, and Gille does not yet authenticate or capture the raw
+projection. Therefore an `unseen-covered` snapshot from the legacy lookup is
+not, by itself, canonical
+negative evidence across Hugin delegation history. No packager may admit it as
+a holdout until Gille #2/#4 and Hugin #240 establish authenticated stamp/echo,
+canonical raw capture, and a new post-cutover coverage epoch. Legacy rows stay
+rendered/inexact; they are never silently upgraded.
 
 ## Run it
 
@@ -156,5 +200,8 @@ ledger remain owned by `gille-inference`; this Hugin-side factory owns daily
 task discovery and reproducibility evidence.
 
 The owner-side registry and lookup contract shipped before the component's
-clean-history publication. `gille-inference` remains the owning repository for
-that contract and its public capability-evidence backlog.
+clean-history publication. Public follow-up
+[`gille-inference#4`](https://github.com/Magnus-Gille/gille-inference/issues/4)
+owns canonical capture and holdout coverage; authenticated stamp admission is
+owned by [`gille-inference#2`](https://github.com/Magnus-Gille/gille-inference/issues/2)
+and Hugin [#240](https://github.com/Magnus-Gille/hugin/issues/240).

@@ -10,8 +10,13 @@ import {
   parseCanonicalEnvelope,
   serializeEnvelope,
 } from "../../src/broker/task-store.js";
-import type { MuninClient } from "../../src/munin-client.js";
+import { BROKER_TASK_TYPE_TAXONOMY_VERSION } from "../../src/broker/task-type-metadata.js";
+import { MuninWriteRejectedError, type MuninClient } from "../../src/munin-client.js";
 import type { DelegationEnvelope } from "../../src/broker/types.js";
+import {
+  buildQualityBinding,
+  buildQualityReceipt,
+} from "../../src/quality-receipt.js";
 
 interface WriteCall {
   namespace: string;
@@ -20,6 +25,7 @@ interface WriteCall {
   tags?: string[];
   expectedUpdatedAt?: string;
   classification?: string;
+  createIfAbsent?: boolean;
 }
 
 class FakeMunin {
@@ -43,9 +49,18 @@ class FakeMunin {
     tags?: string[],
     expectedUpdatedAt?: string,
     classification?: string,
+    createIfAbsent?: boolean,
   ): Promise<Record<string, unknown>> {
-    this.writes.push({ namespace, key, content, tags, expectedUpdatedAt, classification });
-    return { ok: true };
+    this.writes.push({
+      namespace,
+      key,
+      content,
+      tags,
+      expectedUpdatedAt,
+      classification,
+      createIfAbsent,
+    });
+    return { ok: true, status: createIfAbsent ? "created" : "updated" };
   }
   async read(namespace: string, key: string): Promise<unknown> {
     this.reads.push({ namespace, key });
@@ -117,6 +132,7 @@ describe("buildSubmitTags", () => {
     expect(tags).toContain("runtime-row:homeserver-m5");
     expect(tags).toContain("alias:m5");
     expect(tags).toContain("task-type:summarize");
+    expect(tags).toContain(`task-taxonomy:${BROKER_TASK_TYPE_TAXONOMY_VERSION}`);
     expect(tags).toContain("broker:mcp-v2");
     expect(tags).not.toContain(ORCH_V1_TAG);
   });
@@ -596,5 +612,183 @@ describe("BrokerTaskStore.recordAwait — durable-handoff evidence (#164)", () =
 
     // Five polls, ONE write: only the first carried new evidence.
     expect(munin.writes.filter((w) => w.key === "await-observation")).toHaveLength(1);
+  });
+});
+
+describe("BrokerTaskStore.writeQualityReceipt — concurrent append safety (#231)", () => {
+  function qualityReceipt(reviewerPrincipal: string) {
+    return buildQualityReceipt({
+      taskId: "t1",
+      reviewerPrincipal,
+      reviewerIndependence: "independent",
+      rating: "pass",
+      ratingReason: `Reviewed by ${reviewerPrincipal}`,
+      verificationOutcome: "accepted_unchanged",
+      ratedAt: "2026-07-19T10:00:00.000Z",
+      bindingAttestation: "server-bound",
+      binding: buildQualityBinding({
+        statusContent: ENVELOPE_CONTENT,
+        structuredResultContent: JSON.stringify({ task_id: "t1", result_schema_version: 1 }),
+      }),
+    });
+  }
+
+  const ENVELOPE_CONTENT = `## Task\n\n### Broker envelope\n\`\`\`json\n${JSON.stringify({
+    envelope_version: 2,
+    orchestrator_submitter: "claude-code",
+    orchestrator_session_id: "session-A",
+    sensitivity: "internal",
+  })}\n\`\`\`\n`;
+
+  function concurrentMunin() {
+    const entries: Record<string, { content: string; updated_at: string }> = {
+      "tasks/t1/status": { content: ENVELOPE_CONTENT, updated_at: "s1" },
+    };
+    let feedbackReads = 0;
+    let releaseFirstReads!: () => void;
+    const firstReadsReady = new Promise<void>((resolve) => { releaseFirstReads = resolve; });
+    let version = 0;
+    const writes: WriteCall[] = [];
+    return {
+      entries,
+      writes,
+      read: async (namespace: string, key: string) => {
+        if (key === "feedback" && feedbackReads < 2) {
+          feedbackReads += 1;
+          if (feedbackReads === 2) releaseFirstReads();
+          await firstReadsReady;
+          return null;
+        }
+        return entries[`${namespace}/${key}`] ?? null;
+      },
+      write: async (
+        namespace: string,
+        key: string,
+        content: string,
+        tags?: string[],
+        expectedUpdatedAt?: string,
+        classification?: string,
+        createIfAbsent?: boolean,
+      ) => {
+        const storageKey = `${namespace}/${key}`;
+        const existing = entries[storageKey];
+        if (createIfAbsent && existing) {
+          throw new MuninWriteRejectedError(namespace, key, {
+            error: "conflict",
+            message: "Entry already exists.",
+            conflict_reason: "already_exists",
+            current_updated_at: existing.updated_at,
+          });
+        }
+        if (expectedUpdatedAt && existing && existing.updated_at !== expectedUpdatedAt) {
+          throw new MuninWriteRejectedError(namespace, key, {
+            error: "conflict",
+            message: "Entry version changed.",
+            conflict_reason: "version_mismatch",
+            current_updated_at: existing.updated_at,
+          });
+        }
+        version += 1;
+        writes.push({
+          namespace,
+          key,
+          content,
+          tags,
+          expectedUpdatedAt,
+          classification,
+          createIfAbsent,
+        });
+        entries[storageKey] = { content, updated_at: `v${version}` };
+        return {
+          ok: true,
+          status: createIfAbsent ? "created" : "updated",
+          updated_at: `v${version}`,
+        };
+      },
+    };
+  }
+
+  it("cannot lose either of two simultaneous first reviewers", async () => {
+    const munin = concurrentMunin();
+    const store = new BrokerTaskStore(munin as unknown as MuninClient);
+
+    await Promise.all([
+      store.writeQualityReceipt("t1", qualityReceipt("reviewer-a")),
+      store.writeQualityReceipt("t1", qualityReceipt("reviewer-b")),
+    ]);
+
+    const ledger = JSON.parse(munin.entries["tasks/t1/feedback"]!.content) as {
+      receipts: Array<{ reviewer: { principal: string } }>;
+    };
+    expect(ledger.receipts.map((item) => item.reviewer.principal).sort()).toEqual([
+      "reviewer-a",
+      "reviewer-b",
+    ]);
+    expect(munin.writes[0]!.createIfAbsent).toBe(true);
+    expect(munin.writes[0]!.expectedUpdatedAt).toBeUndefined();
+    const reconciliation = munin.writes.find((write) => write.expectedUpdatedAt === "v1");
+    expect(reconciliation).toBeDefined();
+    expect(reconciliation!.createIfAbsent).toBeUndefined();
+  });
+
+  it("makes an identical retry idempotent after the create CAS loses", async () => {
+    const munin = concurrentMunin();
+    const store = new BrokerTaskStore(munin as unknown as MuninClient);
+    const next = qualityReceipt("reviewer-a");
+
+    const results = await Promise.all([
+      store.writeQualityReceipt("t1", next),
+      store.writeQualityReceipt("t1", next),
+    ]);
+
+    expect(results.map((result) => result.changed).sort()).toEqual([false, true]);
+    const ledger = JSON.parse(munin.entries["tasks/t1/feedback"]!.content) as { receipts: unknown[] };
+    expect(ledger.receipts).toHaveLength(1);
+  });
+
+  it("fails closed on a typed conflict that does not match the attempted write mode", async () => {
+    let feedbackReads = 0;
+    const munin = {
+      read: async (namespace: string, key: string) => {
+        if (key === "status") {
+          return { content: ENVELOPE_CONTENT, updated_at: "s1", classification: "internal" };
+        }
+        feedbackReads += 1;
+        return null;
+      },
+      write: async (namespace: string, key: string) => {
+        throw new MuninWriteRejectedError(namespace, key, {
+          error: "conflict",
+          message: "Unexpected version conflict for an absent-key create.",
+          conflict_reason: "version_mismatch",
+          current_updated_at: "v1",
+        });
+      },
+    };
+    const store = new BrokerTaskStore(munin as unknown as MuninClient);
+
+    await expect(
+      store.writeQualityReceipt("t1", qualityReceipt("reviewer-a")),
+    ).rejects.toMatchObject({
+      errorCode: "conflict",
+      conflictReason: "version_mismatch",
+    });
+    expect(feedbackReads).toBe(1);
+  });
+
+  it("fails closed when Munin does not confirm an atomic first create", async () => {
+    const munin = {
+      read: async (_namespace: string, key: string) => key === "status"
+        ? { content: ENVELOPE_CONTENT, updated_at: "s1", classification: "internal" }
+        : null,
+      write: async () => ({ ok: true, status: "updated" }),
+    };
+    const store = new BrokerTaskStore(munin as unknown as MuninClient);
+
+    await expect(
+      store.writeQualityReceipt("t1", qualityReceipt("reviewer-a")),
+    ).rejects.toThrow(
+      "Munin create_if_absent did not return status created; refusing to trust first-write atomicity",
+    );
   });
 });

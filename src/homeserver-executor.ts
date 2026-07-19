@@ -24,6 +24,21 @@ import * as path from "node:path";
 import { extractM5Provenance, sanitizeProviderTokenCount } from "./m5-provenance.js";
 import type { M5DelegationProvenance } from "./m5-provenance.js";
 import { resolveGatewayRootUrl } from "./orchestrator/provider-config.js";
+import {
+  buildHuginTaskIdentity,
+  type HuginTaskIdentity,
+} from "./task-identity.js";
+import {
+  buildLearningTaskRequestStamp,
+  gatewayEchoDigest,
+  learningTaskExecutionEvidenceSchema,
+  requestStampDigest,
+  validateLearningTaskGatewayEcho,
+  validateLearningTaskReplayPayload,
+  type LearningTaskExecutionEvidence,
+  type LearningTaskPreparation,
+  type LearningTaskRequestContext,
+} from "./learning-task-handshake.js";
 
 // --- Types ---
 
@@ -71,6 +86,12 @@ export interface HomeserverTaskConfig {
   timeoutMs: number;
   maxOutputChars: number;
   injectedContext?: string;
+  /**
+   * Internal producer context. It is created only after Hugin durably starts
+   * the attempt and accepts an authenticated preflight. Task documents cannot
+   * supply this object. Direct `/delegate` refuses to run without it.
+   */
+  learningTask?: LearningTaskPreparation | { kind: "ineligible" };
 }
 
 export type Backpressure = "none" | "quota" | "admission";
@@ -108,6 +129,10 @@ export interface HomeserverExecutorResult {
    * carried.
    */
   provenance: M5DelegationProvenance | null;
+  /** Hugin-produced raw-task/rendered-prompt identity; not a gateway admission echo. */
+  huginTaskIdentity: HuginTaskIdentity | null;
+  /** Exact producer stamp/join evidence for this authoritative Hugin attempt. */
+  learningTask: LearningTaskExecutionEvidence | null;
 }
 
 export interface HomeserverExecutorOptions {
@@ -175,11 +200,115 @@ function parseRetryAfter(res: Response): number | null {
   return null;
 }
 
-function buildUserMessage(task: HomeserverTaskConfig): string {
+export function renderHomeserverUserMessage(task: HomeserverTaskConfig): string {
   const parts: string[] = [];
   if (task.injectedContext) parts.push("## Context\n" + task.injectedContext);
   parts.push("## Task\n" + task.prompt);
   return parts.join("\n\n---\n\n");
+}
+
+export interface HomeserverRequestBody extends Record<string, unknown> {
+  prompt?: string;
+  huginTaskIdentity?: HuginTaskIdentity;
+  learningTaskStamp?: ReturnType<typeof buildLearningTaskRequestStamp>;
+}
+
+/** Build the exact candidate body before its classified replay copy is persisted. */
+export function buildFreshHomeserverDelegateRequestBody(
+  task: HomeserverTaskConfig,
+  taskId: string,
+  context: LearningTaskRequestContext,
+): HomeserverRequestBody {
+  if (!task.taskType) {
+    throw new Error("LearningTaskContract delegation requires a canonical task type");
+  }
+  const userMessage = renderHomeserverUserMessage(task);
+  const huginTaskIdentity = buildHuginTaskIdentity({
+    taskId,
+    rawTaskText: task.prompt,
+    renderedPrompt: userMessage,
+  });
+  return {
+    prompt: userMessage,
+    taskType: task.taskType,
+    ...(task.systemPrompt !== undefined ? { systemPrompt: task.systemPrompt } : {}),
+    ...(task.maxTokens !== undefined ? { maxTokens: task.maxTokens } : {}),
+    ...(task.modelId !== undefined ? { modelId: task.modelId } : {}),
+    ...(task.frontierModelId !== undefined ? { frontierModelId: task.frontierModelId } : {}),
+    ...(task.verifier !== undefined ? { verifier: task.verifier } : {}),
+    ...(task.responseFormat !== undefined ? { responseFormat: task.responseFormat } : {}),
+    ...(task.delegatorModelId !== undefined ? { delegatorModelId: task.delegatorModelId } : {}),
+    ...(task.premiumBaselineModelId !== undefined
+      ? { premiumBaselineModelId: task.premiumBaselineModelId }
+      : {}),
+    huginTaskIdentity,
+    learningTaskStamp: buildLearningTaskRequestStamp({
+      context,
+      taskType: task.taskType,
+      rawTaskText: task.prompt,
+      renderedPrompt: userMessage,
+    }),
+  };
+}
+
+/**
+ * The one real serializer used by the executor and cross-repository fixtures.
+ * The canonical identity is always recomputed here; no config/body override is
+ * accepted from the task document.
+ */
+export function buildHomeserverRequestBody(
+  task: HomeserverTaskConfig,
+  taskId: string,
+): HomeserverRequestBody {
+  const userMessage = renderHomeserverUserMessage(task);
+  if (task.path === "delegate") {
+    if (task.learningTask?.kind === "ineligible") {
+      if (!task.taskType) throw new Error("Legacy homeserver delegation requires a task type");
+      return {
+        prompt: userMessage,
+        taskType: task.taskType,
+        ...(task.systemPrompt !== undefined ? { systemPrompt: task.systemPrompt } : {}),
+        ...(task.maxTokens !== undefined ? { maxTokens: task.maxTokens } : {}),
+        ...(task.modelId !== undefined ? { modelId: task.modelId } : {}),
+        ...(task.frontierModelId !== undefined ? { frontierModelId: task.frontierModelId } : {}),
+        ...(task.verifier !== undefined ? { verifier: task.verifier } : {}),
+        ...(task.responseFormat !== undefined ? { responseFormat: task.responseFormat } : {}),
+        ...(task.delegatorModelId !== undefined ? { delegatorModelId: task.delegatorModelId } : {}),
+        ...(task.premiumBaselineModelId !== undefined
+          ? { premiumBaselineModelId: task.premiumBaselineModelId }
+          : {}),
+        huginTaskIdentity: buildHuginTaskIdentity({
+          taskId,
+          rawTaskText: task.prompt,
+          renderedPrompt: userMessage,
+        }),
+      };
+    }
+    if (task.learningTask?.kind !== "ready") {
+      throw new Error("Direct homeserver delegation requires a durable LearningTaskContract attempt and accepted preflight");
+    }
+    const fresh = buildFreshHomeserverDelegateRequestBody(
+      task,
+      taskId,
+      task.learningTask.context,
+    );
+    const replay = validateLearningTaskReplayPayload(
+      task.learningTask.preparedDispatch,
+      task.learningTask.replayPayload,
+    );
+    if (JSON.stringify(fresh) !== JSON.stringify(replay.requestBody)) {
+      throw new Error("task request bytes changed after immutable dispatch preparation");
+    }
+    return structuredClone(replay.requestBody) as HomeserverRequestBody;
+  }
+  return {
+    model: task.model,
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: userMessage },
+    ],
+    stream: true,
+  };
 }
 
 // --- Executor ---
@@ -192,7 +321,7 @@ export async function executeHomeserverTask(
 ): Promise<HomeserverExecutorResult> {
   const logFile = path.join(logDir, `${taskId}.log`);
   const startedAt = new Date().toISOString();
-  const userMessage = buildUserMessage(task);
+  const userMessage = renderHomeserverUserMessage(task);
   const promptChars = SYSTEM_PROMPT.length + userMessage.length;
 
   fs.mkdirSync(logDir, { recursive: true });
@@ -249,6 +378,8 @@ export async function executeHomeserverTask(
     verifierNotes: null,
     nodeId: null,
     provenance: null,
+    huginTaskIdentity: null,
+    learningTask: null,
   };
 
   const finish = async (): Promise<HomeserverExecutorResult> => {
@@ -283,35 +414,80 @@ export async function executeHomeserverTask(
   if (task.apiKey) headers.Authorization = `Bearer ${task.apiKey}`;
 
   try {
+    if (task.path === "delegate" && task.learningTask?.kind === "preflight-failed") {
+      const { attempt, attemptStartRef, failureReason } = task.learningTask;
+      result.huginTaskIdentity = attempt.huginTaskIdentity;
+      result.learningTask = learningTaskExecutionEvidenceSchema.parse({
+        schemaVersion: 1,
+        contractVersion: "grimnir.learning-task/v1",
+        state: "preflight-failed",
+        evidenceAccepted: false,
+        taskId: attempt.taskId,
+        attemptId: attempt.attemptId,
+        attemptStartedAt: attempt.startedAt,
+        attemptStartRef,
+        taskOutcomeRef: { namespace: `tasks/${attempt.taskId}`, key: "result-structured" },
+        rawFingerprint: attempt.huginTaskIdentity.rawTaskFingerprint,
+        failureCode: "preflight-failed",
+        failureReason,
+      });
+      appendOutput(`[LearningTaskContract preflight failed: ${failureReason}]\n`);
+      return finish();
+    }
+    if (task.path === "delegate" && task.learningTask?.kind === "dispatch-failed") {
+      const { attempt, attemptStartRef, requestStamp, requestStampDigest: digest, failureReason } = task.learningTask;
+      result.huginTaskIdentity = attempt.huginTaskIdentity;
+      result.learningTask = learningTaskExecutionEvidenceSchema.parse({
+        schemaVersion: 1,
+        contractVersion: "grimnir.learning-task/v1",
+        state: "m5-not-admitted",
+        evidenceAccepted: false,
+        taskId: attempt.taskId,
+        attemptId: attempt.attemptId,
+        attemptStartedAt: attempt.startedAt,
+        attemptStartRef,
+        taskOutcomeRef: { namespace: `tasks/${attempt.taskId}`, key: "result-structured" },
+        rawFingerprint: attempt.huginTaskIdentity.rawTaskFingerprint,
+        requestStamp,
+        requestStampDigest: digest,
+        failureCode: "prepared-dispatch-persistence-failed",
+        failureReason,
+      });
+      appendOutput(`[LearningTaskContract dispatch preparation failed: ${failureReason}]\n`);
+      return finish();
+    }
+    // Keep defensive identity/serialization validation inside the executor's
+    // normal failure boundary so malformed direct callers still receive a
+    // closed log and structured executor result rather than an escaped throw.
+    const body = buildHomeserverRequestBody(task, taskId);
+    result.huginTaskIdentity = body.huginTaskIdentity ?? null;
+    if (task.path === "delegate" && task.learningTask?.kind === "ready") {
+      const stamp = body.learningTaskStamp!;
+      const context = task.learningTask as Extract<LearningTaskPreparation, { kind: "ready" }>;
+      result.learningTask = learningTaskExecutionEvidenceSchema.parse({
+        schemaVersion: 1,
+        contractVersion: "grimnir.learning-task/v1",
+        state: "m5-not-admitted",
+        evidenceAccepted: false,
+        taskId: stamp.task_instance_id,
+        attemptId: stamp.attempt_id,
+        attemptStartedAt: context.context.attempt.startedAt,
+        attemptStartRef: context.context.attemptStartRef,
+        preparedDispatchRef: context.preparedDispatch.preparedDispatchRef,
+        replayPayloadRef: context.preparedDispatch.replayPayloadRef,
+        replayPayloadDigest: context.preparedDispatch.replayPayloadDigest,
+        taskOutcomeRef: { namespace: `tasks/${stamp.task_instance_id}`, key: "result-structured" },
+        rawFingerprint: stamp.raw_fingerprint,
+        requestStamp: stamp,
+        requestStampDigest: requestStampDigest(stamp),
+        failureCode: "transport-not-admitted",
+        failureReason: "gateway admission has not been proven by an exact echo",
+      });
+    }
     const url =
       task.path === "delegate"
         ? `${task.gatewayBaseUrl}/delegate`
         : `${task.gatewayBaseUrl}/v1/chat/completions`;
-
-    const body: Record<string, unknown> =
-      task.path === "delegate"
-        ? {
-            prompt: userMessage,
-            ...(task.taskType ? { taskType: task.taskType } : {}),
-            ...(task.systemPrompt !== undefined ? { systemPrompt: task.systemPrompt } : {}),
-            ...(task.maxTokens !== undefined ? { maxTokens: task.maxTokens } : {}),
-            ...(task.modelId !== undefined ? { modelId: task.modelId } : {}),
-            ...(task.frontierModelId !== undefined ? { frontierModelId: task.frontierModelId } : {}),
-            ...(task.verifier !== undefined ? { verifier: task.verifier } : {}),
-            ...(task.responseFormat !== undefined ? { responseFormat: task.responseFormat } : {}),
-            ...(task.delegatorModelId !== undefined ? { delegatorModelId: task.delegatorModelId } : {}),
-            ...(task.premiumBaselineModelId !== undefined
-              ? { premiumBaselineModelId: task.premiumBaselineModelId }
-              : {}),
-          }
-        : {
-            model: task.model,
-            messages: [
-              { role: "system", content: SYSTEM_PROMPT },
-              { role: "user", content: userMessage },
-            ],
-            stream: true,
-          };
 
     const res = await fetch(url, {
       method: "POST",
@@ -349,6 +525,37 @@ export async function executeHomeserverTask(
       // throw inside the downstream buildStructuredTaskResult .parse() and lose
       // the result of an already-paid run.
       const raw: unknown = await res.json();
+      if (task.learningTask?.kind === "ready") {
+        const stamp = body.learningTaskStamp!;
+        let gatewayEcho;
+        try {
+          gatewayEcho = validateLearningTaskGatewayEcho(
+            (raw as { learningTaskGatewayEcho?: unknown })?.learningTaskGatewayEcho,
+            stamp,
+          );
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : "invalid gateway echo";
+          result.learningTask = learningTaskExecutionEvidenceSchema.parse({
+            ...result.learningTask!,
+            state: "join-failed",
+            evidenceAccepted: false,
+            failureCode: "gateway-echo-invalid",
+            failureReason: reason,
+          });
+          appendOutput(`[LearningTaskContract join rejected: ${reason}]\n`);
+          result.exitCode = 1;
+          return finish();
+        }
+        result.learningTask = learningTaskExecutionEvidenceSchema.parse({
+          ...result.learningTask!,
+          state: "m5-admitted",
+          evidenceAccepted: true,
+          gatewayEcho,
+          gatewayEchoDigest: gatewayEchoDigest(gatewayEcho),
+          failureCode: undefined,
+          failureReason: undefined,
+        });
+      }
       const outcome = raw as {
         output?: unknown;
         frontierOutput?: unknown;
@@ -451,6 +658,15 @@ export async function executeHomeserverTask(
     }
     return finish();
   } catch (err) {
+    if (result.learningTask?.requestStamp !== undefined
+      && result.learningTask.state === "m5-not-admitted") {
+      result.learningTask = learningTaskExecutionEvidenceSchema.parse({
+        ...result.learningTask,
+        failureReason: err instanceof Error && err.name === "AbortError"
+          ? "gateway request timed out before an exact admission echo"
+          : "gateway request failed before an exact admission echo",
+      });
+    }
     if (err instanceof Error && err.name === "AbortError") {
       result.exitCode = "TIMEOUT";
       appendOutput(`\n[Gateway request aborted after ${Math.round((Date.now() - startMs) / 1000)}s]\n`);

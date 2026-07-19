@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parsePlan, TASK_TYPES } from "../../src/orchestrator/plan.js";
+import { taskTypeSchema } from "../../src/broker/types.js";
 
 const FALLBACK_PROMPT = "Do the whole task yourself.";
 
@@ -77,10 +78,12 @@ describe("parsePlan", () => {
 });
 
 describe("parsePlan — taskType taxonomy (V2)", () => {
-  it("TASK_TYPES is the 22-value taxonomy including 'other' and 'claim-verify' (Fix #6), with no duplicates", () => {
+  it("uses the shared Broker task-type schema without a second enum mirror", () => {
+    expect(TASK_TYPES).toEqual(taskTypeSchema.options);
     expect(TASK_TYPES).toContain("other");
     expect(TASK_TYPES).toContain("claim-verify");
-    expect(TASK_TYPES).toHaveLength(22);
+    expect(TASK_TYPES).toContain("memory-decision");
+    expect(TASK_TYPES).toContain("triage");
     const unique = new Set(TASK_TYPES);
     expect(unique.size).toBe(TASK_TYPES.length);
   });
