@@ -468,7 +468,13 @@ export interface RepositoryOutcomeEvidence {
     | "not-finalized"
     | "no-changes"
     | "changes-present"
-    | "publication-failed";
+    | "publication-failed"
+    // Issue #236: the pre-execution clean-verification gate refused to run a
+    // mutation-capable task against this checkout — either the managed
+    // checkout itself could not be prepared, or it was prepared but found
+    // dirty/unverified even after an explicit recovery attempt. Reached only
+    // via {@link prepareManagedCheckout}, never by a bare checkout-failed.
+    | "checkout-contaminated";
   baseBranch?: string;
   baseCommit?: string;
 }
@@ -477,13 +483,15 @@ export interface RepositoryOutcomeEvidence {
 export function deriveRepositoryOutcome(
   branch: TaskBranchResult,
   finalizeAction?: BranchFinalizeResult["action"],
+  gateRefused?: boolean,
 ): RepositoryOutcomeEvidence {
-  if (branch.action === "skipped") return { state: "not-managed" };
-  if (branch.action === "fetch-failed") return { state: "checkout-failed" };
   const base = {
     ...(branch.baseBranch ? { baseBranch: branch.baseBranch } : {}),
     ...(branch.baseCommit ? { baseCommit: branch.baseCommit } : {}),
   };
+  if (gateRefused) return { state: "checkout-contaminated", ...base };
+  if (branch.action === "skipped") return { state: "not-managed" };
+  if (branch.action === "fetch-failed") return { state: "checkout-failed" };
   if (!branch.baseBranch || !branch.baseCommit) {
     return { state: "not-finalized", ...base };
   }
@@ -1200,6 +1208,336 @@ async function createPullRequest(
     });
     child.on("error", () => resolve(null));
   });
+}
+
+// --- Checkout contamination detection + clean-verification gate (#236) ---
+//
+// `checkoutTaskBranch` above is non-fatal by design: a fetch/resolve/checkout
+// failure returns `fetch-failed` and the CALLER decides what to do. Historically
+// the caller just proceeded anyway (logged a warning, executed the agent
+// against whatever was already on disk). Because a managed working directory
+// is REUSED across tasks (one directory per repo, not per task), that leaves a
+// durable hole: a task whose checkout failed — or whose `checkout -b` silently
+// carried over an earlier task's uncommitted files instead of conflicting —
+// can execute against, and `finalizeTaskBranch` can auto-commit and publish,
+// state that has nothing to do with the current task. A later task then
+// inherits the same contaminated directory.
+//
+// The functions below give the pre-task seam in index.ts a durable
+// contamination marker plus a verification gate: a managed task's checkout is
+// only ever trusted once it is independently proven clean at the exact
+// resolved base commit, and a mutation-capable task whose checkout cannot be
+// proven clean — even after one explicit, verified recovery attempt — is
+// refused before any executor runs. A read-only task (one whose runtime
+// cannot itself write, per Hugin's own permission-profile/runtime gating) may
+// still proceed in an explicitly logged degraded mode, since it cannot
+// compound the contamination.
+
+/** Durable, git-native contamination marker for a reused managed working directory. */
+export interface CheckoutContaminationRecord {
+  contaminatedAt: string;
+  taskId: string;
+  reason: string;
+}
+
+// Stored in the repository's own `.git/config` (via `git config --local`):
+// scoped to exactly this reused working directory, invisible to `git add -A`
+// and `git diff` (git never treats its own metadata directory as trackable
+// content), and durable across dispatcher restarts. `--local` always resolves
+// relative to `cwd`, so this can never leak into a different checkout.
+const CONTAMINATION_CONFIG_KEY = "hugin.checkout-contaminated";
+
+function sanitizeContaminationField(value: string): string {
+  return value.replace(/[\r\n|]+/g, " ").trim();
+}
+
+function encodeContaminationRecord(record: CheckoutContaminationRecord): string {
+  return [
+    record.contaminatedAt,
+    sanitizeContaminationField(record.taskId),
+    sanitizeContaminationField(record.reason),
+  ].join("|");
+}
+
+function decodeContaminationRecord(raw: string): CheckoutContaminationRecord | null {
+  const parts = raw.split("|");
+  if (parts.length < 3) return null;
+  const [contaminatedAt, taskId, ...reasonParts] = parts;
+  return { contaminatedAt, taskId, reason: reasonParts.join("|") };
+}
+
+/** Durably mark a managed working directory CONTAMINATED. Best-effort return value only — callers must still fail closed on the caller-visible outcome, never on whether the marker write itself succeeded. */
+export async function markCheckoutContaminated(
+  workingDir: string,
+  taskId: string,
+  reason: string,
+): Promise<boolean> {
+  const record: CheckoutContaminationRecord = {
+    contaminatedAt: new Date().toISOString(),
+    taskId,
+    reason,
+  };
+  const result = await runGitCapture(workingDir, [
+    "config", "--local", CONTAMINATION_CONFIG_KEY, encodeContaminationRecord(record),
+  ]);
+  if (!result.ok) {
+    console.error(
+      `Failed to durably mark checkout contaminated in ${workingDir}: ${result.stderr || "unknown error"}`,
+    );
+  }
+  return result.ok;
+}
+
+/** Read the durable contamination marker, if any. Never throws. */
+export async function readCheckoutContamination(
+  workingDir: string,
+): Promise<CheckoutContaminationRecord | null> {
+  const result = await runGitCapture(workingDir, [
+    "config", "--local", "--get", CONTAMINATION_CONFIG_KEY,
+  ]);
+  if (!result.ok) return null;
+  const raw = result.stdout.toString("utf8").trim();
+  if (!raw) return null;
+  return decodeContaminationRecord(raw);
+}
+
+/**
+ * Explicitly clear the durable contamination marker. Callers must only call
+ * this AFTER independently verifying the checkout is clean — never merely
+ * because a recovery step reported success (see {@link prepareManagedCheckout}).
+ */
+export async function clearCheckoutContamination(workingDir: string): Promise<void> {
+  // --unset-all succeeds even when the key was never set — "no longer
+  // present" is the only postcondition this needs, not "was present before".
+  await runGitCapture(workingDir, ["config", "--local", "--unset-all", CONTAMINATION_CONFIG_KEY]);
+}
+
+export interface CleanCheckoutVerification {
+  clean: boolean;
+  reason?: string;
+  headCommit?: string;
+}
+
+/**
+ * Verify the working tree has no dirty/untracked state and HEAD matches the
+ * expected commit. Run immediately after `checkoutTaskBranch` succeeds and
+ * before any executor runs: `git checkout -b` does not require a clean tree
+ * to succeed, so a prior task's uncommitted leftovers can survive onto the
+ * new branch without the checkout step itself failing.
+ */
+export async function verifyCleanCheckout(
+  workingDir: string,
+  expectedCommit: string,
+): Promise<CleanCheckoutVerification> {
+  const normalizedExpected = expectedCommit.trim().toLowerCase();
+  if (!GIT_COMMIT_ID.test(normalizedExpected)) {
+    return {
+      clean: false,
+      reason: `expected commit ${JSON.stringify(expectedCommit)} is not a valid commit id`,
+    };
+  }
+  // `--ignored` is deliberate (M5 review, #236): plain `--porcelain` never
+  // reports gitignored paths, so a prior task's leftover ignored garbage
+  // (e.g. a stale `.env`, build cache, or partial `node_modules`) would
+  // otherwise verify as "clean" and never trigger `recoverCleanCheckout`
+  // (whose `git clean -fdx` DOES remove ignored files) — silently leaving
+  // untracked-but-invisible state for the next task to inherit.
+  const status = await runGitCapture(workingDir, ["status", "--porcelain", "--ignored"]);
+  if (!status.ok) {
+    return { clean: false, reason: `git status failed: ${status.stderr || "unknown error"}` };
+  }
+  if (status.stdout.toString("utf8").trim().length > 0) {
+    return { clean: false, reason: "working tree has uncommitted, untracked, or ignored leftover state" };
+  }
+  const head = await runGitCapture(workingDir, ["rev-parse", "HEAD"]);
+  if (!head.ok) {
+    return { clean: false, reason: `git rev-parse HEAD failed: ${head.stderr || "unknown error"}` };
+  }
+  const headCommit = head.stdout.toString("utf8").trim().toLowerCase();
+  if (!GIT_COMMIT_ID.test(headCommit) || headCommit !== normalizedExpected) {
+    return {
+      clean: false,
+      reason: `HEAD ${headCommit || "(empty)"} does not match resolved base commit ${normalizedExpected}`,
+      headCommit,
+    };
+  }
+  return { clean: true, headCommit };
+}
+
+async function runGitVoid(workingDir: string, args: string[]): Promise<{ ok: boolean; output: string }> {
+  return new Promise((resolve) => {
+    const child = spawn("git", args, {
+      cwd: workingDir,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, HOME: "/home/magnus" },
+    });
+    let output = "";
+    child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
+    child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
+    child.on("close", (code) => resolve({ ok: code === 0, output }));
+    child.on("error", (err) => resolve({ ok: false, output: err.message }));
+  });
+}
+
+/**
+ * Explicit, verified-by-the-caller recovery: hard-reset the working tree to
+ * `targetCommit` and remove untracked/ignored files. Only ever touches the
+ * LOCAL working directory (no push, no remote mutation) — the remote is the
+ * source of truth this recovers back to. Callers must re-run
+ * {@link verifyCleanCheckout} afterward; this function never asserts its own
+ * success is sufficient.
+ */
+export async function recoverCleanCheckout(
+  workingDir: string,
+  targetCommit: string,
+): Promise<{ ok: boolean; reason?: string }> {
+  const normalizedTarget = targetCommit.trim().toLowerCase();
+  if (!GIT_COMMIT_ID.test(normalizedTarget)) {
+    return { ok: false, reason: `recovery target ${JSON.stringify(targetCommit)} is not a valid commit id` };
+  }
+  const reset = await runGitVoid(workingDir, ["reset", "--hard", normalizedTarget]);
+  if (!reset.ok) {
+    return { ok: false, reason: `git reset --hard ${normalizedTarget} failed: ${reset.output.trim()}` };
+  }
+  const clean = await runGitVoid(workingDir, ["clean", "-fdx"]);
+  if (!clean.ok) {
+    return { ok: false, reason: `git clean -fdx failed: ${clean.output.trim()}` };
+  }
+  return { ok: true };
+}
+
+export interface ManagedCheckoutGateOptions extends TaskBranchOptions {
+  /**
+   * Whether THIS task's runtime/permission profile can itself write to the
+   * working directory. Read-only tasks may proceed in explicit degraded mode
+   * against an unverified checkout (AC: "distinguish read-only tasks where
+   * degraded execution is explicitly permitted"); mutation-capable tasks
+   * never may.
+   */
+  mutationCapable: boolean;
+}
+
+export interface ManagedCheckoutGateResult {
+  /** The underlying checkout attempt — unchanged semantics, still feeds `deriveRepositoryOutcome`. */
+  branch: TaskBranchResult;
+  /** Set only when a mutation-capable task must be refused before any executor runs. */
+  refusalReason?: string;
+  /** True when a contaminated/unverified checkout was explicitly cleaned and reverified before this task proceeded. */
+  recovered?: boolean;
+  /** True when execution proceeded in explicit degraded mode against an unverified/unresolved checkout because this task cannot mutate it. Callers must skip publication (finalizeTaskBranch) whenever this is true — a read-only task must never have a PRIOR task's leftover dirty state auto-committed and published in its name. */
+  degraded?: boolean;
+  degradedReason?: string;
+  /** The pre-existing durable marker, if the working directory was already contaminated when this task started (context for logging/results, not a gating input — the checkout is always independently reverified regardless). */
+  priorContamination?: CheckoutContaminationRecord | null;
+}
+
+/**
+ * Pre-execution isolation/verification gate around the managed-checkout seam.
+ * Wraps {@link checkoutTaskBranch} with a durable contamination marker and a
+ * clean-at-the-resolved-commit verification, so a managed task only ever
+ * executes once its checkout is proven trustworthy:
+ *
+ * - `skipped` (not a managed repo): gate does not apply, unchanged behavior.
+ * - Checkout itself could not be prepared (`fetch-failed`): mutation-capable →
+ *   mark contaminated + refuse (no safe target to recover to). Read-only →
+ *   explicit degraded pass-through.
+ * - Checkout created but NOT verified clean at the pinned base commit:
+ *   mutation-capable → mark contaminated, attempt exactly one explicit
+ *   reset+clean recovery, re-verify; refuse if still unverified. Read-only →
+ *   explicit degraded pass-through (contamination left marked for the next
+ *   mutation-capable task to recover).
+ * - Verified clean: any pre-existing marker is explicitly cleared (never
+ *   assumed) and the task proceeds normally.
+ */
+export async function prepareManagedCheckout(
+  workingDir: string,
+  taskId: string,
+  options: ManagedCheckoutGateOptions,
+): Promise<ManagedCheckoutGateResult> {
+  const { mutationCapable, ...checkoutOptions } = options;
+  const branch = await checkoutTaskBranch(workingDir, taskId, {
+    ...checkoutOptions,
+    captureBaseCommit: true,
+  });
+
+  if (branch.action === "skipped") {
+    return { branch };
+  }
+
+  const priorContamination = await readCheckoutContamination(workingDir);
+
+  // Detection and marking are UNCONDITIONAL — a proven-untrustworthy checkout
+  // is durably recorded regardless of whether the discovering task can itself
+  // mutate the tree, so the evidence survives for whichever task (read-only or
+  // mutation-capable) looks at this directory next. Only the RECOVERY attempt
+  // below is gated on `mutationCapable`.
+  if (branch.action === "fetch-failed") {
+    const reason = branch.error ?? "managed checkout failed";
+    await markCheckoutContaminated(workingDir, taskId, reason);
+    if (!mutationCapable) {
+      return {
+        branch,
+        degraded: true,
+        degradedReason: `checkout failed (${reason}); proceeding read-only against the existing working tree`,
+        priorContamination,
+      };
+    }
+    return {
+      branch,
+      refusalReason: `Managed checkout failed and the working directory state cannot be trusted: ${reason}`,
+      priorContamination,
+    };
+  }
+
+  const expectedCommit = branch.baseCommit;
+  if (!expectedCommit) {
+    // captureBaseCommit is always forced true above; this should be
+    // unreachable, but never assume a checkout is safe without evidence.
+    const reason = "resolved checkout has no pinned base commit to verify against";
+    await markCheckoutContaminated(workingDir, taskId, reason);
+    if (!mutationCapable) {
+      return { branch, degraded: true, degradedReason: reason, priorContamination };
+    }
+    return { branch, refusalReason: reason, priorContamination };
+  }
+
+  let verification = await verifyCleanCheckout(workingDir, expectedCommit);
+  if (verification.clean) {
+    // Explicit + verified: only ever clear a PRIOR marker once THIS checkout
+    // has been independently proven clean at the intended commit — never
+    // merely because no marker blocked us from getting this far.
+    await clearCheckoutContamination(workingDir);
+    return { branch, priorContamination };
+  }
+
+  const dirtyReason = verification.reason ?? "checkout is not clean";
+  await markCheckoutContaminated(workingDir, taskId, dirtyReason);
+  if (!mutationCapable) {
+    return {
+      branch,
+      degraded: true,
+      degradedReason: `checkout unverified (${dirtyReason}); proceeding read-only against the existing working tree`,
+      priorContamination,
+    };
+  }
+
+  const recovery = await recoverCleanCheckout(workingDir, expectedCommit);
+  if (recovery.ok) {
+    verification = await verifyCleanCheckout(workingDir, expectedCommit);
+  }
+
+  if (!recovery.ok || !verification.clean) {
+    return {
+      branch,
+      refusalReason:
+        `Managed checkout could not be verified clean at ${expectedCommit} after an explicit recovery attempt: ` +
+        (verification.reason ?? recovery.reason ?? "unknown recovery failure"),
+      priorContamination,
+    };
+  }
+
+  await clearCheckoutContamination(workingDir);
+  return { branch, recovered: true, priorContamination };
 }
 
 // --- Publication failure recovery (#225) ---

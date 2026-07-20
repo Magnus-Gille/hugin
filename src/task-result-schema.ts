@@ -367,6 +367,11 @@ export const repositoryOutcomeSchema = z.object({
     // the recorded exact head) and the failure is terminal without a rerun.
     "publication-recovered",
     "publication-abandoned",
+    // Issue #236: the pre-execution clean-verification gate refused to run a
+    // mutation-capable task because the managed checkout could not be proven
+    // clean at the intended commit — even after one explicit recovery
+    // attempt. Reached only via the pre-task gate, never the executor path.
+    "checkout-contaminated",
   ]),
   baseBranch: repositoryChangeEvidenceSchema.shape.baseBranch,
   baseCommit: z.string().regex(/^[0-9a-f]{40,64}$/).optional(),
