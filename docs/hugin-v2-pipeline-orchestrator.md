@@ -162,7 +162,7 @@ A pipeline is a set of phases with dependencies between them. It is submitted as
 - **Sensitivity:** internal
 - **Submitted by:** claude-code
 - **Submitted at:** 2026-04-02T22:00:00Z
-- **Reply-to:** telegram:12345678
+- **Reply-to:** telegram:test-chat
 
 ### Pipeline
 

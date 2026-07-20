@@ -72,8 +72,8 @@ describe("resolveProviderBaseUrl", () => {
 
   it("resolves homeserver from the gateway-root env var, appending /v1", () => {
     expect(
-      resolveProviderBaseUrl(homeserver(), { HOMESERVER_GATEWAY_URL: "http://100.76.72.59:8080" }),
-    ).toEqual({ ok: true, baseUrl: "http://100.76.72.59:8080/v1" });
+      resolveProviderBaseUrl(homeserver(), { HOMESERVER_GATEWAY_URL: "http://100.64.0.42:8080" }),
+    ).toEqual({ ok: true, baseUrl: "http://100.64.0.42:8080/v1" });
   });
 
   it("strips trailing slashes from the gateway root before appending /v1", () => {
@@ -107,11 +107,11 @@ describe("resolveProviderBaseUrl", () => {
 
   it("rejects URLs with credentials, query, fragment, or a path", () => {
     for (const url of [
-      "http://user:pw@100.76.72.59:8080",
-      "http://100.76.72.59:8080?x=1",
-      "http://100.76.72.59:8080#frag",
-      "http://100.76.72.59:8080/api",
-      "http://100.76.72.59:8080/v1",
+      "http://user:pw@100.64.0.42:8080",
+      "http://100.64.0.42:8080?x=1",
+      "http://100.64.0.42:8080#frag",
+      "http://100.64.0.42:8080/api",
+      "http://100.64.0.42:8080/v1",
     ]) {
       const result = resolveProviderBaseUrl(homeserver(), { HOMESERVER_GATEWAY_URL: url });
       expect(result.ok, url).toBe(false);
@@ -119,7 +119,7 @@ describe("resolveProviderBaseUrl", () => {
   });
 
   it("rejects non-http(s) schemes and unparseable URLs", () => {
-    for (const url of ["ftp://100.76.72.59:8080", "not a url"]) {
+    for (const url of ["ftp://100.64.0.42:8080", "not a url"]) {
       const result = resolveProviderBaseUrl(homeserver(), { HOMESERVER_GATEWAY_URL: url });
       expect(result.ok, url).toBe(false);
     }
@@ -146,8 +146,8 @@ describe("resolveProviderBaseUrl", () => {
 
 describe("resolveGatewayRootUrl (V7 — ledger client, no /v1 append)", () => {
   it("returns the gateway ROOT with no /v1 suffix", () => {
-    const result = resolveGatewayRootUrl({ HOMESERVER_GATEWAY_URL: "http://100.76.72.59:8080" });
-    expect(result).toEqual({ ok: true, baseUrl: "http://100.76.72.59:8080" });
+    const result = resolveGatewayRootUrl({ HOMESERVER_GATEWAY_URL: "http://100.64.0.42:8080" });
+    expect(result).toEqual({ ok: true, baseUrl: "http://100.64.0.42:8080" });
   });
 
   it("strips a trailing slash from the gateway root", () => {
@@ -168,10 +168,10 @@ describe("resolveGatewayRootUrl (V7 — ledger client, no /v1 append)", () => {
 
   it("rejects URLs with credentials, query, fragment, or a path", () => {
     for (const url of [
-      "http://user:pw@100.76.72.59:8080",
-      "http://100.76.72.59:8080?x=1",
-      "http://100.76.72.59:8080#frag",
-      "http://100.76.72.59:8080/api",
+      "http://user:pw@100.64.0.42:8080",
+      "http://100.64.0.42:8080?x=1",
+      "http://100.64.0.42:8080#frag",
+      "http://100.64.0.42:8080/api",
     ]) {
       const result = resolveGatewayRootUrl({ HOMESERVER_GATEWAY_URL: url });
       expect(result.ok, url).toBe(false);
@@ -179,7 +179,7 @@ describe("resolveGatewayRootUrl (V7 — ledger client, no /v1 append)", () => {
   });
 
   it("rejects non-http(s) schemes and unparseable URLs", () => {
-    for (const url of ["ftp://100.76.72.59:8080", "not a url"]) {
+    for (const url of ["ftp://100.64.0.42:8080", "not a url"]) {
       const result = resolveGatewayRootUrl({ HOMESERVER_GATEWAY_URL: url });
       expect(result.ok, url).toBe(false);
     }
@@ -200,10 +200,10 @@ describe("isSovereignGatewayHost", () => {
       "172.31.255.255",
       "192.168.0.1",
       "100.64.0.0",
-      "100.76.72.59",
+      "100.64.0.42",
       "100.127.255.255",
       "m5",
-      "huginmunin",
+      "hugin-node",
       "box.ts.net",
       "nas.local",
       "[::1]",

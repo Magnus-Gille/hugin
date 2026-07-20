@@ -161,17 +161,17 @@ const CONTEXT_SENSITIVE_PATTERNS = [
 const TECHNICAL_CONTEXT = /\b(?:handling|handled|scanning|scanned|management|managed|rotation|rotated|module|system|API|integration|integrated|processing|processed|calculation|calculated|architecture|endpoint|schema|service|engine|middleware|template|pipeline|detection|detected|verification|verified|authentication|authenticated|authorization|authorized|signing|signed|encryption|encrypted|hashing|hashed|registry|registered|configuration|configured|systemd|SDK|CLI|framework|protocol|required|optional|generated|stored|provided|available)\b/i;
 
 const PRIVATE_PATH_PREFIXES = [
-  "/home/magnus/mimir",
-  "/home/magnus/.claude",
-  "/home/magnus/.codex",
-  "/home/magnus/.ssh",
-  "/home/magnus/.config",
+  "/var/lib/hugin/mimir",
+  "/var/lib/hugin/.claude",
+  "/var/lib/hugin/.codex",
+  "/var/lib/hugin/.ssh",
+  "/var/lib/hugin/.config",
 ];
 
 const INTERNAL_PATH_PREFIXES = [
-  "/home/magnus/repos/",
-  "/home/magnus/workspace",
-  "/home/magnus/scratch",
+  "/var/lib/hugin/repos/",
+  "/var/lib/hugin/workspace",
+  "/var/lib/hugin/scratch",
 ];
 
 export interface SensitivityAssessment {

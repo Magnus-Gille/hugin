@@ -53,10 +53,10 @@ Then, from the Hugin repo on that host:
 
 ```bash
 tsx scripts/run-pii-eval.ts \
-  --opf eval/privacy-filter/results/huginmunin/predictions-huginmunin.jsonl \
-  --timings eval/privacy-filter/results/huginmunin/bench-huginmunin.json \
-  --md eval/privacy-filter/results/report-pi.md \
-  --json eval/privacy-filter/results/report-pi.json
+  --opf eval/privacy-filter/results/local/predictions-local.jsonl \
+  --timings eval/privacy-filter/results/local/bench-local.json \
+  --md eval/privacy-filter/results/report-local.md \
+  --json eval/privacy-filter/results/report-local.json
 ```
 
 ## Metrics

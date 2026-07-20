@@ -2,6 +2,20 @@
   "name": "hugin",
   "version": "0.1.0",
   "description": "Task dispatcher for the Grimnir AI system — polls Munin for tasks, spawns AI runtimes, reports results",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Magnus-Gille/hugin.git"
+  },
+  "homepage": "https://github.com/Magnus-Gille/hugin#readme",
+  "bugs": {
+    "url": "https://github.com/Magnus-Gille/hugin/issues"
+  },
+  "keywords": [
+    "ai-agents",
+    "mcp",
+    "self-hosted",
+    "task-dispatcher"
+  ],
   "type": "module",
   "bin": {
     "hugin-mcp": "dist/mcp-server.js",
@@ -10,8 +24,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js",
+    "dev": "tsx --env-file=.env watch src/index.ts",
+    "start": "node --env-file=.env dist/index.js",
     "start:mcp": "node dist/mcp-server.js",
     "start:friction-mcp": "node dist/friction-mcp.js",
     "friction-report": "node scripts/friction-report.mjs",
@@ -28,7 +42,7 @@
     "test:watch": "vitest"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.6"
   },
   "license": "MIT",
   "dependencies": {

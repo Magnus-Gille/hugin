@@ -2,7 +2,7 @@
 
 Date: 2026-04-03
 Branch: `codex/step1-live-eval`
-Deployed worker: `hugin-huginmunin-801104`
+Deployed worker: `hugin-hugin-node-801104`
 
 ## Trigger
 
@@ -49,7 +49,7 @@ New regression coverage includes:
 
 ### Startup
 
-Deployed cleanly to `huginmunin.local`.
+Deployed cleanly to `hugin-node.local`.
 
 Observed after restart:
 

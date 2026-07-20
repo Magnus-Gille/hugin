@@ -51,7 +51,7 @@ Minimal content:
 ## Task: <title>
 
 - **Runtime:** claude | codex | ollama | opencode | homeserver | pipeline | auto | orchestrator
-- **Context:** repo:<name> | scratch | files | /home/magnus/<path>
+- **Context:** repo:<name> | scratch | files | /var/lib/hugin/<path>
 - **Timeout:** 300000
 - **Max output tokens:** 4096
 - **Submitted by:** <claimed submitter>
@@ -82,7 +82,7 @@ Do not invent fields from old plans—confirm parsing in `src/index.ts`,
 
 - `Context` takes priority over `Working dir`. `repo:<name>` resolves beneath
   `HUGIN_REPOS_ROOT`; `scratch` and `files` resolve to their configured safe roots.
-  Absolute working paths must remain under `/home/magnus/`. Relative paths,
+  Absolute working paths must remain under `/var/lib/hugin/`. Relative paths,
   traversal, and normalized paths outside the allowed root fall back safely.
 - Point `HUGIN_REPOS_ROOT` at an isolated managed tree, never production deployment
   checkouts. Canonicalized paths—not string prefixes—decide whether Hugin may create
@@ -275,8 +275,8 @@ Deploy with:
 ./scripts/deploy-pi.sh [hostname]
 ```
 
-The default host is `huginmunin.local`. The Pi service environment lives outside Git
-at `/home/magnus/repos/hugin/.env`.
+The default host is `hugin.local`. The example service environment lives outside Git
+at `/var/lib/hugin/app/.env`.
 
 - `deploy-pi.sh` accepts only a clean, addressable local Git commit. It deploys that
   exact payload; never deploy an uncommitted working tree or an ambiguous ref.

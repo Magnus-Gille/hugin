@@ -56,7 +56,7 @@ and journal rows but are rejected at submission until an executor ships.
 
 | Alias | Family | Harness | Backing model | Host | Runtime | Notes |
 |---|---|---|---|---|---|---|
-| `tiny` | one-shot | — | `qwen2.5:3b` | Pi (huginmunin.local) | ollama | Only viable Pi model per ollama-performance-spike |
+| `tiny` | one-shot | — | `qwen2.5:3b` | Pi (hugin-node.local) | ollama | Only viable Pi model per ollama-performance-spike |
 | `medium` | one-shot | — | `qwen3:14b` | MBA via Tailscale | ollama | Validated in aider eval. **Registry currently defaults laptop to `qwen3.5:35b-a3b`, which the eval found unreliable — registry default needs follow-up fix; alias pins to working model.** |
 | `large-reasoning` | one-shot | — | `gpt-oss-120b` @ reasoning level `medium` | OpenRouter | openrouter | Studio proxy. Reasoning level pinned for v1; level routing deferred. |
 | `pi-large-coder` | harness | `pi` | `qwen/qwen3-coder-next` | Pi (harness) → OpenRouter (model) | pi-harness | Validated 2026-04-26: 5/6 strict, 6/6 lenient on aider eval. Headless one-shot via `pi -p ... --no-session`. Pi reads files via tool calls; output is a unified diff. |
@@ -115,7 +115,7 @@ interface DelegationRequest {
 }
 
 interface WorktreeSpec {
-  repo: string;                         // Repo slug, e.g. "hugin". Resolves to /home/magnus/repos/<repo> on the Pi.
+  repo: string;                         // Repo slug, e.g. "hugin". Resolves to /var/lib/hugin/repos/<repo> on the Pi.
   base_ref: string;                     // Git ref the harness branches from, e.g. "origin/main". Broker resolves to a SHA at submission time and pins it.
   target_files?: string[];              // Optional advisory list; pi can read more via tool calls. Used only for the journal.
   copy_node_modules?: boolean;          // Default false. Set true per-call for Node repos that need installed deps available at run time. See §11.3 for cap/admission.
@@ -160,7 +160,7 @@ interface BrokerAnnotations {
     repo: string;
     base_ref: string;
     base_sha: string;                   // Pinned SHA at submission time.
-    worktree_path: string;              // Absolute path on Pi, e.g. /home/magnus/.hugin/worktrees/<task_id>.
+    worktree_path: string;              // Absolute path on Pi, e.g. /var/lib/hugin/.hugin/worktrees/<task_id>.
   };
   policy_version: string;               // ZDR allowlist version + reasoning-level pinning version, e.g. "zdr-v1+rlv-v1".
 }

@@ -28,4 +28,4 @@ jobs:
 
       - run: bash scripts/deploy-pi.test.sh
 
-      - run: bash scripts/lib/claude-config-bootstrap.test.sh
+      - run: bash scripts/submit-dep-bumps.test.sh

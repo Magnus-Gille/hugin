@@ -23,7 +23,7 @@ try {
 const lastMessage = data.last_assistant_message;
 if (!lastMessage) process.exit(0);
 
-const resultDir = join(process.env.HOME || "/home/magnus", ".hugin", "hook-results");
+const resultDir = join(process.env.HOME || "/var/lib/hugin", ".hugin", "hook-results");
 mkdirSync(resultDir, { recursive: true });
 
 const result = {

@@ -2,7 +2,11 @@ import { describe, it, expect } from "vitest";
 import express from "express";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { HEIMDALL_DESCRIPTOR, registerHeimdallDescriptorRoute } from "../src/heimdall-descriptor.js";
+import {
+  HEIMDALL_DESCRIPTOR,
+  buildHeimdallDescriptor,
+  registerHeimdallDescriptorRoute,
+} from "../src/heimdall-descriptor.js";
 
 // ---------------------------------------------------------------------------
 // Descriptor shape tests (no HTTP needed)
@@ -59,7 +63,7 @@ describe("HEIMDALL_DESCRIPTOR", () => {
         name: "hugin",
         label: "Hugin",
         namespace: "grimnir",
-        instance_id: "huginmunin",
+        instance_id: expect.any(String),
       },
       kind: "http-service",
       status: "pass",
@@ -70,6 +74,44 @@ describe("HEIMDALL_DESCRIPTOR", () => {
     expect(HEIMDALL_DESCRIPTOR.links).toEqual({
       repo: "https://github.com/Magnus-Gille/hugin",
     });
+  });
+
+  it("uses validated operator identity for multi-instance deployments", () => {
+    const descriptor = buildHeimdallDescriptor(
+      {
+        HUGIN_INSTANCE_ID: "hugin-secondary",
+        HUGIN_DEPLOY_HOST: "hugin-2.internal.example",
+      },
+      "ignored-runtime-host"
+    );
+
+    expect(descriptor.service.instance_id).toBe("hugin-secondary");
+    expect(descriptor.deploy.host).toBe("hugin-2.internal.example");
+  });
+
+  it("uses the validated runtime hostname when identity settings are missing", () => {
+    const descriptor = buildHeimdallDescriptor({}, "hugin-node-2");
+
+    expect(descriptor.service.instance_id).toBe("hugin-node-2");
+    expect(descriptor.deploy.host).toBe("hugin-node-2");
+  });
+
+  it("rejects an explicitly invalid instance ID instead of hiding a collision risk", () => {
+    expect(() =>
+      buildHeimdallDescriptor(
+        { HUGIN_INSTANCE_ID: "../../duplicate\n<script>" },
+        "hugin-node-2"
+      )
+    ).toThrow(/Invalid HUGIN_INSTANCE_ID/);
+  });
+
+  it("rejects an explicitly invalid deploy host instead of publishing false metadata", () => {
+    expect(() =>
+      buildHeimdallDescriptor(
+        { HUGIN_DEPLOY_HOST: "https://wrong.example/path" },
+        "hugin-node-2"
+      )
+    ).toThrow(/Invalid HUGIN_DEPLOY_HOST/);
   });
 });
 

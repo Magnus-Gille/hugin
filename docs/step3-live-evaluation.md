@@ -1,8 +1,8 @@
 # Step 3 Live Evaluation
 
-**Date:** 2026-04-02  
-**Environment:** `huginmunin` Pi, deployed from branch `codex/step1-live-eval`  
-**Service worker observed:** `hugin-huginmunin-741842`
+**Date:** 2026-04-02
+**Environment:** `hugin-node` Pi, deployed from branch `codex/step1-live-eval`
+**Service worker observed:** `hugin-hugin-node-741842`
 
 ## Goal
 

@@ -6,6 +6,8 @@
  */
 
 import type { Application } from "express";
+import { hostname as runtimeHostname } from "node:os";
+import { isIP } from "node:net";
 import {
   buildLearningLoopPanels,
   computeCapabilityPlane,
@@ -15,20 +17,39 @@ import {
 } from "./learning-loop-health.js";
 import type { LearningLoopCollector } from "./learning-loop-collector.js";
 
-export const HEIMDALL_DESCRIPTOR = {
+const INSTANCE_ID_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$/;
+const HOST_LABEL_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
+
+function isValidDeployHost(value: string): boolean {
+  if (isIP(value) !== 0) return true;
+  return value.length <= 253 && value.split(".").every((label) => HOST_LABEL_RE.test(label));
+}
+
+function safeRuntimeHost(hostname: string): string {
+  const candidate = hostname.trim();
+  return isValidDeployHost(candidate) ? candidate : "localhost";
+}
+
+function runtimeInstanceId(hostname: string): string {
+  const candidate = hostname
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, "")
+    .slice(0, 64);
+  return INSTANCE_ID_RE.test(candidate) ? candidate : "hugin";
+}
+
+const BASE_HEIMDALL_DESCRIPTOR = {
   _schema: "https://heimdall.gille.ai/schema/service/v1",
   service: {
     name: "hugin",
     label: "Hugin",
     namespace: "grimnir",
-    instance_id: "huginmunin",
     criticality: "normal",
   },
   kind: "http-service",
   status: "pass",
   version: "0.1.0",
   deploy: {
-    host: "huginmunin",
     platform: "bare-metal",
   },
   metrics: [],
@@ -45,6 +66,42 @@ export const HEIMDALL_DESCRIPTOR = {
   },
   ui: { icon: "cpu", category: "infra" },
 } as const;
+
+export function buildHeimdallDescriptor(
+  env: NodeJS.ProcessEnv = process.env,
+  hostname: string = runtimeHostname()
+) {
+  const fallbackHost = safeRuntimeHost(hostname);
+  const configuredHost = env.HUGIN_DEPLOY_HOST?.trim() ?? "";
+  if (configuredHost && !isValidDeployHost(configuredHost)) {
+    throw new Error(
+      "Invalid HUGIN_DEPLOY_HOST: expected an IPv4/IPv6 address or DNS hostname"
+    );
+  }
+  const deployHost = configuredHost || fallbackHost;
+
+  const configuredInstanceId = env.HUGIN_INSTANCE_ID?.trim() ?? "";
+  if (configuredInstanceId && !INSTANCE_ID_RE.test(configuredInstanceId)) {
+    throw new Error(
+      "Invalid HUGIN_INSTANCE_ID: expected 1-64 letters, numbers, dots, underscores, or hyphens"
+    );
+  }
+  const instanceId = configuredInstanceId || runtimeInstanceId(fallbackHost);
+
+  return {
+    ...BASE_HEIMDALL_DESCRIPTOR,
+    service: {
+      ...BASE_HEIMDALL_DESCRIPTOR.service,
+      instance_id: instanceId,
+    },
+    deploy: {
+      ...BASE_HEIMDALL_DESCRIPTOR.deploy,
+      host: deployHost,
+    },
+  } as const;
+}
+
+export const HEIMDALL_DESCRIPTOR = buildHeimdallDescriptor();
 
 /**
  * Build the learning-loop health panels (#164) from collected evidence.

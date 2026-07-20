@@ -41,19 +41,19 @@ describe("buildDefaultEgressHosts", () => {
     const hosts = buildDefaultEgressHosts({
       muninUrl: "http://192.168.1.50:3030",
       ollamaPiUrl: "http://10.0.0.5:11434",
-      ollamaLaptopUrl: "http://100.97.117.37:11434",
+      ollamaLaptopUrl: "http://100.64.0.44:11434",
     });
     expect(hosts).toContain("192.168.1.50");
     expect(hosts).toContain("10.0.0.5");
-    expect(hosts).toContain("100.97.117.37");
+    expect(hosts).toContain("100.64.0.44");
   });
 
   it("extracts the hostname from the homeserver gateway URL", () => {
     const hosts = buildDefaultEgressHosts({
       muninUrl: "http://localhost:3030",
-      homeserverGatewayUrl: "http://100.76.72.59:8080",
+      homeserverGatewayUrl: "http://100.64.0.42:8080",
     });
-    expect(hosts).toContain("100.76.72.59");
+    expect(hosts).toContain("100.64.0.42");
   });
 
   it("includes extra hosts and deduplicates", () => {

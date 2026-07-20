@@ -117,7 +117,7 @@ describe("buildRuntimeCandidates", () => {
 
   const orinOffline: OllamaHost = {
     name: "orin",
-    baseUrl: "http://100.127.176.78:11434",
+    baseUrl: "http://100.64.0.43:11434",
     available: false,
     models: [],
     lastChecked: Date.now(),
@@ -126,7 +126,7 @@ describe("buildRuntimeCandidates", () => {
 
   const orinOnline: OllamaHost = {
     name: "orin",
-    baseUrl: "http://100.127.176.78:11434",
+    baseUrl: "http://100.64.0.43:11434",
     available: true,
     models: ["qwen2.5-coder:7b", "qwen2.5:3b"],
     lastChecked: Date.now(),

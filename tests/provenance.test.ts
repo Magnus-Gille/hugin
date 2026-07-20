@@ -19,7 +19,7 @@ describe("detectProvenance", () => {
   it("returns trusted for everything else", () => {
     expect(detectProvenance([], "projects/hugin")).toBe("trusted");
     expect(detectProvenance(["source:internal"], "meta/conventions")).toBe("trusted");
-    expect(detectProvenance(undefined, "people/magnus")).toBe("trusted");
+    expect(detectProvenance(undefined, "people/example-owner")).toBe("trusted");
   });
 
   it("does not confuse similarly-named namespaces", () => {

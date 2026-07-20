@@ -44,10 +44,10 @@ describe("opf-output — predictions shape", () => {
   it("parses the predicted_spans map keyed by 'label: surface'", () => {
     const pred = parseOpfPrediction({
       example_id: "sample_eval_5_01",
-      text: "Quindle Testwick at quindle@openai.com",
+      text: "Quindle Testwick at quindle@example.com",
       predicted_spans: {
         "private_person: Quindle Testwick": [[0, 16]],
-        "private_email: quindle@openai.com": [[20, 38]],
+        "private_email: quindle@example.com": [[20, 39]],
       },
     });
     expect(pred.exampleId).toBe("sample_eval_5_01");

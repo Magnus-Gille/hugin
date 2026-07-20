@@ -1,7 +1,7 @@
 # Security Critical Holes Live Evaluation
 
-**Date:** 2026-04-04  
-**Service:** `huginmunin`  
+**Date:** 2026-04-04
+**Service:** `hugin-node`
 **Scope:** legacy Claude spawn removal, first-pass outbound egress allowlist, context-ref classification enforcement
 
 ## Summary
@@ -41,7 +41,7 @@ Submitted task:
 - namespace: `tasks/20260404-220600-security-private-ref-claude`
 - runtime: `claude`
 - declared sensitivity: `internal`
-- context ref: `people/magnus/profile`
+- context ref: `people/example-owner/profile`
 
 ### Observed
 
@@ -55,7 +55,7 @@ Final status:
 
 Result:
 
-- `Context ref "people/magnus/profile" is classified client-confidential, but runtime "claude" only allows up to internal`
+- `Context ref "people/example-owner/profile" is classified client-confidential, but runtime "claude" only allows up to internal`
 
 Structured result:
 

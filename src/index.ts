@@ -17,7 +17,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, getManagedCheckoutFailure, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt } from "./task-helpers.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
 import {
@@ -138,6 +138,11 @@ import {
   buildTerminalStatusTags,
   getPersistentStatusTags,
 } from "./task-status-tags.js";
+import {
+  finalizeManagedCheckoutFailure,
+  renewTaskLease,
+  type MutableTaskStatus,
+} from "./managed-checkout-failure.js";
 import { LearningLoopCollector } from "./learning-loop-collector.js";
 import { LearningExperimentStore } from "./learning/experiment-store.js";
 import { sanitizeProviderTokenCount } from "./m5-provenance.js";
@@ -302,7 +307,7 @@ function applyExfilPolicy(
   };
 }
 
-const HUGIN_HOME = path.join(process.env.HOME || "/home/magnus", ".hugin");
+const HUGIN_HOME = path.join(process.env.HOME || "/var/lib/hugin", ".hugin");
 const LOG_DIR = path.join(HUGIN_HOME, "logs");
 const HOOK_RESULT_DIR = path.join(HUGIN_HOME, "hook-results");
 const CANCEL_REQUESTED_TAG = "cancel-requested";
@@ -347,10 +352,10 @@ const config = {
     300_000,
     MAX_TASK_TIMEOUT_MS,
   ),
-  workspace: process.env.HUGIN_WORKSPACE || "/home/magnus/workspace",
+  workspace: process.env.HUGIN_WORKSPACE || "/var/lib/hugin/workspace",
   // Root under which `repo:<name>` aliases resolve and task branches are cut
   // (#139). Point this at an isolated tree to keep hugin tasks off the
-  // production deploy checkouts under /home/magnus/repos. Default preserves
+  // production deploy checkouts under /var/lib/hugin/repos. Default preserves
   // the historical hardcoded behavior.
   reposRoot: normalizeRoot(process.env.HUGIN_REPOS_ROOT || DEFAULT_REPOS_ROOT),
   maxOutputChars: parseBoundedPositiveInt(
@@ -562,6 +567,7 @@ let brokerBindStatus: BrokerBindStatus | null = null;
 // shutdown has already begun.
 let brokerBindAbort: AbortController | null = null;
 let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
+let leaseRenewalInFlight: Promise<void> | null = null;
 let cancelWatchTimer: ReturnType<typeof setInterval> | null = null;
 let leaseReaperTimer: ReturnType<typeof setInterval> | null = null;
 let leaseReaperInFlight = false;
@@ -600,7 +606,7 @@ function createMuninClient(
 }
 
 // The auth-alarm push (#131) uses the global fetch, which is egress-gated below.
-// The Ratatoskr Alert Bus host (typically `huginmunin` or the Pi Tailscale IP,
+// The Ratatoskr Alert Bus host (typically an internal DNS name or private IP,
 // not loopback — see ratatoskr bind-resilience notes) must therefore be
 // allowlisted or the alarm's own POST would be denied before it leaves the box.
 function hostnameOf(url: string): string | null {
@@ -1691,7 +1697,7 @@ async function probeClaudeUsage(): Promise<{
   let expiresAtMs: number | null = null;
   let expiryEvidence: "known" | "not-applicable" | "unknown" = "unknown";
   try {
-    const credPath = path.join(process.env.HOME || "/home/magnus", ".claude", ".credentials.json");
+    const credPath = path.join(process.env.HOME || "/var/lib/hugin", ".claude", ".credentials.json");
     const creds = JSON.parse(fs.readFileSync(credPath, "utf-8"));
     const token = creds?.claudeAiOauth?.accessToken;
     const rawExpiry = creds?.claudeAiOauth?.expiresAt;
@@ -2169,7 +2175,7 @@ function spawnRuntime(
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
-        HOME: "/home/magnus",
+        HOME: "/var/lib/hugin",
         HUGIN_TASK_ID: taskId,
         HUGIN_TASK_NAMESPACE: ctx.taskNs,
       },
@@ -2345,20 +2351,38 @@ function stripLeaseTags(tags: string[]): string[] {
 }
 
 /** Start periodic lease renewal for the current task. */
-function startLeaseRenewal(taskNs: string, entryContent: string, baseTags: string[]): void {
+function startLeaseRenewal(
+  taskNs: string,
+  status: MutableTaskStatus,
+  baseTags: string[],
+): void {
   stopLeaseRenewal();
-  leaseRenewalTimer = setInterval(async () => {
+  leaseRenewalTimer = setInterval(() => {
     if (!currentTask || currentTask !== taskNs) {
       stopLeaseRenewal();
       return;
     }
-    try {
-      const renewedTags = buildClaimTags(baseTags, "running");
-      await leaseMunin.write(taskNs, "status", entryContent, renewedTags);
-      console.log(`Lease renewed for ${taskNs} (expires: ${leaseExpiry()})`);
-    } catch (err) {
-      console.error(`Lease renewal failed for ${taskNs}:`, err);
-    }
+    if (leaseRenewalInFlight) return;
+
+    const renewedTags = buildClaimTags(baseTags, "running");
+    const renewal = renewTaskLease({
+      client: leaseMunin,
+      taskNs,
+      status,
+      renewedTags,
+    })
+      .then(() => {
+        console.log(`Lease renewed for ${taskNs} (expires: ${leaseExpiry()})`);
+      })
+      .catch((err) => {
+        console.error(`Lease renewal failed for ${taskNs}:`, err);
+      })
+      .finally(() => {
+        if (leaseRenewalInFlight === renewal) {
+          leaseRenewalInFlight = null;
+        }
+      });
+    leaseRenewalInFlight = renewal;
   }, LEASE_RENEWAL_INTERVAL_MS);
 }
 
@@ -2367,6 +2391,12 @@ function stopLeaseRenewal(): void {
     clearInterval(leaseRenewalTimer);
     leaseRenewalTimer = null;
   }
+}
+
+async function stopLeaseRenewalAndWait(): Promise<void> {
+  stopLeaseRenewal();
+  const inFlight = leaseRenewalInFlight;
+  if (inFlight) await inFlight;
 }
 
 function requestCancellationForCurrentTask(request: CancellationRequest): void {
@@ -4541,6 +4571,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       entry.updated_at = claimResult.updated_at;
       claimAcceptedAt = claimResult.updated_at;
     }
+    entry.tags = claimTags;
   } catch (err) {
     // Another dispatcher won the CAS. Its claim-time assessment owns the
     // eventual result; retaining ours risks applying stale identity to a
@@ -4560,7 +4591,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   console.log(`Executing task ${taskNs}...`);
 
   // Start periodic lease renewal
-  startLeaseRenewal(taskNs, entry.content, entry.tags);
+  startLeaseRenewal(taskNs, entry, claimTags);
 
   try {
     if (declaredRuntime === "pipeline") {
@@ -4579,7 +4610,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         await probeAllHosts(),
         { allowOwnerOverride: isOwnerSubmitter(submittedBy) },
       );
-      stopLeaseRenewal();
+      await stopLeaseRenewalAndWait();
       stopCancellationWatch();
       currentTask = null;
       currentTaskConfig = null;
@@ -4600,14 +4631,51 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         baseBranchOverride: task.baseBranch,
         captureBaseCommit: true,
       });
-      if (branchResult.action === "fetch-failed") {
-        console.warn(`Pre-task branch checkout failed for ${taskNs} (non-fatal, proceeding without branch): ${branchResult.error}`);
-      } else if (branchResult.action === "created") {
+      if (branchResult.action === "created") {
         console.log(`Pre-task: branch ${branchResult.branchName} ready in ${task.workingDir}`);
       }
     }
     let repositoryOutcome: StructuredTaskResult["repositoryOutcome"] =
       deriveRepositoryOutcome(branchResult);
+
+    const checkoutFailure = getManagedCheckoutFailure(branchResult);
+    if (checkoutFailure) {
+      console.error(`Refusing to execute ${taskNs}: ${checkoutFailure}`);
+      const classification = getTaskArtifactClassification(task);
+      await finalizeManagedCheckoutFailure({
+        client: munin,
+        taskNs,
+        status: entry,
+        classification,
+        resultContent:
+          `## Result\n\n- **Exit code:** ${DISPATCHER_FAILURE_EXIT_CODE}\n` +
+          `- **Error:** ${checkoutFailure}\n`,
+        stopLeaseRenewal: stopLeaseRenewalAndWait,
+        writeStructuredResult: () => writeStructuredTaskResult(
+          taskNs,
+          {
+            ...createFailureStructuredResult(taskNs, task.runtime, checkoutFailure, {
+              executor: "dispatcher",
+              resultSource: "repository-checkout",
+              startedAt,
+              replyTo: task.replyTo,
+              replyFormat: task.replyFormat,
+              group: task.group,
+              sequence: task.sequence,
+              pipeline: task.pipeline,
+              sensitivity: buildTaskSensitivitySnapshot(task.sensitivityAssessment),
+            }),
+            repositoryOutcome,
+            provenance: signingVerdict.provenance,
+          },
+          classification,
+        ),
+        logMessage: `Task rejected before execution: ${checkoutFailure}`,
+      });
+      await promoteDependents(taskId);
+      await refreshPipelineSummaryFromContent(entry.content);
+      return { hadTask: true, queueDepth };
+    }
 
     currentTaskConfig = task;
     const taskClassification = getTaskArtifactClassification(task);
@@ -5234,7 +5302,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // cancellation watch stays
     // ACTIVE through delivery so an operator can still abort a hung rsync; it
     // is stopped after delivery finalization below.
-    stopLeaseRenewal();
+    await stopLeaseRenewalAndWait();
     currentSdkAbort = null;
     currentOllamaAbort = null;
     currentOpencodeAbort = null;
@@ -5595,7 +5663,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         maxAgeMs: config.deliveryRetryMaxAgeMs,
       });
       if (decision.action === "retry") {
-        stopLeaseRenewal();
+        await stopLeaseRenewalAndWait();
         stopCancellationWatch();
         await writeDeliveryRetryMeta(
           taskNs,
@@ -5652,7 +5720,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // below is an idempotent guard, not the primary stop. The cancellation
     // watch, however, was kept ACTIVE through delivery so an operator could
     // abort a hung rsync; THIS is where it is finally stopped.
-    stopLeaseRenewal();
+    await stopLeaseRenewalAndWait();
     stopCancellationWatch();
 
     // Write result to Munin (skip if timeout already wrote partial result via SDK)
@@ -6053,7 +6121,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     currentTaskConfig = null;
     return { hadTask: true, queueDepth };
   } finally {
-    stopLeaseRenewal();
+    await stopLeaseRenewalAndWait();
     stopCancellationWatch();
     currentSdkAbort = null;
     currentOllamaAbort = null;
@@ -6239,7 +6307,7 @@ async function shutdown(signal: string): Promise<void> {
     });
   }
 
-  stopLeaseRenewal();
+  await stopLeaseRenewalAndWait();
   stopCancellationWatch();
   stopLeaseReaper();
   stopDeliveryRetryReaper();

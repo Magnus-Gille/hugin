@@ -10,7 +10,7 @@ What shipped:
 - summary refresh on decomposition, claim, completion, failure, and recovery transitions
 - structured runtime metadata and pipeline provenance on child results
 
-What was shown live on `huginmunin`:
+What was shown live on `hugin-node`:
 1. One pipeline task decomposed into `spec`, `result`, and a new parent `summary` artifact immediately.
 2. The initial summary showed the right graph state: one `pending` phase and one `blocked` phase.
 3. The child phases executed in order on the Pi with `qwen2.5:3b`.
@@ -25,11 +25,11 @@ Why it matters:
 
 ## Evidence
 
-- Engineering plan: [docs/hugin-v2-engineering-plan.md](/Users/magnus/repos/hugin/docs/hugin-v2-engineering-plan.md)
-- Live evaluation record: [docs/step3-live-evaluation.md](/Users/magnus/repos/hugin/docs/step3-live-evaluation.md)
-- Structured result schema: [src/task-result-schema.ts](/Users/magnus/repos/hugin/src/task-result-schema.ts)
-- Pipeline summary reducer: [src/pipeline-summary.ts](/Users/magnus/repos/hugin/src/pipeline-summary.ts)
-- Dispatcher integration: [src/index.ts](/Users/magnus/repos/hugin/src/index.ts)
+- Engineering plan: [docs/hugin-v2-engineering-plan.md](../docs/hugin-v2-engineering-plan.md)
+- Live evaluation record: [docs/step3-live-evaluation.md](../docs/step3-live-evaluation.md)
+- Structured result schema: [src/task-result-schema.ts](../src/task-result-schema.ts)
+- Pipeline summary reducer: [src/pipeline-summary.ts](../src/pipeline-summary.ts)
+- Dispatcher integration: [src/index.ts](../src/index.ts)
 
 ## Feedback
 

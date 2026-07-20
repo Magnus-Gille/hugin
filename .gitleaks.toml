@@ -1,0 +1,72 @@
+[extend]
+useDefault = true
+
+# These allowlists require BOTH the exact fixture file and a distinctive fake
+# value. They keep the secret-scanner regression corpus usable without
+# suppressing unrelated findings elsewhere in the repository.
+
+[[allowlists]]
+description = "Synthetic PII evaluation credentials"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^eval/privacy-filter/fixtures/grimnir-pii\.jsonl$''']
+regexes = [
+  '''AKIA4Z9QXWPLMN72BVTQ''',
+  '''ghp_Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56Qr78''',
+  '''sk-proj-9Qa3xKmZ7bV2tLpRfWnE4cYhUiOaSdF6''',
+  '''xoxb-2488-90213-AbCdEfGhIjKlMnOpQrStUv''',
+  '''b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB''',
+]
+
+[[allowlists]]
+description = "Historical generated predictions over the same synthetic PII corpus"
+condition = "AND"
+regexTarget = "secret"
+# This path pattern exists solely for deleted historical generated-result files.
+# Exact fabricated values are still required by the AND condition below.
+paths = ['''^eval/privacy-filter/results/[^/]+/predictions-(?:all-)?[^/]+\.jsonl$''']
+regexes = [
+  '''AKIA4Z9QXWPLMN72BVTQ''',
+  '''ghp_Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56Qr78''',
+  '''sk-proj-9Qa3xKmZ7bV2tLpRfWnE4cYhUiOaSdF6''',
+  '''xoxb-2488-90213-AbCdEfGhIjKlMnOpQrStUv''',
+  '''b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB''',
+]
+
+[[allowlists]]
+description = "Synthetic PII fixture generator private-key marker"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^scripts/build-pii-fixtures\.ts$''']
+regexes = ['''b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB''']
+
+[[allowlists]]
+description = "Synthetic delegated-output scanner payloads"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^tests/finalize-delegated-output\.test\.ts$''']
+regexes = [
+  '''MIIBOgIBAAJBA\.\.\.''',
+  '''b3BlbnNzaC1rZXkt\.\.\.''',
+]
+
+[[allowlists]]
+description = "Synthetic exfiltration-scanner payloads"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^tests/exfiltration-scanner\.test\.ts$''']
+regexes = [
+  '''b3BlbnNzaC1rZXktdjEAAAAABG5vbmUA''',
+  '''BEGIN RSA PRIVATE KEY-----",\s*"-----BEGIN EC PRIVATE KEY''',
+  '''eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.abcdefghij''',
+]
+
+[[allowlists]]
+description = "Synthetic sensitivity-classifier payloads"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^tests/sensitivity\.test\.ts$''']
+regexes = [
+  '''eyJhbGciOiJIUzI1NiJ9''',
+  '''MIIEpAIBAAKCAQEA\.\.\.''',
+]

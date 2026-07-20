@@ -5,11 +5,12 @@
 # for each repo with fixable vulnerabilities, submits one Hugin task (runtime:claude,
 # type:dep-bump) that runs `npm audit fix`, verifies build/test, and opens a PR.
 #
-# Idempotency: skips repos that already have an open `chore/audit-fix-*` PR (requires gh CLI).
-# If gh is unavailable, the check is skipped and a warning is printed.
+# Idempotency: skips repos that already have an open `chore/audit-fix-*` PR.
+# The owner and a working gh CLI are required because an unchecked submission
+# could create a duplicate paid task.
 #
 # Usage:
-#   MUNIN_API_KEY=<key> ./scripts/submit-dep-bumps.sh [repo1 repo2 ...]
+#   MUNIN_API_KEY=<key> GITHUB_OWNER=<owner> ./scripts/submit-dep-bumps.sh [repo1 repo2 ...]
 #
 #   If no repos are given, all repos found under security/repos/* in Munin are used.
 
@@ -17,6 +18,16 @@ set -euo pipefail
 
 MUNIN_URL="${MUNIN_URL:-http://localhost:3030}"
 MUNIN_API_KEY="${MUNIN_API_KEY:?MUNIN_API_KEY is required}"
+GITHUB_OWNER="${GITHUB_OWNER:-}"
+
+if [[ ! "$GITHUB_OWNER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]; then
+  echo "ERROR: GITHUB_OWNER is required and must be a valid GitHub owner name." >&2
+  exit 1
+fi
+if ! command -v gh >/dev/null 2>&1; then
+  echo "ERROR: gh CLI is required for the dependency-bump idempotency check." >&2
+  exit 1
+fi
 
 SCAN_DATE="$(date -u +%Y%m%d)"
 SUBMITTED=0
@@ -84,22 +95,25 @@ print('0')
 
 has_open_audit_pr() {
   # Usage: has_open_audit_pr <repo>
-  # Returns 0 (true) if an open chore/audit-fix-* PR exists for the repo, 1 otherwise.
+  # Returns 0 if an open PR exists, 1 if none exists, and 2 if the check could
+  # not be completed. Callers must treat 2 as a hard stop for that repository.
   local repo="$1"
-  if ! command -v gh &>/dev/null; then
-    echo "  [warn] gh CLI not found — skipping idempotency check for ${repo}" >&2
-    return 1  # can't check, assume no PR
-  fi
   # `gh pr list --head` matches an EXACT branch, not a prefix, so list open PRs
   # and match the chore/audit-fix-* branch family ourselves.
   local count
-  count=$(gh pr list \
-    --repo "Magnus-Gille/${repo}" \
-    --state open \
-    --json headRefName \
-    --jq '[.[] | select(.headRefName | startswith("chore/audit-fix-"))] | length' \
-    2>/dev/null || echo "0")
-  [ "${count:-0}" -gt 0 ]
+  if ! count=$(gh pr list \
+      --repo "${GITHUB_OWNER}/${repo}" \
+      --state open \
+      --json headRefName \
+      --jq '[.[] | select(.headRefName | startswith("chore/audit-fix-"))] | length'); then
+    echo "  [error] GitHub idempotency check failed for ${GITHUB_OWNER}/${repo}; refusing task submission" >&2
+    return 2
+  fi
+  if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+    echo "  [error] GitHub idempotency check returned an invalid count for ${GITHUB_OWNER}/${repo}; refusing task submission" >&2
+    return 2
+  fi
+  [ "$count" -gt 0 ]
 }
 
 submit_task() {
@@ -279,6 +293,12 @@ sys.exit(0 if data.get('found') else 1)
     echo "  [skip] Open chore/audit-fix-* PR already exists for ${repo}"
     SKIPPED=$((SKIPPED + 1))
     continue
+  else
+    idempotency_rc=$?
+    if [ "$idempotency_rc" -ne 1 ]; then
+      FAILED=$((FAILED + 1))
+      continue
+    fi
   fi
 
   # Submit the task

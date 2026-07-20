@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 // Mock child_process.spawn before importing the module
 const spawnCalls: Array<{ cmd: string; args: string[]; opts: Record<string, unknown> }> = [];
@@ -53,6 +56,7 @@ const {
   checkoutTaskBranch,
   deriveRepositoryOutcome,
   finalizeTaskBranch,
+  getManagedCheckoutFailure,
   isValidBaseBranchName,
   parseBaseBranchOverride,
 } = await import("../src/task-helpers.js");
@@ -84,6 +88,25 @@ describe("deriveRepositoryOutcome", () => {
   });
 });
 
+describe("getManagedCheckoutFailure", () => {
+  it("fails closed before execution when a managed checkout cannot be prepared", () => {
+    expect(getManagedCheckoutFailure({
+      action: "fetch-failed",
+      error: "Failed to create task branch",
+    })).toBe("Managed repository checkout failed: Failed to create task branch");
+  });
+
+  it("allows unmanaged contexts and successfully isolated repositories", () => {
+    expect(getManagedCheckoutFailure({ action: "skipped" })).toBeNull();
+    expect(getManagedCheckoutFailure({
+      action: "created",
+      branchName: "hugin/task-1",
+      baseBranch: "main",
+      baseCommit: "a".repeat(40),
+    })).toBeNull();
+  });
+});
+
 // Sequences for checkoutTaskBranch:
 //   1. git rev-parse --git-dir
 //   2. git remote get-url origin
@@ -91,14 +114,14 @@ describe("deriveRepositoryOutcome", () => {
 //   4+. resolve + verify the base, then git checkout -b hugin/<taskId> origin/<base>
 
 describe("checkoutTaskBranch", () => {
-  it("skips directories outside /home/magnus/repos/", async () => {
-    const result = await checkoutTaskBranch("/home/magnus/workspace", "test-id");
+  it("skips directories outside /var/lib/hugin/repos/", async () => {
+    const result = await checkoutTaskBranch("/var/lib/hugin/workspace", "test-id");
     expect(result.action).toBe("skipped");
     expect(spawnCalls).toHaveLength(0);
   });
 
   it("skips scratch and other non-repo paths", async () => {
-    const result = await checkoutTaskBranch("/home/magnus/scratch", "test-id");
+    const result = await checkoutTaskBranch("/var/lib/hugin/scratch", "test-id");
     expect(result.action).toBe("skipped");
     expect(spawnCalls).toHaveLength(0);
   });
@@ -107,7 +130,7 @@ describe("checkoutTaskBranch", () => {
     spawnBehaviors = [
       { exitCode: 128 }, // git rev-parse --git-dir fails
     ];
-    const result = await checkoutTaskBranch("/home/magnus/repos/some-dir", "test-id");
+    const result = await checkoutTaskBranch("/var/lib/hugin/repos/some-dir", "test-id");
     expect(result.action).toBe("skipped");
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0].args).toContain("--git-dir");
@@ -118,7 +141,7 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 0 },   // git rev-parse --git-dir
       { exitCode: 128 }, // git remote get-url origin fails
     ];
-    const result = await checkoutTaskBranch("/home/magnus/repos/no-remote", "test-id");
+    const result = await checkoutTaskBranch("/var/lib/hugin/repos/no-remote", "test-id");
     expect(result.action).toBe("skipped");
     expect(spawnCalls).toHaveLength(2);
   });
@@ -130,7 +153,7 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 0 }, // git fetch origin
       { exitCode: 0 }, // git checkout -b hugin/task-123 origin/main
     ];
-    const result = await checkoutTaskBranch("/home/magnus/repos/grimnir", "task-123", {
+    const result = await checkoutTaskBranch("/var/lib/hugin/repos/grimnir", "task-123", {
       fetchRetryDelaysMs: [0, 0],
     });
     expect(result.action).toBe("created");
@@ -150,7 +173,7 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 0 },
     ];
     const result = await checkoutTaskBranch(
-      "/home/magnus/repos/grimnir",
+      "/var/lib/hugin/repos/grimnir",
       "task-pinned",
       { fetchRetryDelaysMs: [0, 0], captureBaseCommit: true },
     );
@@ -173,9 +196,9 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 0 }, // git checkout -b hugin/task-iso origin/main
     ];
     const result = await checkoutTaskBranch(
-      "/home/magnus/hugin-workspace/grimnir",
+      "/var/lib/hugin/hugin-workspace/grimnir",
       "task-iso",
-      { fetchRetryDelaysMs: [0, 0], reposRoot: "/home/magnus/hugin-workspace" },
+      { fetchRetryDelaysMs: [0, 0], reposRoot: "/var/lib/hugin/hugin-workspace" },
     );
     expect(result.action).toBe("created");
     expect(result.branchName).toBe("hugin/task-iso");
@@ -186,9 +209,9 @@ describe("checkoutTaskBranch", () => {
     // With an isolated root configured, a production checkout under the old
     // default is no longer managed — the task can't branch/re-point it.
     const result = await checkoutTaskBranch(
-      "/home/magnus/repos/grimnir",
+      "/var/lib/hugin/repos/grimnir",
       "task-prod",
-      { reposRoot: "/home/magnus/hugin-workspace" },
+      { reposRoot: "/var/lib/hugin/hugin-workspace" },
     );
     expect(result.action).toBe("skipped");
     expect(spawnCalls).toHaveLength(0);
@@ -197,27 +220,50 @@ describe("checkoutTaskBranch", () => {
   it("canonicalizes workingDir: rejects a ../ path that string-matches but escapes the reposRoot (#139)", async () => {
     // A raw `startsWith` guard would pass this (it string-prefixes the isolated
     // root), but the OS resolves the cwd to the production checkout under
-    // /home/magnus/repos — exactly the re-pointing #139 must prevent. All spawn
+    // /var/lib/hugin/repos — exactly the re-pointing #139 must prevent. All spawn
     // behaviors default to exitCode 0, so a bypass would proceed to "created".
     const result = await checkoutTaskBranch(
-      "/home/magnus/hugin-workspace/../repos/grimnir",
+      "/var/lib/hugin/hugin-workspace/../repos/grimnir",
       "task-escape",
-      { reposRoot: "/home/magnus/hugin-workspace" },
+      { reposRoot: "/var/lib/hugin/hugin-workspace" },
     );
     expect(result.action).toBe("skipped");
     expect(spawnCalls).toHaveLength(0);
   });
 
   it("canonicalizes workingDir: rejects a sibling dir that shares the root's string prefix (#139)", async () => {
-    // /home/magnus/hugin-workspace-evil string-prefixes "hugin-workspace" but is
+    // /var/lib/hugin/hugin-workspace-evil string-prefixes "hugin-workspace" but is
     // not under "hugin-workspace/". The path.sep-anchored guard must reject it.
     const result = await checkoutTaskBranch(
-      "/home/magnus/hugin-workspace-evil/grimnir",
+      "/var/lib/hugin/hugin-workspace-evil/grimnir",
       "task-sibling",
-      { reposRoot: "/home/magnus/hugin-workspace" },
+      { reposRoot: "/var/lib/hugin/hugin-workspace" },
     );
     expect(result.action).toBe("skipped");
     expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("canonicalizes symlinks: rejects a managed-root entry that resolves outside the root", async () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "hugin-repo-sync-"));
+    const reposRoot = path.join(fixture, "managed");
+    const productionCheckout = path.join(fixture, "production-checkout");
+    const linkedCheckout = path.join(reposRoot, "linked-checkout");
+    fs.mkdirSync(reposRoot);
+    fs.mkdirSync(productionCheckout);
+    fs.symlinkSync(productionCheckout, linkedCheckout, "dir");
+
+    try {
+      // Lexically this path is below reposRoot, but the OS resolves it to the
+      // production checkout. No git command may run through that symlink.
+      const result = await checkoutTaskBranch(linkedCheckout, "task-symlink", {
+        reposRoot,
+        fetchRetryDelaysMs: [0, 0],
+      });
+      expect(result.action).toBe("skipped");
+      expect(spawnCalls).toHaveLength(0);
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
   });
 
   it("tolerates a trailing slash on the configured reposRoot (#139)", async () => {
@@ -228,9 +274,9 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 0 },
     ];
     const result = await checkoutTaskBranch(
-      "/home/magnus/hugin-workspace/heimdall",
+      "/var/lib/hugin/hugin-workspace/heimdall",
       "task-slash",
-      { fetchRetryDelaysMs: [0, 0], reposRoot: "/home/magnus/hugin-workspace/" },
+      { fetchRetryDelaysMs: [0, 0], reposRoot: "/var/lib/hugin/hugin-workspace/" },
     );
     expect(result.action).toBe("created");
   });
@@ -243,7 +289,7 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 0 },   // fetch #2 succeeds (with bypass)
       { exitCode: 0 },   // git checkout -b
     ];
-    const result = await checkoutTaskBranch("/home/magnus/repos/grimnir", "task-456", {
+    const result = await checkoutTaskBranch("/var/lib/hugin/repos/grimnir", "task-456", {
       fetchRetryDelaysMs: [0, 0],
     });
     expect(result.action).toBe("created");
@@ -256,7 +302,7 @@ describe("checkoutTaskBranch", () => {
     // Attempt #2: bypass via explicit -F
     const secondFetch = spawnCalls[3];
     expect((secondFetch.opts.env as Record<string, string>).GIT_SSH_COMMAND).toBe(
-      "ssh -F /home/magnus/.ssh/config",
+      "ssh -F /var/lib/hugin/.ssh/config",
     );
   });
 
@@ -268,7 +314,7 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 128, stderr: "fail 2" },
       { exitCode: 128, stderr: "fail 3" },
     ];
-    const result = await checkoutTaskBranch("/home/magnus/repos/grimnir", "task-789", {
+    const result = await checkoutTaskBranch("/var/lib/hugin/repos/grimnir", "task-789", {
       fetchRetryDelaysMs: [0, 0],
     });
     expect(result.action).toBe("fetch-failed");
@@ -283,7 +329,7 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 0 },   // git fetch origin
       { exitCode: 128, stderr: "branch already exists" }, // git checkout -b fails
     ];
-    const result = await checkoutTaskBranch("/home/magnus/repos/grimnir", "task-dup", {
+    const result = await checkoutTaskBranch("/var/lib/hugin/repos/grimnir", "task-dup", {
       fetchRetryDelaysMs: [0, 0],
     });
     expect(result.action).toBe("fetch-failed");
@@ -297,7 +343,7 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 0 },
       { exitCode: 0 },
     ];
-    const dir = "/home/magnus/repos/my-project";
+    const dir = "/var/lib/hugin/repos/my-project";
     await checkoutTaskBranch(dir, "t1", { fetchRetryDelaysMs: [0, 0] });
     for (const call of spawnCalls) {
       expect(call.opts.cwd).toBe(dir);
@@ -317,7 +363,7 @@ describe("checkoutTaskBranch", () => {
     ];
 
     const result = await checkoutTaskBranch(
-      "/home/magnus/repos/cassette-ai",
+      "/var/lib/hugin/repos/cassette-ai",
       "task-master",
       { fetchRetryDelaysMs: [0, 0], captureBaseCommit: true },
     );
@@ -355,7 +401,7 @@ describe("checkoutTaskBranch", () => {
     ];
 
     const result = await checkoutTaskBranch(
-      "/home/magnus/repos/cassette-ai",
+      "/var/lib/hugin/repos/cassette-ai",
       "task-remote-head",
       { fetchRetryDelaysMs: [0, 0], captureBaseCommit: true },
     );
@@ -382,7 +428,7 @@ describe("checkoutTaskBranch", () => {
     ];
 
     const result = await checkoutTaskBranch(
-      "/home/magnus/repos/cassette-ai",
+      "/var/lib/hugin/repos/cassette-ai",
       "task-explicit",
       {
         fetchRetryDelaysMs: [0, 0],
@@ -413,7 +459,7 @@ describe("checkoutTaskBranch", () => {
     expect(isValidBaseBranchName("main; touch owned")).toBe(false);
 
     const result = await checkoutTaskBranch(
-      "/home/magnus/repos/demo",
+      "/var/lib/hugin/repos/demo",
       "task-invalid",
       { baseBranchOverride: "../main" },
     );
@@ -441,7 +487,7 @@ describe("finalizeTaskBranch", () => {
       { exitCode: 0 },              // git branch -d
     ];
     const result = await finalizeTaskBranch(
-      "/home/magnus/repos/grimnir",
+      "/var/lib/hugin/repos/grimnir",
       "hugin/task-123",
       "pr body",
       allowedHosts,
@@ -460,7 +506,7 @@ describe("finalizeTaskBranch", () => {
     ];
 
     const result = await finalizeTaskBranch(
-      "/home/magnus/repos/grimnir",
+      "/var/lib/hugin/repos/grimnir",
       "hugin/task-compare-failed",
       "body",
       allowedHosts,
@@ -484,7 +530,7 @@ describe("finalizeTaskBranch", () => {
       { exitCode: 0, stdout: "https://github.com/Magnus-Gille/grimnir/pull/42\n" }, // gh pr create
     ];
     const result = await finalizeTaskBranch(
-      "/home/magnus/repos/grimnir",
+      "/var/lib/hugin/repos/grimnir",
       "hugin/task-abc",
       "pr body",
       allowedHosts,
@@ -513,7 +559,7 @@ describe("finalizeTaskBranch", () => {
       { exitCode: 0, stdout: "https://github.com/Magnus-Gille/grimnir/pull/7\n" }, // gh pr create
     ];
     const result = await finalizeTaskBranch(
-      "/home/magnus/repos/grimnir",
+      "/var/lib/hugin/repos/grimnir",
       "hugin/task-xyz",
       "body",
       allowedHosts,
@@ -540,7 +586,7 @@ describe("finalizeTaskBranch", () => {
       { exitCode: 0, stdout: "https://github.com/Magnus-Gille/grimnir/pull/8\n" },
     ];
     const result = await finalizeTaskBranch(
-      "/home/magnus/repos/grimnir",
+      "/var/lib/hugin/repos/grimnir",
       "hugin/task-evidence",
       "body",
       allowedHosts,
@@ -572,7 +618,7 @@ describe("finalizeTaskBranch", () => {
       { exitCode: 0, stdout: "https://gitlab.com/user/repo.git\n" }, // git remote: blocked
     ];
     const result = await finalizeTaskBranch(
-      "/home/magnus/repos/grimnir",
+      "/var/lib/hugin/repos/grimnir",
       "hugin/task-blocked",
       "body",
       allowedHosts, // only github.com allowed
@@ -589,7 +635,7 @@ describe("finalizeTaskBranch", () => {
       { exitCode: 1, stderr: "error: failed to push" }, // git push fails
     ];
     const result = await finalizeTaskBranch(
-      "/home/magnus/repos/grimnir",
+      "/var/lib/hugin/repos/grimnir",
       "hugin/task-pushfail",
       "body",
       allowedHosts,
@@ -607,7 +653,7 @@ describe("finalizeTaskBranch", () => {
       { exitCode: 1, stderr: "GraphQL error" }, // gh pr create fails
     ];
     const result = await finalizeTaskBranch(
-      "/home/magnus/repos/grimnir",
+      "/var/lib/hugin/repos/grimnir",
       "hugin/task-prfail",
       "body",
       allowedHosts,
@@ -625,7 +671,7 @@ describe("finalizeTaskBranch", () => {
       { exitCode: 0, stdout: "https://github.com/Magnus-Gille/grimnir/pull/99\n" },
     ];
     await finalizeTaskBranch(
-      "/home/magnus/repos/grimnir",
+      "/var/lib/hugin/repos/grimnir",
       "hugin/20260416-120000-a1b2",
       "the body",
       allowedHosts,

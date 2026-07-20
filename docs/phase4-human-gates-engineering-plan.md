@@ -1,7 +1,7 @@
 # Phase 4 Engineering Plan: Human Gates for Side Effects
 
-**Parent plan:** [hugin-v2-engineering-plan.md](/Users/magnus/repos/hugin/docs/hugin-v2-engineering-plan.md)  
-**Status:** Implemented and live-validated (see STATUS.md)  
+**Parent plan:** [hugin-v2-engineering-plan.md](../docs/hugin-v2-engineering-plan.md)
+**Status:** Implemented and live-validated (see STATUS.md)
 **Date:** 2026-04-04
 
 ## Goal
@@ -165,13 +165,13 @@ Suggested JSON shape:
   "sideEffects": ["deploy.service"],
   "status": "pending",
   "requestedAt": "2026-04-04T08:00:00Z",
-  "requestedByWorker": "hugin-huginmunin-123456",
-  "replyTo": "telegram:1234",
+  "requestedByWorker": "hugin-hugin-node-123456",
+  "replyTo": "telegram:test-chat",
   "replyFormat": "summary",
   "summary": {
     "runtime": "claude-sdk",
     "context": "repo:hugin",
-    "promptPreview": "Deploy the reviewed change to huginmunin...",
+    "promptPreview": "Deploy the reviewed change to hugin-node...",
     "dependencyTaskIds": ["..."]
   }
 }
@@ -309,9 +309,9 @@ Hugin must treat duplicate approval writes as harmless. Safe pattern:
 
 Files:
 
-- [src/pipeline-ir.ts](/Users/magnus/repos/hugin/src/pipeline-ir.ts)
-- [src/pipeline-compiler.ts](/Users/magnus/repos/hugin/src/pipeline-compiler.ts)
-- [tests/pipeline-compiler.test.ts](/Users/magnus/repos/hugin/tests/pipeline-compiler.test.ts)
+- [src/pipeline-ir.ts](../src/pipeline-ir.ts)
+- [src/pipeline-compiler.ts](../src/pipeline-compiler.ts)
+- [tests/pipeline-compiler.test.ts](../tests/pipeline-compiler.test.ts)
 
 Changes:
 
@@ -325,9 +325,9 @@ Changes:
 
 Files:
 
-- [src/index.ts](/Users/magnus/repos/hugin/src/index.ts)
-- [src/pipeline-dispatch.ts](/Users/magnus/repos/hugin/src/pipeline-dispatch.ts)
-- [src/task-status-tags.ts](/Users/magnus/repos/hugin/src/task-status-tags.ts)
+- [src/index.ts](../src/index.ts)
+- [src/pipeline-dispatch.ts](../src/pipeline-dispatch.ts)
+- [src/task-status-tags.ts](../src/task-status-tags.ts)
 
 Changes:
 
@@ -340,9 +340,9 @@ Changes:
 
 Files:
 
-- [src/pipeline-control.ts](/Users/magnus/repos/hugin/src/pipeline-control.ts)
-- likely new [src/pipeline-gates.ts](/Users/magnus/repos/hugin/src/pipeline-gates.ts)
-- [tests/pipeline-control.test.ts](/Users/magnus/repos/hugin/tests/pipeline-control.test.ts)
+- [src/pipeline-control.ts](../src/pipeline-control.ts)
+- likely new [src/pipeline-gates.ts](../src/pipeline-gates.ts)
+- [tests/pipeline-control.test.ts](../tests/pipeline-control.test.ts)
 - new gate-focused tests
 
 Changes:
@@ -356,9 +356,9 @@ Changes:
 
 Files:
 
-- [src/task-result-schema.ts](/Users/magnus/repos/hugin/src/task-result-schema.ts)
-- [src/pipeline-summary.ts](/Users/magnus/repos/hugin/src/pipeline-summary.ts)
-- [src/pipeline-summary-manager.ts](/Users/magnus/repos/hugin/src/pipeline-summary-manager.ts)
+- [src/task-result-schema.ts](../src/task-result-schema.ts)
+- [src/pipeline-summary.ts](../src/pipeline-summary.ts)
+- [src/pipeline-summary-manager.ts](../src/pipeline-summary-manager.ts)
 - associated tests
 
 Changes:
@@ -428,7 +428,7 @@ Phase 4 is done when all of the following are true:
 - Rejection fails the phase and propagates through the DAG using existing dependency rules.
 - Parent summaries and structured results represent approval state explicitly.
 - Cancellation and resume remain coherent when a pipeline contains gated phases.
-- A live four-phase pipeline passes the evaluation above on `huginmunin`.
+- A live four-phase pipeline passes the evaluation above on `hugin-node`.
 
 ## Recommendation
 

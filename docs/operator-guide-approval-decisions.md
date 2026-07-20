@@ -29,7 +29,7 @@ You never need to write this — Hugin creates it automatically. Read it to get 
 | `status` | `"pending"` | Always `"pending"`. |
 | `requestedAt` | string | ISO 8601 timestamp of when the gate was reached. |
 | `requestedByWorker` | string | Hugin worker instance ID. |
-| `replyTo` | string? | Optional reply routing (e.g. `"telegram:1234"`). |
+| `replyTo` | string? | Optional reply routing (e.g. `"telegram:test-chat"`). |
 | `replyFormat` | string? | Optional reply format. |
 | `operationKey` | string | Idempotency key (`<pipelineId>:<phaseTaskId>`). |
 | `summary.runtime` | string | Runtime that will execute the phase (e.g. `"claude-sdk"`). |
@@ -49,12 +49,12 @@ You never need to write this — Hugin creates it automatically. Read it to get 
   "sideEffects": ["deploy.service"],
   "status": "pending",
   "requestedAt": "2026-04-04T08:00:00.000Z",
-  "requestedByWorker": "hugin-huginmunin-874413",
+  "requestedByWorker": "hugin-hugin-node-874413",
   "operationKey": "20260404-deploy-pipeline:20260404-deploy-pipeline-deploy",
   "summary": {
     "runtime": "claude-sdk",
     "context": "repo:hugin",
-    "promptPreview": "Deploy the reviewed change to huginmunin...",
+    "promptPreview": "Deploy the reviewed change to hugin-node...",
     "dependencyTaskIds": ["20260404-deploy-pipeline-review"]
   }
 }

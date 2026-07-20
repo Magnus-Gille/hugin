@@ -5,17 +5,18 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/home/magnus/repos/hugin
-EnvironmentFile=/home/magnus/repos/hugin/.env
-ExecStart=/usr/bin/node dist/daily-exam-harvest-cli.js --lookback-hours 48 --limit 500 --output /home/magnus/.hugin/daily-exam-candidates/latest.json
+WorkingDirectory=/var/lib/hugin/app
+EnvironmentFile=/var/lib/hugin/app/.env
+Environment=HOME=/var/lib/hugin
+ExecStart=/usr/bin/node dist/daily-exam-harvest-cli.js --lookback-hours 48 --limit 500 --output /var/lib/hugin/.hugin/daily-exam-candidates/latest.json
 TimeoutStartSec=120
 UMask=0077
 
 # The factory reads Hugin/Munin and can only persist its content-blind manifest.
 ProtectSystem=strict
 ProtectHome=read-only
-ReadOnlyPaths=/home/magnus/repos/hugin
-ReadWritePaths=/home/magnus/.hugin/daily-exam-candidates
+ReadOnlyPaths=/var/lib/hugin/app
+ReadWritePaths=/var/lib/hugin/.hugin/daily-exam-candidates
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes

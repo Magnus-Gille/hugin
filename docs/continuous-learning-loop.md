@@ -133,8 +133,8 @@ existing ten-case Gate D battery. The first controlled experiment should change 
 - non-regression: zero correctness/usefulness/rescue regression, bounded latency, identical local
   cost.
 
-The M5/gille-inference code-loop owner must emit the phase timing and work id. That owning-repo
-work is tracked by [gille-inference #247](https://github.com/Magnus-Gille/gille-inference/issues/247).
+The M5/gille-inference code-loop owner must emit the phase timing and work id. That remains
+owning-repository work in `gille-inference` after its clean-history publication.
 Until it is deployed, Hugin records final diff/check facts but deliberately leaves edit timing
 unmeasured, so this experiment remains `gathering` instead of manufacturing a conclusion.
 
@@ -182,7 +182,7 @@ tokens in the manifest:
 
 ```bash
 eval "$(m5-auth --env --tailnet)"
-HUGIN_BROKER_URL=http://huginmunin.<tailnet>.ts.net:3035 \
+HUGIN_BROKER_URL=http://hugin-node.<tailnet>.ts.net:3035 \
 HUGIN_BROKER_TOKEN=<keychain-or-env-token> \
 npm run experiment:m5-code-loop -- /path/to/gate-d-wave.json --dry-run
 

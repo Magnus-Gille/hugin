@@ -9,3 +9,5 @@ debate/*
 .claude/
 __pycache__/
 *.pyc
+eval/privacy-filter/results/*
+!eval/privacy-filter/results/README.md

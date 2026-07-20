@@ -12,7 +12,7 @@ import {
 
 const BASELINE: VersionSnapshot = {
   sdkVersion: "0.2.81",
-  cliPath: "/home/magnus/repos/hugin/node_modules/@anthropic-ai/claude-agent-sdk/cli.js",
+  cliPath: "/var/lib/hugin/repos/hugin/node_modules/@anthropic-ai/claude-agent-sdk/cli.js",
   cliSizeBytes: 1_234_567,
   cliMtimeMs: 1_750_000_000_000,
 };

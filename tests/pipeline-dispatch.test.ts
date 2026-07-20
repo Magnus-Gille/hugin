@@ -188,7 +188,7 @@ function makeValidPipelineContent(): string {
 - **Runtime:** pipeline
 - **Submitted by:** Codex
 - **Submitted at:** 2026-04-03T10:00:00Z
-- **Reply-to:** telegram:12345
+- **Reply-to:** telegram:test-chat
 - **Reply-format:** summary
 - **Group:** sprint-step3
 - **Sequence:** 2
@@ -228,7 +228,7 @@ describe("handlePipelineTask", () => {
     expect(specEntry).not.toBeNull();
     const pipeline = pipelineIRSchema.parse(JSON.parse(specEntry!.content));
     expect(pipeline.id).toBe("20260403-valid-pipeline");
-    expect(pipeline.replyTo).toBe("telegram:12345");
+    expect(pipeline.replyTo).toBe("telegram:test-chat");
     expect(pipeline.group).toBe("sprint-step3");
 
     const parentStatus = client.get(taskNs, "status");
@@ -242,7 +242,7 @@ describe("handlePipelineTask", () => {
 
     const parentResult = client.get(taskNs, "result");
     expect(parentResult?.content).toContain("- **Pipeline action:** compiled and decomposed");
-    expect(parentResult?.content).toContain("- **Reply-to:** telegram:12345");
+    expect(parentResult?.content).toContain("- **Reply-to:** telegram:test-chat");
     expect(parentResult?.content).toContain("- **Reply-format:** summary");
     expect(parentResult?.content).toContain("- **Group:** sprint-step3");
     expect(parentResult?.content).toContain("- **Sequence:** 2");

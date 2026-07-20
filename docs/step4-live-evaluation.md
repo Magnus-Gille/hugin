@@ -1,7 +1,7 @@
 # Step 4 Live Evaluation
 
 Date: 2026-04-04
-Environment: `huginmunin` (`hugin-huginmunin-874413`)
+Environment: `hugin-node` (`hugin-hugin-node-874413`)
 Goal: validate Phase 4 human gates for side-effecting pipeline phases on the live dispatcher
 
 ## Scope

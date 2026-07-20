@@ -13,7 +13,7 @@
  * contract. See `src/mcp/tools.ts`.
  *
  * Required env:
- *   HUGIN_BROKER_URL    — e.g. http://huginmunin.tail-scale.ts.net:3033
+ *   HUGIN_BROKER_URL    — e.g. http://hugin.internal.example:3033
  *   HUGIN_BROKER_TOKEN  — bearer token registered in HUGIN_BROKER_KEYS
  *
  * Optional env:

@@ -12,7 +12,7 @@ What shipped:
 - child-task decomposition using Step 1 join primitives
 - explicit ollama runtime variants with pinned models
 
-What was shown live on `huginmunin`:
+What was shown live on `hugin-node`:
 1. One pipeline task compiled into `spec` plus three child tasks with the expected `pending` and `blocked` initial states.
 2. The child tasks preserved dependency provenance in content instead of relying on transient `depends-on:*` tags.
 3. The full `explore -> synthesize -> review` flow ran in order on the Pi using `qwen2.5:3b`.
@@ -26,11 +26,11 @@ Why it matters:
 
 ## Evidence
 
-- Engineering plan: [docs/hugin-v2-engineering-plan.md](/Users/magnus/repos/hugin/docs/hugin-v2-engineering-plan.md)
-- Live evaluation record: [docs/step2-live-evaluation.md](/Users/magnus/repos/hugin/docs/step2-live-evaluation.md)
-- Pipeline IR: [src/pipeline-ir.ts](/Users/magnus/repos/hugin/src/pipeline-ir.ts)
-- Pipeline compiler: [src/pipeline-compiler.ts](/Users/magnus/repos/hugin/src/pipeline-compiler.ts)
-- Dispatcher integration: [src/index.ts](/Users/magnus/repos/hugin/src/index.ts)
+- Engineering plan: [docs/hugin-v2-engineering-plan.md](../docs/hugin-v2-engineering-plan.md)
+- Live evaluation record: [docs/step2-live-evaluation.md](../docs/step2-live-evaluation.md)
+- Pipeline IR: [src/pipeline-ir.ts](../src/pipeline-ir.ts)
+- Pipeline compiler: [src/pipeline-compiler.ts](../src/pipeline-compiler.ts)
+- Dispatcher integration: [src/index.ts](../src/index.ts)
 
 ## Feedback
 

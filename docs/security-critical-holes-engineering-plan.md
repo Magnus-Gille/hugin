@@ -1,8 +1,8 @@
 # Security Engineering Plan: Critical Pre-Phase-5 Holes
 
-**Parent plan:** [hugin-v2-engineering-plan.md](/Users/magnus/repos/hugin/docs/hugin-v2-engineering-plan.md)  
-**Status:** Implemented first pass and live-validated  
-**Date:** 2026-04-04  
+**Parent plan:** [hugin-v2-engineering-plan.md](../docs/hugin-v2-engineering-plan.md)
+**Status:** Implemented first pass and live-validated
+**Date:** 2026-04-04
 **Source:** Pi-side `docs/security/lethal-trifecta-assessment.md`
 
 ## Goal
@@ -32,10 +32,10 @@ This plan is intentionally sequenced against the v2 roadmap:
 
 The current repo state leaves all three holes materially open:
 
-- [src/index.ts](/Users/magnus/repos/hugin/src/index.ts) still accepts `HUGIN_CLAUDE_EXECUTOR=spawn` and invokes `claude -p --dangerously-skip-permissions --verbose`.
-- [src/context-loader.ts](/Users/magnus/repos/hugin/src/context-loader.ts) fetches `Context-refs` mechanically and injects their content into prompts without considering Munin `classification`.
-- [src/munin-client.ts](/Users/magnus/repos/hugin/src/munin-client.ts) does not expose or write Munin `classification`, so Hugin cannot currently enforce or persist classification at the storage boundary.
-- [hugin.service](/Users/magnus/repos/hugin/hugin.service) has filesystem hardening, but no concrete outbound egress policy.
+- [src/index.ts](../src/index.ts) still accepts `HUGIN_CLAUDE_EXECUTOR=spawn` and invokes `claude -p --dangerously-skip-permissions --verbose`.
+- [src/context-loader.ts](../src/context-loader.ts) fetches `Context-refs` mechanically and injects their content into prompts without considering Munin `classification`.
+- [src/munin-client.ts](../src/munin-client.ts) does not expose or write Munin `classification`, so Hugin cannot currently enforce or persist classification at the storage boundary.
+- [hugin.service](../hugin.service) has filesystem hardening, but no concrete outbound egress policy.
 
 The risk called out by the assessment is not one isolated bug. It is the composition:
 
@@ -101,9 +101,9 @@ Remove the `claude -p --dangerously-skip-permissions` execution path so Hugin ha
 
 ### Scope
 
-- [src/index.ts](/Users/magnus/repos/hugin/src/index.ts)
-- [AGENTS.md](/Users/magnus/repos/hugin/AGENTS.md)
-- [CLAUDE.md](/Users/magnus/repos/hugin/CLAUDE.md)
+- [src/index.ts](../src/index.ts)
+- [AGENTS.md](../AGENTS.md)
+- [CLAUDE.md](../CLAUDE.md)
 - tests that cover executor selection and user-facing config
 
 ### Changes
@@ -141,20 +141,20 @@ This is the first hard policy consumer of the sensitivity model. It depends on:
 - Munin classification plumbing
 - task-level effective sensitivity assessment
 
-Those are already the first building blocks in [phase5-sensitivity-classification-engineering-plan.md](/Users/magnus/repos/hugin/docs/phase5-sensitivity-classification-engineering-plan.md).
+Those are already the first building blocks in [phase5-sensitivity-classification-engineering-plan.md](../docs/phase5-sensitivity-classification-engineering-plan.md).
 
 So this workstream should be implemented as **Phase 5 Step 0**, not as an unrelated patch afterward.
 
 ### Scope
 
-- [src/sensitivity.ts](/Users/magnus/repos/hugin/src/sensitivity.ts) (new, shared)
-- [src/munin-client.ts](/Users/magnus/repos/hugin/src/munin-client.ts)
-- [src/context-loader.ts](/Users/magnus/repos/hugin/src/context-loader.ts)
-- [src/index.ts](/Users/magnus/repos/hugin/src/index.ts)
-- [src/pipeline-ir.ts](/Users/magnus/repos/hugin/src/pipeline-ir.ts)
-- [src/pipeline-compiler.ts](/Users/magnus/repos/hugin/src/pipeline-compiler.ts)
-- [src/task-result-schema.ts](/Users/magnus/repos/hugin/src/task-result-schema.ts)
-- [src/pipeline-summary.ts](/Users/magnus/repos/hugin/src/pipeline-summary.ts)
+- [src/sensitivity.ts](../src/sensitivity.ts) (new, shared)
+- [src/munin-client.ts](../src/munin-client.ts)
+- [src/context-loader.ts](../src/context-loader.ts)
+- [src/index.ts](../src/index.ts)
+- [src/pipeline-ir.ts](../src/pipeline-ir.ts)
+- [src/pipeline-compiler.ts](../src/pipeline-compiler.ts)
+- [src/task-result-schema.ts](../src/task-result-schema.ts)
+- [src/pipeline-summary.ts](../src/pipeline-summary.ts)
 
 ### Policy model
 
@@ -210,7 +210,7 @@ This keeps the first enforcement slice conservative and directly addresses the r
 Denied context injection should write a clear structured failure, for example:
 
 - `errorCode: "context_ref_classification_denied"`
-- `deniedRef: "people/magnus/profile"`
+- `deniedRef: "people/example-owner/profile"`
 - `refClassification: "private"`
 - `taskEffectiveSensitivity: "internal"`
 
@@ -228,8 +228,8 @@ Constrain what Hugin can talk to on the network, so prompt compromise cannot aut
 
 ### Scope
 
-- [hugin.service](/Users/magnus/repos/hugin/hugin.service)
-- [scripts/deploy-pi.sh](/Users/magnus/repos/hugin/scripts/deploy-pi.sh)
+- [hugin.service](../hugin.service)
+- [scripts/deploy-pi.sh](../scripts/deploy-pi.sh)
 - optional deploy-managed host firewall assets if systemd-only restrictions are not sufficient
 - operational docs for allowed endpoints
 
@@ -350,4 +350,4 @@ This pre-Phase-5 hardening pass is done when:
 - context-ref classification enforcement is live
 - the Phase 5 sensitivity work can proceed on top of a real trust boundary instead of an aspirational one
 
-At that point the next normal roadmap item remains [phase5-sensitivity-classification-engineering-plan.md](/Users/magnus/repos/hugin/docs/phase5-sensitivity-classification-engineering-plan.md), starting with the context-ref enforcement slice above.
+At that point the next normal roadmap item remains [phase5-sensitivity-classification-engineering-plan.md](../docs/phase5-sensitivity-classification-engineering-plan.md), starting with the context-ref enforcement slice above.

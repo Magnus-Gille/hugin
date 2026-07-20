@@ -4,7 +4,6 @@ import type { spawn as nodeSpawn } from "node:child_process";
 import {
   parseDeliveryPolicy,
   loadDeliveryTargets,
-  DEFAULT_DELIVERY_TARGETS,
   parseArtifactManifest,
   parseRemote,
   deliverArtifacts,
@@ -49,10 +48,10 @@ beforeEach(() => {
 
 const TARGETS: DeliveryTarget[] = [
   {
-    user: "magnus",
-    host: "10.0.0.1",
-    remotePathPrefix: "/home/magnus/mimir-inbox/",
-    localStagingPrefix: "/home/magnus/scratch/",
+    user: "agent",
+    host: "192.0.2.10",
+    remotePathPrefix: "/srv/mimir/inbox/",
+    localStagingPrefix: "/srv/hugin/staging/",
   },
 ];
 
@@ -67,8 +66,8 @@ function manifestBlock(json: string, beforePrompt = true): string {
 const VALID_ENTRY = JSON.stringify([
   {
     id: "report",
-    local: "/home/magnus/scratch/report.md",
-    remote: "magnus@10.0.0.1:/home/magnus/mimir-inbox/report.md",
+    local: "/srv/hugin/staging/report.md",
+    remote: "agent@192.0.2.10:/srv/mimir/inbox/report.md",
     required: true,
   },
 ]);
@@ -93,8 +92,9 @@ describe("parseDeliveryPolicy", () => {
 });
 
 describe("loadDeliveryTargets", () => {
-  it("returns the default NAS target when unset", () => {
-    expect(loadDeliveryTargets(undefined)).toEqual(DEFAULT_DELIVERY_TARGETS);
+  it("allows no delivery targets when configuration is unset", () => {
+    expect(loadDeliveryTargets(undefined)).toEqual([]);
+    expect(loadDeliveryTargets("  ")).toEqual([]);
   });
   it("normalizes prefixes to a trailing slash", () => {
     const t = loadDeliveryTargets(
@@ -171,7 +171,7 @@ describe("parseArtifactManifest", () => {
     const content = manifestBlock(VALID_ENTRY);
     const prompt = content.match(/###\s*Prompt\s*\n([\s\S]+)$/i)?.[1] ?? "";
     expect(prompt).not.toContain("### Artifacts");
-    expect(prompt).not.toContain("mimir-inbox");
+    expect(prompt).not.toContain("/srv/mimir/inbox");
   });
 
   it("rejects malformed JSON", () => {
@@ -193,8 +193,8 @@ describe("parseArtifactManifest", () => {
         JSON.stringify([
           {
             id: "report",
-            local: "/home/magnus/scratch/<slug>.md",
-            remote: "magnus@10.0.0.1:/home/magnus/mimir-inbox/r.md",
+            local: "/srv/hugin/staging/<slug>.md",
+            remote: "agent@192.0.2.10:/srv/mimir/inbox/r.md",
             required: true,
           },
         ]),
@@ -210,8 +210,8 @@ describe("parseArtifactManifest", () => {
         JSON.stringify([
           {
             id: "report",
-            local: "/home/magnus/scratch/r.md",
-            remote: "evil@9.9.9.9:/home/magnus/mimir-inbox/r.md",
+            local: "/srv/hugin/staging/r.md",
+            remote: "evil@203.0.113.9:/srv/mimir/inbox/r.md",
             required: true,
           },
         ]),
@@ -223,9 +223,9 @@ describe("parseArtifactManifest", () => {
 
   it("rejects path injection (.., newline, shell metachars)", () => {
     for (const bad of [
-      "/home/magnus/scratch/../etc/passwd",
-      "/home/magnus/scratch/a;rm -rf b",
-      "/home/magnus/scratch/a\nb",
+      "/srv/hugin/staging/../etc/passwd",
+      "/srv/hugin/staging/a;rm -rf b",
+      "/srv/hugin/staging/a\nb",
     ]) {
       const r = parseArtifactManifest(
         manifestBlock(
@@ -233,7 +233,7 @@ describe("parseArtifactManifest", () => {
             {
               id: "report",
               local: bad,
-              remote: "magnus@10.0.0.1:/home/magnus/mimir-inbox/r.md",
+              remote: "agent@192.0.2.10:/srv/mimir/inbox/r.md",
               required: true,
             },
           ]),
@@ -250,8 +250,8 @@ describe("parseArtifactManifest", () => {
         JSON.stringify([
           {
             id: "report",
-            local: "/home/magnus/secrets/r.md",
-            remote: "magnus@10.0.0.1:/home/magnus/mimir-inbox/r.md",
+            local: "/srv/private/r.md",
+            remote: "agent@192.0.2.10:/srv/mimir/inbox/r.md",
             required: true,
           },
         ]),
@@ -265,14 +265,14 @@ describe("parseArtifactManifest", () => {
     const dup = JSON.stringify([
       {
         id: "report",
-        local: "/home/magnus/scratch/a.md",
-        remote: "magnus@10.0.0.1:/home/magnus/mimir-inbox/a.md",
+        local: "/srv/hugin/staging/a.md",
+        remote: "agent@192.0.2.10:/srv/mimir/inbox/a.md",
         required: true,
       },
       {
         id: "report",
-        local: "/home/magnus/scratch/b.md",
-        remote: "magnus@10.0.0.1:/home/magnus/mimir-inbox/b.md",
+        local: "/srv/hugin/staging/b.md",
+        remote: "agent@192.0.2.10:/srv/mimir/inbox/b.md",
         required: true,
       },
     ]);
@@ -417,8 +417,8 @@ describe("deliverArtifacts", () => {
       appendLog: () => {},
       spawnFn: mockSpawn,
       lstatFn: () => ({ isSymbolicLink: () => false }),
-      realpathFn: () => "/home/magnus/.ssh/id_ed25519",
-      stagingPrefixes: ["/home/magnus/scratch/"],
+      realpathFn: () => "/srv/private/id_ed25519",
+      stagingPrefixes: ["/srv/hugin/staging/"],
       statFn: () => ({ size: 42 }),
       hashFn: () => "h",
     });
@@ -440,7 +440,7 @@ describe("deliverArtifacts", () => {
         err.code = "EACCES";
         throw err;
       },
-      stagingPrefixes: ["/home/magnus/scratch/"],
+      stagingPrefixes: ["/srv/hugin/staging/"],
       statFn: () => ({ size: 42 }),
       hashFn: () => "h",
     });
@@ -462,7 +462,7 @@ describe("deliverArtifacts", () => {
         err.code = "ENOENT";
         throw err;
       },
-      stagingPrefixes: ["/home/magnus/scratch/"],
+      stagingPrefixes: ["/srv/hugin/staging/"],
       statFn: () => {
         throw new Error("ENOENT");
       },
@@ -486,7 +486,7 @@ describe("deliverArtifacts", () => {
       spawnFn: mockSpawn,
       lstatFn: () => ({ isSymbolicLink: () => false }),
       realpathFn: (p) => p,
-      stagingPrefixes: ["/home/magnus/scratch/"],
+      stagingPrefixes: ["/srv/hugin/staging/"],
       statFn: () => ({ size: 42 }),
       hashFn: () => "abc123",
     });
@@ -523,7 +523,7 @@ describe("renderArtifactDeliverySection", () => {
         {
           id: "report",
           status: "verified",
-          remote: "magnus@h:/p/r.md",
+          remote: "agent@host:/p/r.md",
           bytes: 42,
           sha256: "abc",
         },
@@ -543,7 +543,7 @@ describe("renderArtifactDeliverySection", () => {
         {
           id: "report",
           status: "missing-local",
-          remote: "magnus@h:/p/r.md",
+          remote: "agent@host:/p/r.md",
           error: "no local file",
         },
       ],

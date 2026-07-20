@@ -14,7 +14,7 @@ artefact-delivery crash-recovery paths. It exercises the real task lifecycle on 
    `delivery:pending`; PR #86). A `research-spike` SKILL.md against an OLD Hugin reintroduces
    #68's silent data loss — never update the skill before the dispatcher is deployed.
    - Confirm on the Pi: `curl -s localhost:3032/health | jq '{worker_id, process_instance_id}'`
-     — `worker_id` must be **`hugin-huginmunin`** (no PID suffix). `process_instance_id`
+     — `worker_id` must be **`hugin-hugin-node`** (no PID suffix). `process_instance_id`
      carries the PID for observability.
 2. `./scripts/deploy-pi.sh` passes its preflights (NAS SSH/rsync probe; codex bwrap probe #59).
 3. `HUGIN_DELIVERY_POLICY=require` (or `defer` for the #72 retry-loop variant, see S5).
@@ -24,7 +24,7 @@ artefact-delivery crash-recovery paths. It exercises the real task lifecycle on 
 - Submit by writing a `tasks/<id>/status` entry to Munin (tag `pending`, `runtime:claude`),
   with an `### Artifacts` manifest **before** `### Prompt`. Watch `~/.hugin/logs/<id>.log`.
 - After each scenario, read back: `tasks/<id>/status` tags, `tasks/<id>/result` markdown,
-  `tasks/<id>/result-structured`, and the NAS inbox (`/home/magnus/mimir-inbox/`).
+  `tasks/<id>/result-structured`, and the NAS inbox (`/var/lib/hugin/mimir-inbox/`).
 - A delivery failure must render **`- **Exit code:** 2`** + `- **Failure kind:** DELIVERY_FAILED`
   (Ratatoskr reads a non-numeric/negative code as success — see #73).
 
@@ -56,7 +56,7 @@ The core #77 acceptance test.
    brings it back within `RestartSec` (~10 s).
 3. Observe the restarted process.
 
-**Expect (post-#77):** the restarted process has the **same** `worker_id` (`hugin-huginmunin`),
+**Expect (post-#77):** the restarted process has the **same** `worker_id` (`hugin-hugin-node`),
 so `recoverStaleTasks` sees the orphaned `running + delivery:pending` checkpoint as **ours**
 (even though the dead worker's lease is still live) and **reconciles it on the first restart** —
 re-delivers without a paid agent rerun, lands the file on the NAS, flips to terminal

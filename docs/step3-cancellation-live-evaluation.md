@@ -2,7 +2,7 @@
 
 Date: 2026-04-02
 Branch: `codex/step1-live-eval`
-Final deployed worker: `hugin-huginmunin-750305`
+Final deployed worker: `hugin-hugin-node-750305`
 
 ## Goal
 

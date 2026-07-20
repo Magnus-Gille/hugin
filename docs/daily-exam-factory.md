@@ -199,8 +199,8 @@ immediately before execution. The reusable Gate D corpus and M5 capability
 ledger remain owned by `gille-inference`; this Hugin-side factory owns daily
 task discovery and reproducibility evidence.
 
-The legacy owner-side registry and lookup contract shipped in the former
-private repository. Public follow-up
+The owner-side registry and lookup contract shipped before the component's
+clean-history publication. Public follow-up
 [`gille-inference#4`](https://github.com/Magnus-Gille/gille-inference/issues/4)
 owns canonical capture and holdout coverage; authenticated stamp admission is
 owned by [`gille-inference#2`](https://github.com/Magnus-Gille/gille-inference/issues/2)

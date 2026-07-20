@@ -27,14 +27,14 @@ describe("task result formatting", () => {
       executor: "ollama",
       resultSource: "ollama",
       logFile: "~/.hugin/logs/test.log",
-      replyTo: "telegram:12345",
+      replyTo: "telegram:test-chat",
       replyFormat: "summary",
       group: "pipeline:abc",
       sequence: 2,
       body: "### Response\n\nSTEP2_SYNTHESIZE",
     });
 
-    expect(result).toContain("- **Reply-to:** telegram:12345");
+    expect(result).toContain("- **Reply-to:** telegram:test-chat");
     expect(result).toContain("- **Reply-format:** summary");
     expect(result).toContain("- **Group:** pipeline:abc");
     expect(result).toContain("- **Sequence:** 2");
