@@ -62,6 +62,7 @@ import {
   type RegistryEvidenceRef,
   type RegistryHighWaterDoc,
   type RegistryNaturalKey,
+  type RegistryOriginComponent,
   type RegistryPartitionProof,
   type RegistryRecordKind,
   type SubmissionEvent,
@@ -250,6 +251,9 @@ export class LearningRegistryStore {
     taskId: string;
     taskOutcomeRef: RegistryEvidenceRef;
     occurredAt: string;
+    /** Defaults to "hugin" (native dispatch). External-receipt intake (#237)
+     * passes the originating surface instead. */
+    originComponent?: RegistryOriginComponent;
   }): Promise<AppendResult<SubmissionEvent>> {
     const naturalKey: RegistryNaturalKey = { recordKind: "submission", taskId: input.taskId };
     const recordedAt = this.now();
@@ -261,7 +265,10 @@ export class LearningRegistryStore {
       membership: buildMembership({ naturalKey, issuedAt: input.occurredAt }),
       occurredAt: input.occurredAt,
       recordedAt,
-      payload: { taskOutcomeRef: input.taskOutcomeRef, originComponent: "hugin" },
+      payload: {
+        taskOutcomeRef: input.taskOutcomeRef,
+        originComponent: input.originComponent ?? "hugin",
+      },
     });
     return appendRegistryEvent(this.munin, event, recordedAt);
   }

@@ -204,12 +204,25 @@ const registryEventBase = {
   recordedAt: registryTimestampSchema,
 };
 
+/**
+ * Which surface originated this task. `"hugin"` is native dispatcher
+ * execution; the other three are content-blind imports of external task/
+ * outcome receipts (hugin#237) — a submission's own natural key is still
+ * only `{recordKind: "submission", taskId}`, so an imported submission never
+ * silently overwrites or is overwritten by a native one at the same taskId:
+ * a genuinely different `originComponent` at an existing taskId is a natural
+ * -key payload conflict (`RegistryNaturalKeyConflictError`), not a merge.
+ */
+export const REGISTRY_ORIGIN_COMPONENTS = ["hugin", "codex_app", "codex_cli", "pi"] as const;
+export const registryOriginComponentSchema = z.enum(REGISTRY_ORIGIN_COMPONENTS);
+export type RegistryOriginComponent = z.infer<typeof registryOriginComponentSchema>;
+
 export const submissionEventSchema = z.object({
   ...registryEventBase,
   recordKind: z.literal("submission"),
   payload: z.object({
     taskOutcomeRef: registryEvidenceRefSchema,
-    originComponent: z.literal("hugin"),
+    originComponent: registryOriginComponentSchema,
   }).strict(),
 }).strict();
 
