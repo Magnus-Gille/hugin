@@ -17,7 +17,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt, PUBLICATION_FAILED_TAG } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, prepareManagedCheckout, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt, PUBLICATION_FAILED_TAG } from "./task-helpers.js";
 import { persistPublicationFailure } from "./publication-recovery.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
@@ -4592,23 +4592,63 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       throw new Error(`Internal dispatcher error: parsed task missing for ${taskNs}`);
     }
 
+    const isOllama = task.runtime === "ollama";
+    const isClaude = task.runtime === "claude";
+    const isCodex = task.runtime === "codex";
+    const isOpencode = task.runtime === "opencode";
+    const isHomeserver = task.runtime === "homeserver";
+    const isOrchestrator = task.runtime === "orchestrator";
+
+    // Mutation-capable per issue #236: whether THIS runtime/permission
+    // profile can itself write to the managed working directory, regardless
+    // of what the task's prompt asks for. Codex spawns `--full-auto` (always
+    // write-capable). Claude SDK and OpenCode gate writes behind
+    // `permissionProfile === "trusted-code"` (sdk-executor.ts,
+    // opencode-executor.ts). Ollama has no file-write tool at all. Orchestrator
+    // fans out to a `pi`-harness worker whose write capability this dispatcher
+    // cannot cheaply prove either way, so it is treated as mutation-capable —
+    // the safe default is to fail closed, not to assume read-only.
+    const mutationCapable =
+      isCodex ||
+      isOrchestrator ||
+      ((isClaude || isOpencode) && task.permissionProfile === "trusted-code");
+
     // Pre-task: checkout a fresh hugin/<taskId> branch from the repository's
-    // resolved default branch (or validated explicit override, #217).
+    // resolved default branch (or validated explicit override, #217), then
+    // durably verify it is actually clean at that exact commit before trusting
+    // it (#236) — `checkoutTaskBranch` succeeding does not by itself prove the
+    // tree is clean, since `git checkout -b` can carry over an earlier task's
+    // uncommitted leftovers instead of conflicting.
     let branchResult: Awaited<ReturnType<typeof checkoutTaskBranch>> = { action: "skipped" };
+    let checkoutGateRefusalReason: string | undefined;
+    let checkoutGateDegraded = false;
     if (task.runtime !== "homeserver") {
-      branchResult = await checkoutTaskBranch(task.workingDir, taskId, {
+      const gate = await prepareManagedCheckout(task.workingDir, taskId, {
         reposRoot: config.reposRoot,
         baseBranchOverride: task.baseBranch,
-        captureBaseCommit: true,
+        mutationCapable,
       });
-      if (branchResult.action === "fetch-failed") {
-        console.warn(`Pre-task branch checkout failed for ${taskNs} (non-fatal, proceeding without branch): ${branchResult.error}`);
+      branchResult = gate.branch;
+      checkoutGateRefusalReason = gate.refusalReason;
+      checkoutGateDegraded = Boolean(gate.degraded);
+      if (gate.refusalReason) {
+        console.error(
+          `Managed checkout refused for ${taskNs} (mutation-capable, contaminated/unverified working directory): ${gate.refusalReason}`,
+        );
+      } else if (gate.degraded) {
+        console.warn(
+          `Managed checkout degraded for ${taskNs} (read-only, proceeding against unverified working directory): ${gate.degradedReason}`,
+        );
+      } else if (gate.recovered) {
+        console.warn(
+          `Managed checkout recovered for ${taskNs}: an earlier contaminated/unverified working directory was reset and re-verified clean before this task ran.`,
+        );
       } else if (branchResult.action === "created") {
         console.log(`Pre-task: branch ${branchResult.branchName} ready in ${task.workingDir}`);
       }
     }
     let repositoryOutcome: StructuredTaskResult["repositoryOutcome"] =
-      deriveRepositoryOutcome(branchResult);
+      deriveRepositoryOutcome(branchResult, undefined, Boolean(checkoutGateRefusalReason));
 
     currentTaskConfig = task;
     const taskClassification = getTaskArtifactClassification(task);
@@ -4642,12 +4682,6 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     }
     startCancellationWatch();
 
-    const isOllama = task.runtime === "ollama";
-    const isClaude = task.runtime === "claude";
-    const isCodex = task.runtime === "codex";
-    const isOpencode = task.runtime === "opencode";
-    const isHomeserver = task.runtime === "homeserver";
-    const isOrchestrator = task.runtime === "orchestrator";
     const executorLabel = isOllama
       ? "ollama"
       : isClaude
@@ -4699,7 +4733,37 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let fallbackTriggered = false;
     let fallbackReason: string | null = null;
 
-    if (isOllama) {
+    if (checkoutGateRefusalReason) {
+      // Issue #236: the pre-execution clean-verification gate refused this
+      // mutation-capable task before any executor ran — the managed checkout
+      // could not be proven clean at the intended commit even after an
+      // explicit recovery attempt. This must never fall through to any
+      // runtime branch below; the model-execution path itself is untouched.
+      exitCode = 1;
+      output = checkoutGateRefusalReason;
+      logFile = path.join(LOG_DIR, `${taskId}.log`);
+      try {
+        fs.writeFileSync(
+          logFile,
+          [
+            "=== Hugin Task Log ===",
+            `Task: ${taskId}`,
+            `Runtime: ${task.runtime}`,
+            "===",
+            "Managed checkout refused by the pre-execution clean-verification gate (#236):",
+            checkoutGateRefusalReason,
+            "",
+            "===",
+            "Exit code: 1",
+            "===",
+            "",
+          ].join("\n"),
+          { encoding: "utf-8" },
+        );
+      } catch {
+        /* log is best-effort — never fail the task on a log write */
+      }
+    } else if (isOllama) {
     // --- Ollama execution path ---
     const ollamaModel = task.model || config.ollamaDefaultModel;
     const freeMemBeforeMb = Math.round(os.freemem() / 1024 / 1024);
@@ -5347,7 +5411,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // noise. This tag survives the terminal status write below so an
     // operator can discover and retry it without a rerun.
     let publicationFailureTag: string | undefined;
-    if (ok && !isCancelled && branchResult.action === "created" && branchResult.branchName) {
+    // Issue #236: a task that ran in explicit degraded mode against an
+    // unverified/contaminated checkout must never have finalizeTaskBranch
+    // auto-commit and publish whatever was ALREADY on disk — that state may
+    // belong to an earlier task entirely, not to this one's output.
+    if (ok && !isCancelled && !checkoutGateDegraded && branchResult.action === "created" && branchResult.branchName) {
       const prBody = [
         `Automated changes from Hugin task \`${taskId}\`.`,
         "",
