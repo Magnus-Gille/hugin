@@ -174,12 +174,27 @@ async function pollUntilTerminal(
   opts: { pollMs: number; deadlineMs: number },
 ): Promise<z.infer<typeof awaitResponseSchema>> {
   const deadline = Date.now() + opts.deadlineMs;
+  let lastPollError: unknown = null;
   for (;;) {
-    const parsed = awaitResponseSchema.parse(await broker.await_({ task_id: taskId }));
-    if (parsed.status !== "running") return parsed;
+    try {
+      // max_wait_s: 0 requests immediate status rather than the endpoint's default long-poll,
+      // whose server-side hold exceeds the client timeout (and which was observed to miss
+      // completion events for fast-terminal tasks — both prior live runs hung here).
+      const parsed = awaitResponseSchema.parse(await broker.await_({ task_id: taskId, max_wait_s: 0 }));
+      lastPollError = null;
+      if (parsed.status !== "running") return parsed;
+    } catch (err) {
+      // A single failed poll (timeout, transient network) is not a smoke verdict; keep
+      // polling until the deadline and only then report the last error.
+      lastPollError = err;
+      process.stderr.write(
+        `[joint-smoke] poll error (retrying): ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
     if (Date.now() >= deadline) {
+      const suffix = lastPollError instanceof Error ? `; last poll error: ${lastPollError.message}` : "";
       throw new Error(
-        `joint smoke timed out after ${opts.deadlineMs}ms waiting for task ${taskId} to leave "running"`,
+        `joint smoke timed out after ${opts.deadlineMs}ms waiting for task ${taskId} to leave "running"${suffix}`,
       );
     }
     await sleep(opts.pollMs);
