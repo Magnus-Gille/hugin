@@ -314,7 +314,10 @@ export function loadKeyStoreFromEnv(env: NodeJS.ProcessEnv = process.env): KeySt
   return {};
 }
 
-function parseKeyStoreJson(raw: string, source: string): KeyStore {
+/** Exported so other HMAC-keystore surfaces (e.g. hugin#237's external
+ * receipt producer keys) reuse the same tolerant-parse/warn-and-empty
+ * behaviour instead of re-implementing it. */
+export function parseKeyStoreJson(raw: string, source: string): KeyStore {
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -350,7 +353,14 @@ function sanitizeValue(v: string): string {
   return v.replace(/[\r\n]+/g, " ").trim();
 }
 
-function keyIdMatchesSubmitter(keyId: string, submitter: string): boolean {
+/**
+ * A signer's keyId must equal the claimed principal name or be a rotation
+ * alias `<principal>-<rotation>` (e.g. `codex-cli-2026q3`). Exported so other
+ * authenticated-intake surfaces with the same rotation-alias shape (e.g. the
+ * external task-receipt producer keystore, hugin#237) reuse one aliasing rule
+ * instead of re-deriving it.
+ */
+export function keyIdMatchesSubmitter(keyId: string, submitter: string): boolean {
   if (!keyId || !submitter) return false;
   if (keyId === submitter) return true;
   return keyId.startsWith(`${submitter}-`);
@@ -371,7 +381,9 @@ export function canonicalizePrompt(raw: string): string {
  * arbitrary strings — useful for tests and non-production config. HMAC
  * accepts any byte length, but short secrets weaken the guarantee.
  */
-function decodeSecret(raw: string): Buffer {
+/** Exported so other HMAC-keystore surfaces (e.g. hugin#237's external
+ * receipt producer keys) accept the same hex/base64/utf8 secret shapes. */
+export function decodeSecret(raw: string): Buffer {
   const trimmed = raw.trim();
   if (/^[0-9a-f]+$/i.test(trimmed) && trimmed.length % 2 === 0 && trimmed.length >= 32) {
     return Buffer.from(trimmed, "hex");

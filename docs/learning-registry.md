@@ -4,8 +4,15 @@
 task lifecycle. `src/learning-registry-schema.ts`, `src/learning-registry-store.ts`,
 and `src/learning-registry-view.ts` are a self-contained, tested library. Wiring
 calls into `src/index.ts`/`src/broker/handlers.ts` is deliberately left to the
-tickets that actually need it (#233, #237), to avoid broadening this PR's blast
+tickets that actually need it (#233), to avoid broadening this PR's blast
 radius across in-flight sibling work on `src/broker/handlers.ts` (#250/#251).
+External Codex/Pi receipt ingestion (#237) is now implemented on top of this
+mechanism — see `docs/external-receipt-intake.md`; it widened
+`submissionEventSchema.payload.originComponent` from `z.literal("hugin")` to
+an enum (`"hugin" | "codex_app" | "codex_cli" | "pi"`) as its one additive
+schema change here, and otherwise consumes `recordSubmission` /
+`recordAttemptReference` / `recordTerminalOutcome` / `getEvent` exactly as
+documented below.
 
 ## Scope boundary vs #241
 
@@ -181,7 +188,8 @@ on.
 
 - Monthly closes, cross-owner `gille-inference` accounting, and membership
   tokens for cross-owner erasure — #241.
-- Ingesting external Codex/Pi receipts — #237.
+- Ingesting external Codex/Pi receipts — implemented in #237 as a consumer of
+  this mechanism (`docs/external-receipt-intake.md`), not inside it.
 - Candidate packaging/promotion — #233.
 - Wiring `record*` calls into the live dispatcher lifecycle in
   `src/index.ts`/`src/broker/handlers.ts` — left to the consuming tickets so
