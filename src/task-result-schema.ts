@@ -118,6 +118,13 @@ export const delegationProvenanceSchema = z.object({
   nodeId: z.string().min(1).optional(),
   modelId: z.string().min(1).optional(),
   taskType: z.string().min(1).optional(),
+  // Standing harness-lane sampler (hugin#267). Distinguishes a one-shot
+  // delegation from one additionally sampled through the harness (code_loop /
+  // opencode) lane, so the SAME #163 evidence-identity shape carries the
+  // one-shot-vs-harness signal the rolling comparison report groups by.
+  // Additive + optional: absent on every delegation this schema already
+  // described before #267, exactly like every other field here.
+  lane: z.enum(["one-shot", "harness"]).optional(),
   // Enum + bounds declared here as well as in the sanitizer, so the contract
   // cannot silently drift between the two (Codex review of #163).
   outcome: z.enum(M5_OUTCOMES).optional(),

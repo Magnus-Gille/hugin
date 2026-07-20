@@ -17,7 +17,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { jcsCanonicalize } from "./learning-task-handshake.js";
-import { taskExecutionOutcomeSchema } from "./task-result-schema.js";
+import { taskExecutionOutcomeSchema, delegationProvenanceSchema } from "./task-result-schema.js";
 
 export const LEARNING_REGISTRY_SCHEMA_VERSION = 1 as const;
 /** Every #232-mechanism event is owned and counted by Hugin itself. Cross-owner
@@ -253,6 +253,13 @@ export const terminalOutcomeEventSchema = z.object({
     ]).optional(),
     taskOutcomeRef: registryEvidenceRefSchema,
     attemptOutcomeRef: registryEvidenceRefSchema.optional(),
+    // Standing harness-lane sampler (hugin#267) — additive + optional, same
+    // non-breaking rationale as every other optional field in this file: old
+    // readers strip it. Reuses the exact #163 evidence-identity shape
+    // (`delegationProvenanceSchema`) rather than growing a second, competing
+    // provenance shape; its new `lane` field is what the rolling one-shot-
+    // vs-harness comparison report groups by.
+    delegation: delegationProvenanceSchema.optional(),
   }).strict(),
 }).strict();
 
