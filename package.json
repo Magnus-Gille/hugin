@@ -24,6 +24,7 @@
     "harvest:daily-exams": "node dist/daily-exam-harvest-cli.js",
     "recover:publication": "node dist/publication-recovery-cli.js",
     "experiment:cadence": "node dist/experiment-cadence-cli.js",
+    "report:harness-comparison": "node dist/harness-lane-comparison-report-cli.js",
     "pilot:harbor": "tsx scripts/harbor_pilot/run-pilot.ts",
     "pilot:harbor:import": "tsx scripts/harbor_pilot/import-learning-report.ts",
     "test": "vitest run",

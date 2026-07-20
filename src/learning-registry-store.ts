@@ -308,6 +308,11 @@ export class LearningRegistryStore {
     repositoryOutcomeState?: TerminalOutcomeEvent["payload"]["repositoryOutcomeState"];
     taskOutcomeRef: RegistryEvidenceRef;
     attemptOutcomeRef?: RegistryEvidenceRef;
+    /** Standing harness-lane sampler (hugin#267) — the #163 evidence-identity
+     * shape, carrying `lane: "one-shot" | "harness"` plus whatever other
+     * delegation fields the caller has (model/node/verifier/outcome). Omit
+     * entirely for terminal outcomes the sampler never touched. */
+    delegation?: TerminalOutcomeEvent["payload"]["delegation"];
     occurredAt: string;
   }): Promise<AppendResult<TerminalOutcomeEvent>> {
     const naturalKey: RegistryNaturalKey = {
@@ -336,6 +341,8 @@ export class LearningRegistryStore {
           ? { repositoryOutcomeState: input.repositoryOutcomeState } : {}),
         ...(input.attemptOutcomeRef !== undefined
           ? { attemptOutcomeRef: input.attemptOutcomeRef } : {}),
+        ...(input.delegation !== undefined
+          ? { delegation: input.delegation } : {}),
       },
     });
     return appendRegistryEvent(this.munin, event, recordedAt);
@@ -531,6 +538,38 @@ export class LearningRegistryStore {
     const events = reads
       .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
       .map((entry) => registryEventSchema.parse(JSON.parse(entry.content)))
+      .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.eventId.localeCompare(b.eventId));
+    return { events, truncated: paged.truncated };
+  }
+
+  /**
+   * Cross-task read of every terminal-outcome event recorded in one UTC
+   * occurrence period (#267's harness-lane comparison report and any future
+   * cross-task reader). This reuses exactly the partition tag every
+   * terminal-outcome event is already stamped with at append time
+   * (`registryPartitionTag`), the same mechanism `findPartitionOrphans`
+   * relies on internally — no second index to keep in sync. Content-blind:
+   * this returns full registry events (opaque ids/refs/digests only, never
+   * prompt/response bytes), same as `listEventsForTask`.
+   */
+  async listTerminalOutcomesForPeriod(
+    occurrencePeriodUtc: string,
+  ): Promise<{ events: TerminalOutcomeEvent[]; truncated: boolean }> {
+    const tag = registryPartitionTag("terminal-outcome", occurrencePeriodUtc);
+    const paged = await queryAllMuninEntries(
+      this.munin,
+      { tags: [REGISTRY_EVENT_TAG, tag], entry_type: "state" },
+      this.partitionCompletenessQueryBudget,
+    );
+    const reads = await Promise.all(
+      paged.results
+        .filter((result) => typeof result.key === "string" && result.key.startsWith("reg-"))
+        .map((result) => this.munin.read(result.namespace, result.key as string)),
+    );
+    const events = reads
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+      .map((entry) => registryEventSchema.parse(JSON.parse(entry.content)))
+      .filter((event): event is TerminalOutcomeEvent => event.recordKind === "terminal-outcome")
       .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.eventId.localeCompare(b.eventId));
     return { events, truncated: paged.truncated };
   }
