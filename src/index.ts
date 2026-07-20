@@ -192,7 +192,12 @@ import {
   type TaskSubmissionProvenance,
 } from "./task-signing.js";
 import { consultSkillLane } from "./skill/skill-lane-dispatch.js";
-import { readBrokerEnv, startBroker, type RunningBroker } from "./broker/server.js";
+import { readBrokerEnv, type RunningBroker } from "./broker/server.js";
+import {
+  startBrokerWithRetry,
+  computeBrokerHealthField,
+  type BrokerBindStatus,
+} from "./broker/bind-retry.js";
 import { brokerExecutorCapabilities } from "./broker/executor-capabilities.js";
 import { BrokerTaskStore, parseCanonicalEnvelope } from "./broker/task-store.js";
 import {
@@ -548,6 +553,14 @@ let currentDeliveryAbort: AbortController | null = null;
 let currentReconcileAbort: AbortController | null = null;
 let server: Server;
 let runningBroker: RunningBroker | null = null;
+// Live broker bind status for /health (issue #252). null until the retry
+// loop's first onStatus callback fires (or forever, if the broker is
+// disabled — computeBrokerHealthField never reads it in that case).
+let brokerBindStatus: BrokerBindStatus | null = null;
+// Cancels a pending broker bind retry on shutdown so it doesn't keep the
+// process alive on a dangling timer or bind an orphaned listener after
+// shutdown has already begun.
+let brokerBindAbort: AbortController | null = null;
 let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
 let cancelWatchTimer: ReturnType<typeof setInterval> | null = null;
 let leaseReaperTimer: ReturnType<typeof setInterval> | null = null;
@@ -6174,6 +6187,15 @@ app.get("/health", (_req, res) => {
           available: false,
           state: "checking",
         },
+    // Broker bind visibility (issue #252): distinguishes intentionally
+    // disabled (no HUGIN_BROKER_KEYS) from configured-but-not-listening
+    // (bind failed / still retrying / permanently failed) from listening.
+    // Top-level `status` deliberately stays "ok" here — existing
+    // Heimdall/monitor consumers key off it for "the dispatcher process is
+    // up", which remains true even when the broker is degraded. Consumers
+    // that care about the broker specifically should key off
+    // `broker.degraded` (or `broker.state`), not top-level `status`.
+    broker: computeBrokerHealthField(brokerEnv.enabled, brokerBindStatus),
   });
 });
 
@@ -6205,6 +6227,10 @@ async function shutdown(signal: string): Promise<void> {
 
   // Release the port immediately so a replacement instance can start.
   server?.close();
+  // Cancel a pending broker bind retry (issue #252) — otherwise a queued
+  // backoff timer keeps a reference alive and a late successful bind would
+  // race the shutdown (handled defensively in the .then() above too).
+  brokerBindAbort?.abort();
   if (runningBroker) {
     runningBroker.close().catch((err) => {
       console.error(
@@ -6386,29 +6412,52 @@ if (brokerEnv.enabled) {
   const executorCapabilities = brokerExecutorCapabilities({
     homeserverEnabled: homeserverReady,
   });
-  startBroker({
-    host: brokerEnv.host,
-    port: brokerEnv.port,
-    keys: brokerEnv.keys,
-    learningStore,
-    deps: { taskStore, journal, idempotency, executorCapabilities },
-  })
-    .then((rb) => {
-      runningBroker = rb;
-      console.log(
-        `Broker endpoint: http://${brokerEnv.host}:${brokerEnv.port}/v1/delegate/* (principals: ${Object.keys(brokerEnv.keys).join(", ")})`,
-      );
-      console.log(
-        `Broker canonical lifecycle: Munin dispatcher (legacy journal read-only: ${brokerHome})`,
-      );
-      console.log(`Broker M5 delegate executor: ${homeserverReady ? "enabled" : "disabled"}`);
-    })
-    .catch((err) => {
-      console.error(
-        `Failed to start broker: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    });
+  // Bounded-retry bind (issue #252): a not-yet-assigned tailnet IP
+  // (HUGIN_BROKER_HOST) at boot fails EADDRNOTAVAIL until tailscaled
+  // assigns it — retry transient failures with backoff rather than
+  // degrading to "dispatcher without broker" on the first attempt.
+  // Permanent errors (EADDRINUSE/EACCES) fail fast without retrying.
+  // brokerBindStatus is updated on every transition so /health reflects
+  // the live state instead of only learning about success after the fact.
+  brokerBindAbort = new AbortController();
+  startBrokerWithRetry(
+    {
+      host: brokerEnv.host,
+      port: brokerEnv.port,
+      keys: brokerEnv.keys,
+      learningStore,
+      deps: { taskStore, journal, idempotency, executorCapabilities },
+    },
+    {
+      signal: brokerBindAbort.signal,
+      onStatus: (status) => {
+        brokerBindStatus = status;
+      },
+      onLog: (level, message) => {
+        if (level === "error") console.error(`[broker] ${message}`);
+        else if (level === "warn") console.warn(`[broker] ${message}`);
+        else console.log(`[broker] ${message}`);
+      },
+    },
+  ).then((rb) => {
+    if (!rb) return; // permanently failed, retries exhausted, or cancelled — already logged/reported
+    if (shuttingDown) {
+      // Bound while shutdown was already in progress (retry sleep raced the
+      // shutdown signal): don't leak an open listener into a dying process.
+      rb.close().catch(() => {});
+      return;
+    }
+    runningBroker = rb;
+    console.log(
+      `Broker endpoint: http://${brokerEnv.host}:${brokerEnv.port}/v1/delegate/* (principals: ${Object.keys(brokerEnv.keys).join(", ")})`,
+    );
+    console.log(
+      `Broker canonical lifecycle: Munin dispatcher (legacy journal read-only: ${brokerHome})`,
+    );
+    console.log(`Broker M5 delegate executor: ${homeserverReady ? "enabled" : "disabled"}`);
+  });
 } else {
+  brokerBindStatus = null;
   console.log("Broker: disabled (set HUGIN_BROKER_KEYS to enable)");
 }
 
