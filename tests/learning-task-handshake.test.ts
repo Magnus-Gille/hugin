@@ -825,5 +825,42 @@ describe("LearningTaskContract v1 producer handshake", () => {
       expect(() => validateLearningTaskGatewayEcho(echo, stamp, new Date("2026-07-19T10:00:04Z")))
         .toThrow(/admission clock/);
     });
+
+    // The stamp-context ordering (attempt/preflight/stamp) repeats the same
+    // cross-host comparisons and must carry the same tolerance — caught live
+    // by joint-smoke r6 after the fetch-time check was fixed (#253).
+    const stampWith = (advertisedAtOverride: string, expiresAtOverride?: string) => {
+      const ctx = context();
+      ctx.preflight.response.advertised_at = advertisedAtOverride;
+      ctx.preflight.response.expires_at = expiresAtOverride
+        ?? new Date(Date.parse(advertisedAtOverride) + 15 * 60 * 1_000).toISOString();
+      return () => buildLearningTaskRequestStamp({
+        context: ctx,
+        taskType: "summarize",
+        rawTaskText: "  Summarize the fixture incident report.\n",
+        renderedPrompt: ctx.attempt.renderedPrompt,
+      });
+    };
+
+    it("stamp context accepts a gateway advertisement clock ahead of the stamp within tolerance", () => {
+      // stampedAt fixture is 10:00:02.250; advertisement 1.25s later on the gateway clock.
+      expect(stampWith("2026-07-19T10:00:03.500Z")).not.toThrow();
+    });
+
+    it("stamp context accepts a gateway advertisement clock behind the request within tolerance", () => {
+      // requested_at fixture is 10:00:01.500; advertisement 1.3s earlier on the gateway clock.
+      expect(stampWith("2026-07-19T10:00:00.200Z")).not.toThrow();
+    });
+
+    it("stamp context rejects a gateway advertisement clock beyond the tolerance", () => {
+      expect(stampWith("2026-07-19T10:00:05.000Z")).toThrow(/clocks are out of order/);
+    });
+
+    it("stamp context tightens the expiry edge instead of extending it", () => {
+      // stamped (10:00:02.250) is before expires (10:00:03.000) but NOT before
+      // expires minus tolerance — the window must shrink, never grow.
+      expect(stampWith("2026-07-19T10:00:02.000Z", "2026-07-19T10:00:03.000Z"))
+        .toThrow(/clocks are out of order/);
+    });
   });
 });

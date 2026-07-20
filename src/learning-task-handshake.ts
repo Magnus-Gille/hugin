@@ -915,9 +915,14 @@ export function buildLearningTaskRequestStamp(input: {
     // A previously authenticated request/advertisement pair may be cached
     // before this attempt. Its own request must still precede advertisement,
     // and the advertisement must remain fresh at this attempt's stamp time.
-    && requested <= advertised
-    && advertised <= stamped
-    && stamped < expires)) {
+    // `requested`/`stamped` are Hugin-host clocks; `advertised`/`expires` are
+    // gateway-host clocks, so those orderings carry the bounded cross-host
+    // skew tolerance (#253, same as fetchLearningTaskPreflight and the
+    // gateway-echo check) — with the expiry edge tightened, never extended.
+    // The same-host chain above stays exact.
+    && requested - LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS <= advertised
+    && advertised <= stamped + LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS
+    && stamped < expires - LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS)) {
     throw new LearningTaskHandshakeError("LearningTaskContract attempt/preflight/stamp clocks are out of order");
   }
   if (expires - advertised > LEARNING_TASK_PREFLIGHT_TTL_MS
