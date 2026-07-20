@@ -25,6 +25,11 @@ const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 const isoTimestampSchema = z.string().datetime({ offset: true });
 const metadataIdSchema = z.string().min(1).max(160);
 
+// `.passthrough()` (not `.strict()`): the gateway owns this contract and may
+// add fields under the same `schema_version` (gille-inference#27 added six
+// coverage keys the same day it shipped). A client must not hard-fail on
+// unknown-but-additive fields it does not yet understand (hugin#258); every
+// field the client actually depends on remains required and validated below.
 export const taskExposureCoverageSchema = z.object({
   coverage_complete: z.boolean(),
   from: isoTimestampSchema,
@@ -37,8 +42,12 @@ export const taskExposureCoverageSchema = z.object({
   historical_rows_skipped_inexact: z.number().int().nonnegative(),
   incomplete_before: isoTimestampSchema,
   incomplete_reasons: z.array(z.string().min(1).max(500)).max(64),
-}).strict();
+}).passthrough();
 
+// `identity_kind` and `unseen_claim_supported` are #27's fail-closed holdout
+// signal: they are recognized (typed) optional fields, not merely passed
+// through, so `daily-task-exam-factory.ts` can read them. Any other unknown
+// key (e.g. `includes_legacy_inexact`) is tolerated via `.passthrough()`.
 export const taskExposureLookupResultSchema = z.object({
   fingerprint_sha256: sha256Schema,
   seen: z.boolean(),
@@ -47,14 +56,21 @@ export const taskExposureLookupResultSchema = z.object({
   lanes: z.array(z.string().min(1).max(80)).max(64),
   model_ids: z.array(metadataIdSchema).max(256),
   harness_ids: z.array(metadataIdSchema).max(256),
-}).strict();
+  identity_kind: z.string().min(1).max(160).optional(),
+  unseen_claim_supported: z.boolean().optional(),
+}).passthrough();
 
+// Tolerant at the top level too, for consistency: the observed #27 payload
+// only added nested coverage/result keys plus the already-modeled
+// `fingerprint_version`, but a client that will not `.strict()`-parse a
+// response it does not own should apply that rule uniformly rather than
+// re-litigate it the next time the gateway adds a top-level field.
 const taskExposureLookupResponseSchema = z.object({
   schema_version: z.literal(1),
   fingerprint_version: z.literal(TASK_EXPOSURE_FINGERPRINT_VERSION),
   coverage: taskExposureCoverageSchema,
   results: z.array(taskExposureLookupResultSchema).min(1).max(TASK_EXPOSURE_LOOKUP_MAX),
-}).strict();
+}).passthrough();
 
 export type TaskExposureCoverage = z.infer<typeof taskExposureCoverageSchema>;
 export type TaskExposureLookupResult = z.infer<typeof taskExposureLookupResultSchema>;

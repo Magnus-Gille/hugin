@@ -143,6 +143,7 @@ function snapshot(fingerprint: string, input: {
   from?: string;
   through?: string;
   lanes?: string[];
+  unseenClaimSupported?: boolean;
 } = {}): TaskExposureSnapshot {
   const seen = input.seen ?? false;
   return {
@@ -168,6 +169,7 @@ function snapshot(fingerprint: string, input: {
       lanes: seen ? ["chat"] : [],
       model_ids: seen ? ["mellum"] : [],
       harness_ids: seen ? ["openai-chat"] : [],
+      ...(input.unseenClaimSupported === undefined ? {} : { unseen_claim_supported: input.unseenClaimSupported }),
     },
   };
 }
@@ -475,6 +477,27 @@ describe("daily task exam factory", () => {
     expect(candidate.crossClientExposure.coverage?.through).toBe("2026-07-14T12:00:00.000Z");
     expect(candidate.reasons).not.toContain("requires-cross-client-exposure-check-before-holdout-seal");
     expect(candidate.reasons).toContain("independent-verifier-required");
+  });
+
+  it("never clears an unseen result as fresh when the gateway cannot vouch for the claim (unseen_claim_supported: false)", () => {
+    const manifest = buildDailyExamManifest({
+      generatedAt: "2026-07-14T12:00:00.000Z",
+      historyComplete: true,
+      sources: [source("claude")],
+    });
+    const digest = manifest.candidates[0]!.source.promptSha256!;
+    const finalized = applyCrossClientExposure(manifest, {
+      snapshots: new Map([[digest, snapshot(digest, { unseenClaimSupported: false })]]),
+    });
+    const candidate = finalized.candidates[0]!;
+
+    // Otherwise this exact snapshot (complete coverage, task inside the
+    // window, all required lanes present) would clear to unseen-covered.
+    expect(candidate.lane).toBe("quarantine");
+    expect(candidate.readiness).toBe("quarantined");
+    expect(candidate.crossClientExposure.state).not.toBe("unseen-covered");
+    expect(candidate.reasons).toContain("cross-client-unseen-claim-unsupported");
+    expect(candidate.reasons).not.toContain("independent-verifier-required");
   });
 
   it("routes seen=true to regression even when coverage is incomplete", () => {
