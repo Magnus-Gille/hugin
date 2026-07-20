@@ -4,6 +4,15 @@ import {
   LearningRegistryStore,
   RegistryNaturalKeyConflictError,
   isEligibleForCertification,
+  submissionEventSchema,
+  buildMembership,
+  deriveEventId,
+  registryEventNamespace,
+  registryEventKey,
+  registryPartitionTag,
+  REGISTRY_EVENT_TAG,
+  LEARNING_REGISTRY_SCHEMA_VERSION,
+  type RegistryNaturalKey,
 } from "../src/learning-registry-store.js";
 
 interface StoredEntry {
@@ -543,5 +552,81 @@ describe("LearningRegistryStore — partition/high-water proofs", () => {
     const verdict = await store.verifyPartitionProof(selfAssembledSubset);
     expect(verdict.valid).toBe(false);
     expect(verdict.reason).toMatch(/partial/);
+  });
+
+  it("degrades to partial when a persisted event never reached the high-water document (crash before bumpHighWater)", async () => {
+    const client = munin();
+    const store = new LearningRegistryStore(client);
+
+    // A normal, healthy event first, so the partition has a real high-water doc.
+    await store.recordSubmission({
+      taskId: "task-1",
+      taskOutcomeRef: ref("tasks/task-1", "result-structured"),
+      occurredAt: "2024-03-01T00:00:00.000Z",
+    });
+
+    // Simulate the crash window `appendRegistryEvent` cannot fully close: its
+    // `munin.write` for the event succeeded, but the process died before
+    // `bumpHighWater` folded it into the high-water document, and it was
+    // never redelivered (so the idempotent skip-if-already-present path in
+    // `bumpHighWater` never got a chance to heal it). We reproduce that exact
+    // persisted state directly against the fake store, bypassing the
+    // LearningRegistryStore API entirely — the store itself never leaves this
+    // window open on a call that runs to completion.
+    const orphanNaturalKey: RegistryNaturalKey = { recordKind: "submission", taskId: "task-2" };
+    const orphanEvent = submissionEventSchema.parse({
+      schemaVersion: LEARNING_REGISTRY_SCHEMA_VERSION,
+      eventId: deriveEventId(orphanNaturalKey),
+      taskId: "task-2",
+      recordKind: "submission",
+      membership: buildMembership({ naturalKey: orphanNaturalKey, issuedAt: "2024-03-01T00:00:00.000Z" }),
+      occurredAt: "2024-03-01T00:00:00.000Z",
+      recordedAt: "2024-03-01T00:00:00.000Z",
+      payload: { taskOutcomeRef: ref("tasks/task-2", "result-structured"), originComponent: "hugin" },
+    });
+    await client.write(
+      registryEventNamespace("task-2"),
+      registryEventKey(orphanEvent.eventId),
+      JSON.stringify(orphanEvent),
+      [REGISTRY_EVENT_TAG, "registry-kind:submission", registryPartitionTag("submission", "2024-03")],
+      undefined,
+      "internal",
+      true,
+    );
+
+    const proof = await store.issuePartitionProof("submission", "2024-03");
+    expect(proof.status).toBe("partial");
+    expect(proof.partialReason).toMatch(/not present in the high-water record/);
+    expect(proof.partialReason).toContain(orphanEvent.eventId);
+    expect(isEligibleForCertification(proof)).toBe(false);
+
+    // The pre-existing per-member existence check alone would have missed
+    // this — every doc-claimed member (task-1's submission) genuinely exists
+    // and recomputes correctly. Only the reverse (tag-query) direction catches it.
+  });
+
+  it("degrades to partial, rather than silently certifying, when the completeness tag query truncates", async () => {
+    const client = munin();
+    // Force the completeness cross-check's own query budget down to something
+    // two real members will overflow, without needing thousands of rows.
+    const store = new LearningRegistryStore(client, {
+      partitionCompletenessQueryBudget: { maxPages: 1, maxResults: 1 },
+    });
+
+    await store.recordSubmission({
+      taskId: "task-1",
+      taskOutcomeRef: ref("tasks/task-1", "result-structured"),
+      occurredAt: "2024-03-01T00:00:00.000Z",
+    });
+    await store.recordSubmission({
+      taskId: "task-2",
+      taskOutcomeRef: ref("tasks/task-2", "result-structured"),
+      occurredAt: "2024-03-02T00:00:00.000Z",
+    });
+
+    const proof = await store.issuePartitionProof("submission", "2024-03");
+    expect(proof.status).toBe("partial");
+    expect(proof.partialReason).toMatch(/truncat/i);
+    expect(isEligibleForCertification(proof)).toBe(false);
   });
 });

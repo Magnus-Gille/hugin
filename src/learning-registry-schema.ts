@@ -387,7 +387,13 @@ export const registryHighWaterDocSchema = z.object({
   counterOwner: z.literal(LEARNING_REGISTRY_COUNTER_OWNER),
   occurrencePeriodUtc: occurrencePeriodSchema,
   highWaterSeq: z.number().int().nonnegative(),
-  /** Append-ordered members currently known in this partition. */
+  /**
+   * Append-ordered members currently known in this partition. This array
+   * grows unboundedly for the life of the partition (one UTC month per
+   * counter) — acceptable at current per-period volumes, but revisit (e.g. a
+   * paged or summarized document) if a single period ever approaches a few
+   * thousand events.
+   */
   members: z.array(registryPartitionMemberSchema),
   /** Running hash chain over ordered event digests — tamper-evident. */
   chainDigest: z.string().regex(/^[0-9a-f]{64}$/),

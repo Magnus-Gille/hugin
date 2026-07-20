@@ -32,7 +32,7 @@
  */
 
 import { MuninWriteRejectedError, type MuninClient } from "./munin-client.js";
-import { queryAllMuninEntries } from "./munin-pagination.js";
+import { queryAllMuninEntries, type MuninPaginationBudget } from "./munin-pagination.js";
 import {
   buildMembership,
   canonicalEqual,
@@ -96,6 +96,15 @@ export interface AppendResult<E extends RegistryEvent = RegistryEvent> {
 const REGISTRY_PARTITION_NAMESPACE = "learning-registry/partitions";
 const REGISTRY_PARTITION_DOC_TAG = "learning-registry-partition";
 const HIGH_WATER_CAS_ATTEMPTS = 8;
+/** Cheap existence probe used only to tell "genuinely zero events" apart from
+ * a missing/corrupt high-water doc — doesn't need to enumerate anything. */
+const PARTITION_EXISTENCE_PROBE_BUDGET: MuninPaginationBudget = { maxPages: 2, maxResults: 1 };
+/** Full enumeration budget for the completeness cross-check below. Proof
+ * issuance is period-close-frequency work (#241 is expected to call this
+ * roughly once per UTC month per counter), not the hot append path, so a
+ * generous page budget is an acceptable cost for actually proving
+ * completeness rather than only self-consistency. */
+const PARTITION_COMPLETENESS_QUERY_BUDGET: MuninPaginationBudget = { maxPages: 200, maxResults: 5_000 };
 
 function partitionDocKey(counter: RegistryRecordKind, occurrencePeriodUtc: string): string {
   return `${counter}-${occurrencePeriodUtc}`;
@@ -216,16 +225,23 @@ async function appendRegistryEvent<E extends RegistryEvent>(
 
 export interface LearningRegistryStoreOptions {
   now?: () => string;
+  /** Override the completeness cross-check's query budget — mainly for
+   * tests that want to force an honest truncation without enumerating
+   * thousands of rows. Defaults to `PARTITION_COMPLETENESS_QUERY_BUDGET`. */
+  partitionCompletenessQueryBudget?: MuninPaginationBudget;
 }
 
 export class LearningRegistryStore {
   private readonly now: () => string;
+  private readonly partitionCompletenessQueryBudget: MuninPaginationBudget;
 
   constructor(
     private readonly munin: MuninClient,
     options: LearningRegistryStoreOptions = {},
   ) {
     this.now = options.now ?? (() => new Date().toISOString());
+    this.partitionCompletenessQueryBudget =
+      options.partitionCompletenessQueryBudget ?? PARTITION_COMPLETENESS_QUERY_BUDGET;
   }
 
   // -- capture-time membership events -------------------------------------
@@ -545,6 +561,52 @@ export class LearningRegistryStore {
   }
 
   /**
+   * `recomputeChain` only proves that every event a high-water document
+   * *claims* as a member actually exists and belongs to this partition — it
+   * cannot see an event that was durably written but never folded in. That
+   * gap is real: `appendRegistryEvent` persists the event first and folds it
+   * into the high-water document second (`bumpHighWater`); a crash between
+   * those two writes leaves a durably-written, correctly-tagged event that
+   * `bumpHighWater`'s idempotent skip-if-already-present check will only
+   * ever fix on a *later redelivery of that same natural key* — which may
+   * never come. Without this reverse check, `issuePartitionProof` could
+   * certify a partition `"complete"` while silently omitting a persisted
+   * event: exactly the "aggregate looks internally consistent but omits an
+   * attempt" failure this registry exists to prevent.
+   *
+   * This queries every event tagged with this partition, cross-repository of
+   * task namespace, and reports any whose id is not already in
+   * `knownMemberIds`. An honest truncation (the tag query's own budget
+   * exhausted before enumerating everything) is reported as its own failure
+   * rather than silently treated as "no orphans found".
+   */
+  private async findPartitionOrphans(
+    counter: RegistryRecordKind,
+    occurrencePeriodUtc: string,
+    knownMemberIds: ReadonlySet<string>,
+  ): Promise<{ ok: true; orphanEventIds: string[] } | { ok: false; reason: string }> {
+    const probe = await queryAllMuninEntries(
+      this.munin,
+      { tags: [registryPartitionTag(counter, occurrencePeriodUtc)] },
+      this.partitionCompletenessQueryBudget,
+    );
+    if (probe.truncated) {
+      return {
+        ok: false,
+        reason: "partition completeness tag query truncated before enumerating every tagged event",
+      };
+    }
+    const orphanEventIds = probe.results
+      // The high-water document itself carries this same partition tag but
+      // lives in a different namespace/key shape (`counter-period`, not
+      // `reg-<hash>`) — exclude it so it never mistakes itself for an orphan.
+      .filter((result) => typeof result.key === "string" && result.key.startsWith("reg-"))
+      .map((result) => result.key as string)
+      .filter((eventId) => !knownMemberIds.has(eventId));
+    return { ok: true, orphanEventIds };
+  }
+
+  /**
    * Issue an authoritative statement that partition (counter, period) is
    * complete up to the registry's own recorded high-water mark — or, when no
    * events ever occurred, an authenticated confirmation of a legitimate
@@ -562,7 +624,7 @@ export class LearningRegistryStore {
       const probe = await queryAllMuninEntries(
         this.munin,
         { tags: [registryPartitionTag(counter, occurrencePeriodUtc)] },
-        { maxPages: 2, maxResults: 1 },
+        PARTITION_EXISTENCE_PROBE_BUDGET,
       );
       if (probe.results.length > 0 || probe.truncated) {
         return registryPartitionProofSchema.parse({
@@ -607,6 +669,45 @@ export class LearningRegistryStore {
           : recompute.reason,
       });
     }
+    // The document is internally consistent — but internal consistency alone
+    // cannot rule out an event that was durably written and correctly tagged
+    // yet never folded into `doc.members` (see `findPartitionOrphans`). Cross
+    // -check the other direction before certifying "complete".
+    const knownMemberIds = new Set(doc.members.map((member) => member.eventId));
+    const orphanCheck = await this.findPartitionOrphans(counter, occurrencePeriodUtc, knownMemberIds);
+    if (!orphanCheck.ok) {
+      return registryPartitionProofSchema.parse({
+        schemaVersion: LEARNING_REGISTRY_SCHEMA_VERSION,
+        counter,
+        counterOwner: LEARNING_REGISTRY_COUNTER_OWNER,
+        occurrencePeriodUtc,
+        status: "partial",
+        highWaterSeq: doc.highWaterSeq,
+        members: doc.members,
+        chainDigest: doc.chainDigest,
+        issuedAt,
+        partialReason: orphanCheck.reason,
+      });
+    }
+    if (orphanCheck.orphanEventIds.length > 0) {
+      // Keep well under the proof's 256-char partialReason cap even when
+      // every event id is a full "reg-<32 hex>" string.
+      const preview = orphanCheck.orphanEventIds.slice(0, 3).join(", ");
+      const suffix = orphanCheck.orphanEventIds.length > 3 ? ", ..." : "";
+      return registryPartitionProofSchema.parse({
+        schemaVersion: LEARNING_REGISTRY_SCHEMA_VERSION,
+        counter,
+        counterOwner: LEARNING_REGISTRY_COUNTER_OWNER,
+        occurrencePeriodUtc,
+        status: "partial",
+        highWaterSeq: doc.highWaterSeq,
+        members: doc.members,
+        chainDigest: doc.chainDigest,
+        issuedAt,
+        partialReason:
+          `${orphanCheck.orphanEventIds.length} tagged event(s) not present in the high-water record: ${preview}${suffix}`,
+      });
+    }
     return registryPartitionProofSchema.parse({
       schemaVersion: LEARNING_REGISTRY_SCHEMA_VERSION,
       counter,
@@ -643,7 +744,7 @@ export class LearningRegistryStore {
       const probe = await queryAllMuninEntries(
         this.munin,
         { tags: [registryPartitionTag(parsed.counter, parsed.occurrencePeriodUtc)] },
-        { maxPages: 2, maxResults: 1 },
+        PARTITION_EXISTENCE_PROBE_BUDGET,
       );
       if (probe.results.length > 0 || probe.truncated) {
         return { valid: false, reason: "tagged events exist despite no high-water record; cannot confirm empty" };
