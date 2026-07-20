@@ -39,6 +39,16 @@ also be canonically identical; reusing an id with a different clock or extension
 field is an identity collision. A changed native-v1 verdict from the same
 reviewer for the same binding remains a conflict.
 
+Native-v2 request recovery also accounts for the server-owned clock: while each
+CAS snapshot is held, Hugin advances a first correction to at least one
+millisecond after its immutable predecessor. If a successful response is lost
+and the authenticated caller retries the exact correction later, Hugin matches
+the existing successor canonically while ignoring only `ratedAt` and its derived
+`receiptId`, returns success, and preserves the first stored artifact byte for
+byte. A changed verdict, reason, rubric, verifier, failure, configuration,
+reference, binding, reviewer, task, or attempt remains a conflicting fork. The
+same-ID/different-artifact collision check still runs first and remains strict.
+
 This depends on the explicit Munin create-if-absent API from Munin #211. Hugin
 does not invent a timestamp and does not assume that candidate is deployed:
 deploy Munin first, verify `memory_write` accepts `create_if_absent: true` and
@@ -83,18 +93,19 @@ preserving every native-v1 object unchanged. Both `quality:receipt-v1` and
 
 ### Activation boundary: authoritative attempts
 
-The native-v2 schema, fold, storage, and harvest path are implemented, but the
-authenticated rate endpoint currently rejects every `correction` with HTTP 409.
-Hugin does not yet persist an authoritative execution-attempt id in its task
-result. Its claim-time MCP session UUID is process-local, while startup and lease
-recovery can terminalize the task after that process disappears. The task id is
-the logical task instance and must not be copied into `attemptId` as invented
-provenance.
+The authenticated rate endpoint activates native v2 only when the exact current
+`result-structured` document passes Hugin's full schema and contains
+`runtimeMetadata.learningTask` with `state: "m5-admitted"` and
+`evidenceAccepted: true`. That nested schema cross-validates the logical task,
+authoritative attempt, request stamp, authenticated gateway echo, digests, and
+durable start/prepared/replay/outcome/result references before the handler may
+derive `attemptId`.
 
-Hugin issue #240 owns starting and durably identifying the attempt. Once that
-evidence is present in the exact structured result, the rate handler may bind
-native v2 to it. Callers cannot supply an attempt id themselves. Until then,
-native v1 remains fully operational and v2 fails closed.
+Callers cannot supply or override an attempt id, and Hugin never copies the
+logical task id into `attemptId`. Legacy results, missing or malformed learning
+evidence, non-admitted attempts, unaccepted evidence, and task/ref mismatches
+return HTTP 409 without a feedback write. Native v1 remains byte/field compatible
+and available for every otherwise-rateable terminal task.
 
 The `quality-correction-group-jcs-v1` key uses a dedicated RFC 8785 canonicalizer:
 ECMAScript number/string serialization, raw UTF-16 property ordering, and

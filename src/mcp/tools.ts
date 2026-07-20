@@ -152,7 +152,7 @@ export const rateInputShape = {
   reviewer_role: z.enum(["independent", "self"]).optional()
     .describe("Authenticated reviewer attestation. Same-task owners cannot claim independent."),
   correction: qualityCorrectionRequestSchema.optional().describe(
-    "Append-only native v2 correction shape. Names the predecessor and carries content-blind rubric, failure, configuration, and successor provenance. The Broker currently fails closed until authoritative execution-attempt evidence lands; callers cannot provide or infer it.",
+    "Append-only native v2 correction shape. Names the predecessor and carries content-blind rubric, failure, configuration, and successor provenance. The Broker derives the attempt only from accepted authoritative LearningTask evidence in the exact structured result; callers cannot provide or infer it.",
   ),
   expected_binding: z.object({
     task_document_sha256: z.string().regex(/^[0-9a-f]{64}$/),
