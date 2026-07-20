@@ -532,6 +532,15 @@ function applySnapshot(candidate: DailyExamCandidate, snapshot: TaskExposureSnap
     return;
   }
 
+  // #27's fail-closed signal: when the gateway itself cannot vouch for its
+  // own negative match, that match must never be treated as a fresh/eligible
+  // holdout. Quarantine before evaluating coverage completeness/window/lanes.
+  if (snapshot.result.unseen_claim_supported === false) {
+    candidate.crossClientExposure.evidence = ["m5-unseen-claim-unsupported"];
+    quarantine(candidate, "cross-client-unseen-claim-unsupported");
+    return;
+  }
+
   const createdAtIsIso = isoTimestampSchema.safeParse(candidate.source.taskCreatedAt).success;
   const createdMs = Date.parse(candidate.source.taskCreatedAt);
   const fromMs = Date.parse(snapshot.coverage.from);
