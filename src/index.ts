@@ -17,7 +17,8 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt, PUBLICATION_FAILED_TAG } from "./task-helpers.js";
+import { persistPublicationFailure } from "./publication-recovery.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
 import {
@@ -5341,6 +5342,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // Post-task: finalize branch — auto-commit leftovers, push, open PR (#47)
     let prUrl: string | undefined;
     let repositoryChange: StructuredTaskResult["repositoryChange"];
+    // Issue #225: a publication (push/PR) failure AFTER the paid model work
+    // completed must never strand the exact commit as invisible service-log
+    // noise. This tag survives the terminal status write below so an
+    // operator can discover and retry it without a rerun.
+    let publicationFailureTag: string | undefined;
     if (ok && !isCancelled && branchResult.action === "created" && branchResult.branchName) {
       const prBody = [
         `Automated changes from Hugin task \`${taskId}\`.`,
@@ -5369,6 +5375,28 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         await munin.log(taskNs, `PR created: ${prUrl}`);
       } else if (finalizeResult.action === "push-failed") {
         console.warn(`Post-task branch finalization failed for ${taskNs}: ${finalizeResult.error}`);
+        publicationFailureTag = PUBLICATION_FAILED_TAG;
+        try {
+          await persistPublicationFailure(munin, {
+            taskId,
+            taskNamespace: taskNs,
+            workingDir: task.workingDir,
+            branchName: finalizeResult.branchName ?? branchResult.branchName,
+            baseBranch: branchResult.baseBranch ?? "main",
+            baseCommit: repositoryChange?.baseCommit ?? branchResult.baseCommit ?? "",
+            headCommit: repositoryChange?.headCommit,
+            prBody,
+            allowedEgressHosts: egressPolicy.allowedHosts,
+            failureReason: finalizeResult.error ?? "publication failed",
+            classification: taskClassification,
+          });
+        } catch (err) {
+          // The durable record is best-effort UX for recovery, not the
+          // source of truth — result-structured's `publication-failed`
+          // repositoryOutcome (written below) is. Never let this throw
+          // strand the task off its terminal write.
+          console.error(`[publication-recovery] failed to persist durable record for ${taskNs}:`, err);
+        }
       }
     }
 
@@ -5898,17 +5926,23 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         return { hadTask: true, queueDepth };
       }
     } else {
-      // Append the distinct failure tag (issue #129) AFTER buildTerminalStatusTags,
-      // whose persistent-tag filter would otherwise drop a `failure:*` tag.
+      // Append the distinct failure tag (issue #129) and the publication
+      // failure tag (issue #225) AFTER buildTerminalStatusTags, whose
+      // persistent-tag filter would otherwise drop tags not already present
+      // on the pre-task entry.
       const terminalTags = buildTerminalStatusTags(
         ok ? "completed" : "failed",
         finalizeBaseTags,
         `runtime:${task.runtime}`,
       );
+      const extraTerminalTags = [
+        ...(failureClassification ? [failureClassification.tag] : []),
+        ...(publicationFailureTag ? [publicationFailureTag] : []),
+      ];
       const finalizeOutcome = await finalizeTaskCompletion(munin, taskNs, {
         statusContent: entry.content,
-        terminalTags: failureClassification
-          ? [...terminalTags, failureClassification.tag]
+        terminalTags: extraTerminalTags.length > 0
+          ? [...terminalTags, ...extraTerminalTags]
           : terminalTags,
         classification: taskClassification,
         // Single-owner CAS for runtime-owned delivery (#68): if a startup

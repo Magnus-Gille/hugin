@@ -58,6 +58,55 @@ describe("structured task result schema", () => {
     expect(result.repositoryChange).toBeUndefined();
   });
 
+  it.each(["publication-recovered", "publication-abandoned"] as const)(
+    "accepts the durable publication-recovery outcome %s with its required base evidence (#225)",
+    (state) => {
+      const result = buildStructuredTaskResult({
+        schemaVersion: 1,
+        taskId: "recovered-1",
+        taskNamespace: "tasks/recovered-1",
+        lifecycle: "completed",
+        outcome: "completed",
+        runtime: "codex",
+        executor: "codex-spawn",
+        resultSource: "stdout",
+        exitCode: 0,
+        completedAt: "2026-07-16T12:00:00Z",
+        bodyKind: "response",
+        bodyText: "ok",
+        ...(state === "publication-recovered"
+          ? { prUrl: "https://github.com/Magnus-Gille/cassette/pull/28" }
+          : {}),
+        repositoryOutcome: {
+          state,
+          baseBranch: "master",
+          baseCommit: "a".repeat(40),
+        },
+      });
+      expect(result.repositoryOutcome?.state).toBe(state);
+    },
+  );
+
+  it("rejects a publication-recovery outcome missing its base evidence (#225)", () => {
+    expect(() =>
+      buildStructuredTaskResult({
+        schemaVersion: 1,
+        taskId: "recovered-2",
+        taskNamespace: "tasks/recovered-2",
+        lifecycle: "completed",
+        outcome: "completed",
+        runtime: "codex",
+        executor: "codex-spawn",
+        resultSource: "stdout",
+        exitCode: 0,
+        completedAt: "2026-07-16T12:00:00Z",
+        bodyKind: "response",
+        bodyText: "ok",
+        repositoryOutcome: { state: "publication-recovered" } as never,
+      }),
+    ).toThrow();
+  });
+
   it("preserves M5 delegation provenance on canonical homeserver results", () => {
     const result = buildStructuredTaskResult({
       schemaVersion: 1, taskId: "mcp-m5-abc", taskNamespace: "tasks/mcp-m5-abc",

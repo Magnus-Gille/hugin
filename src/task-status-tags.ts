@@ -19,6 +19,13 @@ const IDEMPOTENCY_PREFIX = "idempotency:";
 // checkpoint and the terminal `delivery:verified`/`delivery:failed` markers are
 // the source of truth for downstream consumers and for startup reconciliation.
 const DELIVERY_PREFIX = "delivery:";
+// Durable managed-repository publication recovery (issue #225). `publication:*`
+// marks a completed task whose repository publication (push/PR) failed after
+// the paid model work finished. It must survive the terminal status flip so
+// operators can discover it, and it must survive the later recovery rewrite
+// (`publication:failed` -> `publication:recovered`/`publication:abandoned`)
+// so `buildTerminalStatusTags` does not silently drop it mid-transition.
+const PUBLICATION_PREFIX = "publication:";
 
 function dedupeTags(tags: string[]): string[] {
   const seen = new Set<string>();
@@ -48,6 +55,7 @@ export function getPersistentStatusTags(
   const sensitivityTags = tags.filter((tag) => tag.startsWith(SENSITIVITY_PREFIX));
   const routingTags = tags.filter((tag) => tag.startsWith(ROUTING_PREFIX));
   const deliveryTags = tags.filter((tag) => tag.startsWith(DELIVERY_PREFIX));
+  const publicationTags = tags.filter((tag) => tag.startsWith(PUBLICATION_PREFIX));
   const brokerTags = tags.filter((tag) => tag.startsWith(BROKER_PREFIX));
   const aliasTags = tags.filter((tag) => tag.startsWith(ALIAS_PREFIX));
   const taskTypeTags = tags.filter((tag) => tag.startsWith(TASK_TYPE_PREFIX));
@@ -63,6 +71,7 @@ export function getPersistentStatusTags(
     ...sensitivityTags,
     ...routingTags,
     ...deliveryTags,
+    ...publicationTags,
     ...brokerTags,
     ...aliasTags,
     ...taskTypeTags,

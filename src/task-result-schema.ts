@@ -358,11 +358,26 @@ export const repositoryOutcomeSchema = z.object({
     "no-changes",
     "changes-present",
     "publication-failed",
+    // Issue #225: reached only via the durable publication-recovery seam,
+    // never by the primary execution path. "publication-recovered" means an
+    // authorized operator retried a prior "publication-failed" outcome and
+    // the push/PR was confirmed complete (freshly published or reconciled
+    // against a partial success). "publication-abandoned" means recovery
+    // could not safely proceed (e.g. the local task branch no longer matches
+    // the recorded exact head) and the failure is terminal without a rerun.
+    "publication-recovered",
+    "publication-abandoned",
   ]),
   baseBranch: repositoryChangeEvidenceSchema.shape.baseBranch,
   baseCommit: z.string().regex(/^[0-9a-f]{40,64}$/).optional(),
 }).strict().superRefine((value, ctx) => {
-  if (["no-changes", "changes-present", "publication-failed"].includes(value.state)) {
+  if ([
+    "no-changes",
+    "changes-present",
+    "publication-failed",
+    "publication-recovered",
+    "publication-abandoned",
+  ].includes(value.state)) {
     if (!value.baseBranch) {
       ctx.addIssue({ code: "custom", path: ["baseBranch"], message: "managed outcome requires baseBranch" });
     }

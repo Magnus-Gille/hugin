@@ -29,6 +29,29 @@ const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 const gitCommitSchema = z.string().regex(/^[0-9a-f]{40,64}$/);
 const isoTimestampSchema = z.string().datetime({ offset: true });
 
+// The frozen schema-v2 candidate manifest vocabulary. Issue #225 added
+// `publication-recovered` / `publication-abandoned` to the dispatcher's
+// repositoryOutcome for the durable publication-recovery seam, but ingesting
+// recovery outcomes into the exam factory's reproducible-candidate contract
+// is explicitly owned by #232 (see grimnir#88), not this issue. A task whose
+// outcome is one of those two states simply omits `repositoryOutcome` below
+// rather than widening this manifest's pinned vocabulary out from under it.
+const dailyExamRepositoryOutcomeSchema = z.enum([
+  "not-managed",
+  "checkout-failed",
+  "not-finalized",
+  "no-changes",
+  "changes-present",
+  "publication-failed",
+]);
+type DailyExamRepositoryOutcome = z.infer<typeof dailyExamRepositoryOutcomeSchema>;
+
+function knownDailyExamRepositoryOutcome(
+  state: string | undefined,
+): state is DailyExamRepositoryOutcome {
+  return dailyExamRepositoryOutcomeSchema.safeParse(state).success;
+}
+
 export const dailyExamCandidateSchema = z.object({
   schemaVersion: z.literal(2),
   candidateId: z.string().regex(/^daily-[0-9a-f]{24}$/),
@@ -57,14 +80,7 @@ export const dailyExamCandidateSchema = z.object({
       "legacy-type-tag",
     ]).optional(),
     sensitivity: z.enum(["public", "internal", "private"]).optional(),
-    repositoryOutcome: z.enum([
-      "not-managed",
-      "checkout-failed",
-      "not-finalized",
-      "no-changes",
-      "changes-present",
-      "publication-failed",
-    ]).optional(),
+    repositoryOutcome: dailyExamRepositoryOutcomeSchema.optional(),
   }).strict().superRefine((value, ctx) => {
     const taskTypeFields = [
       value.taskType,
@@ -414,7 +430,9 @@ export function buildDailyExamCandidate(source: DailyTaskHarvestSource): DailyEx
           }
         : {}),
       ...(sensitivity ? { sensitivity } : {}),
-      ...(result?.repositoryOutcome ? { repositoryOutcome: result.repositoryOutcome.state } : {}),
+      ...(knownDailyExamRepositoryOutcome(result?.repositoryOutcome?.state)
+        ? { repositoryOutcome: result!.repositoryOutcome!.state as DailyExamRepositoryOutcome }
+        : {}),
     },
     repository,
     exposure,

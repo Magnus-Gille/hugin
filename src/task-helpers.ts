@@ -1202,6 +1202,265 @@ async function createPullRequest(
   });
 }
 
+// --- Publication failure recovery (#225) ---
+//
+// A managed task's paid model work and its repository publication (push +
+// PR) are separate facts. `finalizeTaskBranch` above can return `push-failed`
+// AFTER an exact commit already exists on the task branch — e.g. GitHub
+// denies the configured identity write access, or `gh pr create` fails
+// transiently. The model work must never be re-run just to retry that last
+// step. The functions below give an authorized operator (never the primary
+// execution loop) an idempotent, git/gh-only path back to a durable
+// publication outcome, driven entirely by a `PublicationRecoveryRecord`
+// persisted at push-failed time — never by re-invoking any executor.
+
+export const PUBLICATION_FAILED_TAG = "publication:failed";
+export const PUBLICATION_RECOVERED_TAG = "publication:recovered";
+export const PUBLICATION_ABANDONED_TAG = "publication:abandoned";
+
+/**
+ * Durable, content-blind record of a publication failure: enough to retry
+ * ONLY the push/PR step, never the model. `headCommit` is only present when
+ * repository-change evidence was captured before the failure (it never is,
+ * for example, when the pre-push branch-vs-base comparison itself failed) —
+ * without it, {@link recoverPublication} cannot safely verify partial success
+ * and refuses to touch git.
+ */
+export interface PublicationRecoveryRecord {
+  schemaVersion: 1;
+  taskId: string;
+  taskNamespace: string;
+  workingDir: string;
+  branchName: string;
+  baseBranch: string;
+  baseCommit: string;
+  headCommit?: string;
+  prBody: string;
+  allowedEgressHosts: string[];
+  failureReason: string;
+  attempts: number;
+  firstFailedAt: string;
+  lastAttemptAt: string;
+  lastError?: string;
+}
+
+export interface BuildPublicationRecoveryRecordInput {
+  taskId: string;
+  taskNamespace: string;
+  workingDir: string;
+  branchName: string;
+  baseBranch: string;
+  baseCommit: string;
+  headCommit?: string;
+  prBody: string;
+  allowedEgressHosts: string[];
+  failureReason: string;
+  now?: Date;
+}
+
+/** Construct the initial durable record at the moment publication fails. */
+export function buildPublicationRecoveryRecord(
+  input: BuildPublicationRecoveryRecordInput,
+): PublicationRecoveryRecord {
+  const nowIso = (input.now ?? new Date()).toISOString();
+  return {
+    schemaVersion: 1,
+    taskId: input.taskId,
+    taskNamespace: input.taskNamespace,
+    workingDir: input.workingDir,
+    branchName: input.branchName,
+    baseBranch: input.baseBranch,
+    baseCommit: input.baseCommit,
+    headCommit: input.headCommit,
+    prBody: input.prBody,
+    allowedEgressHosts: input.allowedEgressHosts,
+    failureReason: input.failureReason,
+    attempts: 0,
+    firstFailedAt: nowIso,
+    lastAttemptAt: nowIso,
+  };
+}
+
+export type PublicationRecoveryOutcome =
+  | "published"
+  | "reconciled"
+  | "failed"
+  | "abandoned";
+
+export interface PublicationRecoveryAttemptResult {
+  outcome: PublicationRecoveryOutcome;
+  /** Set for `published` (freshly created) and `reconciled` (found existing). */
+  prUrl?: string;
+  /** The verified exact head commit the outcome refers to. */
+  headCommit?: string;
+  /** Present for `failed`: a retryable git/gh error. */
+  error?: string;
+  /** Present for `abandoned`: why recovery refused to touch git at all. */
+  reason?: string;
+}
+
+async function findExistingPullRequest(
+  workingDir: string,
+  branchName: string,
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    const child = spawn(
+      "gh",
+      ["pr", "list", "--head", branchName, "--state", "all", "--json", "url", "--limit", "1"],
+      {
+        cwd: workingDir,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, HOME: "/home/magnus" },
+      },
+    );
+    let out = "";
+    child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
+    child.stderr?.on("data", (d: Buffer) => (out += d.toString()));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        resolve(null);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(out.trim() || "[]") as Array<{ url?: unknown }>;
+        const url = parsed[0]?.url;
+        resolve(typeof url === "string" && url.startsWith("https://") ? url : null);
+      } catch {
+        resolve(null);
+      }
+    });
+    child.on("error", () => resolve(null));
+  });
+}
+
+/**
+ * Retry ONLY the publication step for a previously failed managed-repository
+ * task, from a durable {@link PublicationRecoveryRecord}. Never runs an
+ * executor and never re-derives the diff — it only inspects and, if safe,
+ * advances the exact branch/commit that already exists.
+ *
+ * Reconciliation-first: before pushing or creating anything, it checks
+ * whether the remote already has the recorded exact commit and whether a PR
+ * already exists for the branch. This makes repeated recovery attempts
+ * (including a second call after a first `published`/`reconciled` result)
+ * idempotent at the git/gh level — a retry can never open a second PR for a
+ * publication that already succeeded.
+ *
+ * Refuses to touch git (returns `abandoned`) whenever it cannot verify the
+ * local branch still points at the exact recorded head — the safest failure
+ * mode when a checkout was reused by a later task or evidence was never
+ * captured.
+ */
+export async function recoverPublication(
+  record: PublicationRecoveryRecord,
+): Promise<PublicationRecoveryAttemptResult> {
+  if (!isValidBaseBranchName(record.baseBranch)) {
+    return { outcome: "abandoned", reason: `invalid recorded base branch ${JSON.stringify(record.baseBranch)}` };
+  }
+  if (!record.branchName.startsWith("hugin/") || !GIT_COMMIT_ID.test(record.baseCommit)) {
+    return { outcome: "abandoned", reason: "recovery record is missing a valid branch name or base commit" };
+  }
+  if (!record.headCommit) {
+    return {
+      outcome: "abandoned",
+      reason:
+        "no repository-change evidence was captured before the failure — the exact head commit is " +
+        "unknown, so recovery cannot safely verify what would be published",
+    };
+  }
+
+  // Verify the local branch still exists and points at the exact recorded
+  // head. A mismatch means the working directory was reused by a later task
+  // (or the branch was deleted) — the completed commit is no longer safely
+  // reachable from this checkout, so recovery must not guess.
+  const localHead = await runGitCapture(record.workingDir, [
+    "rev-parse", "--verify", `refs/heads/${record.branchName}^{commit}`,
+  ]);
+  const localHeadCommit = localHead.stdout.toString("utf8").trim().toLowerCase();
+  if (!localHead.ok || !GIT_COMMIT_ID.test(localHeadCommit)) {
+    return {
+      outcome: "abandoned",
+      reason: `local branch ${record.branchName} no longer exists in ${record.workingDir}`,
+    };
+  }
+  if (localHeadCommit !== record.headCommit) {
+    return {
+      outcome: "abandoned",
+      reason:
+        `local branch ${record.branchName} now points at ${localHeadCommit}, not the recorded ` +
+        `head ${record.headCommit} — the checkout was reused; publication cannot be safely recovered`,
+    };
+  }
+
+  // Reconciliation first (Codex-reviewed, #225): an existing PR for this
+  // branch — in ANY state — means a prior attempt already published, so a
+  // retry must never call `gh pr create` again. No base/body cross-check is
+  // needed: `branchName` is always `hugin/<taskId>`, unique per task
+  // throughout this codebase, so any PR found here can only be this task's.
+  // A residual check-then-create race (a PR appearing between this check and
+  // `createPullRequest` below) is not a duplicate-publish risk either — GitHub
+  // rejects a second open PR for the same head branch, so `createPullRequest`
+  // returns null and this attempt reports `failed` (retryable); it never
+  // reports a false `published`, and the next recovery attempt reconciles
+  // against the PR that actually exists.
+  const existingPr = await findExistingPullRequest(record.workingDir, record.branchName);
+  if (existingPr) {
+    return { outcome: "reconciled", prUrl: existingPr, headCommit: record.headCommit };
+  }
+
+  const remoteUrl = await new Promise<string | null>((resolve) => {
+    const child = spawn("git", ["remote", "get-url", "--push", "origin"], {
+      cwd: record.workingDir,
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, HOME: "/home/magnus" },
+    });
+    let out = "";
+    child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
+    child.on("close", (code) => resolve(code === 0 ? out.trim() : null));
+    child.on("error", () => resolve(null));
+  });
+  if (!remoteUrl || !isRemoteHostAllowed(remoteUrl, record.allowedEgressHosts)) {
+    return { outcome: "failed", headCommit: record.headCommit, error: "Remote not allowed by egress policy" };
+  }
+
+  // Push only if the remote doesn't already have the exact recorded commit —
+  // the other half of partial-success reconciliation (branch pushed, PR
+  // creation failed).
+  const remoteBranch = await runGitCapture(record.workingDir, [
+    "ls-remote", "origin", `refs/heads/${record.branchName}`,
+  ]);
+  const remoteHeadCommit = remoteBranch.ok
+    ? remoteBranch.stdout.toString("utf8").trim().split(/\s+/)[0]?.toLowerCase()
+    : undefined;
+  if (remoteHeadCommit !== record.headCommit) {
+    const pushOk = await new Promise<boolean>((resolve) => {
+      const child = spawn("git", ["push", "-u", "origin", record.branchName], {
+        cwd: record.workingDir,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, HOME: "/home/magnus" },
+      });
+      child.on("close", (code) => resolve(code === 0));
+      child.on("error", () => resolve(false));
+    });
+    if (!pushOk) {
+      return { outcome: "failed", headCommit: record.headCommit, error: "git push failed" };
+    }
+  }
+
+  const prUrl = await createPullRequest(
+    record.workingDir,
+    record.branchName,
+    record.baseBranch,
+    record.taskId,
+    record.prBody,
+  );
+  if (!prUrl) {
+    return { outcome: "failed", headCommit: record.headCommit, error: "gh pr create failed" };
+  }
+
+  return { outcome: "published", prUrl, headCommit: record.headCommit };
+}
+
 // --- Atomic task completion (#57) ---
 
 // Minimal interface needed — avoids importing MuninClient which would create circular deps
