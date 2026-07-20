@@ -135,6 +135,55 @@ describe("M5 task exposure lookup", () => {
     expect(snapshots.get(A)?.result.seen).toBe(true);
   });
 
+  it("tolerates #27's additive coverage/result fields under the same schema_version (regression for hugin#258)", async () => {
+    const body = responseFor([A], { seen: new Set([A]) });
+    const withAdditiveFields = {
+      ...body,
+      coverage: {
+        ...body.coverage,
+        coverage_epoch_id: "epoch-9",
+        restart_count: 2,
+        total_restart_gap_ms: 4500,
+        canonical_identity_capture_started_at: "2026-07-14T20:00:00.000Z",
+        direct_loopback_traffic: true,
+        exact_match_semantics: "trim-utf8-sha256-v1",
+      },
+      results: body.results.map((result) => ({
+        ...result,
+        identity_kind: "canonical",
+        unseen_claim_supported: true,
+        includes_legacy_inexact: false,
+      })),
+    };
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(withAdditiveFields), { status: 200 }));
+
+    const snapshots = await lookupTaskExposureSnapshots({
+      gatewayBaseUrl: "https://host",
+      apiKey: "owner-token",
+      fingerprints: [A],
+      fetchImpl,
+    });
+
+    const snapshot = snapshots.get(A);
+    expect(snapshot?.result.seen).toBe(true);
+    // Recognized as typed optional fields, not merely passed through.
+    expect(snapshot?.result.identity_kind).toBe("canonical");
+    expect(snapshot?.result.unseen_claim_supported).toBe(true);
+  });
+
+  it("still rejects a response missing a required field (does not over-loosen)", async () => {
+    const body = responseFor([A], { seen: new Set([A]) }) as { coverage: Record<string, unknown> };
+    delete body.coverage.coverage_complete;
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }));
+
+    await expect(lookupTaskExposureSnapshots({
+      gatewayBaseUrl: "https://host",
+      apiKey: "owner-token",
+      fingerprints: [A],
+      fetchImpl,
+    })).rejects.toMatchObject({ code: "invalid-response" });
+  });
+
   it("fails closed on auth, version, schema, cardinality, or result-order ambiguity", async () => {
     const base = {
       gatewayBaseUrl: "https://host",
