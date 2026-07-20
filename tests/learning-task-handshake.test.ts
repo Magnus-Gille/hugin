@@ -727,4 +727,103 @@ describe("LearningTaskContract v1 producer handshake", () => {
     substituted.authenticated_principal_id = "service:other";
     expect(() => validateLearningTaskGatewayEcho(substituted, stamp)).toThrow(/principal/i);
   });
+
+  describe("cross-host clock skew tolerance (#253)", () => {
+    const preflightWith = async (advertised: string, expires: string) => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.endsWith("/portal/me")) return response({ alias: "service:hugin", tier: "owner" });
+        return response({
+          advertisement_id: `opaque:${randomUUID()}`,
+          endpoint: "/v1/capabilities/learning-task",
+          protocol_version: "learning-task-preflight/v1",
+          advertised_at: advertised,
+          expires_at: expires,
+          authenticated_principal_id: "service:gille-inference",
+          authentication: "service-auth",
+          capabilities: structuredClone(LEARNING_TASK_CAPABILITIES),
+        });
+      });
+      const clock = [
+        new Date("2026-07-19T10:00:01.500Z"),
+        new Date("2026-07-19T10:00:02.250Z"),
+      ];
+      return fetchLearningTaskPreflight({
+        gatewayBaseUrl: "https://m5.test",
+        apiKey: "key",
+        attemptStartedAt: startedAt,
+        now: () => clock.shift() ?? new Date("2026-07-19T10:00:02.250Z"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+    };
+
+    it("accepts a gateway clock ahead of the local bracket within tolerance", async () => {
+      await expect(preflightWith("2026-07-19T10:00:03.500Z", "2026-07-19T10:15:03.500Z"))
+        .resolves.toBeDefined();
+    });
+
+    it("accepts a gateway clock behind the local bracket within tolerance", async () => {
+      await expect(preflightWith("2026-07-19T10:00:00.000Z", "2026-07-19T10:15:00.000Z"))
+        .resolves.toBeDefined();
+    });
+
+    it("rejects a gateway clock beyond the tolerance", async () => {
+      await expect(preflightWith("2026-07-19T10:00:05.000Z", "2026-07-19T10:15:05.000Z"))
+        .rejects.toThrow(/does not cover observation time/);
+    });
+
+    it("tightens the expiry edge instead of extending it", async () => {
+      // Observation (10:00:02.250) is before expires (10:00:04.000) but NOT before
+      // expires minus tolerance — the window must shrink, never grow.
+      await expect(preflightWith("2026-07-19T10:00:02.000Z", "2026-07-19T10:00:04.000Z"))
+        .rejects.toThrow(/does not cover observation time/);
+    });
+
+    const echoWith = (admittedAt: string) => {
+      const ctx = context();
+      const stamp = buildLearningTaskRequestStamp({
+        context: ctx,
+        taskType: "summarize",
+        rawTaskText: "  Summarize the fixture incident report.\n",
+        renderedPrompt: ctx.attempt.renderedPrompt,
+      });
+      const binding = {
+        authenticated_principal_id: "service:hugin",
+        request_stamp: stamp,
+      };
+      const echo = {
+        echoed_request: structuredClone(stamp),
+        gateway_request_id: "opaque:e3e3e3e3-e3e3-4e3e-8e3e-e3e3e3e3e3e3",
+        admission_id: "opaque:e4e4e4e4-e4e4-4e4e-8e4e-e4e4e4e4e4e4",
+        admitted_at: admittedAt,
+        authenticated_principal_id: "service:hugin",
+        authentication: "gateway-owner-auth",
+        principal_binding_digest: {
+          algorithm: "sha256",
+          version: "gateway-principal-request-binding-jcs-v1",
+          digest: createHash("sha256").update(jcsCanonicalize(binding), "utf8").digest("hex"),
+        },
+        capabilities: structuredClone(LEARNING_TASK_CAPABILITIES),
+      };
+      return { echo, stamp };
+    };
+
+    it("accepts an admission clock slightly behind the stamp clock", () => {
+      // stampedAt fixture is 10:00:02.250; admission 1.75s earlier on the gateway clock.
+      const { echo, stamp } = echoWith("2026-07-19T10:00:00.500Z");
+      expect(validateLearningTaskGatewayEcho(echo, stamp, new Date("2026-07-19T10:00:04Z")))
+        .toEqual(echo);
+    });
+
+    it("accepts an admission clock slightly ahead of the observation clock", () => {
+      const { echo, stamp } = echoWith("2026-07-19T10:00:05.500Z");
+      expect(validateLearningTaskGatewayEcho(echo, stamp, new Date("2026-07-19T10:00:04Z")))
+        .toEqual(echo);
+    });
+
+    it("rejects an admission clock beyond the tolerance", () => {
+      const { echo, stamp } = echoWith("2026-07-19T10:00:07.000Z");
+      expect(() => validateLearningTaskGatewayEcho(echo, stamp, new Date("2026-07-19T10:00:04Z")))
+        .toThrow(/admission clock/);
+    });
+  });
 });
