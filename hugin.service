@@ -2,6 +2,13 @@
 Description=Hugin Task Dispatcher
 After=network-online.target
 Wants=network-online.target
+# network-online.target does not guarantee tailscaled has assigned the
+# tailnet interface address yet (issue #252): this is a user-scope unit, and
+# ordering against the system-scope tailscaled.service is not reliably
+# expressible for user units, so no direct dependency is added here. The
+# broker's HUGIN_BROKER_HOST bind (src/broker/bind-retry.ts) retries a
+# not-yet-assigned address with bounded backoff instead of relying on unit
+# ordering — that is the actual fix for the boot race.
 
 [Service]
 Type=simple
