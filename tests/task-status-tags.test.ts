@@ -35,6 +35,28 @@ describe("task status tag helpers", () => {
     expect(buildTerminalStatusTags("completed", input)).toEqual(persistent);
   });
 
+  it("preserves publication recovery tags (#225) across a terminal status rewrite", () => {
+    // The publication-recovery orchestration rewrites a task's terminal tags
+    // to swap `publication:failed` for `publication:recovered`/`publication:abandoned`
+    // via buildTerminalStatusTags — this must survive that pass exactly like
+    // `delivery:*` does for artifact delivery.
+    expect(
+      buildTerminalStatusTags("completed", [
+        "completed",
+        "runtime:codex",
+        "publication:failed",
+      ]),
+    ).toEqual(["completed", "runtime:codex", "publication:failed"]);
+
+    expect(
+      buildTerminalStatusTags("completed", [
+        "completed",
+        "runtime:codex",
+        "publication:recovered",
+      ]),
+    ).toEqual(["completed", "runtime:codex", "publication:recovered"]);
+  });
+
   it.each(["draft", "conversation"])(
     "preserves the additive M5 task type %s through terminalization",
     (taskType) => {

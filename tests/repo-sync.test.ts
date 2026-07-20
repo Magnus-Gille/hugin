@@ -55,7 +55,10 @@ const {
   finalizeTaskBranch,
   isValidBaseBranchName,
   parseBaseBranchOverride,
+  buildPublicationRecoveryRecord,
+  recoverPublication,
 } = await import("../src/task-helpers.js");
+type PublicationRecoveryRecord = Awaited<ReturnType<typeof buildPublicationRecoveryRecord>>;
 
 beforeEach(() => {
   spawnCalls.length = 0;
@@ -638,5 +641,182 @@ describe("finalizeTaskBranch", () => {
     expect(ghCall?.args).toContain("hugin: 20260416-120000-a1b2");
     expect(ghCall?.args).toContain("--body");
     expect(ghCall?.args).toContain("the body");
+  });
+});
+
+describe("buildPublicationRecoveryRecord", () => {
+  it("captures a durable, resumable snapshot at the moment publication fails", () => {
+    const now = new Date("2026-07-15T09:38:50.000Z");
+    const record = buildPublicationRecoveryRecord({
+      taskId: "t-1",
+      taskNamespace: "tasks/t-1",
+      workingDir: "/home/magnus/repos/cassette",
+      branchName: "hugin/t-1",
+      baseBranch: "master",
+      baseCommit: "a".repeat(40),
+      headCommit: "b".repeat(40),
+      prBody: "pr body",
+      allowedEgressHosts: ["github.com"],
+      failureReason: "git push failed",
+      now,
+    });
+    expect(record).toEqual({
+      schemaVersion: 1,
+      taskId: "t-1",
+      taskNamespace: "tasks/t-1",
+      workingDir: "/home/magnus/repos/cassette",
+      branchName: "hugin/t-1",
+      baseBranch: "master",
+      baseCommit: "a".repeat(40),
+      headCommit: "b".repeat(40),
+      prBody: "pr body",
+      allowedEgressHosts: ["github.com"],
+      failureReason: "git push failed",
+      attempts: 0,
+      firstFailedAt: now.toISOString(),
+      lastAttemptAt: now.toISOString(),
+    });
+  });
+});
+
+describe("recoverPublication", () => {
+  const allowedHosts = ["github.com"];
+  const head = "b".repeat(40);
+  const base = "a".repeat(40);
+
+  function record(overrides: Partial<PublicationRecoveryRecord> = {}): PublicationRecoveryRecord {
+    return {
+      schemaVersion: 1,
+      taskId: "t-1",
+      taskNamespace: "tasks/t-1",
+      workingDir: "/home/magnus/repos/cassette",
+      branchName: "hugin/t-1",
+      baseBranch: "master",
+      baseCommit: base,
+      headCommit: head,
+      prBody: "pr body",
+      allowedEgressHosts: allowedHosts,
+      failureReason: "git push failed",
+      attempts: 0,
+      firstFailedAt: "2026-07-15T09:38:50.000Z",
+      lastAttemptAt: "2026-07-15T09:38:50.000Z",
+      ...overrides,
+    };
+  }
+
+  it("abandons without touching git when the base branch is invalid", async () => {
+    const result = await recoverPublication(record({ baseBranch: "origin/master" }));
+    expect(result.outcome).toBe("abandoned");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("abandons without touching git when no head commit was ever captured", async () => {
+    const result = await recoverPublication(record({ headCommit: undefined }));
+    expect(result.outcome).toBe("abandoned");
+    expect(result.reason).toContain("no repository-change evidence");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("abandons when the local task branch no longer exists", async () => {
+    spawnBehaviors = [
+      { exitCode: 128, stderr: "unknown revision" }, // rev-parse --verify
+    ];
+    const result = await recoverPublication(record());
+    expect(result.outcome).toBe("abandoned");
+    expect(result.reason).toContain("no longer exists");
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  it("abandons when the checkout was reused and no longer points at the recorded head", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${"c".repeat(40)}\n` }, // rev-parse --verify: different commit
+    ];
+    const result = await recoverPublication(record());
+    expect(result.outcome).toBe("abandoned");
+    expect(result.reason).toContain("checkout was reused");
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  it("reconciles instead of duplicating when a PR already exists (partial success)", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${head}\n` }, // rev-parse --verify: matches
+      { exitCode: 0, stdout: `[{"url":"https://github.com/Magnus-Gille/cassette/pull/28"}]\n` }, // gh pr list
+    ];
+    const result = await recoverPublication(record());
+    expect(result.outcome).toBe("reconciled");
+    expect(result.prUrl).toBe("https://github.com/Magnus-Gille/cassette/pull/28");
+    expect(result.headCommit).toBe(head);
+    // Must not push or attempt to create a second PR.
+    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls.some((c) => c.args.includes("push"))).toBe(false);
+    expect(spawnCalls.some((c) => c.args.includes("create"))).toBe(false);
+  });
+
+  it("publishes fresh (push + PR) when nothing was published yet", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${head}\n` },       // rev-parse --verify
+      { exitCode: 0, stdout: "[]\n" },              // gh pr list: none
+      { exitCode: 0, stdout: "git@github.com:Magnus-Gille/cassette.git\n" }, // remote get-url
+      { exitCode: 0, stdout: "\n" },                // ls-remote: branch not on remote yet
+      { exitCode: 0 },                              // git push
+      { exitCode: 0, stdout: "https://github.com/Magnus-Gille/cassette/pull/29\n" }, // gh pr create
+    ];
+    const result = await recoverPublication(record());
+    expect(result.outcome).toBe("published");
+    expect(result.prUrl).toBe("https://github.com/Magnus-Gille/cassette/pull/29");
+    const pushCall = spawnCalls.find((c) => c.args.includes("push"));
+    expect(pushCall).toBeDefined();
+    expect(pushCall?.args).toContain("hugin/t-1");
+  });
+
+  it("skips the redundant push when the remote already has the exact recorded commit", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${head}\n` },
+      { exitCode: 0, stdout: "[]\n" },
+      { exitCode: 0, stdout: "git@github.com:Magnus-Gille/cassette.git\n" },
+      { exitCode: 0, stdout: `${head}\trefs/heads/hugin/t-1\n` }, // ls-remote: already has exact head
+      { exitCode: 0, stdout: "https://github.com/Magnus-Gille/cassette/pull/30\n" }, // gh pr create
+    ];
+    const result = await recoverPublication(record());
+    expect(result.outcome).toBe("published");
+    expect(spawnCalls.some((c) => c.args.includes("push"))).toBe(false);
+  });
+
+  it("returns a retryable failure when the remote is not in the egress allowlist", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${head}\n` },
+      { exitCode: 0, stdout: "[]\n" },
+      { exitCode: 0, stdout: "https://gitlab.com/user/repo.git\n" },
+    ];
+    const result = await recoverPublication(record());
+    expect(result.outcome).toBe("failed");
+    expect(result.error).toContain("egress");
+  });
+
+  it("returns a retryable failure when git push fails again", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${head}\n` },
+      { exitCode: 0, stdout: "[]\n" },
+      { exitCode: 0, stdout: "git@github.com:Magnus-Gille/cassette.git\n" },
+      { exitCode: 0, stdout: "\n" },
+      { exitCode: 1, stderr: "permission denied" },
+    ];
+    const result = await recoverPublication(record());
+    expect(result.outcome).toBe("failed");
+    expect(result.error).toContain("push failed");
+  });
+
+  it("returns a retryable failure when gh pr create fails again", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${head}\n` },
+      { exitCode: 0, stdout: "[]\n" },
+      { exitCode: 0, stdout: "git@github.com:Magnus-Gille/cassette.git\n" },
+      { exitCode: 0, stdout: "\n" },
+      { exitCode: 0 },
+      { exitCode: 1, stderr: "GraphQL error" },
+    ];
+    const result = await recoverPublication(record());
+    expect(result.outcome).toBe("failed");
+    expect(result.error).toContain("gh pr create");
   });
 });
