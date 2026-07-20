@@ -41,7 +41,10 @@ import {
   sanitiseTaskId,
 } from "../friction/munin-key.js";
 import {
+  advancingQualityCorrectionRatedAt,
+  buildQualityCorrectionReceipt,
   foldQualityReceipt,
+  type BuildQualityCorrectionReceiptInput,
   type NativeQualityReceipt,
 } from "../quality-receipt.js";
 import { buildBrokerTaskTypeTags } from "./task-type-metadata.js";
@@ -321,6 +324,30 @@ export class BrokerTaskStore {
     taskId: string,
     receipt: NativeQualityReceipt,
   ): Promise<{ changed: boolean }> {
+    return this.writeQualityReceiptWithFactory(taskId, () => receipt);
+  }
+
+  async writeQualityCorrection(
+    taskId: string,
+    input: BuildQualityCorrectionReceiptInput,
+  ): Promise<{ changed: boolean }> {
+    return this.writeQualityReceiptWithFactory(taskId, (existing) =>
+      buildQualityCorrectionReceipt({
+        ...input,
+        ratedAt: advancingQualityCorrectionRatedAt(
+          existing,
+          input.correctsReceiptId,
+          input.ratedAt,
+        ),
+      }));
+  }
+
+  private async writeQualityReceiptWithFactory(
+    taskId: string,
+    buildReceipt: (
+      existing: Record<string, unknown> | null,
+    ) => NativeQualityReceipt,
+  ): Promise<{ changed: boolean }> {
     const status = await this.readStatus(taskId);
     const envelope = status ? parseStoredEnvelope(status.content) : null;
     const namespace = namespaceForTaskId(taskId);
@@ -334,6 +361,7 @@ export class BrokerTaskStore {
         }
         existing = parsed as Record<string, unknown>;
       }
+      const receipt = buildReceipt(existing);
       const folded = foldQualityReceipt(existing, receipt);
       if (!folded.changed) return { changed: false };
       const receiptVersionTags = [...new Set(

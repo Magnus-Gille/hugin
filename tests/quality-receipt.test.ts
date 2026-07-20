@@ -331,6 +331,25 @@ describe("quality receipt v2 corrections", () => {
     })).toThrow(/identity collision/);
   });
 
+  it("treats a correction retry with only a new server clock and derived id as unchanged", () => {
+    const original = receipt();
+    const first = correction(original.receiptId);
+    const ledger = foldQualityReceipt(
+      foldQualityReceipt(null, original).ledger,
+      first,
+    ).ledger;
+    const laterRetry = correction(original.receiptId, {
+      ratedAt: "2026-07-15T10:16:00.000Z",
+    });
+
+    expect(laterRetry.receiptId).not.toBe(first.receiptId);
+    expect(foldQualityReceipt(ledger, laterRetry)).toEqual({
+      ledger,
+      changed: false,
+    });
+    expect(ledger.receipts[1]).toEqual(first);
+  });
+
   it("rejects correction forks and changed correction replays", () => {
     const original = receipt();
     const first = correction(original.receiptId);

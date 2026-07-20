@@ -9,7 +9,19 @@ import { DelegationJournal } from "../../src/broker/journal.js";
 import { IdempotencyIndex } from "../../src/broker/idempotency.js";
 import { brokerExecutorCapabilities } from "../../src/broker/executor-capabilities.js";
 import type { MuninClient } from "../../src/munin-client.js";
-import { buildStructuredTaskResult } from "../../src/task-result-schema.js";
+import {
+  buildStructuredTaskResult,
+  type StructuredTaskResult,
+} from "../../src/task-result-schema.js";
+import {
+  gatewayEchoDigest,
+  learningTaskExecutionEvidenceSchema,
+} from "../../src/learning-task-handshake.js";
+import { buildHomeserverRequestBody } from "../../src/homeserver-executor.js";
+import {
+  withLearningTaskContext,
+  withLearningTaskGatewayEcho,
+} from "../helpers/learning-task.js";
 
 const SECRET = "a".repeat(64);
 const OTHER_SECRET = "b".repeat(64);
@@ -62,6 +74,7 @@ interface Harness {
   idempotency: IdempotencyIndex;
   url: string;
   tmpDir: string;
+  clock: { value: Date | null };
 }
 
 let harness: Harness;
@@ -72,6 +85,7 @@ beforeEach(async () => {
   const journal = new DelegationJournal({ path: path.join(tmpDir, "events.jsonl") });
   const idempotency = new IdempotencyIndex();
   const taskStore = new BrokerTaskStore(munin as unknown as MuninClient);
+  const clock = { value: null as Date | null };
   const broker = await startBroker({
     host: "127.0.0.1",
     port: 0,
@@ -86,6 +100,7 @@ beforeEach(async () => {
       journal,
       idempotency,
       executorCapabilities: brokerExecutorCapabilities({ homeserverEnabled: true }),
+      now: () => clock.value ?? new Date(),
     },
   });
   const addr = broker.server.address() as AddressInfo;
@@ -96,6 +111,7 @@ beforeEach(async () => {
     idempotency,
     tmpDir,
     url: `http://127.0.0.1:${addr.port}`,
+    clock,
   };
 });
 
@@ -138,6 +154,141 @@ function structuredTaskResultContent(taskId: string): string {
     bodyText: "ok",
     repositoryOutcome: { state: "not-managed" },
   }));
+}
+
+function authoritativeStructuredTaskResult(taskId: string): {
+  result: StructuredTaskResult;
+  attemptId: string;
+} {
+  const task = withLearningTaskContext({
+    prompt: "Summarize the authoritative learning-task fixture.",
+    gatewayBaseUrl: "https://m5.test",
+    apiKey: "private-owner-key",
+    path: "delegate",
+    taskType: "summarize",
+    timeoutMs: 30_000,
+    maxOutputChars: 4_096,
+  }, taskId);
+  if (task.learningTask?.kind !== "ready") {
+    throw new Error("learning-task fixture was not prepared");
+  }
+  const requestBody = buildHomeserverRequestBody(task, taskId);
+  const gatewayResponse = withLearningTaskGatewayEcho(task, taskId, {}) as {
+    learningTaskGatewayEcho: unknown;
+  };
+  const gatewayEcho = gatewayResponse.learningTaskGatewayEcho;
+  const prepared = task.learningTask.preparedDispatch;
+  const learningTask = learningTaskExecutionEvidenceSchema.parse({
+    schemaVersion: 1,
+    contractVersion: "grimnir.learning-task/v1",
+    state: "m5-admitted",
+    evidenceAccepted: true,
+    taskId,
+    attemptId: prepared.attemptId,
+    attemptStartedAt: prepared.attemptStartedAt,
+    attemptStartRef: prepared.attemptStartRef,
+    preparedDispatchRef: prepared.preparedDispatchRef,
+    replayPayloadRef: prepared.replayPayloadRef,
+    replayPayloadDigest: prepared.replayPayloadDigest,
+    taskOutcomeRef: prepared.taskOutcomeRef,
+    rawFingerprint: prepared.requestStamp.raw_fingerprint,
+    requestStamp: prepared.requestStamp,
+    requestStampDigest: prepared.requestStampDigest,
+    gatewayEcho,
+    gatewayEchoDigest: gatewayEchoDigest(gatewayEcho as Parameters<typeof gatewayEchoDigest>[0]),
+    attemptOutcomeRef: prepared.attemptOutcomeRef,
+  });
+  return {
+    result: buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId,
+      taskNamespace: `tasks/${taskId}`,
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "homeserver",
+      executor: "homeserver-delegate",
+      resultSource: "homeserver-delegate",
+      exitCode: 0,
+      completedAt: "2026-07-19T10:00:10.000Z",
+      bodyKind: "response",
+      bodyText: "ok",
+      repositoryOutcome: { state: "not-managed" },
+      runtimeMetadata: {
+        huginTaskIdentity: requestBody.huginTaskIdentity!,
+        learningTask,
+      },
+    }),
+    attemptId: learningTask.attemptId,
+  };
+}
+
+function qualityCorrection(predecessorReceiptId: string) {
+  return {
+    predecessor_receipt_id: predecessorReceiptId,
+    rubric: {
+      id: "code-review",
+      version: "2.1.0",
+      config_digest: {
+        algorithm: "sha256",
+        canonicalization: "jcs-rfc8785-utf8-v1",
+        source_ref: "source-doc:rubric/code-review-2.1.0",
+        source_type: "rubric-config",
+        source_version: "rubric-source-2.1.0",
+        digest: "d".repeat(64),
+      },
+    },
+    verifier: { id: "claude-opus", version: "2026-07-19" },
+    failure: {
+      taxonomy: { id: "hugin-quality-failure", version: "1" },
+      code: "incorrect-answer",
+    },
+    producing_configuration: {
+      harness: { id: "codex", version: "1", sha256: "e".repeat(64) },
+      model: { id: "gpt-5", configuration_sha256: "f".repeat(64) },
+    },
+    references: {
+      corrected_successor: {
+        task_id: "general-correction-fix",
+        structured_result_sha256: "1".repeat(64),
+      },
+      pull_request_url: "https://github.com/Magnus-Gille/demo/pull/2",
+      replacement_commit: "2".repeat(40),
+    },
+  };
+}
+
+async function prepareAuthoritativeCorrectionTask(taskId: string, ratedAt: string) {
+  harness.clock.value = new Date(ratedAt);
+  const authoritative = authoritativeStructuredTaskResult(taskId);
+  harness.munin.reads[`tasks/${taskId}/status`] = {
+    content: "## Task: correction\n\n### Prompt\nFix it.",
+    tags: ["completed", "runtime:homeserver"],
+    created_at: "ts",
+    updated_at: "ts",
+  };
+  harness.munin.reads[`tasks/${taskId}/result-structured`] = {
+    content: JSON.stringify(authoritative.result),
+    tags: ["type:task-result-structured"],
+    created_at: "ts",
+    updated_at: "ts",
+  };
+  const initialResponse = await fetch(`${harness.url}/v1/delegate/rate`, {
+    method: "POST",
+    headers: authHeader(),
+    body: JSON.stringify({
+      task_id: taskId,
+      rating: "pass",
+      rating_reason: "Initially accepted.",
+      verification_outcome: "accepted_unchanged",
+      reviewer_role: "independent",
+    }),
+  });
+  expect(initialResponse.status).toBe(204);
+  const ledger = JSON.parse(harness.munin.writes.at(-1)!.content);
+  return {
+    authoritative,
+    predecessor: ledger.receipts[0] as { receiptId: string; ratedAt: string },
+  };
 }
 
 function validRequest(overrides: Record<string, unknown> = {}) {
@@ -942,91 +1093,255 @@ describe("POST /v1/delegate/rate", () => {
     expect(harness.munin.writes.filter((write) => write.key === "feedback")).toHaveLength(1);
   });
 
-  it("fails closed instead of fabricating a task id as native-v2 attempt identity", async () => {
-    harness.munin.reads["tasks/general-correction/status"] = {
-      content: "## Task: correction\n\n### Prompt\nFix it.",
-      tags: ["completed", "runtime:codex"],
-      created_at: "ts",
-      updated_at: "ts",
-    };
-    harness.munin.reads["tasks/general-correction/result-structured"] = {
-      content: structuredTaskResultContent("general-correction"),
-      tags: ["type:task-result-structured"],
-      created_at: "ts",
-      updated_at: "ts",
-    };
-    const initial = {
-      task_id: "general-correction",
-      rating: "pass",
-      rating_reason: "Initially accepted.",
-      verification_outcome: "accepted_unchanged",
-      reviewer_role: "independent",
-    };
-    expect((await fetch(`${harness.url}/v1/delegate/rate`, {
-      method: "POST",
-      headers: authHeader(),
-      body: JSON.stringify(initial),
-    })).status).toBe(204);
-    const firstLedger = JSON.parse(harness.munin.writes.at(-1)!.content);
-    const predecessor = firstLedger.receipts[0];
-    // Make the immutable lineage clock deterministic rather than relying on
-    // two loopback HTTP requests landing in different milliseconds.
-    predecessor.ratedAt = "2026-07-18T10:00:00.000Z";
-    (harness.munin.reads["tasks/general-correction/feedback"] as { content: string }).content =
-      JSON.stringify(firstLedger);
+  it("derives the native-v2 attempt from exact admitted learning evidence", async () => {
+    const { authoritative, predecessor } = await prepareAuthoritativeCorrectionTask(
+      "general-correction",
+      "2026-07-19T10:00:00.000Z",
+    );
 
     const correctionPayload = {
-      ...initial,
+      task_id: "general-correction",
       rating: "wrong",
       rating_reason: "Unicode regression remained.",
       verification_outcome: "discarded",
-      correction: {
-        predecessor_receipt_id: predecessor.receiptId,
-        rubric: {
-          id: "code-review",
-          version: "2.1.0",
-          config_digest: {
-            algorithm: "sha256",
-            canonicalization: "jcs-rfc8785-utf8-v1",
-            source_ref: "source-doc:rubric/code-review-2.1.0",
-            source_type: "rubric-config",
-            source_version: "rubric-source-2.1.0",
-            digest: "d".repeat(64),
-          },
-        },
-        verifier: { id: "claude-opus", version: "2026-07-19" },
-        failure: {
-          taxonomy: { id: "hugin-quality-failure", version: "1" },
-          code: "incorrect-answer",
-        },
-        producing_configuration: {
-          harness: { id: "codex", version: "1", sha256: "e".repeat(64) },
-          model: { id: "gpt-5", configuration_sha256: "f".repeat(64) },
-        },
-        references: {
-          corrected_successor: {
-            task_id: "general-correction-fix",
-            structured_result_sha256: "1".repeat(64),
-          },
-          pull_request_url: "https://github.com/Magnus-Gille/demo/pull/2",
-          replacement_commit: "2".repeat(40),
-        },
-      },
+      reviewer_role: "independent",
+      correction: qualityCorrection(predecessor.receiptId),
     };
     const correctionResponse = await fetch(`${harness.url}/v1/delegate/rate`, {
       method: "POST",
       headers: authHeader(),
       body: JSON.stringify(correctionPayload),
     });
-    expect(correctionResponse.status).toBe(409);
-    expect(await correctionResponse.json()).toMatchObject({
-      error: "policy_rejected",
-      message: expect.stringContaining("authoritative execution attempt"),
+    expect(correctionResponse.status).toBe(204);
+    const ledger = JSON.parse(harness.munin.writes.at(-1)!.content);
+    expect(ledger).toMatchObject({
+      schemaVersion: 2,
+      taskId: "general-correction",
+      receipts: [
+        { schemaVersion: 1, receiptId: predecessor.receiptId },
+        {
+          schemaVersion: 2,
+          attemptId: authoritative.attemptId,
+          correctsReceiptId: predecessor.receiptId,
+          ratedAt: "2026-07-19T10:00:00.001Z",
+          rubric: correctionPayload.correction.rubric,
+          verifier: correctionPayload.correction.verifier,
+          failure: correctionPayload.correction.failure,
+          producingConfiguration: {
+            harness: { id: "codex", version: "1", sha256: "e".repeat(64) },
+            model: { id: "gpt-5", configurationSha256: "f".repeat(64) },
+          },
+          references: {
+            correctedSuccessor: {
+              taskId: "general-correction-fix",
+              structuredResultSha256: "1".repeat(64),
+            },
+            pullRequestUrl: "https://github.com/Magnus-Gille/demo/pull/2",
+            replacementCommit: "2".repeat(40),
+          },
+        },
+      ],
     });
-    expect(harness.munin.writes.filter((write) => write.key === "feedback")).toHaveLength(1);
     expect(JSON.parse(
       (harness.munin.reads["tasks/general-correction/feedback"] as { content: string }).content,
-    )).toEqual(firstLedger);
+    )).toEqual(ledger);
+  });
+
+  it("preserves the first native-v2 artifact on an identical retry after a lost response", async () => {
+    const { predecessor } = await prepareAuthoritativeCorrectionTask(
+      "correction-retry",
+      "2026-07-19T10:00:00.000Z",
+    );
+    const payload = {
+      task_id: "correction-retry",
+      rating: "wrong",
+      rating_reason: "Unicode regression remained.",
+      verification_outcome: "discarded",
+      reviewer_role: "independent",
+      correction: qualityCorrection(predecessor.receiptId),
+    };
+    harness.clock.value = new Date("2026-07-19T10:00:01.000Z");
+    expect((await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(payload),
+    })).status).toBe(204);
+    const firstStoredBytes = (
+      harness.munin.reads["tasks/correction-retry/feedback"] as { content: string }
+    ).content;
+    const firstLedger = JSON.parse(firstStoredBytes);
+    const firstCorrectionId = firstLedger.receipts[1].receiptId;
+    const writesAfterFirst = harness.munin.writes.filter((write) => write.key === "feedback").length;
+
+    harness.clock.value = new Date("2026-07-19T10:00:02.000Z");
+    const retry = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(payload),
+    });
+
+    expect(retry.status).toBe(204);
+    expect(harness.munin.writes.filter((write) => write.key === "feedback"))
+      .toHaveLength(writesAfterFirst);
+    const retryStoredBytes = (
+      harness.munin.reads["tasks/correction-retry/feedback"] as { content: string }
+    ).content;
+    expect(retryStoredBytes).toBe(firstStoredBytes);
+    expect(JSON.parse(retryStoredBytes).receipts[1].receiptId).toBe(firstCorrectionId);
+  });
+
+  it("rejects a genuinely changed successor as a native-v2 fork", async () => {
+    const { predecessor } = await prepareAuthoritativeCorrectionTask(
+      "correction-fork",
+      "2026-07-19T10:00:00.000Z",
+    );
+    const payload = {
+      task_id: "correction-fork",
+      rating: "wrong",
+      rating_reason: "Unicode regression remained.",
+      verification_outcome: "discarded",
+      reviewer_role: "independent",
+      correction: qualityCorrection(predecessor.receiptId),
+    };
+    harness.clock.value = new Date("2026-07-19T10:00:01.000Z");
+    expect((await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(payload),
+    })).status).toBe(204);
+    const firstStoredBytes = (
+      harness.munin.reads["tasks/correction-fork/feedback"] as { content: string }
+    ).content;
+    const changedCorrection = structuredClone(payload.correction);
+    changedCorrection.references.corrected_successor.structured_result_sha256 = "9".repeat(64);
+    harness.clock.value = new Date("2026-07-19T10:00:02.000Z");
+
+    const fork = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({ ...payload, correction: changedCorrection }),
+    });
+
+    expect(fork.status).toBe(409);
+    expect((harness.munin.reads["tasks/correction-fork/feedback"] as { content: string }).content)
+      .toBe(firstStoredBytes);
+  });
+
+  it.each(["top-level", "correction"])(
+    "does not let the caller choose or substitute the native-v2 attempt (%s)",
+    async (location) => {
+      const correction = qualityCorrection("qr-" + "a".repeat(24)) as Record<string, unknown>;
+      const payload: Record<string, unknown> = {
+        task_id: "caller-attempt",
+        rating: "wrong",
+        rating_reason: "Caller must not choose provenance.",
+        verification_outcome: "discarded",
+        correction,
+      };
+      if (location === "top-level") {
+        payload.attempt_id = "hugin-attempt:99999999-9999-4999-8999-999999999999";
+      } else {
+        correction.attempt_id = "hugin-attempt:99999999-9999-4999-8999-999999999999";
+      }
+
+      const response = await fetch(`${harness.url}/v1/delegate/rate`, {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify(payload),
+      });
+
+      expect(response.status).toBe(400);
+      expect(harness.munin.writes).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    ["legacy", () => JSON.stringify({
+      task_id: "unsafe-correction",
+      result_schema_version: 1,
+      response: "ok",
+    })],
+    ["missing", () => structuredTaskResultContent("unsafe-correction")],
+    ["mismatched attempt-start ref", () => {
+      const current = authoritativeStructuredTaskResult("unsafe-correction").result;
+      current.runtimeMetadata!.learningTask!.attemptStartRef!.key = "learning-attempt-wrong";
+      return JSON.stringify(current);
+    }],
+    ["mismatched prepared-dispatch ref", () => {
+      const current = authoritativeStructuredTaskResult("unsafe-correction").result;
+      current.runtimeMetadata!.learningTask!.preparedDispatchRef!.key = "learning-attempt-wrong-prepared";
+      return JSON.stringify(current);
+    }],
+    ["mismatched replay-payload ref", () => {
+      const current = authoritativeStructuredTaskResult("unsafe-correction").result;
+      current.runtimeMetadata!.learningTask!.replayPayloadRef!.key = "learning-attempt-wrong-replay";
+      return JSON.stringify(current);
+    }],
+    ["mismatched attempt-outcome ref", () => {
+      const current = authoritativeStructuredTaskResult("unsafe-correction").result;
+      current.runtimeMetadata!.learningTask!.attemptOutcomeRef!.key = "learning-attempt-wrong-outcome";
+      return JSON.stringify(current);
+    }],
+    ["mismatched task-outcome ref", () => {
+      const current = authoritativeStructuredTaskResult("unsafe-correction").result;
+      current.runtimeMetadata!.learningTask!.taskOutcomeRef.key = "result";
+      return JSON.stringify(current);
+    }],
+    ["missing durable attempt-outcome ref", () => {
+      const current = authoritativeStructuredTaskResult("unsafe-correction").result;
+      delete current.runtimeMetadata!.learningTask!.attemptOutcomeRef;
+      return JSON.stringify(buildStructuredTaskResult(current));
+    }],
+    ["non-admitted", () => {
+      const current = authoritativeStructuredTaskResult("unsafe-correction").result;
+      const learning = current.runtimeMetadata!.learningTask!;
+      learning.state = "m5-not-admitted";
+      learning.evidenceAccepted = false;
+      delete learning.gatewayEcho;
+      delete learning.gatewayEchoDigest;
+      learning.failureCode = "transport-not-admitted";
+      learning.failureReason = "gateway admission was not proven";
+      return JSON.stringify(buildStructuredTaskResult(current));
+    }],
+    ["unaccepted", () => {
+      const current = authoritativeStructuredTaskResult("unsafe-correction").result;
+      current.runtimeMetadata!.learningTask!.evidenceAccepted = false;
+      return JSON.stringify(current);
+    }],
+    ["mismatched", () => {
+      const current = authoritativeStructuredTaskResult("unsafe-correction").result;
+      current.runtimeMetadata!.learningTask!.taskId = "another-task";
+      return JSON.stringify(current);
+    }],
+  ])("rejects %s attempt evidence without a feedback write", async (_case, content) => {
+    harness.munin.reads["tasks/unsafe-correction/status"] = {
+      content: "## Task: correction\n\n### Prompt\nFix it.",
+      tags: ["completed", "runtime:homeserver"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+    harness.munin.reads["tasks/unsafe-correction/result-structured"] = {
+      content: content(),
+      tags: ["type:task-result-structured"],
+      created_at: "ts",
+      updated_at: "ts",
+    };
+
+    const response = await fetch(`${harness.url}/v1/delegate/rate`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        task_id: "unsafe-correction",
+        rating: "wrong",
+        rating_reason: "Invalid attempt evidence must fail closed.",
+        verification_outcome: "discarded",
+        correction: qualityCorrection("qr-" + "a".repeat(24)),
+      }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "policy_rejected" });
+    expect(harness.munin.writes.some((write) => write.key === "feedback")).toBe(false);
   });
 
   it("enforces failure code none iff a v2 correction is accepted unchanged", async () => {

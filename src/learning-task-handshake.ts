@@ -19,6 +19,16 @@ export const LEARNING_TASK_PREFLIGHT_ENDPOINT = "/v1/capabilities/learning-task"
 export const LEARNING_TASK_PREFLIGHT_PROTOCOL = "learning-task-preflight/v1" as const;
 export const LEARNING_TASK_GATEWAY_PRINCIPAL = "service:gille-inference" as const;
 export const LEARNING_TASK_PREFLIGHT_TTL_MS = 15 * 60 * 1_000;
+/**
+ * Bounded allowance for clock disagreement between Hugin's host and the M5 gateway host when
+ * ordering timestamps that were stamped on DIFFERENT hosts (issue #253). Without it, the
+ * preflight freshness check requires the gateway's `advertised_at` to land inside the
+ * milliseconds-wide request/observe bracket measured on Hugin's clock — tighter agreement than
+ * NTP delivers between two hosts, so the joint handshake fails on ordinary tens-of-ms offsets.
+ * The tolerance is applied ONLY to cross-host orderings; same-host orderings stay exact, and the
+ * advertisement expiry edge is TIGHTENED by the same amount (the acceptance window never grows).
+ */
+export const LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS = 2_000;
 export const LEARNING_TASK_FEATURES = [
   "hugin-request-stamp-v1",
   "gateway-echo-v1",
@@ -690,7 +700,14 @@ export async function fetchLearningTaskPreflight(
   const requestedMs = Date.parse(request.requested_at);
   const advertisedMs = Date.parse(response.advertised_at);
   const expiresMs = Date.parse(response.expires_at);
-  if (!(requestedMs <= advertisedMs && advertisedMs <= observedAt && observedAt < expiresMs)) {
+  // `requested_at`/`observedAt` are Hugin-host clocks; `advertised_at`/`expires_at` are
+  // gateway-host clocks. Cross-host orderings carry the bounded skew tolerance (#253); the
+  // expiry edge is tightened by the same amount so tolerance can never extend the window.
+  if (!(
+    requestedMs - LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS <= advertisedMs
+    && advertisedMs <= observedAt + LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS
+    && observedAt < expiresMs - LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS
+  )) {
     throw new LearningTaskHandshakeError("learning-task preflight freshness does not cover observation time");
   }
   if (expiresMs - advertisedMs > LEARNING_TASK_PREFLIGHT_TTL_MS) {
@@ -1244,7 +1261,12 @@ export function validateLearningTaskGatewayEcho(
     throw new LearningTaskHandshakeError("gateway echo authenticated principal substitution");
   }
   const admitted = Date.parse(echo.admitted_at);
-  if (!(Date.parse(stamp.stamped_at) <= admitted && admitted <= observedAt.getTime())) {
+  // `stamped_at`/`observedAt` are Hugin-host clocks; `admitted_at` is a gateway-host clock.
+  // Same bounded cross-host skew tolerance as the preflight freshness check (#253).
+  if (!(
+    Date.parse(stamp.stamped_at) - LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS <= admitted
+    && admitted <= observedAt.getTime() + LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS
+  )) {
     throw new LearningTaskHandshakeError("gateway admission clock is outside the request/observation interval");
   }
   const expectedBinding = jcsDigest({
