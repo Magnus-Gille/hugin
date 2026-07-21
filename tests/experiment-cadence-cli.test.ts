@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { parseArgs } from "../src/experiment-cadence-cli.js";
 
 describe("experiment cadence CLI arg parsing", () => {
-  it("requires --candidates", () => {
-    expect(() => parseArgs([])).toThrow("--candidates <path> is required");
-    expect(() => parseArgs(["--dry-run"])).toThrow("--candidates <path> is required");
+  it("--candidates is optional -- absent means the default assembler is used", () => {
+    expect(parseArgs([])).toEqual({ dryRun: false, candidatesPath: undefined });
+    expect(parseArgs(["--dry-run"])).toEqual({ dryRun: true, candidatesPath: undefined });
   });
 
   it("parses --candidates", () => {
