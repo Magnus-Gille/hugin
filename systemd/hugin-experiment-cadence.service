@@ -7,7 +7,11 @@ Wants=network-online.target
 Type=oneshot
 User=magnus
 WorkingDirectory=/home/magnus/repos/hugin
-ExecStart=/usr/bin/node dist/experiment-cadence-cli.js --candidates /home/magnus/.hugin/experiment-cadence/candidates.json
+# hugin#272: no --candidates flag -- the default production candidate-pool
+# assembler scans the #232 registry itself. A leftover
+# ~/.hugin/experiment-cadence/candidates.json from an older deploy is simply
+# never read; its presence on disk is harmless.
+ExecStart=/usr/bin/node dist/experiment-cadence-cli.js
 EnvironmentFile=/home/magnus/repos/hugin/.env
 TimeoutStartSec=120
 

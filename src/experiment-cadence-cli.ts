@@ -13,14 +13,13 @@
  * experiment's reviewable summary records `outcomeExport.status: "skipped"`
  * with a reason, per experiment-cadence.ts's documented limitation.
  *
- * Documented limitation: there is no production-ready bulk assembler for the
- * full `PackagerCandidateInput[]` evidence pool yet (see
- * experiment-cadence.ts's module doc comment) -- this CLI reads that pool
- * from an operator/cron-supplied JSON snapshot file (`--candidates <path>`)
- * rather than inventing a whole-ledger scan under this ticket's narrower
- * orchestration scope. A future ticket can point `--candidates` at a real
- * generator's output, or replace the flag with a direct call, without
- * touching `experiment-cadence.ts` at all.
+ * Candidate source (hugin#272): the DEFAULT is the production bulk assembler
+ * (`candidate-pool-assembler.ts`), which scans the #232 registry itself --
+ * no manual snapshot required. `--candidates <path>` remains as an explicit
+ * override (a JSON `PackagerCandidateInput[]` snapshot) for tests and manual
+ * runs; when omitted, the deploy-seeded empty
+ * `~/.hugin/experiment-cadence/candidates.json` (if still present from an
+ * older deploy) is simply never read -- its presence is harmless.
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -30,6 +29,8 @@ import { LearningRegistryStore } from "./learning-registry-store.js";
 import { LearningExperimentStore } from "./learning/experiment-store.js";
 import { packagerCandidateInputSchema } from "./learning/candidate-packager-schema.js";
 import { createGilleOutcomeExportClient } from "./learning/experiment-outcome-export.js";
+import { createCandidatePoolAssembler } from "./learning/candidate-pool-assembler.js";
+import { createGilleOutcomeEvidenceResolver } from "./learning/gille-outcome-evidence-resolver.js";
 import { runExperimentCadenceTick, type CadenceTickResult } from "./learning/experiment-cadence.js";
 
 export const DEFAULT_CADENCE_PRINCIPAL = "service:hugin-experiment-cadence";
@@ -41,7 +42,7 @@ interface CliOptions {
 
 function usage(): string {
   return [
-    "Usage: npm run experiment:cadence -- --candidates <path> [options]",
+    "Usage: npm run experiment:cadence -- [options]",
     "",
     "Run one continuous-improvement experiment-cadence tick: propose (#234) ->",
     "package (#233) -> observe running experiments -> conclude terminal ones",
@@ -49,8 +50,10 @@ function usage(): string {
     "promotes. Idempotent -- re-running against unchanged state is a no-op.",
     "",
     "Options:",
-    "  --candidates <path>   Required. JSON file containing a",
-    "                        PackagerCandidateInput[] evidence snapshot.",
+    "  --candidates <path>   Optional. JSON file containing a",
+    "                        PackagerCandidateInput[] evidence snapshot,",
+    "                        overriding the default production candidate-pool",
+    "                        assembler (which scans the #232 registry itself).",
     "  --dry-run             Report the would-be actions; mutate nothing.",
     "  --help                Show this help",
   ].join("\n");
@@ -73,9 +76,6 @@ export function parseArgs(argv: string[]): CliOptions {
     } else {
       throw new Error(`unknown option: ${arg}`);
     }
-  }
-  if (!options.candidatesPath) {
-    throw new Error("--candidates <path> is required (see --help)");
   }
   return options;
 }
@@ -126,11 +126,16 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     gatewayUrl && adminApiKey
       ? createGilleOutcomeExportClient({ gatewayBaseUrl: gatewayUrl, apiKey: adminApiKey })
       : undefined;
+  const evidenceResolver = gilleExport
+    ? createGilleOutcomeEvidenceResolver({ munin, registry })
+    : undefined;
 
-  const candidates = loadCandidatesFromFile(options.candidatesPath!);
+  const loadCandidates = options.candidatesPath
+    ? async () => loadCandidatesFromFile(options.candidatesPath!)
+    : createCandidatePoolAssembler({ registry, munin });
 
   const result = await runExperimentCadenceTick(
-    { registry, experimentStore, munin, principal, loadCandidates: async () => candidates, gilleExport },
+    { registry, experimentStore, munin, principal, loadCandidates, gilleExport, evidenceResolver },
     { dryRun: options.dryRun },
   );
 
