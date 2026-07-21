@@ -76,6 +76,7 @@ import {
   type LearningTaskSource,
 } from "./learning-task-handshake.js";
 import {
+  recoverAmbiguousStoredLearningTaskCandidate,
   recoverLatestStoredLearningTaskAttempt,
   type RecoveredStoredLearningTask,
 } from "./learning-task-recovery.js";
@@ -5218,7 +5219,22 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       homeserverResult = await executeHomeserverTask({
         ...homeserverTaskConfig,
         learningTask: preparedLearningTask?.preparation ?? { kind: "ineligible" },
-      }, taskId, LOG_DIR, { abortController: homeserverAbort });
+      }, taskId, LOG_DIR, {
+        abortController: homeserverAbort,
+        recoverAmbiguousLearningTask: async (failureEvidence) => {
+          const preparation = preparedLearningTask?.preparation;
+          if (preparation?.kind !== "ready") return null;
+          const recovered = await recoverAmbiguousStoredLearningTaskCandidate({
+            munin,
+            taskNamespace: taskNs,
+            taskClassification,
+            preparedDispatchRef: preparation.preparedDispatch.preparedDispatchRef,
+            failureEvidence,
+            gateway,
+          });
+          return recovered?.evidence ?? null;
+        },
+      });
       if (homeserverResult.learningTask && learningAttemptKey) {
         const outcomeKey = `${learningAttemptKey}-outcome`;
         const attemptOutcomeRef = { namespace: taskNs, key: outcomeKey };

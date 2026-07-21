@@ -34,6 +34,7 @@ import {
   learningTaskExecutionEvidenceSchema,
   requestStampDigest,
   validateLearningTaskGatewayEcho,
+  validatePreparedLearningTaskOutcome,
   validateLearningTaskReplayPayload,
   type LearningTaskExecutionEvidence,
   type LearningTaskPreparation,
@@ -137,6 +138,14 @@ export interface HomeserverExecutorResult {
 
 export interface HomeserverExecutorOptions {
   abortController?: AbortController;
+  /**
+   * Storage-aware, success-only probe for a stamped request whose admission is
+   * ambiguous. Implementations must return null unless exact recovery proves
+   * admission; failures leave the original transport evidence untouched.
+   */
+  recoverAmbiguousLearningTask?: (
+    failureEvidence: LearningTaskExecutionEvidence,
+  ) => Promise<LearningTaskExecutionEvidence | null>;
 }
 
 export interface HomeserverGatewayConfig {
@@ -413,6 +422,33 @@ export async function executeHomeserverTask(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (task.apiKey) headers.Authorization = `Bearer ${task.apiKey}`;
 
+  const recoverAmbiguousLearningTask = async (): Promise<void> => {
+    const original = result.learningTask;
+    if (!options?.recoverAmbiguousLearningTask
+      || !original
+      || original.state !== "m5-not-admitted"
+      || original.evidenceAccepted
+      || original.failureCode !== "transport-not-admitted"
+      || task.learningTask?.kind !== "ready") {
+      return;
+    }
+    try {
+      const recovered = await options.recoverAmbiguousLearningTask(original);
+      if (!recovered
+        || recovered.state !== "m5-admitted"
+        || !recovered.evidenceAccepted) {
+        return;
+      }
+      result.learningTask = validatePreparedLearningTaskOutcome(
+        task.learningTask.preparedDispatch,
+        learningTaskExecutionEvidenceSchema.parse(recovered),
+      );
+    } catch {
+      // Recovery is evidence enrichment only. Its absence or rejection must
+      // not replace the truthful failure recorded for the original request.
+    }
+  };
+
   try {
     if (task.path === "delegate" && task.learningTask?.kind === "preflight-failed") {
       const { attempt, attemptStartRef, failureReason } = task.learningTask;
@@ -513,8 +549,37 @@ export async function executeHomeserverTask(
 
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
-      appendOutput(`[Gateway HTTP ${res.status}] ${errText}\n`);
       result.exitCode = res.status; // surface 401/403/400 as the exit code
+      const eligibleStamped5xx = res.status >= 500
+        && task.path === "delegate"
+        && task.learningTask?.kind === "ready";
+      if (eligibleStamped5xx) {
+        let authoritativeEchoAccepted = false;
+        try {
+          const raw = JSON.parse(errText) as { learningTaskGatewayEcho?: unknown };
+          const gatewayEcho = validateLearningTaskGatewayEcho(
+            raw.learningTaskGatewayEcho,
+            body.learningTaskStamp!,
+          );
+          result.learningTask = learningTaskExecutionEvidenceSchema.parse({
+            ...result.learningTask!,
+            state: "m5-admitted",
+            evidenceAccepted: true,
+            gatewayEcho,
+            gatewayEchoDigest: gatewayEchoDigest(gatewayEcho),
+            failureCode: undefined,
+            failureReason: undefined,
+          });
+          authoritativeEchoAccepted = true;
+        } catch {
+          // Missing/malformed/mismatched 5xx evidence is the ambiguity that
+          // the single exact-recovery probe is allowed to investigate.
+        }
+        if (!authoritativeEchoAccepted) await recoverAmbiguousLearningTask();
+        appendOutput(`[Gateway HTTP ${res.status}]\n`);
+      } else {
+        appendOutput(`[Gateway HTTP ${res.status}] ${errText}\n`);
+      }
       return finish();
     }
 
@@ -524,7 +589,23 @@ export async function executeHomeserverTask(
       // anything out of contract, so a buggy or hostile gateway value cannot
       // throw inside the downstream buildStructuredTaskResult .parse() and lose
       // the result of an already-paid run.
-      const raw: unknown = await res.json();
+      let raw: unknown;
+      try {
+        raw = await res.json();
+      } catch (error) {
+        if (task.learningTask?.kind !== "ready" || !(error instanceof SyntaxError)) throw error;
+        const reason = "gateway returned malformed JSON without an exact admission echo";
+        result.learningTask = learningTaskExecutionEvidenceSchema.parse({
+          ...result.learningTask!,
+          state: "join-failed",
+          evidenceAccepted: false,
+          failureCode: "gateway-echo-invalid",
+          failureReason: reason,
+        });
+        appendOutput(`[LearningTaskContract join rejected: ${reason}]\n`);
+        result.exitCode = 1;
+        return finish();
+      }
       if (task.learningTask?.kind === "ready") {
         const stamp = body.learningTaskStamp!;
         let gatewayEcho;
@@ -666,6 +747,7 @@ export async function executeHomeserverTask(
           ? "gateway request timed out before an exact admission echo"
           : "gateway request failed before an exact admission echo",
       });
+      await recoverAmbiguousLearningTask();
     }
     if (err instanceof Error && err.name === "AbortError") {
       result.exitCode = "TIMEOUT";

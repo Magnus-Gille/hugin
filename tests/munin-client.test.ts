@@ -74,6 +74,32 @@ describe("MuninClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("cancels a deadline-bound read without retrying and releases the request queue", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockImplementationOnce(async (_url, init) => new Promise<Response>((_resolve, reject) => {
+        const signal = (init as RequestInit).signal!;
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }))
+      .mockResolvedValueOnce(rpcResponse({ ok: true }));
+    const client = new MuninClient({
+      baseUrl: "http://munin.test",
+      apiKey: "test-key",
+      minRequestSpacingMs: 0,
+    });
+    const controller = new AbortController();
+
+    const read = client.read("tasks/demo", "status", {
+      signal: controller.signal,
+      maxRetries: 0,
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    controller.abort(new Error("immediate recovery deadline exceeded"));
+
+    await expect(read).rejects.toThrow(/deadline exceeded|aborted/i);
+    await expect(client.write("tasks/demo", "result", "failed")).resolves.toMatchObject({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("supports batch reads", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       rpcResponse({

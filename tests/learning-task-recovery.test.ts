@@ -7,8 +7,11 @@ import {
   durableLearningTaskAttemptStart,
   jcsCanonicalize,
   learningTaskAttemptKey,
+  learningTaskExecutionEvidenceSchema,
+  requestStampDigest,
 } from "../src/learning-task-handshake.js";
 import {
+  recoverAmbiguousStoredLearningTaskCandidate,
   recoverLatestStoredLearningTaskAttempt,
   recoverStoredLearningTaskCandidate,
 } from "../src/learning-task-recovery.js";
@@ -55,6 +58,7 @@ function fixture() {
   const replay = task.learningTask.replayPayload;
   const entries = new Map<string, MuninEntry>([
     [prepared.attemptStartRef.key, entry(prepared.attemptStartRef.key, start)],
+    [prepared.preparedDispatchRef.key, entry(prepared.preparedDispatchRef.key, prepared)],
     [prepared.replayPayloadRef.key, entry(prepared.replayPayloadRef.key, replay)],
   ]);
   const writes: unknown[][] = [];
@@ -88,6 +92,29 @@ function fixture() {
   return { task, prepared, start, entries, writes, client, fetchImpl };
 }
 
+function transportFailure(input: ReturnType<typeof fixture>) {
+  const stamp = input.prepared.requestStamp;
+  return learningTaskExecutionEvidenceSchema.parse({
+    schemaVersion: 1,
+    contractVersion: "grimnir.learning-task/v1",
+    state: "m5-not-admitted",
+    evidenceAccepted: false,
+    taskId: input.prepared.taskId,
+    attemptId: input.prepared.attemptId,
+    attemptStartedAt: input.prepared.attemptStartedAt,
+    attemptStartRef: input.prepared.attemptStartRef,
+    preparedDispatchRef: input.prepared.preparedDispatchRef,
+    replayPayloadRef: input.prepared.replayPayloadRef,
+    replayPayloadDigest: input.prepared.replayPayloadDigest,
+    taskOutcomeRef: input.prepared.taskOutcomeRef,
+    rawFingerprint: stamp.raw_fingerprint,
+    requestStamp: stamp,
+    requestStampDigest: requestStampDigest(stamp),
+    failureCode: "transport-not-admitted",
+    failureReason: "gateway request failed before an exact admission echo",
+  });
+}
+
 async function recover(input: ReturnType<typeof fixture>) {
   return recoverStoredLearningTaskCandidate({
     munin: input.client,
@@ -103,6 +130,90 @@ async function recover(input: ReturnType<typeof fixture>) {
 }
 
 describe("stored LearningTaskContract recovery", () => {
+  it("immediately probes the exact classified stored attempt without persisting a second outcome", async () => {
+    const input = fixture();
+    const recovered = await recoverAmbiguousStoredLearningTaskCandidate({
+      munin: input.client,
+      taskNamespace: `tasks/${TASK_ID}`,
+      taskClassification: CLASSIFICATION,
+      preparedDispatchRef: input.prepared.preparedDispatchRef,
+      failureEvidence: transportFailure(input),
+      gateway: { baseUrl: "https://m5.test", apiKey: "owner-key" },
+      fetchImpl: input.fetchImpl as typeof fetch,
+    });
+
+    expect(recovered?.evidence).toMatchObject({ state: "m5-admitted", evidenceAccepted: true });
+    expect(recovered?.classification).toBe(CLASSIFICATION);
+    expect(input.fetchImpl).toHaveBeenCalledTimes(1);
+    expect((input.fetchImpl.mock.calls[0]?.[1] as RequestInit).body)
+      .toBe(JSON.stringify(input.task.learningTask!.kind === "ready"
+        ? input.task.learningTask.replayPayload.requestBody
+        : null));
+    expect(input.writes).toHaveLength(0);
+  });
+
+  it("does not probe when immediate recovery storage classification differs", async () => {
+    const input = fixture();
+    input.entries.set(
+      input.prepared.preparedDispatchRef.key,
+      entry(input.prepared.preparedDispatchRef.key, input.prepared, "internal"),
+    );
+    const recovered = await recoverAmbiguousStoredLearningTaskCandidate({
+      munin: input.client,
+      taskNamespace: `tasks/${TASK_ID}`,
+      taskClassification: CLASSIFICATION,
+      preparedDispatchRef: input.prepared.preparedDispatchRef,
+      failureEvidence: transportFailure(input),
+      gateway: { baseUrl: "https://m5.test", apiKey: "owner-key" },
+      fetchImpl: input.fetchImpl as typeof fetch,
+    });
+
+    expect(recovered).toBeNull();
+    expect(input.fetchImpl).not.toHaveBeenCalled();
+    expect(input.writes).toHaveLength(0);
+  });
+
+  it("does not probe past a differently classified existing outcome", async () => {
+    const input = fixture();
+    input.entries.set(
+      input.prepared.attemptOutcomeRef.key,
+      entry(input.prepared.attemptOutcomeRef.key, transportFailure(input), "internal"),
+    );
+    const recovered = await recoverAmbiguousStoredLearningTaskCandidate({
+      munin: input.client,
+      taskNamespace: `tasks/${TASK_ID}`,
+      taskClassification: CLASSIFICATION,
+      preparedDispatchRef: input.prepared.preparedDispatchRef,
+      failureEvidence: transportFailure(input),
+      gateway: { baseUrl: "https://m5.test", apiKey: "owner-key" },
+      fetchImpl: input.fetchImpl as typeof fetch,
+    });
+
+    expect(recovered).toBeNull();
+    expect(input.fetchImpl).not.toHaveBeenCalled();
+    expect(input.writes).toHaveLength(0);
+  });
+
+  it("bounds stalled storage lookup and never starts a late gateway probe", async () => {
+    const input = fixture();
+    const stalledClient = {
+      read: async () => new Promise<MuninEntry | null>(() => {}),
+    } as unknown as MuninClient;
+    const recovered = await recoverAmbiguousStoredLearningTaskCandidate({
+      munin: stalledClient,
+      taskNamespace: `tasks/${TASK_ID}`,
+      taskClassification: CLASSIFICATION,
+      preparedDispatchRef: input.prepared.preparedDispatchRef,
+      failureEvidence: transportFailure(input),
+      gateway: { baseUrl: "https://m5.test", apiKey: "owner-key" },
+      timeoutMs: 20,
+      fetchImpl: input.fetchImpl as typeof fetch,
+    });
+
+    expect(recovered).toBeNull();
+    expect(input.fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("loads the immutable attempt start, preserves its full identity, and classifies output", async () => {
     const input = fixture();
     const recovered = await recover(input);
