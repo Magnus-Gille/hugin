@@ -1,0 +1,11 @@
+[Unit]
+Description=Hugin continuous-improvement experiment cadence — daily tick
+
+[Timer]
+OnCalendar=*-*-* 05:00:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=hugin-experiment-cadence.service
+
+[Install]
+WantedBy=timers.target
