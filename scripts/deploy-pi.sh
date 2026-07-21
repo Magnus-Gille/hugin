@@ -119,13 +119,17 @@ ssh "$REMOTE" "
 
 echo "==> Installing user-level systemd services..."
 ssh "$REMOTE" "
-  mkdir -p ~/.config/systemd/user ~/.hugin/daily-exam-candidates
+  mkdir -p ~/.config/systemd/user ~/.hugin/daily-exam-candidates ~/.hugin/experiment-cadence
+  [ -f ~/.hugin/experiment-cadence/candidates.json ] || echo '[]' > ~/.hugin/experiment-cadence/candidates.json
   cp $REMOTE_DIR/hugin.service ~/.config/systemd/user/hugin.service
   cp $REMOTE_DIR/systemd/hugin-daily-exam-factory.service ~/.config/systemd/user/hugin-daily-exam-factory.service
   cp $REMOTE_DIR/systemd/hugin-daily-exam-factory.timer ~/.config/systemd/user/hugin-daily-exam-factory.timer
+  cp $REMOTE_DIR/systemd/hugin-experiment-cadence.service ~/.config/systemd/user/hugin-experiment-cadence.service
+  cp $REMOTE_DIR/systemd/hugin-experiment-cadence.timer ~/.config/systemd/user/hugin-experiment-cadence.timer
   XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
   XDG_RUNTIME_DIR=/run/user/1000 systemctl --user enable hugin.service
   XDG_RUNTIME_DIR=/run/user/1000 systemctl --user enable --now hugin-daily-exam-factory.timer
+  XDG_RUNTIME_DIR=/run/user/1000 systemctl --user enable --now hugin-experiment-cadence.timer
   loginctl enable-linger magnus 2>/dev/null || true
 "
 

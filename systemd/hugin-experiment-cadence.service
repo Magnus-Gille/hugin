@@ -1,0 +1,33 @@
+[Unit]
+Description=Hugin continuous-improvement experiment cadence tick (propose -> package -> observe -> conclude, hugin#266)
+After=network-online.target munin-memory.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=magnus
+WorkingDirectory=/home/magnus/repos/hugin
+ExecStart=/usr/bin/node dist/experiment-cadence-cli.js --candidates /home/magnus/.hugin/experiment-cadence/candidates.json
+EnvironmentFile=/home/magnus/repos/hugin/.env
+TimeoutStartSec=120
+
+# Sandboxing
+ProtectSystem=strict
+ReadOnlyPaths=/home/magnus/repos/hugin /home/magnus/.hugin
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+PrivateDevices=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target
