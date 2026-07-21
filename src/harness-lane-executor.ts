@@ -190,8 +190,12 @@ export async function runHarnessLaneSampledAttempt(
   input: RunHarnessLaneSampledAttemptInput,
   executors: HarnessLaneExecutors,
   samplerDeps: HarnessLaneSamplerDeps = {},
+  /** A decision made by a caller only after its mandatory preflight gates.
+   * When absent, this helper makes the decision itself as before. */
+  precomputedDecision?: HarnessLaneDecision,
 ): Promise<HarnessLaneAttemptResult> {
-  const decision = decideHarnessLane({ taskId: input.taskId, taskType: input.taskType }, samplerDeps);
+  const decision = precomputedDecision
+    ?? decideHarnessLane({ taskId: input.taskId, taskType: input.taskType }, samplerDeps);
   const lane = decision.lane;
   const taskRef: HarnessLaneTaskRef = { taskId: input.taskId, taskType: input.taskType };
 
