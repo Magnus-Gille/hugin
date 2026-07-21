@@ -140,7 +140,10 @@ import {
   getPersistentStatusTags,
 } from "./task-status-tags.js";
 import { LearningLoopCollector } from "./learning-loop-collector.js";
+import { LearningRegistryStore } from "./learning-registry-store.js";
 import { LearningExperimentStore } from "./learning/experiment-store.js";
+import { runHarnessLaneSampledAttempt, type LaneAttemptOutcome } from "./harness-lane-executor.js";
+import { decideHarnessLane, isHarnessLaneEligibleTaskType } from "./harness-lane-sampler.js";
 import { sanitizeProviderTokenCount } from "./m5-provenance.js";
 import {
   buildStructuredTaskResult,
@@ -640,6 +643,7 @@ const egressPolicy = installFetchEgressPolicy(
 );
 
 const munin = createMuninClient();
+const learningRegistry = new LearningRegistryStore(munin);
 // Keep lease renewal, active-task cancellation polling, and the independent
 // lease reaper off the main request slot so a long Retry-After on background
 // work cannot delay them past expiry — and so reaper traffic does not queue up
@@ -1943,12 +1947,10 @@ interface PreflightCheckedSdkResult extends SdkExecutorResult {
  * Both short-circuits are fail-open on anything inconclusive; only a
  * confirmed problem blocks.
  */
-async function executeClaudeSdkWithPreflightChecks(
-  cfg: SdkTaskConfig,
+async function runClaudeSdkPreflight(
   taskId: string,
   logDir: string,
-  options?: SdkExecutorOptions,
-): Promise<PreflightCheckedSdkResult> {
+): Promise<PreflightCheckedSdkResult | null> {
   const drift = checkVersionDrift();
   if (drift) {
     const logFile = path.join(logDir, `${taskId}.log`);
@@ -2037,7 +2039,17 @@ async function executeClaudeSdkWithPreflightChecks(
       };
     }
   }
-  return executeSdkTask(cfg, taskId, logDir, options);
+  return null;
+}
+
+async function executeClaudeSdkWithPreflightChecks(
+  cfg: SdkTaskConfig,
+  taskId: string,
+  logDir: string,
+  options?: SdkExecutorOptions,
+): Promise<PreflightCheckedSdkResult> {
+  const refusal = await runClaudeSdkPreflight(taskId, logDir);
+  return refusal ?? executeSdkTask(cfg, taskId, logDir, options);
 }
 
 // --- Invocation journal ---
@@ -2278,12 +2290,12 @@ function spawnRuntime(
   });
 }
 
-async function executeCodexWithPreflightChecks(
+async function runCodexPreflight(
   task: TaskConfig,
   ctx: SpawnContext,
-): Promise<SpawnRuntimeResult> {
+): Promise<SpawnRuntimeResult | null> {
   const probe = await refreshCodexSandboxStatus();
-  if (probe.available) return spawnRuntime(task, ctx);
+  if (probe.available) return null;
 
   const taskId = extractTaskId(ctx.taskNs);
   const logFile = path.join(LOG_DIR, `${taskId}.log`);
@@ -2317,6 +2329,14 @@ async function executeCodexWithPreflightChecks(
     preflightFailureKind: CODEX_SANDBOX_FAILURE_KIND,
     preflightFailureReason: reason,
   };
+}
+
+async function executeCodexWithPreflightChecks(
+  task: TaskConfig,
+  ctx: SpawnContext,
+): Promise<SpawnRuntimeResult> {
+  const refusal = await runCodexPreflight(task, ctx);
+  return refusal ?? spawnRuntime(task, ctx);
 }
 
 // --- Lease helpers ---
@@ -4707,9 +4727,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     const startMs = Date.now();
 
     // --- Execute via ollama, SDK, or spawn ---
-    let exitCode: number | "TIMEOUT";
-    let output: string;
-    let logFile: string;
+    let exitCode: number | "TIMEOUT" = 1;
+    let output = "";
+    let logFile = path.join(LOG_DIR, `${taskId}.log`);
     let resultText: string | null = null;
     let costUsd: number | null = null;
     // Verdict layer (V8): per-worker outcomes from the orchestrator engine,
@@ -4732,6 +4752,144 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let codexPreflightFailureReason: string | undefined;
     let fallbackTriggered = false;
     let fallbackReason: string | null = null;
+
+    // Issue #274: the standing harness sampler belongs at the mutation-task
+    // execution seam, after the managed-checkout gate and the applicable
+    // one-shot runtime preflight. Broker /delegate tasks are deliberately not
+    // included: their authenticated envelope promises tool_policy:none and no
+    // worktree, so silently replacing them with a file-editing harness would
+    // exceed the submitted authority. Direct Claude/Codex tasks carrying one
+    // of #267's canonical bounded-coding task types are the live eligible set.
+    const harnessLaneCheckoutPassed = !checkoutGateRefusalReason;
+    const harnessLaneTaskType =
+      harnessLaneCheckoutPassed &&
+      (isClaude || isCodex) &&
+      task.homeserverTaskType !== undefined &&
+      isHarnessLaneEligibleTaskType(task.homeserverTaskType)
+        ? task.homeserverTaskType
+        : undefined;
+    const harnessLaneDispatchEligible = harnessLaneTaskType !== undefined;
+
+    // These return a synthetic one-shot failure on refusal and null on pass.
+    // Running them here creates the production callback point that did not
+    // previously exist: the sampler cannot bypass checkout, dependency drift,
+    // Claude auth, or the Codex sandbox profile probe.
+    const harnessLaneClaudePreflight = harnessLaneDispatchEligible && isClaude
+      ? await runClaudeSdkPreflight(taskId, LOG_DIR)
+      : undefined;
+    const harnessLaneCodexPreflight = harnessLaneDispatchEligible && isCodex
+      ? await runCodexPreflight(task, { taskNs, muninClient: munin })
+      : undefined;
+    const harnessLanePreflightsPassed =
+      harnessLaneDispatchEligible &&
+      (isClaude ? harnessLaneClaudePreflight === null : harnessLaneCodexPreflight === null);
+    const harnessLaneDecision = harnessLanePreflightsPassed && harnessLaneTaskType
+      ? decideHarnessLane({ taskId, taskType: harnessLaneTaskType })
+      : undefined;
+
+    const harnessLaneTaskOutcomeRef = { namespace: taskNs, key: "result-structured" };
+    const laneOutcomeFromExitCode = (
+      code: number | "TIMEOUT",
+      extras: Omit<LaneAttemptOutcome, "outcome" | "taskOutcomeRef">,
+    ): LaneAttemptOutcome => ({
+      outcome: code === "TIMEOUT" ? "timed_out" : code === 0 ? "completed" : "failed",
+      taskOutcomeRef: harnessLaneTaskOutcomeRef,
+      ...extras,
+    });
+
+    const executeSampledHarness = async (): Promise<LaneAttemptOutcome> => {
+      effectiveExecutor = "opencode-sampled";
+      const opencodeGateway = loadOpencodeGatewayConfig(process.env);
+      if (!opencodeGateway) {
+        exitCode = 1;
+        output =
+          "Sampled harness runtime is not configured: set HOMESERVER_GATEWAY_URL + " +
+          "HOMESERVER_GATEWAY_API_KEY or HUGIN_OPENCODE_BASE_URL + HUGIN_OPENCODE_API_KEY";
+        logFile = path.join(LOG_DIR, `${taskId}.log`);
+        fs.writeFileSync(
+          logFile,
+          [
+            "=== Hugin Task Log (sampled harness) ===",
+            `Task: ${taskNs}`,
+            output,
+            "",
+          ].join("\n"),
+        );
+        opencodeJournalExtras = {
+          runtime_requested: task.runtime,
+          runtime_effective: "none",
+          harness_lane: "harness",
+          opencode_configured: false,
+        };
+        return laneOutcomeFromExitCode(exitCode, {
+          verifierKind: "none",
+          verdict: "error",
+          nodeId: "opencode-m5",
+        });
+      }
+
+      const opencodeAbort = new AbortController();
+      currentOpencodeAbort = opencodeAbort;
+      opencodeResult = await executeOpencodeTask(
+        {
+          prompt: task.prompt,
+          workingDir: task.workingDir,
+          timeoutMs: task.timeoutMs,
+          maxOutputChars: config.maxOutputChars,
+          gatewayBaseUrl: opencodeGateway.gatewayBaseUrl,
+          apiKey: opencodeGateway.apiKey,
+          providerId: opencodeGateway.providerId,
+          model: opencodeGateway.defaultModel,
+          // Preserve the already-admitted write ceiling. Codex is always
+          // full-auto; Claude only writes under trusted-code.
+          permissionProfile: isCodex ? "trusted-code" : task.permissionProfile || "read-only",
+          opencodeCommand: opencodeGateway.opencodeCommand,
+        },
+        taskId,
+        LOG_DIR,
+        { abortController: opencodeAbort },
+      );
+      currentOpencodeAbort = null;
+      exitCode = opencodeResult.exitCode;
+      output = opencodeResult.output;
+      logFile = opencodeResult.logFile;
+      resultText = opencodeResult.resultText;
+      const completedTestCalls = opencodeResult.toolCalls.filter(
+        (call) =>
+          call.tool === "bash" &&
+          call.command !== undefined &&
+          opencodeResult!.testCommands.includes(call.command) &&
+          call.exitCode !== undefined,
+      );
+      const hasMechanicalGrade = completedTestCalls.length > 0;
+      const mechanicalPass = hasMechanicalGrade && completedTestCalls.every((call) => call.exitCode === 0);
+      const iterations = opencodeResult.events.filter((event) => event.type === "step_finish").length;
+      opencodeJournalExtras = {
+        runtime_requested: task.runtime,
+        runtime_effective: "opencode",
+        harness_lane: "harness",
+        opencode_configured: true,
+        model_effective: opencodeResult.model,
+        opencode_agent: opencodeResult.agent,
+        permission_profile: opencodeResult.permissionProfile,
+        tool_calls: opencodeResult.toolCalls.length,
+        changed_files: opencodeResult.changedFiles,
+        test_commands: opencodeResult.testCommands,
+        config_dir_removed: opencodeResult.configDirRemoved,
+      };
+      return laneOutcomeFromExitCode(exitCode, {
+        verifierKind: hasMechanicalGrade ? "mechanical" : "none",
+        verdict: hasMechanicalGrade
+          ? mechanicalPass ? "pass" : "fail"
+          : exitCode === 0 ? "unverified" : "error",
+        ...(hasMechanicalGrade
+          ? { verifierNotes: `test-commands=${completedTestCalls.length}; failed=${completedTestCalls.filter((call) => call.exitCode !== 0).length}` }
+          : {}),
+        modelId: opencodeResult.model,
+        nodeId: "opencode-m5",
+        ...(iterations > 0 ? { iterations } : {}),
+      });
+    };
 
     if (checkoutGateRefusalReason) {
       // Issue #236: the pre-execution clean-verification gate refused this
@@ -5107,11 +5265,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       resultText = homeserverResult.resultText;
     }
     } else if (isClaude) {
-    console.log(`Using Agent SDK executor for task ${taskNs}`);
-    const sdkAbort = new AbortController();
-    currentSdkAbort = sdkAbort;
-    const sdkResult = await executeClaudeSdkWithPreflightChecks(
-      {
+    const executeClaudeOneShot = async (): Promise<LaneAttemptOutcome> => {
+      console.log(`Using Agent SDK executor for task ${taskNs}`);
+      const sdkAbort = new AbortController();
+      currentSdkAbort = sdkAbort;
+      const sdkConfig: SdkTaskConfig = {
         prompt: task.prompt,
         workingDir: task.workingDir,
         timeoutMs: task.timeoutMs,
@@ -5121,10 +5279,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         model: task.model,
         muninSessionId: munin.getSessionId(),
         permissionProfile: task.permissionProfile,
-      },
-      taskId,
-      LOG_DIR,
-      {
+      };
+      const sdkOptions: SdkExecutorOptions = {
         abortController: sdkAbort,
         onTimeout: async (partialOutput) => {
           // Write partial result on timeout
@@ -5147,15 +5303,35 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             console.error("Failed to write partial result on timeout:", err);
           }
         },
-      },
-    );
-    currentSdkAbort = null;
-    exitCode = sdkResult.exitCode;
-    output = sdkResult.output;
-    logFile = sdkResult.logFile;
-    resultText = sdkResult.resultText;
-    costUsd = sdkResult.costUsd;
-    sdkPreflightFailureKind = sdkResult.preflightFailureKind;
+      };
+      const sdkResult: PreflightCheckedSdkResult = harnessLaneDispatchEligible
+        ? harnessLaneClaudePreflight ?? await executeSdkTask(sdkConfig, taskId, LOG_DIR, sdkOptions)
+        : await executeClaudeSdkWithPreflightChecks(sdkConfig, taskId, LOG_DIR, sdkOptions);
+      currentSdkAbort = null;
+      exitCode = sdkResult.exitCode;
+      output = sdkResult.output;
+      logFile = sdkResult.logFile;
+      resultText = sdkResult.resultText;
+      costUsd = sdkResult.costUsd;
+      sdkPreflightFailureKind = sdkResult.preflightFailureKind;
+      return laneOutcomeFromExitCode(exitCode, {
+        verifierKind: "none",
+        verdict: exitCode === 0 ? "unverified" : "error",
+        modelId: task.model || "claude-sdk",
+        nodeId: "claude-sdk",
+      });
+    };
+    if (harnessLaneDecision && harnessLaneTaskType) {
+      await runHarnessLaneSampledAttempt(
+        learningRegistry,
+        { taskId, attemptId: `${taskId}:dispatch`, taskType: harnessLaneTaskType, occurredAt: startedAt },
+        { oneShot: executeClaudeOneShot, harness: executeSampledHarness },
+        {},
+        harnessLaneDecision,
+      );
+    } else {
+      await executeClaudeOneShot();
+    }
     } else if (isOpencode) {
     console.log(`Using OpenCode executor for task ${taskNs}`);
     const opencodeGateway = loadOpencodeGatewayConfig(process.env);
@@ -5273,15 +5449,34 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     orchOutcomes = orchResult.outcomes;
     orchSavings = orchResult.savings;
     } else {
-      const spawnResult = await executeCodexWithPreflightChecks(task, {
-        taskNs,
-        muninClient: munin,
-      });
-      exitCode = spawnResult.exitCode;
-      output = spawnResult.output;
-      logFile = spawnResult.logFile;
-      if (spawnResult.preflightFailureKind === CODEX_SANDBOX_FAILURE_KIND) {
-        codexPreflightFailureReason = spawnResult.preflightFailureReason;
+      const executeCodexOneShot = async (): Promise<LaneAttemptOutcome> => {
+        const spawnContext = { taskNs, muninClient: munin };
+        const spawnResult = harnessLaneDispatchEligible
+          ? harnessLaneCodexPreflight ?? await spawnRuntime(task, spawnContext)
+          : await executeCodexWithPreflightChecks(task, spawnContext);
+        exitCode = spawnResult.exitCode;
+        output = spawnResult.output;
+        logFile = spawnResult.logFile;
+        if (spawnResult.preflightFailureKind === CODEX_SANDBOX_FAILURE_KIND) {
+          codexPreflightFailureReason = spawnResult.preflightFailureReason;
+        }
+        return laneOutcomeFromExitCode(exitCode, {
+          verifierKind: "none",
+          verdict: exitCode === 0 ? "unverified" : "error",
+          modelId: task.model || "codex",
+          nodeId: "codex-spawn",
+        });
+      };
+      if (harnessLaneDecision && harnessLaneTaskType) {
+        await runHarnessLaneSampledAttempt(
+          learningRegistry,
+          { taskId, attemptId: `${taskId}:dispatch`, taskType: harnessLaneTaskType, occurredAt: startedAt },
+          { oneShot: executeCodexOneShot, harness: executeSampledHarness },
+          {},
+          harnessLaneDecision,
+        );
+      } else {
+        await executeCodexOneShot();
       }
     }
 
@@ -5307,6 +5502,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
     const durationMs = Date.now() - startMs;
     const completedAt = new Date().toISOString();
+    const sampledHarnessLane = harnessLaneDecision?.lane === "harness";
     let cancellation: CancellationRequest | null = currentCancellation;
     if (!cancellation) {
       const currentEntry = await munin.read(taskNs, "status");
@@ -5479,8 +5675,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let rawBodyText: string;
     let structuredBodyKind: TaskExecutionBodyKind;
 
-    if ((isClaude || isOllama || isOrchestrator || isOpencode || isHomeserver) && resultText) {
-      resultSource = isOpencode
+    if ((isClaude || isOllama || isOrchestrator || isOpencode || isHomeserver || sampledHarnessLane) && resultText) {
+      resultSource = isOpencode || sampledHarnessLane
         ? "opencode-json"
         : isHomeserver
           ? "homeserver-delegate"
@@ -5488,7 +5684,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       rawBodyText = resultText;
       structuredBodyKind = "response";
       resultBody = `### Response\n\n${resultText}`;
-    } else if (!isClaude && !isOllama && !isOrchestrator && !isOpencode && !isHomeserver) {
+    } else if (!isClaude && !isOllama && !isOrchestrator && !isOpencode && !isHomeserver && !sampledHarnessLane) {
       const hookResult = readHookResult(taskId);
       if (hookResult) {
         resultSource = "hook";
@@ -5782,7 +5978,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       );
     }
     const baseRuntimeMetadata: TaskExecutionRuntimeMetadata | undefined =
-      isHomeserver && homeserverResult
+      sampledHarnessLane && opencodeResult
+        ? {
+            ...(task.model ? { requestedModel: task.model } : {}),
+            effectiveModel: opencodeResult.model,
+          }
+      : isHomeserver && homeserverResult
         ? {
             effectiveModel: homeserverResult.modelId ?? undefined,
             effectiveHost: homeserverResult.nodeId ?? "m5",

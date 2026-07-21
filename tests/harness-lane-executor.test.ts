@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { MuninWriteRejectedError, type MuninClient, type MuninQueryResult } from "../src/munin-client.js";
 import { LearningRegistryStore } from "../src/learning-registry-store.js";
@@ -6,7 +7,7 @@ import {
   type HarnessLaneExecutors,
   type LaneAttemptOutcome,
 } from "../src/harness-lane-executor.js";
-import { HARNESS_LANE_FRACTION_ENV } from "../src/harness-lane-sampler.js";
+import { decideHarnessLane, HARNESS_LANE_FRACTION_ENV } from "../src/harness-lane-sampler.js";
 
 interface StoredEntry {
   namespace: string;
@@ -225,12 +226,20 @@ describe("runHarnessLaneSampledAttempt — sampler malfunction", () => {
   it("falls back to one-shot and records the malfunction, without ever touching the harness executor", async () => {
     const store = new LearningRegistryStore(munin());
     const executors = makeExecutors();
+    const decision = decideHarnessLane(
+      { taskId: "task-malfunction-1", taskType: "code-edit" },
+      { env: { [HARNESS_LANE_FRACTION_ENV]: "not-a-number" } },
+    );
 
     const result = await runHarnessLaneSampledAttempt(
       store,
       { taskId: "task-malfunction-1", attemptId: "attempt-1", taskType: "code-edit", occurredAt: OCCURRED_AT },
       executors,
-      { env: { [HARNESS_LANE_FRACTION_ENV]: "not-a-number" } },
+      // Production decides only after the checkout/runtime preflights. Make
+      // the fallback env contradictory to prove that exact decision — and
+      // its malfunction reason — crosses the seam unchanged.
+      { env: { [HARNESS_LANE_FRACTION_ENV]: "1" } },
+      decision,
     );
 
     expect(result.lane).toBe("one-shot");
@@ -323,5 +332,36 @@ describe("runHarnessLaneSampledAttempt — no duplicate/lost tasks", () => {
 
     const { events } = await store.listEventsForTask("task-replay-1");
     expect(events).toHaveLength(3); // submission + attempt-reference + terminal-outcome, no duplicates
+  });
+});
+
+describe("production dispatcher wiring", () => {
+  it("places the sampled lane after checkout and the applicable runtime preflight", () => {
+    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+
+    const checkoutGate = source.indexOf("const harnessLaneCheckoutPassed");
+    const claudePreflight = source.indexOf("runClaudeSdkPreflight", checkoutGate);
+    const codexPreflight = source.indexOf("runCodexPreflight", checkoutGate);
+    const samplerDecision = source.indexOf("decideHarnessLane", checkoutGate);
+    const sampledAttempt = source.indexOf("runHarnessLaneSampledAttempt", samplerDecision);
+
+    expect(checkoutGate).toBeGreaterThan(0);
+    expect(claudePreflight).toBeGreaterThan(checkoutGate);
+    expect(codexPreflight).toBeGreaterThan(checkoutGate);
+    expect(samplerDecision).toBeGreaterThan(claudePreflight);
+    expect(samplerDecision).toBeGreaterThan(codexPreflight);
+    expect(sampledAttempt).toBeGreaterThan(samplerDecision);
+  });
+
+  it("keeps harness and one-shot callbacks exclusive at the live seam", () => {
+    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    const seamStart = source.indexOf("const harnessLaneCheckoutPassed");
+    const seamEnd = source.indexOf("// The agent run is done.", seamStart);
+    const seam = source.slice(seamStart, seamEnd);
+
+    expect(seam).toContain("runHarnessLaneSampledAttempt");
+    expect(seam).toContain("oneShot:");
+    expect(seam).toContain("harness:");
+    expect(seam).not.toMatch(/harness:[\s\S]*catch[\s\S]*oneShot\(/);
   });
 });
