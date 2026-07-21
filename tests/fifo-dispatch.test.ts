@@ -59,15 +59,17 @@ describe("pickEarliestTask", () => {
     expect(pickEarliestTask([metaEntry, newTask, oldTask])).toBe(oldTask);
   });
 
-  it("is stable: returns the first-encountered entry when timestamps are equal", () => {
+  it("breaks equal-created_at ties by stable namespace regardless of input order", () => {
     const sameTime = "2026-01-01T09:00:00Z";
-    const first = makeResult("tasks/first/", sameTime);
-    const second = makeResult("tasks/second/", sameTime);
+    const alphabeticallyFirst = makeResult("tasks/a-task", sameTime);
+    const alphabeticallySecond = makeResult("tasks/z-task", sameTime);
 
-    // When timestamps are equal the reduce keeps the first-seen entry
-    // (the `<` comparison is strict, so ties stay with the accumulator)
-    expect(pickEarliestTask([first, second])).toBe(first);
-    expect(pickEarliestTask([second, first])).toBe(second);
+    expect(pickEarliestTask([alphabeticallyFirst, alphabeticallySecond])).toBe(
+      alphabeticallyFirst,
+    );
+    expect(pickEarliestTask([alphabeticallySecond, alphabeticallyFirst])).toBe(
+      alphabeticallyFirst,
+    );
   });
 
   it("handles millisecond-precision ISO timestamps correctly", () => {

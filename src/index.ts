@@ -20,6 +20,13 @@ import {
 import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, prepareManagedCheckout, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt, PUBLICATION_FAILED_TAG } from "./task-helpers.js";
 import { persistPublicationFailure } from "./publication-recovery.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
+import {
+  buildQueueObservabilityFields,
+  shouldWarnQueueTruncation,
+  snapshotPendingQueue,
+  snapshotPendingQueueAfterClaim,
+  type PendingQueueSnapshot,
+} from "./queue-observability.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
 import {
   classifyClaudeFailure,
@@ -576,7 +583,8 @@ let deliveryRetryReaperInFlight = false;
 let authAlarmTimer: ReturnType<typeof setInterval> | null = null;
 let authAlarmInFlight = false;
 let authAlarmState: AuthAlarmState = INITIAL_AUTH_ALARM_STATE;
-let lastQueueDepth = 0;
+let lastPendingQueueSnapshot: PendingQueueSnapshot = snapshotPendingQueue([], false);
+let lastQueueTruncationWarningAtMs: number | null = null;
 let lastBlockedTaskCount = 0;
 const startedAt = Date.now();
 const pipelineSummaryManager = new PipelineSummaryManager();
@@ -4123,13 +4131,13 @@ async function failTaskWithMessage(
 
 // --- Heartbeat ---
 
-async function emitHeartbeat(queueDepth: number, blockedTasks: number): Promise<void> {
+async function emitHeartbeat(blockedTasks: number): Promise<void> {
   try {
     const heartbeat: Record<string, unknown> = {
       worker_id: workerId,
       process_instance_id: processInstanceId,
       polled_at: new Date().toISOString(),
-      queue_depth: queueDepth,
+      ...buildQueueObservabilityFields(lastPendingQueueSnapshot),
       blocked_tasks: blockedTasks,
       current_task: currentTask,
       uptime_s: Math.round((Date.now() - startedAt) / 1000),
@@ -4163,11 +4171,19 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   ]);
   const results = pendingPage.results;
   const runningResults = runningPage.results;
-  if (pendingPage.truncated || runningPage.truncated) {
+  lastPendingQueueSnapshot = snapshotPendingQueue(results, pendingPage.truncated);
+  const paginationTruncated = pendingPage.truncated || runningPage.truncated;
+  const warningNowMs = Date.now();
+  if (shouldWarnQueueTruncation(
+    paginationTruncated,
+    warningNowMs,
+    lastQueueTruncationWarningAtMs,
+  )) {
     console.warn(
-      "Task queue enumeration contains a >=50-entry same-millisecond timestamp bucket; " +
-      "queue depth is a lower bound, but repeated claims remain starvation-free",
+      "Task queue pagination is truncated by a >=50-entry same-millisecond updated_at bucket; " +
+      "claiming continues from visible rows and affected enumeration counts are lower bounds",
     );
+    lastQueueTruncationWarningAtMs = warningNowMs;
   }
 
   // Orchestrator v1 tasks (broker-submitted, tagged "orch-v1") are dispatched
@@ -4178,7 +4194,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   const dispatchableResults = results.filter(
     (r) => !r.tags.includes("orch-v1"),
   );
-  const queueDepth = results.filter((result) => result.key === "status").length;
+  const queueDepth = lastPendingQueueSnapshot.pendingCount;
 
   // Select the next eligible task respecting Group/Sequence ordering (FIFO within eligible set)
   const taskResult = selectNextTask(dispatchableResults, runningResults);
@@ -4570,6 +4586,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     console.log(`Failed to claim ${taskNs} (concurrent claim?):`, err);
     return { hadTask: false, queueDepth };
   }
+
+  // The selected status is now running. Keep /health accurate while the task
+  // executes instead of reporting the accepted claim as still pending.
+  lastPendingQueueSnapshot = snapshotPendingQueueAfterClaim(
+    results,
+    pendingPage.truncated,
+    taskNs,
+  );
 
   currentTask = taskNs;
   currentCancellation = null;
@@ -6420,7 +6444,6 @@ async function pollLoop(): Promise<void> {
 
   let pollCount = 0;
   while (!shuttingDown) {
-    let queueDepth = 0;
     try {
       pollCount++;
       await flushVersionDriftFiringState();
@@ -6430,19 +6453,17 @@ async function pollLoop(): Promise<void> {
       const processedResume = await processResumeRequests();
       const processedApproval = await processApprovalDecisions();
       const poll = await pollOnce();
-      queueDepth = poll.queueDepth;
-      lastQueueDepth = queueDepth;
       if (pollCount % 5 === 0) {
         await reconcileBlockedTasks();
       }
       lastBlockedTaskCount = await countTasksWithLifecycle("blocked");
       // Fire-and-forget heartbeat
-      emitHeartbeat(queueDepth, lastBlockedTaskCount);
+      emitHeartbeat(lastBlockedTaskCount);
       if ((processedCancellation || processedResume || processedApproval || poll.hadTask) && !shuttingDown) continue; // Check for more immediately
     } catch (err) {
       console.error("Poll error:", err);
       // Still emit heartbeat on error
-      emitHeartbeat(queueDepth, lastBlockedTaskCount);
+      emitHeartbeat(lastBlockedTaskCount);
     }
 
     // Wait for next poll
@@ -6471,7 +6492,7 @@ app.get("/health", (_req, res) => {
     process_instance_id: processInstanceId,
     current_task: currentTask,
     polling: !shuttingDown,
-    queue_depth: lastQueueDepth,
+    ...buildQueueObservabilityFields(lastPendingQueueSnapshot),
     blocked_tasks: lastBlockedTaskCount,
     ollama_hosts: getHostStatus(),
     egress_policy: {

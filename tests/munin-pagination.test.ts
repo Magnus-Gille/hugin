@@ -118,9 +118,13 @@ describe("queryAllMuninEntries", () => {
     expect(claimedOnPoll).toBe(1);
   });
 
-  it("reports an unpageable 50-row exact timestamp bucket as truncated", async () => {
+  it("reports an overflowing timestamp bucket without skipping older visible tasks", async () => {
     const timestamp = "2026-07-12T12:00:00.000Z";
-    const rows = Array.from({ length: 60 }, (_, index) => makeTask(index, timestamp));
+    const older = makeTask(100, "2026-07-12T11:59:59.999Z");
+    const rows = [
+      ...Array.from({ length: 60 }, (_, index) => makeTask(index, timestamp)),
+      older,
+    ];
     const munin = new FilterOnlyMunin(rows);
 
     const result = await queryAllMuninEntries(munin as unknown as MuninClient, {
@@ -130,7 +134,9 @@ describe("queryAllMuninEntries", () => {
     });
 
     expect(result.truncated).toBe(true);
-    expect(result.results).toHaveLength(50);
+    expect(result.results).toHaveLength(51);
+    expect(result.results).toContain(older);
+    expect(selectNextTask(result.results, [])).toBe(older);
     expect(munin.calls).toContainEqual(expect.objectContaining({
       since: timestamp,
       until: timestamp,

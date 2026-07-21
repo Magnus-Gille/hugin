@@ -84,6 +84,33 @@ describe("selectNextTask", () => {
     expect(selectNextTask([newer, old], NO_RUNNING)).toBe(old);
   });
 
+  it("breaks equal-created_at ties by stable namespace regardless of input order", () => {
+    const sameTime = "2026-01-01T08:00:00.123Z";
+    const alphabeticallyFirst = makeTask("tasks/a-task", sameTime);
+    const alphabeticallySecond = makeTask("tasks/z-task", sameTime);
+
+    expect(selectNextTask(
+      [alphabeticallySecond, alphabeticallyFirst],
+      NO_RUNNING,
+    )).toBe(alphabeticallyFirst);
+  });
+
+  it("treats offset representations of the same millisecond as an equal-time tie", () => {
+    const alphabeticallyFirst = makeTask(
+      "tasks/a-task",
+      "2026-01-01T10:00:00.123+01:00",
+    );
+    const alphabeticallySecond = makeTask(
+      "tasks/z-task",
+      "2026-01-01T09:00:00.123Z",
+    );
+
+    expect(selectNextTask(
+      [alphabeticallySecond, alphabeticallyFirst],
+      NO_RUNNING,
+    )).toBe(alphabeticallyFirst);
+  });
+
   it("dispatches a grouped task with Sequence 1 when no other group members exist", () => {
     const content = "**Group:** batch-a\n**Sequence:** 1\n**Runtime:** claude";
     const task = makeTask("tasks/seq1/", "2026-01-01T08:00:00Z", content);
