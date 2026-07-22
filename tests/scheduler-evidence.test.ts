@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildSchedulerDecisionPrediction,
   buildSchedulerDecisionOutcomeFromTerminalResult,
   buildRollingMedianDurationEstimate,
   buildCompleteSchedulerServiceClock,
@@ -8,6 +9,8 @@ import {
   schedulerDecisionOutcomeSchema,
   schedulerDecisionPredictionSchema,
   schedulerServiceClockEvidenceSchema,
+  resolveSchedulerRuntimeEstimates,
+  SchedulerRuntimeEstimatorCache,
 } from "../src/scheduler-evidence.js";
 import { createHash } from "node:crypto";
 
@@ -56,6 +59,196 @@ function outcome(
 }
 
 describe("scheduler evidence", () => {
+  it("keeps the FIFO champion unchanged when shadow ranking is toggled", () => {
+    const candidates = [
+      {
+        taskRef,
+        createdAt: "2026-07-22T20:50:00.000Z",
+        serviceEstimate: estimate(600),
+      },
+      {
+        taskRef: { namespace: "tasks/20260722-230001-efgh", key: "status" as const },
+        createdAt: "2026-07-22T20:55:00.000Z",
+        serviceEstimate: estimate(60),
+      },
+    ];
+    const base = {
+      decisionId,
+      observedAt: "2026-07-22T21:00:00.000Z",
+      championTaskRef: taskRef,
+      candidates,
+      pendingEnumerationComplete: true,
+      runningEnumerationComplete: true,
+    };
+
+    const disabled = buildSchedulerDecisionPrediction({ ...base, shadowEnabled: false });
+    const enabled = buildSchedulerDecisionPrediction({ ...base, shadowEnabled: true });
+
+    expect(disabled.champion.taskRef).toEqual(taskRef);
+    expect(enabled.champion.taskRef).toEqual(taskRef);
+    expect(disabled.challenger).toMatchObject({
+      taskRef: null,
+      reason: "insufficient-evidence",
+      evidenceReasons: ["estimate-missing", "shadow-disabled"],
+    });
+    expect(enabled.challenger).toMatchObject({
+      taskRef: candidates[1].taskRef,
+      reason: "shortest-estimate",
+      serviceEstimate: estimate(60),
+    });
+  });
+
+  it("enforces the 30-minute bound before choosing the shortest estimate", () => {
+    const overdue = {
+      taskRef,
+      createdAt: "2026-07-22T20:29:59.999Z",
+      serviceEstimate: estimate(600),
+    };
+    const shorter = {
+      taskRef: { namespace: "tasks/20260722-230001-efgh", key: "status" as const },
+      createdAt: "2026-07-22T20:59:00.000Z",
+      serviceEstimate: estimate(30),
+    };
+    const prediction = buildSchedulerDecisionPrediction({
+      decisionId,
+      observedAt: "2026-07-22T21:00:00.000Z",
+      championTaskRef: taskRef,
+      candidates: [overdue, shorter],
+      pendingEnumerationComplete: true,
+      runningEnumerationComplete: true,
+      shadowEnabled: true,
+    });
+
+    expect(prediction.challenger).toMatchObject({
+      taskRef,
+      reason: "oldest-overdue",
+      serviceEstimate: estimate(600),
+    });
+  });
+
+  it("abstains deterministically for missing estimates and truncated windows", () => {
+    const missing = buildSchedulerDecisionPrediction({
+      decisionId,
+      observedAt: "2026-07-22T21:00:00.000Z",
+      championTaskRef: taskRef,
+      candidates: [{
+        taskRef,
+        createdAt: "not-a-time",
+        serviceEstimate: null,
+      }],
+      pendingEnumerationComplete: false,
+      runningEnumerationComplete: true,
+      shadowEnabled: true,
+    });
+
+    expect(missing.challenger).toEqual({
+      policy: "bounded-sejf-v1",
+      overdueThresholdSeconds: 1800,
+      taskRef: null,
+      reason: "insufficient-evidence",
+      evidenceReasons: ["window-truncated", "estimate-missing"],
+      serviceEstimate: null,
+    });
+    expect(missing.window).toMatchObject({
+      missingEstimates: 1,
+      estimatedWorkMinutes: null,
+    });
+  });
+
+  it("abstains on mixed estimator versions or look-ahead history", () => {
+    for (const badEstimate of [
+      { ...estimate(10), estimatorVersion: "scheduler-duration-v2" },
+      estimate(10, "2026-07-22T21:00:00.001Z"),
+    ]) {
+      const prediction = buildSchedulerDecisionPrediction({
+        decisionId,
+        observedAt: "2026-07-22T21:00:00.000Z",
+        championTaskRef: taskRef,
+        candidates: [{
+          taskRef,
+          createdAt: "2026-07-22T20:59:00.000Z",
+          serviceEstimate: badEstimate,
+        }],
+        pendingEnumerationComplete: true,
+        runningEnumerationComplete: true,
+        shadowEnabled: true,
+      });
+
+      expect(prediction.challenger).toMatchObject({
+        reason: "insufficient-evidence",
+        evidenceReasons: ["estimate-missing", "estimator-version-mismatch"],
+      });
+    }
+  });
+
+  it("treats future-dated candidates as invalid timing evidence", () => {
+    const prediction = buildSchedulerDecisionPrediction({
+      decisionId,
+      observedAt: "2026-07-22T21:00:00.000Z",
+      championTaskRef: taskRef,
+      candidates: [{
+        taskRef,
+        createdAt: "2026-07-22T21:00:00.001Z",
+        serviceEstimate: estimate(10),
+      }],
+      pendingEnumerationComplete: true,
+      runningEnumerationComplete: true,
+      shadowEnabled: true,
+    });
+
+    expect(prediction.challenger).toMatchObject({
+      reason: "insufficient-evidence",
+      evidenceReasons: ["candidate-timestamp-invalid"],
+    });
+  });
+
+  it("skips disabled lookups and memoizes enabled runtime estimates for large queues", () => {
+    const runtimes = Array.from({ length: 4_000 }, (_, index) =>
+      index % 2 === 0 ? "codex" as const : "claude" as const,
+    );
+    let lookups = 0;
+    const lookup = (runtime: "codex" | "claude") => {
+      lookups += 1;
+      return estimate(runtime === "codex" ? 10 : 20);
+    };
+
+    expect(resolveSchedulerRuntimeEstimates(runtimes, false, lookup)).toEqual(
+      Array.from({ length: 4_000 }, () => null),
+    );
+    expect(lookups).toBe(0);
+
+    const resolved = resolveSchedulerRuntimeEstimates(runtimes, true, lookup);
+    expect(lookups).toBe(2);
+    expect(resolved[0]?.seconds).toBe(10);
+    expect(resolved[1]?.seconds).toBe(20);
+  });
+
+  it("uses only live-process created outcomes in the runtime estimator cache", () => {
+    const cache = new SchedulerRuntimeEstimatorCache({ minimumSamples: 2, windowSize: 3 });
+    const first = outcome(
+      "00000000-0000-4000-8000-000000000001",
+      "completed",
+      10,
+      "2026-07-22T20:01:00.000Z",
+    );
+    const second = outcome(
+      "00000000-0000-4000-8000-000000000002",
+      "failed",
+      20,
+      "2026-07-22T20:02:00.000Z",
+    );
+
+    expect(cache.get("codex")).toBeNull();
+    cache.recordCreated(first);
+    expect(cache.get("codex")).toBeNull();
+    cache.recordCreated(second);
+    expect(cache.get("codex")).toMatchObject({ seconds: 15, sampleCount: 2 });
+    expect(cache.get("claude")).toBeNull();
+    expect(() => cache.recordCreated({ ...second, terminalClass: "completed" })).toThrow(
+      /conflicting scheduler outcomes/,
+    );
+  });
+
   it("accepts a content-blind abstaining prediction and hashes it deterministically", () => {
     const prediction = schedulerDecisionPredictionSchema.parse({
       schemaVersion: 1,

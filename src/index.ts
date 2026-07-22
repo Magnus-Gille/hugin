@@ -158,9 +158,11 @@ import {
   stripSchedulerDecisionPointers,
 } from "./task-status-tags.js";
 import {
+  buildSchedulerDecisionPrediction,
   buildSchedulerDecisionOutcomeFromTerminalResult,
   hashSchedulerPrediction,
-  schedulerDecisionPredictionSchema,
+  resolveSchedulerRuntimeEstimates,
+  SchedulerRuntimeEstimatorCache,
   type SchedulerDecisionPrediction,
   type SchedulerTerminalResultRevision,
 } from "./scheduler-evidence.js";
@@ -184,6 +186,7 @@ import { sanitizeProviderTokenCount } from "./m5-provenance.js";
 import {
   buildTaskSensitivitySnapshot,
   buildStructuredTaskResult,
+  dispatcherRuntimeSchema,
   type DispatcherRuntime,
   type StructuredTaskResult,
   type TaskExecutionApprovalMetadata,
@@ -487,6 +490,9 @@ const config = {
   // artifacts + a real cell that do not exist yet. Until then the orchestrator
   // fails closed to the existing cloud auto-router, so flipping this on is a no-op.
   skillLaneEnabled: process.env.HUGIN_SKILL_LANE === "on",
+  // Bounded-SEJF remains observation-only and opt-in. When off, the exact FIFO
+  // champion is still recorded with an explicit shadow-disabled abstention.
+  schedulerShadowEnabled: process.env.HUGIN_SCHEDULER_SHADOW === "on",
   // Pre-flight Claude auth check (issue #129). When `on` (default), a Claude SDK
   // task probes the Pi's Claude credential BEFORE the (paid, slot-consuming) run
   // and short-circuits to a distinctly-classified AUTH_FAILED failure if the
@@ -715,6 +721,13 @@ const reaperMunin = createMuninClient();
 // request queue plus fire-and-forget writes ensures Munin latency cannot hold
 // up execution after the claim CAS.
 const schedulerEvidenceMunin = createMuninClient();
+// Only outcomes created successfully by this live process enter estimator
+// memory. Durable rows cannot be trusted after restart until scheduler claim
+// instances have an authenticated binding, so restart intentionally cold-starts.
+const schedulerRuntimeEstimator = new SchedulerRuntimeEstimatorCache({
+  minimumSamples: 3,
+  windowSize: 24,
+});
 // Verdict-store traffic (batched record + confidence-source read, Fix #2c)
 // gets its own dedicated client, same precedent as leaseMunin/cancelWatchMunin
 // above: verdict recording is fire-and-forget background work and must never
@@ -2477,6 +2490,21 @@ function releaseCurrentClaimWithSchedulerOutcome(input: {
       model: input.model,
     });
     void persistSchedulerOutcome(schedulerEvidenceMunin, outcome)
+      .then((result) => {
+        // A `created` acknowledgement proves this live dispatcher authored the
+        // immutable row. Never train from exact-existing/replayed rows until
+        // durable claim-instance authentication is available.
+        if (result.status === "created") {
+          try {
+            schedulerRuntimeEstimator.recordCreated(outcome);
+          } catch (err) {
+            console.warn(
+              `Scheduler estimator admission failed for ${input.taskNamespace} ` +
+                `(${outcome.decisionId}): ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+      })
       .catch((err: unknown) => {
         console.warn(
           `Scheduler shadow outcome persistence failed for ${input.taskNamespace} ` +
@@ -4333,6 +4361,15 @@ async function emitHeartbeat(blockedTasks: number): Promise<void> {
 
 // --- Poll loop ---
 
+function schedulerRequestedRuntimeFromTags(tags: string[]): DispatcherRuntime | null {
+  const values = tags
+    .filter((tag) => tag.startsWith("runtime:"))
+    .map((tag) => tag.slice("runtime:".length));
+  if (values.length !== 1) return null;
+  const parsed = dispatcherRuntimeSchema.safeParse(values[0]);
+  return parsed.success ? parsed.data : null;
+}
+
 /** Enumerate the complete pending window and claim the oldest eligible task. */
 async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   const [pendingPage, runningPage] = await Promise.all([
@@ -4765,37 +4802,39 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   let schedulerPrediction: SchedulerDecisionPrediction | null = null;
   let tagsForClaim = stripSchedulerDecisionPointers(claimInputTags);
   try {
-    const candidatePrediction = schedulerDecisionPredictionSchema.parse({
-      schemaVersion: 1,
+    const compareShadow = config.schedulerShadowEnabled
+      && !pendingPage.truncated
+      && !runningPage.truncated;
+    const schedulerCandidates = compareShadow
+      ? (() => {
+          const runtimes = eligibleTasks.map((candidate) =>
+            schedulerRequestedRuntimeFromTags(candidate.tags),
+          );
+          const estimates = resolveSchedulerRuntimeEstimates(
+            runtimes,
+            true,
+            (runtime) => schedulerRuntimeEstimator.get(runtime),
+          );
+          return eligibleTasks.map((candidate, index) => ({
+            taskRef: { namespace: candidate.namespace, key: "status" as const },
+            createdAt: candidate.created_at,
+            serviceEstimate: estimates[index] ?? null,
+          }));
+        })()
+      : [{
+          taskRef: { namespace: taskNs, key: "status" as const },
+          createdAt: taskResult.created_at,
+          serviceEstimate: null,
+        }];
+    const candidatePrediction = buildSchedulerDecisionPrediction({
       decisionId: randomUUID(),
       observedAt: new Date().toISOString(),
-      champion: {
-        policy: pendingPage.truncated || runningPage.truncated
-          ? "visible-window-fifo-v1"
-          : "complete-fifo-v1",
-        taskRef: { namespace: taskNs, key: "status" },
-        serviceEstimate: null,
-      },
-      challenger: {
-        policy: "bounded-sejf-v1",
-        overdueThresholdSeconds: 1800,
-        taskRef: null,
-        reason: "insufficient-evidence",
-        evidenceReasons: [
-          ...(pendingPage.truncated || runningPage.truncated ? ["window-truncated"] : []),
-          "estimate-missing",
-        ],
-        serviceEstimate: null,
-      },
-      window: {
-        eligibleTasks: eligibleTasks.length,
-        pendingEnumerationComplete: !pendingPage.truncated,
-        runningEnumerationComplete: !runningPage.truncated,
-        eligibilityAuthority: "legacy-unbound-group-sequence",
-        estimatedWorkMinutes: null,
-        missingEstimates: eligibleTasks.length,
-      },
-      estimatorVersion: "scheduler-duration-v1",
+      championTaskRef: { namespace: taskNs, key: "status" },
+      candidates: schedulerCandidates,
+      eligibleTaskCount: eligibleTasks.length,
+      pendingEnumerationComplete: !pendingPage.truncated,
+      runningEnumerationComplete: !runningPage.truncated,
+      shadowEnabled: config.schedulerShadowEnabled,
     });
     schedulerPrediction = candidatePrediction;
     tagsForClaim = attachSchedulerDecisionPointer(claimInputTags, {

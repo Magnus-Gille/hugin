@@ -1,7 +1,8 @@
 # Scheduling shadow lanes and work-minute admission
 
-**Status:** prediction and in-process terminal-outcome persistence active in
-shadow; recovery preservation deferred; no scheduling behavior change
+**Status:** prediction, in-process terminal outcomes, and a live-process
+runtime estimator are active; bounded-SEJF comparison is opt-in shadow only;
+recovery preservation is deferred; no scheduling behavior change
 
 **Issue:** [#282](https://github.com/Magnus-Gille/hugin/issues/282)
 
@@ -131,14 +132,15 @@ recovery alone is not an exclusion. The old executor-span `durationSeconds`
 may be compared during calibration but never substituted for the new service
 clock.
 
-An estimate is a persisted, versioned value derived from a bounded historical
-window. The initial implementation should use a robust statistic such as a
-rolling median, require a minimum sample count, and record the history
+An estimate is a versioned value derived from a bounded historical window. The
+initial executable calibration groups by requested dispatcher runtime (the
+only identity mechanically known for every candidate before claim), uses a
+rolling numeric median over the newest 24 complete outcomes, requires three
+samples, and records the history
 high-water tuple used to build it. Equal release timestamps are ordered by the
 content-blind decision UUID; repeated identical outcomes are counted once and
-conflicting outcomes under one UUID fail closed. Exact window length, minimum
-sample count, and grouping keys are calibration parameters, not implicit
-constants.
+conflicting outcomes under one UUID fail closed. These grouping and window
+values are explicit calibration parameters, not a scheduler-promotion claim.
 
 Every estimate carries:
 
@@ -197,6 +199,22 @@ with caller pointer tags stripped. Eligible-window collection uses indexed
 per-group minimum sequences rather than a nested scan. A dedicated Munin client
 and fire-and-forget write ensure evidence latency cannot enter the
 claim-to-execution critical path.
+
+The next live slice admits an outcome to estimator memory only after this
+process receives `status: created` for its create-only outcome write. It never
+trains from `exact-existing` or arbitrary post-restart Munin rows: schema and a
+terminal-result hash prove content consistency, but not that Hugin owned the
+claim instance. A restart therefore cold-starts the three-sample runtime
+window and abstains until enough new exact-bound outcomes have been created.
+The cache retains at most the 24 newest complete outcomes per requested
+runtime. This is intentionally conservative until authenticated
+claim-instance provenance exists.
+
+`HUGIN_SCHEDULER_SHADOW=on` enables challenger computation. It defaults to
+`off`; the disabled state persists a bounded `shadow-disabled` abstention.
+Whether enabled or disabled, `eligibleTasks[0]` remains the exact FIFO claim
+candidate selected before evidence construction, and evidence failure falls
+open only to that same candidate with caller scheduler pointers stripped.
 
 Startup, lease-reaper, and interrupted-delivery recovery continue to strip the
 pointer. Schema and digest validation proves content integrity but not that the
@@ -285,7 +303,8 @@ reported truncation; that case always carries an abstaining challenger.
 Allowed challenger reasons are `shortest-estimate`, `oldest-overdue`, and
 `insufficient-evidence`. An abstention uses a null challenger task reference
 and one or more bounded evidence reasons such as `window-truncated`,
-`estimate-missing`, or `estimator-version-mismatch`, never free-form task
+`estimate-missing`, `estimator-version-mismatch`,
+`candidate-timestamp-invalid`, or `shadow-disabled`, never free-form task
 content.
 
 When the champion task terminalizes, the outcome record adds its realized
@@ -370,9 +389,10 @@ capacity, Hugin must say so truthfully.
 
 1. **Duration evidence:** implement the versioned historical estimator and
    prediction/outcome schemas; no alternate choice yet.
-2. **SEJF shadow:** add the 30-minute challenger behind
-   `HUGIN_SCHEDULER_SHADOW=off` by default. Prove that toggling it cannot change
-   the champion claim.
+2. **SEJF shadow:** the 30-minute challenger is implemented behind
+   `HUGIN_SCHEDULER_SHADOW=off` by default. Toggling it cannot change the
+   champion claim; it needs production observation and calibration before this
+   delivery step is complete.
 3. **Urgency authority:** add digest-bound authenticated urgency, then shadow
    low-to-normal promotion at half of the declared low-class SLA.
 4. **Work-minute shadow:** publish complete/lower-bound queued work and validate
