@@ -250,8 +250,8 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
         err.conflictReason === "already_exists"
       ) {
         const persisted = await deps.taskStore.readStatus(taskId).catch(() => null);
-        deps.idempotency.release(reservationKey);
         if (!persisted) {
+          deps.idempotency.release(reservationKey);
           res.status(500).json({
             error: "internal",
             message: "idempotency task exists but its canonical envelope is unavailable",
@@ -260,6 +260,7 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
         }
         const persistedEnvelopeResult = parseCanonicalEnvelope(persisted.content);
         if (!persistedEnvelopeResult.ok) {
+          deps.idempotency.release(reservationKey);
           res.status(409).json({
             error: "policy_rejected",
             message: "idempotency task exists but its canonical envelope is unreadable",
@@ -270,6 +271,7 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
         const persistedEnvelope = persistedEnvelopeResult.envelope;
         const persistedRequestResult = delegationRequestSchema.safeParse(persistedEnvelope);
         if (!persistedRequestResult.success) {
+          deps.idempotency.release(reservationKey);
           res.status(409).json({
             error: "policy_rejected",
             message: "idempotency task exists but its request contract is invalid",
@@ -278,6 +280,7 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
           return;
         }
         if (hashPayload(persistedRequestResult.data) !== hashPayload(request)) {
+          deps.idempotency.release(reservationKey);
           res.status(409).json({
             error: "policy_rejected",
             message: "idempotency_key reused with a different payload",
