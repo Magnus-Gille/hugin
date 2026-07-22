@@ -22,6 +22,6 @@ describe("systemd user services", () => {
   it.each(SYSTEM_UNITS)("%s declares a non-root runtime identity", (unitPath) => {
     const unit = readFileSync(resolve(unitPath), "utf8");
 
-    expect(unit).toMatch(/^User=\S+$/m);
+    expect(unit).toMatch(/^User=magnus$/m);
   });
 });
