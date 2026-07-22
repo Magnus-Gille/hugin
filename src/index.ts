@@ -164,6 +164,7 @@ import { sanitizeProviderTokenCount } from "./m5-provenance.js";
 import {
   buildTaskSensitivitySnapshot,
   buildStructuredTaskResult,
+  taskExecutionSensitivitySchema,
   type DispatcherRuntime,
   type StructuredTaskResult,
   type TaskExecutionApprovalMetadata,
@@ -1092,18 +1093,26 @@ function isOwnerSubmitter(submittedBy: string | undefined): boolean {
 
 function getTaskSensitivityAssessment(task: TaskConfig): SensitivityAssessment {
   const declared = task.declaredSensitivity;
-  const baseline = task.pipeline?.sensitivity || "internal";
   const contextSensitivity = classifyContextSensitivity(task.context, task.workingDir);
   const promptDetection = detectPromptSensitivity(task.prompt);
   const refsSensitivity = task.contextResolution?.maxSensitivity;
   return buildSensitivityAssessment({
     declared,
-    baseline,
+    baseline: "internal",
     context: contextSensitivity,
     prompt: promptDetection.sensitivity,
     refs: refsSensitivity,
+    // A pipeline phase inherits the compiler's effective classification. Keep
+    // it as an explicit reason rather than an unexplained elevated baseline so
+    // dependency-driven mismatches remain useful to content-blind mining.
+    inherited: task.pipeline?.sensitivity,
     hardPrivate: promptDetection.hardPrivate,
-    allowOwnerOverride: isOwnerSubmitter(task.submittedBy),
+    // Generated phase tasks are submitted by Hugin itself, but override
+    // authority belongs to the original pipeline submitter. Otherwise every
+    // generated phase would accidentally inherit Hugin's owner privilege.
+    allowOwnerOverride: isOwnerSubmitter(
+      task.pipeline?.submittedBy ?? task.submittedBy,
+    ),
   });
 }
 
@@ -2560,6 +2569,41 @@ async function writeDeliveryRetryMeta(
   );
 }
 
+const SENSITIVITY_CHECKPOINT_KEY = "sensitivity-checkpoint";
+
+async function writeSensitivityCheckpoint(
+  taskNs: string,
+  sensitivity: TaskExecutionSensitivity | undefined,
+  client: MuninClient,
+  classification?: string,
+): Promise<void> {
+  if (!sensitivity) return;
+  await client.write(
+    taskNs,
+    SENSITIVITY_CHECKPOINT_KEY,
+    JSON.stringify(sensitivity),
+    ["type:task-sensitivity-checkpoint"],
+    undefined,
+    classification,
+  );
+}
+
+async function readSensitivityCheckpoint(
+  taskNs: string,
+  client: MuninClient,
+): Promise<TaskExecutionSensitivity | undefined> {
+  try {
+    const entry = await client.read(taskNs, SENSITIVITY_CHECKPOINT_KEY);
+    if (!entry?.content) return undefined;
+    const parsed = taskExecutionSensitivitySchema.safeParse(
+      JSON.parse(entry.content),
+    );
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // Runtime-owned artefact delivery (issue #68 / #77): a `running +
 // delivery:pending` checkpoint means the agent content is durably preserved in
 // `result` but delivery did not finalize (crash/restart mid-delivery).
@@ -2584,6 +2628,11 @@ async function reconcileDeliveryPending(
     /^runtime:/,
     "",
   ) as DispatcherRuntime;
+  const recoverySensitivity =
+    await readSensitivityCheckpoint(taskNs, client) ??
+    (task
+      ? buildTaskSensitivitySnapshot(getTaskSensitivityAssessment(task))
+      : undefined);
 
   // Single CAS ownership: reclaim with a fresh lease, keep delivery:pending.
   const reclaimTags = buildClaimTags(
@@ -2773,6 +2822,7 @@ async function reconcileDeliveryPending(
       bodyKind: "response",
       bodyText: "",
       errorMessage: ok ? undefined : delivery.error ?? "delivery failed",
+      sensitivity: recoverySensitivity,
       artifactDelivery: {
         ok: delivery.ok,
         failureKind: delivery.failureKind,
@@ -5829,6 +5879,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         }),
         exfilOutcome.resultTags,
         undefined,
+        taskClassification,
+      );
+      await writeSensitivityCheckpoint(
+        taskNs,
+        taskSensitivitySnapshot,
+        munin,
         taskClassification,
       );
       const checkpointWrite = await munin.write(

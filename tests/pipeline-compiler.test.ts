@@ -291,6 +291,79 @@ Phase: review
     expect(pipeline.phases[0]?.runtime).toBe("ollama-pi");
   });
 
+  it("preserves a detected phase mismatch in IR and the generated child task", () => {
+    const pipeline = makePipeline(`## Task: Phase sensitivity audit
+
+- **Runtime:** pipeline
+- **Sensitivity:** internal
+- **Submitted by:** claude-code
+
+### Pipeline
+
+Phase: review
+  Runtime: ollama-pi
+  Sensitivity: internal
+  Prompt: |
+    Review the medical notes.
+`);
+
+    expect(pipeline.phases[0]?.sensitivityAssessment).toEqual({
+      declared: "internal",
+      effective: "private",
+      detectorMax: "private",
+      mismatch: true,
+      reasons: ["declared:internal", "prompt:private"],
+    });
+
+    const [draft] = buildPhaseTaskDrafts(pipeline);
+    expect(draft?.content).toContain("- **Submitted by:** hugin");
+    expect(draft?.content).toContain("- **Pipeline submitted by:** claude-code");
+    expect(draft?.content).toContain("- **Sensitivity:** internal");
+    expect(draft?.content).toContain("- **Pipeline sensitivity:** private");
+  });
+
+  it("preserves owner-override evidence and original submitter provenance in a child task", () => {
+    const pipeline = compilePipelineTask(
+      "20260402-owner-override",
+      "tasks/20260402-owner-override",
+      `## Task: Owner-reviewed phase
+
+- **Runtime:** pipeline
+- **Sensitivity:** internal
+- **Submitted by:** claude-code
+
+### Pipeline
+
+Phase: review
+  Runtime: ollama-pi
+  Sensitivity: internal
+  Prompt: |
+    Review the invoice.
+`,
+      defaultOllamaHosts,
+      { allowOwnerOverride: true },
+    );
+
+    expect(pipeline.phases[0]?.sensitivityAssessment).toEqual({
+      declared: "internal",
+      effective: "internal",
+      detectorMax: "private",
+      mismatch: true,
+      reasons: [
+        "declared:internal",
+        "prompt:private",
+        "owner-override:internal<private",
+      ],
+      override: { applied: true, detectorMax: "private" },
+    });
+
+    const [draft] = buildPhaseTaskDrafts(pipeline);
+    expect(draft?.content).toContain("- **Submitted by:** hugin");
+    expect(draft?.content).toContain("- **Pipeline submitted by:** claude-code");
+    expect(draft?.content).toContain("- **Sensitivity:** internal");
+    expect(draft?.content).toContain("- **Pipeline sensitivity:** internal");
+  });
+
   it("renders parent routing metadata in the decomposition result", () => {
     const pipeline = makePipeline(`## Task: Improve Munin UX
 

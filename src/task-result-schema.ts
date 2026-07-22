@@ -6,6 +6,8 @@ import {
 } from "./pipeline-ir.js";
 import { M5_OUTCOMES } from "./m5-provenance.js";
 import {
+  sensitivityOverrideSchema,
+  sensitivityReasonSchema,
   sensitivitySchema,
   type SensitivityAssessment,
 } from "./sensitivity.js";
@@ -174,11 +176,6 @@ export type TaskExecutionRuntimeMetadata = z.infer<
   typeof taskExecutionRuntimeMetadataSchema
 >;
 
-const taskExecutionSensitivityReasonSchema = z.string().regex(
-  /^(?:(?:declared|context|prompt|context-refs|inherited):(public|internal|private)|owner-override:(public|internal|private)<(public|internal|private)|owner-override-blocked:hard-private)$/,
-  "sensitivity reasons must use the content-blind detector vocabulary",
-);
-
 export const taskExecutionSensitivitySchema = z.object({
   declared: sensitivitySchema.optional(),
   effective: sensitivitySchema,
@@ -186,11 +183,8 @@ export const taskExecutionSensitivitySchema = z.object({
   // Optional for schema-v1 compatibility. New producers emit this complete
   // content-blind evidence bundle whenever mismatch=true (#280).
   detectorMax: sensitivitySchema.optional(),
-  reasons: z.array(taskExecutionSensitivityReasonSchema).min(1).max(8).optional(),
-  override: z.object({
-    applied: z.literal(true),
-    detectorMax: sensitivitySchema,
-  }).strict().optional(),
+  reasons: z.array(sensitivityReasonSchema).min(1).max(8).optional(),
+  override: sensitivityOverrideSchema.optional(),
 }).superRefine((value, ctx) => {
   const hasEvidence = value.detectorMax !== undefined
     || value.reasons !== undefined

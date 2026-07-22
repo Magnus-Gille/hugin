@@ -265,7 +265,14 @@ function summarizeAwaitResponse(response: unknown, taskId: string): unknown {
     const sensitivity = asRecord(result.sensitivity);
     if (sensitivity) {
       const projectedSensitivity: Record<string, unknown> = {};
-      for (const key of ["declared", "effective", "mismatch"] as const) {
+      for (const key of [
+        "declared",
+        "effective",
+        "mismatch",
+        "detectorMax",
+        "reasons",
+        "override",
+      ] as const) {
         if (sensitivity[key] !== undefined) projectedSensitivity[key] = sensitivity[key];
       }
       if (Object.keys(projectedSensitivity).length > 0) {

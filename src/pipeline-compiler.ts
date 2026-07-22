@@ -28,6 +28,7 @@ import {
   maxSensitivity,
   parseSensitivity,
   sensitivityToTag,
+  type SensitivityAssessment,
 } from "./sensitivity.js";
 import { MAX_DEPENDENCIES } from "./task-graph.js";
 import type { OllamaHost } from "./ollama-hosts.js";
@@ -376,17 +377,17 @@ function validateAuthority(
   throw new Error(`Phase "${phaseName}" uses unsupported authority "${authority}"`);
 }
 
-function computePhaseEffectiveSensitivities(
+function computePhaseSensitivityAssessments(
   phases: ParsedPipelinePhase[],
   pipelineSensitivity: PipelineSensitivity,
   options?: { allowOwnerOverride?: boolean },
-): Map<string, PipelineSensitivity> {
+): Map<string, SensitivityAssessment> {
   const byName = new Map(phases.map((phase) => [phase.name, phase]));
-  const computed = new Map<string, PipelineSensitivity>();
+  const computed = new Map<string, SensitivityAssessment>();
 
   const visit = (phaseName: string): PipelineSensitivity => {
     const cached = computed.get(phaseName);
-    if (cached) return cached;
+    if (cached) return cached.effective;
 
     const phase = byName.get(phaseName);
     if (!phase) {
@@ -418,7 +419,7 @@ function computePhaseEffectiveSensitivities(
       );
     }
 
-    computed.set(phaseName, assessment.effective);
+    computed.set(phaseName, assessment);
     return assessment.effective;
   };
 
@@ -459,7 +460,7 @@ export function compilePipelineTask(
   for (const phase of parsed.phases) {
     phaseIdByName.set(phase.name, `${pipelineId}-${slugifyPhaseName(phase.name)}`);
   }
-  const phaseSensitivities = computePhaseEffectiveSensitivities(
+  const phaseAssessments = computePhaseSensitivityAssessments(
     parsed.phases,
     parsed.sensitivity,
     { allowOwnerOverride: options?.allowOwnerOverride },
@@ -474,7 +475,8 @@ export function compilePipelineTask(
     const sideEffects = validateSideEffects(phase.name, phase.sideEffects);
     const authority = validateAuthority(phase.name, phase.authority, sideEffects);
     const declaredSensitivity = parseSensitivity(phase.sensitivity);
-    const effectiveSensitivity = phaseSensitivities.get(phase.name) || parsed.sensitivity;
+    const sensitivityAssessment = phaseAssessments.get(phase.name);
+    const effectiveSensitivity = sensitivityAssessment?.effective || parsed.sensitivity;
 
     let resolvedRuntimeId: PipelineRuntimeId;
     let autoRouted: boolean | undefined;
@@ -558,6 +560,7 @@ export function compilePipelineTask(
       sideEffects,
       declaredSensitivity,
       effectiveSensitivity,
+      sensitivityAssessment,
       autoRouted,
       routingReason,
     };
@@ -600,7 +603,7 @@ function buildPhaseTaskContent(
     `- **Pipeline:** ${pipeline.id}`,
     `- **Pipeline phase:** ${phase.name}`,
     `- **Pipeline submitted by:** ${pipeline.submittedBy}`,
-    `- **Sensitivity:** ${phase.effectiveSensitivity}`,
+    `- **Sensitivity:** ${phase.declaredSensitivity ?? phase.effectiveSensitivity}`,
     `- **Pipeline sensitivity:** ${phase.effectiveSensitivity}`,
     `- **Pipeline authority:** ${phase.authority}`,
     ...(phase.sideEffects.length > 0

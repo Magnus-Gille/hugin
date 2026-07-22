@@ -248,7 +248,8 @@ Update [src/task-result-schema.ts](/Users/magnus/repos/hugin/src/task-result-sch
 
 - declared sensitivity when present
 - effective sensitivity
-- mismatch indicator when declared < effective
+- mismatch indicator when the detector maximum is higher than the declared
+  sensitivity (including owner overrides where declared equals effective)
 - for mismatches, the content-blind detector maximum and reason codes, plus
   owner-override evidence when one was applied
 
@@ -268,6 +269,14 @@ Reason codes describe detector sources and lattice levels only. They must never
 contain matched prompt text, context content, credentials, or customer data.
 Legacy schema-version-1 results without the additive evidence fields remain
 readable.
+
+The compact `hugin_await` summary preserves this evidence when present, while
+continuing to link to the complete durable result. Artifact-delivery recovery
+checkpoints the exact content-blind snapshot before the nonterminal
+`delivery:pending` transition and reuses it when writing the terminal result.
+Pipeline phase IR likewise retains the full assessment, and generated child
+tasks keep the phase's original declared sensitivity so execution cannot erase
+the mismatch by relabelling the declaration as the effective value.
 
 Per-phase summaries should expose effective phase sensitivity; top-level summaries should expose effective pipeline sensitivity.
 
