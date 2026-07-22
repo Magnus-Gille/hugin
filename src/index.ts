@@ -220,7 +220,7 @@ import {
   type BrokerBindStatus,
 } from "./broker/bind-retry.js";
 import { brokerExecutorCapabilities } from "./broker/executor-capabilities.js";
-import { BrokerTaskStore, parseCanonicalEnvelope } from "./broker/task-store.js";
+import { BrokerTaskStore, resolveHomeserverTaskSource } from "./broker/task-store.js";
 import {
   parseStoredBrokerAttestation,
   validateBrokerAttestation,
@@ -911,10 +911,10 @@ function parseTask(content: string): TaskConfig | null {
   }
 
   if (runtime === "homeserver") {
-    const parsedEnvelope = parseCanonicalEnvelope(content);
-    if (!parsedEnvelope.ok) homeserverPolicyError = parsedEnvelope.error;
-    else {
-      canonicalBrokerEnvelope = parsedEnvelope.envelope;
+    const source = resolveHomeserverTaskSource(content);
+    if (source.kind === "invalid") homeserverPolicyError = source.error;
+    else if (source.kind === "broker") {
+      canonicalBrokerEnvelope = source.envelope;
       homeserverPolicyError = undefined;
     }
   }
