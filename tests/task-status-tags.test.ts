@@ -3,13 +3,13 @@ import { BROKER_TASK_TYPE_TAXONOMY_VERSION } from "../src/broker/task-type-metad
 import {
   attachSchedulerDecisionPointer,
   buildAwaitingApprovalTags,
-  buildCancellationTerminalStatusTags,
   buildClaimedTerminalStatusTags,
   buildLeasedStatusTags,
   buildPipelineParentCancelledTags,
   buildPipelineParentSuccessTags,
   buildTerminalStatusTags,
   getPersistentStatusTags,
+  shouldDeferCancellationToClaimOwner,
   stripSchedulerDecisionPointers,
 } from "../src/task-status-tags.js";
 
@@ -168,30 +168,38 @@ describe("task status tag helpers", () => {
     ]);
   });
 
-  it("preserves scheduler pointers only for cancellations known to follow a claim", () => {
+  it("defers running cancellation without trusting lifecycle tags as claim authority", () => {
     const decisionTag = "scheduler-decision:34f2d430-6c31-47de-860a-8b22bc97f4d4";
     const digestTag = `scheduler-prediction-sha256:${"a".repeat(64)}`;
     const pointerTags = [decisionTag, digestTag];
 
-    expect(buildCancellationTerminalStatusTags([
+    expect(buildTerminalStatusTags("cancelled", [
       "pending",
       "runtime:codex",
       ...pointerTags,
     ])).toEqual(["cancelled", "runtime:codex"]);
-    expect(buildCancellationTerminalStatusTags([
+    expect(buildTerminalStatusTags("cancelled", [
       "blocked",
       "runtime:codex",
       ...pointerTags,
     ])).toEqual(["cancelled", "runtime:codex"]);
-    expect(buildCancellationTerminalStatusTags([
+    expect(shouldDeferCancellationToClaimOwner([
+      "pending",
       "running",
+      "cancel-requested",
       "runtime:codex",
       ...pointerTags,
-    ], true)).toEqual([
-      "cancelled",
+    ])).toBe(true);
+    expect(shouldDeferCancellationToClaimOwner([
+      "pending",
+      "cancel-requested",
       "runtime:codex",
-      ...pointerTags,
-    ]);
+    ])).toBe(false);
+    expect(shouldDeferCancellationToClaimOwner([
+      "blocked",
+      "cancel-requested",
+      "runtime:codex",
+    ])).toBe(false);
   });
 
   it("preserves durable MCP Broker identity and query tags", () => {

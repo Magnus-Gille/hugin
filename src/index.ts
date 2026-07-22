@@ -149,10 +149,10 @@ import {
 } from "./task-graph.js";
 import {
   buildAwaitingApprovalTags,
-  buildCancellationTerminalStatusTags,
   buildClaimedTerminalStatusTags,
   buildLeasedStatusTags,
   buildTerminalStatusTags,
+  shouldDeferCancellationToClaimOwner,
   stripSchedulerDecisionPointers,
 } from "./task-status-tags.js";
 import { LearningLoopCollector } from "./learning-loop-collector.js";
@@ -3702,7 +3702,6 @@ async function markTaskCancelled(
     bodyText?: string;
     logFile?: string;
     runtimeMetadata?: TaskExecutionRuntimeMetadata;
-    preserveClaimedSchedulerPointer?: boolean;
   }
 ): Promise<void> {
   const task = parseTask(entry.content);
@@ -3761,10 +3760,7 @@ async function markTaskCancelled(
       taskNs,
       "status",
       entry.content,
-      buildCancellationTerminalStatusTags(
-        entry.tags,
-        options.preserveClaimedSchedulerPointer,
-      ),
+      buildTerminalStatusTags("cancelled", entry.tags),
       entry.updated_at,
       classification
     );
@@ -4121,6 +4117,14 @@ async function processCancellationRequests(): Promise<boolean> {
       continue;
     }
 
+    if (shouldDeferCancellationToClaimOwner(entry.tags)) {
+      // This generic scanner has no independent proof that a lifecycle tag
+      // followed Hugin's claim CAS. The active owner watches cancellation and
+      // preserves its dispatcher-owned pointer; stale owners are reconciled by
+      // startup/lease recovery. Never promote a caller-supplied pointer here.
+      continue;
+    }
+
     await markTaskCancelled(
       entry.namespace,
       entry,
@@ -4128,7 +4132,6 @@ async function processCancellationRequests(): Promise<boolean> {
       {
         executor: "dispatcher",
         resultSource: "cancellation",
-        preserveClaimedSchedulerPointer: entry.tags.includes("running"),
       }
     );
     processed = true;

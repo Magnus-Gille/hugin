@@ -50,6 +50,11 @@ export function stripSchedulerDecisionPointers(tags: string[]): string[] {
   );
 }
 
+/** Running cancellation belongs to an active owner or claimed-task recovery. */
+export function shouldDeferCancellationToClaimOwner(tags: string[]): boolean {
+  return tags.includes("running");
+}
+
 function dedupeTags(tags: string[]): string[] {
   const seen = new Set<string>();
   const deduped: string[] = [];
@@ -192,17 +197,6 @@ export function buildClaimedTerminalStatusTags(
   runtimeFallback?: string,
 ): string[] {
   return [status, ...getClaimedPersistentStatusTags(tags, runtimeFallback)];
-}
-
-/** Build cancelled tags using explicit call-site knowledge of a successful claim. */
-export function buildCancellationTerminalStatusTags(
-  tags: string[],
-  preserveClaimedSchedulerPointer = false,
-  runtimeFallback?: string,
-): string[] {
-  return preserveClaimedSchedulerPointer
-    ? buildClaimedTerminalStatusTags("cancelled", tags, runtimeFallback)
-    : buildTerminalStatusTags("cancelled", tags, runtimeFallback);
 }
 
 export function buildAwaitingApprovalTags(
