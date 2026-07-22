@@ -19,6 +19,14 @@ function makeResult(
   };
 }
 
+function permutations<T>(items: T[]): T[][] {
+  if (items.length <= 1) return [items];
+  return items.flatMap((item, index) =>
+    permutations(items.filter((_, candidateIndex) => candidateIndex !== index))
+      .map((rest) => [item, ...rest]),
+  );
+}
+
 describe("pickEarliestTask", () => {
   it("returns undefined for an empty result set", () => {
     expect(pickEarliestTask([])).toBeUndefined();
@@ -59,15 +67,17 @@ describe("pickEarliestTask", () => {
     expect(pickEarliestTask([metaEntry, newTask, oldTask])).toBe(oldTask);
   });
 
-  it("is stable: returns the first-encountered entry when timestamps are equal", () => {
+  it("breaks equal-created_at ties by stable namespace regardless of input order", () => {
     const sameTime = "2026-01-01T09:00:00Z";
-    const first = makeResult("tasks/first/", sameTime);
-    const second = makeResult("tasks/second/", sameTime);
+    const alphabeticallyFirst = makeResult("tasks/a-task", sameTime);
+    const alphabeticallySecond = makeResult("tasks/z-task", sameTime);
 
-    // When timestamps are equal the reduce keeps the first-seen entry
-    // (the `<` comparison is strict, so ties stay with the accumulator)
-    expect(pickEarliestTask([first, second])).toBe(first);
-    expect(pickEarliestTask([second, first])).toBe(second);
+    expect(pickEarliestTask([alphabeticallyFirst, alphabeticallySecond])).toBe(
+      alphabeticallyFirst,
+    );
+    expect(pickEarliestTask([alphabeticallySecond, alphabeticallyFirst])).toBe(
+      alphabeticallyFirst,
+    );
   });
 
   it("handles millisecond-precision ISO timestamps correctly", () => {
@@ -75,5 +85,28 @@ describe("pickEarliestTask", () => {
     const later = makeResult("tasks/b/", "2026-04-08T10:00:00.456Z");
 
     expect(pickEarliestTask([later, earlier])).toBe(earlier);
+  });
+
+  it("ranks valid timestamps before malformed timestamps across all input permutations", () => {
+    const validEarlier = makeResult(
+      "tasks/valid-earlier",
+      "2026-01-01T10:00:00+02:00",
+    );
+    const validLater = makeResult(
+      "tasks/valid-later",
+      "2026-01-01T09:00:00Z",
+    );
+    const malformedBetweenLexically = makeResult(
+      "tasks/malformed",
+      "2026-01-01T09:30:00Z invalid",
+    );
+
+    for (const ordering of permutations([
+      validEarlier,
+      validLater,
+      malformedBetweenLexically,
+    ])) {
+      expect(pickEarliestTask(ordering)).toBe(validEarlier);
+    }
   });
 });

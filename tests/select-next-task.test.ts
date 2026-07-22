@@ -38,6 +38,14 @@ function makeRunning(
 
 const NO_RUNNING: MuninQueryResult[] = [];
 
+function permutations<T>(items: T[]): T[][] {
+  if (items.length <= 1) return [items];
+  return items.flatMap((item, index) =>
+    permutations(items.filter((_, candidateIndex) => candidateIndex !== index))
+      .map((rest) => [item, ...rest]),
+  );
+}
+
 describe("parseGroupField", () => {
   it("returns undefined when no Group field", () => {
     expect(parseGroupField("**Runtime:** claude\n**Prompt:** do stuff")).toBeUndefined();
@@ -82,6 +90,56 @@ describe("selectNextTask", () => {
     const old = makeTask("tasks/old/", "2026-01-01T08:00:00Z", "**Runtime:** claude");
     const newer = makeTask("tasks/new/", "2026-01-01T09:00:00Z", "**Runtime:** claude");
     expect(selectNextTask([newer, old], NO_RUNNING)).toBe(old);
+  });
+
+  it("breaks equal-created_at ties by stable namespace regardless of input order", () => {
+    const sameTime = "2026-01-01T08:00:00.123Z";
+    const alphabeticallyFirst = makeTask("tasks/a-task", sameTime);
+    const alphabeticallySecond = makeTask("tasks/z-task", sameTime);
+
+    expect(selectNextTask(
+      [alphabeticallySecond, alphabeticallyFirst],
+      NO_RUNNING,
+    )).toBe(alphabeticallyFirst);
+  });
+
+  it("treats offset representations of the same millisecond as an equal-time tie", () => {
+    const alphabeticallyFirst = makeTask(
+      "tasks/a-task",
+      "2026-01-01T10:00:00.123+01:00",
+    );
+    const alphabeticallySecond = makeTask(
+      "tasks/z-task",
+      "2026-01-01T09:00:00.123Z",
+    );
+
+    expect(selectNextTask(
+      [alphabeticallySecond, alphabeticallyFirst],
+      NO_RUNNING,
+    )).toBe(alphabeticallyFirst);
+  });
+
+  it("selects the earliest valid timestamp across every malformed-timestamp permutation", () => {
+    const validEarlier = makeTask(
+      "tasks/valid-earlier",
+      "2026-01-01T10:00:00+02:00",
+    );
+    const validLater = makeTask(
+      "tasks/valid-later",
+      "2026-01-01T09:00:00Z",
+    );
+    const malformedBetweenLexically = makeTask(
+      "tasks/malformed",
+      "2026-01-01T09:30:00Z invalid",
+    );
+
+    for (const ordering of permutations([
+      validEarlier,
+      validLater,
+      malformedBetweenLexically,
+    ])) {
+      expect(selectNextTask(ordering, NO_RUNNING)).toBe(validEarlier);
+    }
   });
 
   it("dispatches a grouped task with Sequence 1 when no other group members exist", () => {

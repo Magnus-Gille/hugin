@@ -110,9 +110,26 @@ export function extractTaskId(namespace: string): string {
   return namespace.replace(/^tasks\//, "");
 }
 
+function compareTaskClaimOrder(
+  a: MuninQueryResult,
+  b: MuninQueryResult,
+): number {
+  const aCreatedAtMs = Date.parse(a.created_at);
+  const bCreatedAtMs = Date.parse(b.created_at);
+  const aCreatedAtValid = Number.isFinite(aCreatedAtMs);
+  const bCreatedAtValid = Number.isFinite(bCreatedAtMs);
+  if (aCreatedAtValid !== bCreatedAtValid) return aCreatedAtValid ? -1 : 1;
+  if (aCreatedAtValid && bCreatedAtValid) {
+    if (aCreatedAtMs !== bCreatedAtMs) return aCreatedAtMs - bCreatedAtMs;
+  } else if (a.created_at !== b.created_at) {
+    return a.created_at < b.created_at ? -1 : 1;
+  }
+  return a.namespace < b.namespace ? -1 : a.namespace > b.namespace ? 1 : 0;
+}
+
 /**
  * Select the oldest pending task from a batch of query results (FIFO ordering).
- * Filters to key === "status" entries and sorts by created_at ascending.
+ * Filters to key === "status" entries and orders by (created_at, namespace).
  */
 export function pickEarliestTask(
   results: MuninQueryResult[],
@@ -120,7 +137,7 @@ export function pickEarliestTask(
   const statusEntries = results.filter((r) => r.key === "status");
   if (statusEntries.length === 0) return undefined;
   return statusEntries.reduce((earliest, r) =>
-    r.created_at < earliest.created_at ? r : earliest,
+    compareTaskClaimOrder(r, earliest) < 0 ? r : earliest,
   );
 }
 
@@ -157,13 +174,11 @@ export function selectNextTask(
   pendingTasks: MuninQueryResult[],
   runningTasks: MuninQueryResult[],
 ): MuninQueryResult | undefined {
-  // Work in FIFO order (earliest first)
+  // Work in deterministic FIFO order (earliest first, then stable task namespace)
   const statusEntries = pendingTasks.filter((r) => r.key === "status");
   if (statusEntries.length === 0) return undefined;
 
-  const sorted = [...statusEntries].sort((a, b) =>
-    a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0,
-  );
+  const sorted = [...statusEntries].sort(compareTaskClaimOrder);
 
   for (const candidate of sorted) {
     const group = parseGroupField(candidate.content_preview);
