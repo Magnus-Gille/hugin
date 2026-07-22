@@ -210,6 +210,35 @@ The cache retains at most the 24 newest complete outcomes per requested
 runtime. This is intentionally conservative until authenticated
 claim-instance provenance exists.
 
+### Authenticated claim/outcome chain
+
+The first provenance primitive uses the dispatcher-only
+`HUGIN_SENSITIVITY_CHECKPOINT_SECRET` through separate domain-derived HMAC
+keys; scheduler MACs cannot be replayed as sensitivity checkpoints, claim MACs,
+or outcome MACs across protocols. No task content enters the attestation.
+
+The versioned claim attestation binds:
+
+- decision UUID, safe task reference, and SHA-256 of the exact task content;
+- the claim CAS precondition revision and Munin's successful claim
+  acknowledgement timestamp;
+- the exact prediction SHA-256 already attached to that claim;
+- worker and process-instance identity.
+
+The versioned outcome attestation then binds the exact JCS outcome digest and
+terminal-result revision/hash to the full authenticated claim-attestation
+digest. Both use constant-time MAC comparison, reject weak secrets, and fail
+closed on malformed or changed fields. This chain is sufficient for a later
+history reader to distinguish Hugin-authored samples from arbitrary
+create-only rows.
+
+The primitive alone does **not** prove that a mutable current status row is a
+continuous descendant of an older claim. Recovery therefore continues to
+strip scheduler pointers until persistence, crash-gap handling, and replay
+rules for the full chain are implemented and reviewed. Shipping the schemas
+must not silently enable recovery preservation or post-restart estimator
+hydration.
+
 `HUGIN_SCHEDULER_SHADOW=on` enables challenger computation. It defaults to
 `off`; the disabled state persists a bounded `shadow-disabled` abstention.
 Whether enabled or disabled, `eligibleTasks[0]` remains the exact FIFO claim
