@@ -1,10 +1,15 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalizeJcs } from "./jcs.js";
-import { dispatcherRuntimeSchema } from "./task-result-schema.js";
+import {
+  dispatcherRuntimeSchema,
+  structuredTaskResultSchema,
+  type DispatcherRuntime,
+} from "./task-result-schema.js";
 
 export const SCHEDULER_ESTIMATOR_VERSION = "scheduler-duration-v1" as const;
 export const SCHEDULER_SERVICE_CLOCK = "claim-to-release-v1" as const;
+export const SCHEDULER_LONG_JOB_SECONDS = 1800 as const;
 
 const isoTimestampSchema = z.string().datetime({ offset: true });
 const taskNamespaceSchema = z.string().regex(/^tasks\/[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/);
@@ -256,6 +261,93 @@ export const schedulerDecisionOutcomeSchema = z.object({
   }
 });
 export type SchedulerDecisionOutcome = z.infer<typeof schedulerDecisionOutcomeSchema>;
+
+export interface SchedulerTerminalResultRevision {
+  namespace: string;
+  key: "result-structured";
+  updatedAt: string;
+  sha256: string;
+  result: unknown;
+}
+
+export interface BuildSchedulerDecisionOutcomeInput {
+  prediction: unknown;
+  claimedAt: string | null;
+  releasedAt: string;
+  requestedRuntime: DispatcherRuntime;
+  effectiveRuntime: DispatcherRuntime;
+  terminalResult: SchedulerTerminalResultRevision;
+  taskType?: string;
+  harness?: string;
+  model?: string;
+}
+
+function boundedIdentity(value: string | undefined, pattern: RegExp): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed && pattern.test(trimmed) ? trimmed : undefined;
+}
+
+/** Build one content-blind outcome from the exact durable terminal result revision. */
+export function buildSchedulerDecisionOutcomeFromTerminalResult(
+  input: BuildSchedulerDecisionOutcomeInput,
+): SchedulerDecisionOutcome {
+  const prediction = schedulerDecisionPredictionSchema.parse(input.prediction);
+  const terminal = structuredTaskResultSchema.parse(input.terminalResult.result);
+  if (input.terminalResult.namespace !== prediction.champion.taskRef.namespace
+    || terminal.taskNamespace !== prediction.champion.taskRef.namespace) {
+    throw new Error("terminal result does not bind the champion task");
+  }
+  if (input.terminalResult.key !== "result-structured") {
+    throw new Error("scheduler outcome requires result-structured evidence");
+  }
+
+  const claimedAt = input.claimedAt && isoTimestampSchema.safeParse(input.claimedAt).success
+    ? input.claimedAt
+    : null;
+  const releaseBoundaryValid = isoTimestampSchema.safeParse(input.releasedAt).success
+    && (!claimedAt || Date.parse(input.releasedAt) >= Date.parse(claimedAt));
+  const clock: SchedulerServiceClockEvidence = claimedAt && releaseBoundaryValid
+    ? buildCompleteSchedulerServiceClock(claimedAt, input.releasedAt)
+    : schedulerServiceClockEvidenceSchema.parse({
+        serviceClock: SCHEDULER_SERVICE_CLOCK,
+        clockComplete: false,
+        ...(claimedAt ? { claimedAt } : {}),
+        releasedAt: input.releasedAt,
+        incompleteReason: claimedAt
+          ? "release-boundary-unavailable"
+          : "claim-boundary-unavailable",
+      });
+  const championEstimateSeconds = prediction.champion.serviceEstimate?.seconds ?? null;
+  const absolutePredictionErrorSeconds = clock.clockComplete
+    && championEstimateSeconds !== null
+    ? Math.abs(clock.schedulerServiceSeconds - championEstimateSeconds)
+    : null;
+  const terminalClass = terminal.outcome === "timed_out" ? "timed-out" : terminal.outcome;
+
+  return schedulerDecisionOutcomeSchema.parse({
+    schemaVersion: 1,
+    decisionId: prediction.decisionId,
+    taskRef: prediction.champion.taskRef,
+    terminalClass,
+    clock,
+    requestedRuntime: input.requestedRuntime,
+    effectiveRuntime: input.effectiveRuntime,
+    taskType: boundedIdentity(input.taskType, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+    harness: boundedIdentity(input.harness, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+    model: boundedIdentity(input.model, /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/),
+    championEstimateSeconds,
+    absolutePredictionErrorSeconds,
+    longJob: clock.clockComplete
+      ? clock.schedulerServiceSeconds >= SCHEDULER_LONG_JOB_SECONDS
+      : false,
+    terminalResult: {
+      namespace: input.terminalResult.namespace,
+      key: input.terminalResult.key,
+      updatedAt: input.terminalResult.updatedAt,
+      sha256: sha256Schema.parse(input.terminalResult.sha256),
+    },
+  });
+}
 
 function hashSchedulerEvidence(value: unknown): string {
   return createHash("sha256").update(canonicalizeJcs(value), "utf8").digest("hex");

@@ -3,12 +3,16 @@ import {
   type MuninEntry,
 } from "./munin-client.js";
 import {
+  hashSchedulerOutcome,
   hashSchedulerPrediction,
+  schedulerDecisionOutcomeSchema,
   schedulerDecisionPredictionSchema,
 } from "./scheduler-evidence.js";
 
 const PREDICTION_KEY = "prediction";
 const PREDICTION_TAGS = ["type:scheduler-decision-prediction", "scheduler-shadow:v1"];
+const OUTCOME_KEY = "outcome";
+const OUTCOME_TAGS = ["type:scheduler-decision-outcome", "scheduler-shadow:v1"];
 
 export interface SchedulerEvidenceStoreClient {
   read(
@@ -30,6 +34,13 @@ export class SchedulerPredictionConflictError extends Error {
   constructor(decisionId: string) {
     super(`scheduler decision ${decisionId} already contains a different prediction`);
     this.name = "SchedulerPredictionConflictError";
+  }
+}
+
+export class SchedulerOutcomeConflictError extends Error {
+  constructor(decisionId: string) {
+    super(`scheduler decision ${decisionId} already contains a different outcome`);
+    this.name = "SchedulerOutcomeConflictError";
   }
 }
 
@@ -76,6 +87,49 @@ export async function persistSchedulerPrediction(
     const stored = existing ? parseStoredPrediction(existing.content) : null;
     if (!stored || hashSchedulerPrediction(stored) !== hashSchedulerPrediction(prediction)) {
       throw new SchedulerPredictionConflictError(prediction.decisionId);
+    }
+    return { status: "exact-existing" };
+  }
+}
+
+export async function persistSchedulerOutcome(
+  munin: SchedulerEvidenceStoreClient,
+  input: unknown,
+): Promise<{ status: "created" | "exact-existing" }> {
+  const outcome = schedulerDecisionOutcomeSchema.parse(input);
+  const namespace = schedulerDecisionNamespace(outcome.decisionId);
+  try {
+    const result = await munin.write(
+      namespace,
+      OUTCOME_KEY,
+      JSON.stringify(outcome),
+      OUTCOME_TAGS,
+      undefined,
+      "internal",
+      true,
+    );
+    if (result.status !== "created") {
+      throw new Error(
+        `scheduler outcome write returned non-created status for ${namespace}/${OUTCOME_KEY}`,
+      );
+    }
+    return { status: "created" };
+  } catch (error) {
+    if (!(error instanceof MuninWriteRejectedError)
+      || error.conflictReason !== "already_exists") {
+      throw error;
+    }
+    const existing = await munin.read(namespace, OUTCOME_KEY);
+    let stored: unknown = null;
+    try {
+      stored = existing
+        ? schedulerDecisionOutcomeSchema.parse(JSON.parse(existing.content))
+        : null;
+    } catch {
+      stored = null;
+    }
+    if (!stored || hashSchedulerOutcome(stored) !== hashSchedulerOutcome(outcome)) {
+      throw new SchedulerOutcomeConflictError(outcome.decisionId);
     }
     return { status: "exact-existing" };
   }

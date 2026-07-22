@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildSchedulerDecisionOutcomeFromTerminalResult,
   buildRollingMedianDurationEstimate,
   buildCompleteSchedulerServiceClock,
   hashSchedulerOutcome,
@@ -8,6 +9,7 @@ import {
   schedulerDecisionPredictionSchema,
   schedulerServiceClockEvidenceSchema,
 } from "../src/scheduler-evidence.js";
+import { createHash } from "node:crypto";
 
 const taskRef = { namespace: "tasks/20260722-230000-abcd", key: "status" as const };
 const decisionId = "34f2d430-6c31-47de-860a-8b22bc97f4d4";
@@ -292,5 +294,139 @@ describe("scheduler evidence", () => {
     });
     expect(parsed.terminalResult.sha256).toHaveLength(64);
     expect(hashSchedulerOutcome(parsed)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("derives a complete long-job outcome from the exact durable terminal result", () => {
+    const terminalContent = JSON.stringify({
+      schemaVersion: 1,
+      taskId: "20260722-230000-abcd",
+      taskNamespace: taskRef.namespace,
+      lifecycle: "failed",
+      outcome: "timed_out",
+      runtime: "codex",
+      executor: "codex",
+      resultSource: "codex",
+      exitCode: "TIMEOUT",
+      completedAt: "2026-07-22T21:31:41.000Z",
+      bodyKind: "error",
+      bodyText: "timed out",
+    });
+    const prediction = schedulerDecisionPredictionSchema.parse({
+      schemaVersion: 1,
+      decisionId,
+      observedAt: "2026-07-22T21:00:00.000Z",
+      champion: { policy: "complete-fifo-v1", taskRef, serviceEstimate: null },
+      challenger: {
+        policy: "bounded-sejf-v1",
+        overdueThresholdSeconds: 1800,
+        taskRef: null,
+        reason: "insufficient-evidence",
+        evidenceReasons: ["estimate-missing"],
+        serviceEstimate: null,
+      },
+      window: {
+        eligibleTasks: 1,
+        pendingEnumerationComplete: true,
+        runningEnumerationComplete: true,
+        eligibilityAuthority: "legacy-unbound-group-sequence",
+        estimatedWorkMinutes: null,
+        missingEstimates: 1,
+      },
+      estimatorVersion: "scheduler-duration-v1",
+    });
+
+    expect(buildSchedulerDecisionOutcomeFromTerminalResult({
+      prediction,
+      claimedAt: "2026-07-22T21:00:00.000Z",
+      releasedAt: "2026-07-22T21:31:41.000Z",
+      requestedRuntime: "codex",
+      effectiveRuntime: "codex",
+      taskType: "code-fix",
+      terminalResult: {
+        namespace: taskRef.namespace,
+        key: "result-structured",
+        updatedAt: "2026-07-22T21:31:40.000Z",
+        sha256: createHash("sha256").update(terminalContent, "utf8").digest("hex"),
+        result: JSON.parse(terminalContent),
+      },
+    })).toMatchObject({
+      decisionId,
+      terminalClass: "timed-out",
+      clock: { clockComplete: true, schedulerServiceSeconds: 1901 },
+      longJob: true,
+      terminalResult: {
+        sha256: createHash("sha256").update(terminalContent, "utf8").digest("hex"),
+      },
+    });
+  });
+
+  it("marks a missing exact claim boundary incomplete and rejects cross-task results", () => {
+    const prediction = schedulerDecisionPredictionSchema.parse({
+      schemaVersion: 1,
+      decisionId,
+      observedAt: "2026-07-22T21:00:00.000Z",
+      champion: { policy: "complete-fifo-v1", taskRef, serviceEstimate: null },
+      challenger: {
+        policy: "bounded-sejf-v1",
+        overdueThresholdSeconds: 1800,
+        taskRef: null,
+        reason: "insufficient-evidence",
+        evidenceReasons: ["estimate-missing"],
+        serviceEstimate: null,
+      },
+      window: {
+        eligibleTasks: 1,
+        pendingEnumerationComplete: true,
+        runningEnumerationComplete: true,
+        eligibilityAuthority: "legacy-unbound-group-sequence",
+        estimatedWorkMinutes: null,
+        missingEstimates: 1,
+      },
+      estimatorVersion: "scheduler-duration-v1",
+    });
+    const terminal = {
+      schemaVersion: 1,
+      taskId: "20260722-230000-abcd",
+      taskNamespace: taskRef.namespace,
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "codex",
+      executor: "codex",
+      resultSource: "codex",
+      exitCode: 0,
+      completedAt: "2026-07-22T21:01:00.000Z",
+      bodyKind: "response",
+      bodyText: "ok",
+    };
+    const input = {
+      prediction,
+      claimedAt: null,
+      releasedAt: "2026-07-22T21:01:01.000Z",
+      requestedRuntime: "codex" as const,
+      effectiveRuntime: "codex" as const,
+      terminalResult: {
+        namespace: taskRef.namespace,
+        key: "result-structured" as const,
+        updatedAt: "2026-07-22T21:01:00.000Z",
+        sha256: createHash("sha256").update(JSON.stringify(terminal), "utf8").digest("hex"),
+        result: terminal,
+      },
+    };
+    expect(buildSchedulerDecisionOutcomeFromTerminalResult(input)).toMatchObject({
+      clock: { clockComplete: false, incompleteReason: "claim-boundary-unavailable" },
+      longJob: false,
+      absolutePredictionErrorSeconds: null,
+    });
+    expect(buildSchedulerDecisionOutcomeFromTerminalResult({
+      ...input,
+      claimedAt: "2026-07-22T21:02:00.000Z",
+    })).toMatchObject({
+      clock: { clockComplete: false, incompleteReason: "release-boundary-unavailable" },
+      longJob: false,
+    });
+    expect(() => buildSchedulerDecisionOutcomeFromTerminalResult({
+      ...input,
+      terminalResult: { ...input.terminalResult, namespace: "tasks/other" },
+    })).toThrow(/champion task/);
   });
 });

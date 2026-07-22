@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MuninWriteRejectedError, type MuninEntry } from "../src/munin-client.js";
 import {
+  persistSchedulerOutcome,
   persistSchedulerPrediction,
   type SchedulerEvidenceStoreClient,
 } from "../src/scheduler-evidence-store.js";
@@ -103,6 +104,46 @@ describe("scheduler evidence store", () => {
     await expect(persistSchedulerPrediction(munin, prediction({
       observedAt: "2026-07-22T22:16:00.000Z",
     }))).rejects.toThrow(/different prediction/);
+  });
+
+  it("creates outcomes separately and refuses a conflicting immutable replay", async () => {
+    const munin = new FakeMunin();
+    const value = {
+      schemaVersion: 1,
+      decisionId,
+      taskRef: { namespace: taskNamespace, key: "status" },
+      terminalClass: "completed",
+      clock: {
+        serviceClock: "claim-to-release-v1",
+        clockComplete: true,
+        claimedAt: "2026-07-22T22:15:00.000Z",
+        releasedAt: "2026-07-22T22:16:00.000Z",
+        schedulerServiceSeconds: 60,
+      },
+      requestedRuntime: "codex",
+      effectiveRuntime: "codex",
+      championEstimateSeconds: null,
+      absolutePredictionErrorSeconds: null,
+      longJob: false,
+      terminalResult: {
+        namespace: taskNamespace,
+        key: "result-structured",
+        updatedAt: "2026-07-22T22:15:59.000Z",
+        sha256: "a".repeat(64),
+      },
+    };
+
+    expect(await persistSchedulerOutcome(munin, value)).toEqual({ status: "created" });
+    expect(munin.writes[0]).toEqual({
+      namespace: `scheduler/decisions/${decisionId}`,
+      key: "outcome",
+      createIfAbsent: true,
+    });
+    expect(await persistSchedulerOutcome(munin, value)).toEqual({ status: "exact-existing" });
+    await expect(persistSchedulerOutcome(munin, {
+      ...value,
+      terminalClass: "failed",
+    })).rejects.toThrow(/different outcome/);
   });
 
 });

@@ -1,7 +1,7 @@
 # Scheduling shadow lanes and work-minute admission
 
-**Status:** prediction persistence active in shadow; recovery preservation
-deferred; no scheduling behavior change
+**Status:** prediction and in-process terminal-outcome persistence active in
+shadow; recovery preservation deferred; no scheduling behavior change
 
 **Issue:** [#282](https://github.com/Magnus-Gille/hugin/issues/282)
 
@@ -204,6 +204,19 @@ first writer was Hugin or that the pointer came from the successful claim CAS.
 Recovery preservation therefore requires a future immutable, authenticated
 claim-instance binding; mutable status tags plus create-only evidence are not
 sufficient authority.
+
+For a terminal result written by the live in-process claim owner, Hugin retains
+the exact serialized `result-structured` SHA-256 and Munin revision returned by
+that successful write. After synchronous delivery/publication, learning
+capture, dependent promotion, pipeline refresh, quota sampling, and invocation
+journaling finish, Hugin records the release boundary, clears `currentTask`, and
+queues a create-only outcome on the same isolated telemetry client. The outcome
+write is therefore outside the dispatch critical path. If Munin did not return
+the exact claim-CAS timestamp, the outcome records an incomplete
+`claim-boundary-unavailable` clock instead of borrowing the older pending
+timestamp. A release timestamp preceding the claim timestamp is likewise
+incomplete rather than coerced. The initial `longJob` threshold is the same
+explicit 1,800-second bound used by the shadow overdue policy.
 
 Prediction and outcome use separate retry comparisons. A prediction retry
 must match the claim-bound prediction digest. An outcome is deterministically
