@@ -140,6 +140,9 @@ const submitInputSchema = z.object(submitInputShape);
 
 export const awaitInputShape = {
   task_id: z.string().min(1).describe("Task id returned by `hugin_submit`."),
+  verbosity: z.enum(["full", "summary"]).optional().describe(
+    "Response detail. Omit or use `full` for the canonical durable result; use `summary` for a compact projection with refs to the full result.",
+  ),
 };
 const awaitInputSchema = z.object(awaitInputShape);
 
@@ -211,6 +214,73 @@ function withIdempotencyKey(response: unknown, idempotencyKey: string): unknown 
     return obj;
   }
   return { response, idempotency_key: idempotencyKey };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+/**
+ * Project the Broker's canonical await response without changing its durable
+ * representation. Terminal provenance remains available at `fullResult`;
+ * polling fields remain inline so summary callers can safely make progress.
+ */
+function summarizeAwaitResponse(response: unknown, taskId: string): unknown {
+  const source = asRecord(response);
+  if (!source) return response;
+
+  const namespace = `tasks/${taskId}`;
+  const summary: Record<string, unknown> = {
+    task_id: taskId,
+  };
+  for (const key of ["status", "reason", "error", "lease", "orphan_suspected"] as const) {
+    if (source[key] !== undefined) summary[key] = source[key];
+  }
+
+  const result = asRecord(source.result);
+  if (result) {
+    for (const key of ["outcome", "exitCode", "bodyText"] as const) {
+      if (result[key] !== undefined) summary[key] = result[key];
+    }
+
+    const runtimeMetadata = asRecord(result.runtimeMetadata);
+    if (runtimeMetadata) {
+      if (runtimeMetadata.effectiveModel !== undefined) {
+        summary.effectiveModel = runtimeMetadata.effectiveModel;
+      }
+      if (runtimeMetadata.effectiveHost !== undefined) {
+        summary.effectiveHost = runtimeMetadata.effectiveHost;
+      }
+      const delegation = asRecord(runtimeMetadata.delegation);
+      const delegationDecision = delegation?.decisionReason
+        ?? delegation?.policyReason
+        ?? runtimeMetadata.routingReason;
+      if (delegationDecision !== undefined) {
+        summary.delegationDecision = delegationDecision;
+      }
+    }
+
+    const sensitivity = asRecord(result.sensitivity);
+    if (sensitivity) {
+      const projectedSensitivity: Record<string, unknown> = {};
+      for (const key of ["declared", "effective", "mismatch"] as const) {
+        if (sensitivity[key] !== undefined) projectedSensitivity[key] = sensitivity[key];
+      }
+      if (Object.keys(projectedSensitivity).length > 0) {
+        summary.sensitivity = projectedSensitivity;
+      }
+    }
+  }
+
+  summary.refs = {
+    status: { namespace, key: "status" },
+    ...(result
+      ? { fullResult: { namespace, key: "result-structured" } }
+      : {}),
+  };
+  return summary;
 }
 
 function errorPayload(err: unknown): { error: { kind: string; message: string; http_status?: number; body?: unknown } } {
@@ -319,7 +389,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_await",
     title: "Read the current state of a delegated task",
     description:
-      "Idempotent read of a task's status: `running` / `completed` / `failed`. Returns immediately. While `running`, the response also carries lease info and an `orphan_suspected` flag (true once the lease has expired without completion). Safe to poll.",
+      "Idempotent read of a task's status: `running` / `completed` / `failed`. Returns immediately. While `running`, the response also carries lease info and an `orphan_suspected` flag (true once the lease has expired without completion). Use `verbosity: summary` to avoid inlining full terminal provenance; the summary includes a namespace/key ref to it. Safe to poll.",
     inputShape: awaitInputShape,
     handler: async (rawInput) => {
       try {
@@ -328,10 +398,14 @@ export function buildTools(deps: ToolDeps): {
         // broker tell a durable handoff (a LATER session collecting a result)
         // from an ordinary same-session poll. Callers never supply it.
         const response = await deps.broker.await_({
-          ...input,
+          task_id: input.task_id,
           orchestrator_session_id: deps.sessionId,
         });
-        return asResult(response);
+        return asResult(
+          input.verbosity === "summary"
+            ? summarizeAwaitResponse(response, input.task_id)
+            : response,
+        );
       } catch (err) {
         return asResult(errorPayload(err), true);
       }

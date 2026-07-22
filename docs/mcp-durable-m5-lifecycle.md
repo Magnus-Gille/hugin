@@ -32,6 +32,29 @@ another principal's canonical results. Rate remains owner-only for Broker
 tasks; the same authenticated endpoint can also review an ordinary terminal
 Hugin task, which has no Broker owner.
 
+`hugin_await` preserves its canonical full response by default and when called
+with `verbosity: "full"`. Callers that only need the actionable outcome can use
+`verbosity: "summary"`. The compact response retains the status, polling lease
+and orphan evidence, error, outcome, exit code, body text, effective model and
+host, delegation decision, and declared/effective/mismatch sensitivity fields
+when present. It replaces the inline terminal result and its potentially large
+learning provenance with Munin references:
+
+```json
+{
+  "refs": {
+    "status": { "namespace": "tasks/<task-id>", "key": "status" },
+    "fullResult": {
+      "namespace": "tasks/<task-id>",
+      "key": "result-structured"
+    }
+  }
+}
+```
+
+`fullResult` appears only when the Broker returned a structured terminal
+result. The MCP projection does not alter or rewrite the durable document.
+
 This guarantees one durable task for idempotent submission retries. It does not
 claim exactly-once network execution if the process crashes after M5 performs a
 future side effect but before Hugin stores the response. The current endpoint is

@@ -382,6 +382,121 @@ describe("buildTools — hugin_await", () => {
     });
     expect(parseResult(result)).toEqual({ state: "completed" });
   });
+
+  it("returns the canonical response unchanged when full verbosity is explicit", async () => {
+    const canonical = {
+      status: "completed",
+      result: {
+        bodyText: "done",
+        runtimeMetadata: { learningTask: { durable: "full provenance" } },
+      },
+    };
+    const await_ = vi.fn(async () => canonical);
+    const tools = buildTools({
+      broker: fakeBroker({ await_ }),
+      sessionId: "sess",
+      submitter: "claude-code",
+    });
+
+    const result = await tools.await_.handler({ task_id: "t-full", verbosity: "full" });
+
+    expect(await_).toHaveBeenCalledWith({
+      task_id: "t-full",
+      orchestrator_session_id: "sess",
+    });
+    expect(parseResult(result)).toEqual(canonical);
+  });
+
+  it("projects a compact terminal summary without forwarding verbosity", async () => {
+    const await_ = vi.fn(async () => ({
+      status: "completed",
+      result: {
+        schemaVersion: 1,
+        taskId: "t-compact",
+        outcome: "completed",
+        exitCode: 0,
+        bodyText: "done",
+        runtimeMetadata: {
+          effectiveModel: "qwen3-coder-next-80b",
+          effectiveHost: "m5",
+          delegation: {
+            decisionReason: "Selected the strongest available local coding model.",
+            verifierNotes: "large provenance field that must not be inlined",
+          },
+          learningTask: {
+            gatewayEcho: { request: "large provenance field that must not be inlined" },
+          },
+        },
+        sensitivity: {
+          declared: "internal",
+          effective: "internal",
+          mismatch: false,
+        },
+      },
+    }));
+    const tools = buildTools({
+      broker: fakeBroker({ await_ }),
+      sessionId: "sess",
+      submitter: "claude-code",
+    });
+
+    const result = await tools.await_.handler({
+      task_id: "t-compact",
+      verbosity: "summary",
+    });
+
+    expect(await_).toHaveBeenCalledWith({
+      task_id: "t-compact",
+      orchestrator_session_id: "sess",
+    });
+    expect(parseResult(result)).toEqual({
+      task_id: "t-compact",
+      status: "completed",
+      outcome: "completed",
+      exitCode: 0,
+      bodyText: "done",
+      effectiveModel: "qwen3-coder-next-80b",
+      effectiveHost: "m5",
+      delegationDecision: "Selected the strongest available local coding model.",
+      sensitivity: {
+        declared: "internal",
+        effective: "internal",
+        mismatch: false,
+      },
+      refs: {
+        status: { namespace: "tasks/t-compact", key: "status" },
+        fullResult: { namespace: "tasks/t-compact", key: "result-structured" },
+      },
+    });
+  });
+
+  it("keeps polling evidence in a compact running summary", async () => {
+    const await_ = vi.fn(async () => ({
+      status: "running",
+      lease: { claimed_by: "worker-1", lease_expires_at: "2026-07-22T20:00:00Z" },
+      orphan_suspected: false,
+    }));
+    const tools = buildTools({
+      broker: fakeBroker({ await_ }),
+      sessionId: "sess",
+      submitter: "claude-code",
+    });
+
+    const result = await tools.await_.handler({
+      task_id: "t-running",
+      verbosity: "summary",
+    });
+
+    expect(parseResult(result)).toEqual({
+      task_id: "t-running",
+      status: "running",
+      lease: { claimed_by: "worker-1", lease_expires_at: "2026-07-22T20:00:00Z" },
+      orphan_suspected: false,
+      refs: {
+        status: { namespace: "tasks/t-running", key: "status" },
+      },
+    });
+  });
 });
 
 describe("buildTools — hugin_rate", () => {
