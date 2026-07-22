@@ -10,7 +10,7 @@ import {
   buildTerminalStatusTags,
   getPersistentStatusTags,
   mergeClaimedSchedulerPointer,
-  shouldDeferCancellationToClaimOwner,
+  shouldDeferCancellationToLocalOwner,
   stripSchedulerDecisionPointers,
 } from "../src/task-status-tags.js";
 
@@ -170,7 +170,7 @@ describe("task status tag helpers", () => {
     ]);
   });
 
-  it("defers running cancellation without trusting lifecycle tags as claim authority", () => {
+  it("defers cancellation only to the actual in-process claim owner", () => {
     const decisionTag = "scheduler-decision:34f2d430-6c31-47de-860a-8b22bc97f4d4";
     const digestTag = `scheduler-prediction-sha256:${"a".repeat(64)}`;
     const pointerTags = [decisionTag, digestTag];
@@ -185,23 +185,29 @@ describe("task status tag helpers", () => {
       "runtime:codex",
       ...pointerTags,
     ])).toEqual(["cancelled", "runtime:codex"]);
-    expect(shouldDeferCancellationToClaimOwner([
+    const forgedRunningTags = [
       "pending",
       "running",
       "cancel-requested",
       "runtime:codex",
       ...pointerTags,
-    ])).toBe(true);
-    expect(shouldDeferCancellationToClaimOwner([
-      "pending",
-      "cancel-requested",
+    ];
+    expect(buildTerminalStatusTags("cancelled", forgedRunningTags)).toEqual([
+      "cancelled",
       "runtime:codex",
-    ])).toBe(false);
-    expect(shouldDeferCancellationToClaimOwner([
-      "blocked",
-      "cancel-requested",
-      "runtime:codex",
-    ])).toBe(false);
+    ]);
+    expect(shouldDeferCancellationToLocalOwner(
+      "tasks/forged-running",
+      null,
+    )).toBe(false);
+    expect(shouldDeferCancellationToLocalOwner(
+      "tasks/forged-running",
+      "tasks/other-task",
+    )).toBe(false);
+    expect(shouldDeferCancellationToLocalOwner(
+      "tasks/active-task",
+      "tasks/active-task",
+    )).toBe(true);
   });
 
   it("strips unverified scheduler pointers during reclaim and recovery", () => {

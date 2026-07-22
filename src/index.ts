@@ -153,7 +153,7 @@ import {
   buildLeasedStatusTags,
   buildTerminalStatusTags,
   mergeClaimedSchedulerPointer,
-  shouldDeferCancellationToClaimOwner,
+  shouldDeferCancellationToLocalOwner,
   stripSchedulerDecisionPointers,
 } from "./task-status-tags.js";
 import { LearningLoopCollector } from "./learning-loop-collector.js";
@@ -4128,11 +4128,11 @@ async function processCancellationRequests(): Promise<boolean> {
       continue;
     }
 
-    if (shouldDeferCancellationToClaimOwner(entry.tags)) {
-      // This generic scanner has no independent proof that a lifecycle tag
-      // followed Hugin's claim CAS. The active owner watches cancellation and
-      // preserves its dispatcher-owned pointer; stale owners are reconciled by
-      // startup/lease recovery. Never promote a caller-supplied pointer here.
+    if (shouldDeferCancellationToLocalOwner(entry.namespace, currentTask)) {
+      // The live owner watches cancellation and terminalizes from its exact
+      // post-CAS claim snapshot. Every non-local status, including forged or
+      // legacy `running` without a lease, is cancelled generically below so it
+      // cannot preserve a mutable pointer or remain stuck until restart.
       continue;
     }
 

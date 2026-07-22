@@ -64,9 +64,12 @@ export function mergeClaimedSchedulerPointer(
   ]);
 }
 
-/** Running cancellation belongs to an active owner or claimed-task recovery. */
-export function shouldDeferCancellationToClaimOwner(tags: string[]): boolean {
-  return tags.includes("running");
+/** Only the process that currently owns this namespace handles its cancellation. */
+export function shouldDeferCancellationToLocalOwner(
+  taskNamespace: string,
+  currentTaskNamespace: string | null,
+): boolean {
+  return currentTaskNamespace === taskNamespace;
 }
 
 function dedupeTags(tags: string[]): string[] {
