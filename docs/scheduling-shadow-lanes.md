@@ -4,11 +4,16 @@
 
 **Issue:** [#282](https://github.com/Magnus-Gille/hugin/issues/282)
 
-**Champion:** complete-window deterministic FIFO
+**Champion:** deterministic FIFO; complete enumeration normally, visible-window
+FIFO during explicitly reported pagination truncation
 
 ## Decision
 
-Hugin keeps complete-window FIFO as the only enforced claim policy. Bounded
+Hugin keeps its current deterministic FIFO selector as the only enforced claim
+policy. Normal polls enumerate the complete queue. If Munin pagination reports
+the exceptional same-timestamp-bucket truncation, enforcement truthfully
+continues FIFO over the visible window and reports lower-bound queue health;
+it does not claim that omitted rows were considered. Bounded
 shortest-estimated-job-first (SEJF), urgency re-triage, and work-minute
 admission begin as content-blind shadow evidence. A shadow choice must never
 change which task is claimed, delay a claim, or turn missing evidence into a
@@ -32,9 +37,10 @@ The study is evidence for experiments, not authority to enable a challenger.
 
 1. `selectNextTask` remains the enforced selector until a separate reviewed
    promotion changes it.
-2. Champion and challenger see the same complete, dispatchable, group/sequence
-   eligible window. A truncated window is marked incomplete and is never
-   represented as a complete comparison.
+2. Champion and challenger see the same visible, dispatchable,
+   group/sequence-eligible rows. The challenger abstains unless both pending
+   and running enumeration are complete. A truncated enforced claim is labelled
+   visible-window FIFO and is never represented as a complete comparison.
 3. The 30-minute SEJF bound is absolute: if any eligible task has waited at
    least 30 minutes, the shadow choice is the globally oldest overdue task,
    with the same timestamp and namespace tie-break as FIFO.
@@ -52,18 +58,31 @@ The study is evidence for experiments, not authority to enable a challenger.
 ## Why urgency is deferred
 
 The claim loop initially sees Munin query previews. It reads and verifies the
-full task only after FIFO has selected a candidate. Task signing authenticates
-the exact task content, but preview fields and tags alone are not authenticated
-submission metadata. Reading `Urgency: high` from every preview would therefore
-let an unsigned writer poison a supposedly authenticated re-triage experiment.
+full task only after FIFO has selected a candidate. The current v1 signature
+binds task ID, submitter, submission time, runtime, prompt digest, and
+context-ref digest. It does **not** bind the complete task revision or fields
+such as `Urgency`, `Group`, or `Sequence`. Reading `Urgency: high` from a
+preview—or merely batch-reading the full task and rechecking its v1
+signature—would therefore let a writer change unsigned scheduling metadata
+without invalidating the signature.
+
+`Group` and `Sequence` already influence the champion's eligibility check
+through this legacy unbound preview boundary. Shadow code must reuse that
+behavior so it does not diverge from the champion, label its authority as
+legacy/unbound, and must not treat it as precedent for adding another unsigned
+priority field. Hardening those fields is a prerequisite for any promoted
+alternate scheduler.
+
+This hardening prerequisite is tracked in
+[#295](https://github.com/Magnus-Gille/hugin/issues/295).
 
 Re-triage stays unavailable until one of these equivalent contracts exists:
 
-- a principal-authenticated submission surface writes a content-blind urgency
-  sidecar bound to the exact task-content digest; or
-- Hugin batch-reads candidate revisions and caches successful signature
-  verification by `(namespace, updated_at, content digest)` before using their
-  urgency.
+- a principal-authenticated submission surface writes a content-blind urgency,
+  group, and sequence sidecar bound to the exact task-revision digest; or
+- a versioned signing contract binds the full canonical task revision (or
+  explicitly binds every scheduling field) and Hugin verifies that version
+  before using the fields.
 
 Unsigned or unverifiable tasks receive no authenticated urgency. They may
 still run under FIFO, according to the existing signing policy, but the
@@ -71,14 +90,35 @@ re-triage challenger must abstain rather than treating them as normal priority.
 
 ## Duration-estimate contract
 
-The first estimator uses realized terminal task evidence already present in
-`result-structured`:
+Current `result-structured.durationSeconds` is executor-span evidence. It
+starts after some claim-time preparation and ends before delivery,
+publication, learning capture, dependent promotion, and pipeline refresh. The
+current result also has one `runtime` field rather than a reliable general
+requested/effective pair, and has no general structured failure-kind field.
+It must not be presented as authoritative single-dispatcher service time or be
+used for work-minute admission.
 
-- `startedAt`, `completedAt`, and `durationSeconds`;
-- requested and effective runtime identity;
+The first executable estimator slice therefore adds a scheduler-service clock
+whose interval is the successful claim CAS through release of `currentTask`
+after all synchronous task post-processing. It includes checkout and
+preflight, executor time, delivery/publication handling, learning capture,
+dependent promotion, pipeline refresh, and other work that prevents the
+single poller from claiming its next task. The shadow outcome records:
+
+- `claimedAt`, `releasedAt`, and `schedulerServiceSeconds`;
+- requested runtime captured at claim and effective runtime captured at
+  terminalization;
 - content-blind task type and harness/model identity when mechanically known;
-- terminal outcome and failure kind, so policy can state whether failed or
-  cancelled attempts belong in a particular estimator.
+- a bounded scheduler terminal class derived explicitly for this schema; and
+- whether the service clock is complete.
+
+The initial estimator trains only on completed successful tasks with a
+complete scheduler-service clock and mechanically known grouping identity.
+Cancelled, timed-out, recovered, crashed, and failed attempts are recorded as
+censored or excluded with a bounded reason, not silently treated as ordinary
+durations. Their inclusion requires a later versioned sampling policy. The old
+executor-span `durationSeconds` may be compared during calibration but never
+substituted for the new service clock.
 
 An estimate is a persisted, versioned value derived from a bounded historical
 window. The initial implementation should use a robust statistic such as a
@@ -92,6 +132,7 @@ Every estimate carries:
 {
   "seconds": 480,
   "estimatorVersion": "scheduler-duration-v1",
+  "serviceClock": "claim-to-release-v1",
   "source": "verified-terminal-history",
   "sampleCount": 24,
   "historyThrough": "2026-07-22T20:00:00.000Z"
@@ -104,10 +145,26 @@ selection bias that looks like scheduler improvement.
 
 ## Shadow decision contract
 
-After FIFO wins the task claim CAS, Hugin may persist one internal,
-content-blind prediction under a unique decision identity. Prediction and
-outcome should be separate create-only records so a crash cannot rewrite what
-the challenger originally predicted.
+Before attempting the task claim CAS, Hugin generates a decision UUID, builds
+the complete schema-valid prediction (including an abstention), and hashes its
+JCS-canonical bytes. It removes caller-supplied `scheduler-decision:*` and
+`scheduler-prediction-sha256:*` tags, then includes its own
+`scheduler-decision:<uuid>` and `scheduler-prediction-sha256:<digest>` tags in
+the claim write. The UUID and digest become authoritative only if that CAS
+succeeds. Because the winning claim and pointer are one Munin mutation,
+restart recovery can reuse the same identity and validate any stored
+prediction against the claim-bound digest instead of inventing a second
+prediction for the claim.
+
+After FIFO wins the CAS, Hugin may persist one internal, content-blind
+prediction under that durable decision identity. Prediction and outcome are
+separate `create_if_absent` records so a crash cannot rewrite what the
+challenger originally predicted. An existing record is reusable only when its
+schema-valid JCS digest matches the winning claim tag; a different payload at
+the same identity is a conflict, never an update. After a restart, a missing
+prediction remains explicitly missing because the original queue snapshot
+cannot be reconstructed; recovery must not generate a new prediction from the
+later queue state.
 
 Suggested storage:
 
@@ -116,6 +173,10 @@ Suggested storage:
 
 The prediction records only safe references and aggregates:
 
+`champion.policy` is `complete-fifo-v1` only when both enumerations were
+complete. It is `visible-window-fifo-v1` when enforcement proceeded through a
+reported truncation; that case always carries an abstaining challenger.
+
 ```json
 {
   "schemaVersion": 1,
@@ -123,18 +184,35 @@ The prediction records only safe references and aggregates:
   "observedAt": "2026-07-22T20:00:00.000Z",
   "champion": {
     "policy": "complete-fifo-v1",
-    "taskRef": { "namespace": "tasks/<id>", "key": "status" }
+    "taskRef": { "namespace": "tasks/<id>", "key": "status" },
+    "serviceEstimate": {
+      "seconds": 720,
+      "estimatorVersion": "scheduler-duration-v1",
+      "serviceClock": "claim-to-release-v1",
+      "source": "verified-terminal-history",
+      "sampleCount": 24,
+      "historyThrough": "2026-07-22T20:00:00.000Z"
+    }
   },
   "challenger": {
     "policy": "bounded-sejf-v1",
     "overdueThresholdSeconds": 1800,
     "taskRef": { "namespace": "tasks/<id>", "key": "status" },
     "reason": "shortest-estimate",
-    "estimateSeconds": 480
+    "serviceEstimate": {
+      "seconds": 480,
+      "estimatorVersion": "scheduler-duration-v1",
+      "serviceClock": "claim-to-release-v1",
+      "source": "verified-terminal-history",
+      "sampleCount": 24,
+      "historyThrough": "2026-07-22T20:00:00.000Z"
+    }
   },
   "window": {
     "eligibleTasks": 12,
-    "historyComplete": true,
+    "pendingEnumerationComplete": true,
+    "runningEnumerationComplete": true,
+    "eligibilityAuthority": "legacy-unbound-group-sequence",
     "estimatedWorkMinutes": 96,
     "missingEstimates": 0
   },
@@ -144,15 +222,19 @@ The prediction records only safe references and aggregates:
 
 Allowed challenger reasons are `shortest-estimate`, `oldest-overdue`, and
 `insufficient-evidence`. An abstention uses a null challenger task reference
-and names the missing or incomplete evidence in a bounded enum, not free-form
-task content.
+and one or more bounded evidence reasons such as `window-truncated`,
+`estimate-missing`, or `estimator-version-mismatch`, never free-form task
+content.
 
 When the champion task terminalizes, the outcome record adds its realized
-service seconds, terminal outcome class, prediction error, and whether it was
-a long job under the experiment definition. It does not claim the unrealized
-duration of the challenger task. Comparisons across decisions must join later
-realized outcomes by safe task reference instead of inventing counterfactual
-service times.
+service seconds, terminal outcome class, and whether it was a long job under
+the experiment definition. Prediction error is computed only against the
+champion estimate persisted in the same prediction record and is null when
+that estimate is absent. It never compares the challenger's estimate with the
+champion's duration and never recomputes an old estimate using a newer history
+window. The record does not claim the unrealized duration of the challenger
+task. Comparisons across decisions must join later realized outcomes by safe
+task reference instead of inventing counterfactual service times.
 
 Prometheus-style metrics may aggregate counts and duration buckets by policy
 version and reason. Task IDs, decision IDs, principals, and task types with
@@ -163,8 +245,10 @@ unbounded cardinality do not become metric labels.
 For each complete claim window:
 
 1. Reuse the champion's dispatchability and group/sequence eligibility rules.
-2. If the window is truncated or any eligible task lacks an authoritative
-   estimate, emit `insufficient-evidence`.
+2. Select one estimator version for the decision. If pending or running
+   enumeration is truncated, any eligible task lacks an authoritative
+   estimate, or any estimate has an unknown or different version, emit
+   `insufficient-evidence` with the applicable bounded reason.
 3. If one or more eligible tasks have waited at least 30 minutes, choose the
    oldest overdue task by FIFO ordering.
 4. Otherwise choose the smallest estimated service time; break equal estimates
@@ -178,16 +262,27 @@ or caller-controlled duration estimate.
 ## Work-minute admission design
 
 Queue depth remains useful operational context but is not a capacity measure.
-The admission shadow computes:
+The admission shadow computes separate work buckets rather than calling only
+currently dispatchable work the whole backlog:
 
 ```text
-queued_work_minutes = sum(authoritative service estimates for eligible work)
+dispatchable_work_minutes
+group_blocked_work_minutes
+pipeline_blocked_work_minutes
+approval_gated_work_minutes
+other_nonterminal_work_minutes
+running_remaining_work_minutes
+possible_total_work_minutes = sum(all available buckets)
 ```
 
-It also records missing-estimate count, enumeration completeness, currently
-running estimated remainder when available, and the capacity horizon used for
-interpretation. If enumeration is truncated or estimates are missing, the
-value is explicitly a lower bound and cannot support enforcement.
+Every bucket records task count, missing-estimate count, and enumeration
+completeness. Higher-sequence siblings and other accepted nonterminal work are
+therefore visible even though `selectNextTask` correctly excludes them from
+the immediate eligible set. If a category cannot be enumerated, enumeration
+is truncated, estimates are missing, or running remainder is unavailable, the
+affected bucket and possible total are explicitly incomplete/lower-bound and
+cannot support enforcement. `dispatchable_work_minutes` alone is never named
+or used as total admitted load.
 
 The first stage only reports workload bands and compares them with observed
 wait and throughput. A later enforcing policy must define, in a separate PR:
@@ -221,18 +316,22 @@ capacity, Hugin must say so truthfully.
 ## Required tests for executable slices
 
 - shadow on/off produces the same claimed namespace for every queue fixture;
-- complete FIFO ordering and group/sequence eligibility are reused exactly;
+- deterministic FIFO ordering and group/sequence eligibility are reused
+  exactly, with complete versus visible-window policy labelled honestly;
 - 30-minute overdue choice has zero selection-rule violations;
 - invalid timestamps, truncated enumeration, missing estimates, and mixed
   estimator versions abstain deterministically;
 - equal estimates use numeric values and FIFO tie-breaking;
 - unsigned/spoofed urgency never enters a re-triage choice;
-- prediction is create-only, outcome cannot replace it, and retries are
-  idempotent;
+- the successful claim CAS carries one dispatcher-owned decision identity;
+  caller-supplied decision tags are removed, prediction is create-only,
+  outcome cannot replace it, restart retries reuse only exact records, and a
+  crash gap never creates a prediction from a later queue snapshot;
 - prediction persistence failure does not fail or release the champion claim;
 - persisted records and metric labels contain no task content or credentials;
-- queued work is marked lower-bound whenever enumeration or estimates are
-  incomplete.
+- each nonterminal work bucket and the possible total are marked
+  incomplete/lower-bound whenever enumeration, estimates, classification, or
+  running remainder are incomplete.
 
 ## Not decided here
 
