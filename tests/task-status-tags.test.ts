@@ -57,6 +57,18 @@ describe("task status tag helpers", () => {
     ).toEqual(["completed", "runtime:codex", "publication:recovered"]);
   });
 
+  it("preserves learning-registry recovery state across terminal rewrites", () => {
+    expect(buildTerminalStatusTags("completed", [
+      "completed",
+      "runtime:homeserver",
+      "learning-registry:pending",
+    ])).toEqual([
+      "completed",
+      "runtime:homeserver",
+      "learning-registry:pending",
+    ]);
+  });
+
   it.each(["draft", "conversation"])(
     "preserves the additive M5 task type %s through terminalization",
     (taskType) => {

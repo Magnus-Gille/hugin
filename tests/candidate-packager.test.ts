@@ -278,6 +278,20 @@ describe("qualifyCandidate", () => {
     if (!result.ok) expect(result.reasons).toContainEqual({ code: "quality-receipt-task-mismatch" });
   });
 
+  it("rejects a candidate whose quality receipt is not independently reviewed", async () => {
+    const store = new LearningRegistryStore(munin());
+    await registerQualifiedAttempt(store, { taskId: "t1", attemptId: "a1", occurredAt: "2026-07-19T00:00:00.000Z" });
+    const timeline = await buildTaskLifecycleTimeline(store, "t1");
+    const candidate = candidateFor("t1", "a1", "champion", "agent-prompt", {
+      reviewerIndependence: "self",
+    });
+    const result = qualifyCandidate(candidate, timeline);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reasons).toContainEqual({ code: "quality-receipt-not-independent", independence: "self" });
+    }
+  });
+
   it("rejects a candidate whose receipt rating is below the required threshold", async () => {
     const store = new LearningRegistryStore(munin());
     await registerQualifiedAttempt(store, { taskId: "t1", attemptId: "a1", occurredAt: "2026-07-19T00:00:00.000Z" });

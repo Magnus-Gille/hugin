@@ -118,6 +118,10 @@ export const delegationProvenanceSchema = z.object({
   nodeId: z.string().min(1).optional(),
   modelId: z.string().min(1).optional(),
   taskType: z.string().min(1).optional(),
+  // Authoritative Gille evidence-identity hash for registry/cadence
+  // candidates. Direct gateway responses do not self-assert this value;
+  // Hugin adds it only after authenticated GET /ledger/{id} verification.
+  evidenceIdentityHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   // Standing harness-lane sampler (hugin#267). Distinguishes a one-shot
   // delegation from one additionally sampled through the harness (code_loop /
   // opencode) lane, so the SAME #163 evidence-identity shape carries the

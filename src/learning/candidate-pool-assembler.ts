@@ -36,10 +36,10 @@
  *
  *   1. `payload.outcome !== "completed"` -> excluded ("outcome-not-completed").
  *   2. `payload.delegation?.modelId` absent -> excluded
- *      ("missing-model-identity"). Hugin's own registry only durably records a
- *      real model identity via the standing harness-lane sampler's (#267)
- *      `delegation` field; a terminal outcome the sampler never touched
- *      carries no model identity Hugin can honestly attribute.
+ *      ("missing-model-identity"). Hugin's native registry producers durably
+ *      record real model identity in the shared `delegation` field. The
+ *      admitted direct-homeserver bridge (#284) additionally requires its M5
+ *      ledger join before it writes that field.
  *   3. `payload.delegation?.taskType` absent or not a valid Broker task type
  *      -> excluded ("missing-or-invalid-task-type").
  *   4. `payload.attemptOutcomeRef` absent, or it does not resolve to an
@@ -57,8 +57,8 @@
  *          `.harness` (id/version + the config document's own sha256 digest;
  *          `harness.toolPolicyVersion` from `origin_config.tool_policy.version`).
  *        - `model` from `delegation.modelId`, with `provider`/`runtime`
- *          naming the one dispatch surface Hugin's own registry can honestly
- *          attribute today (the M5 gateway's `/delegate` lane); `config: {}`
+ *          naming the dispatch surface the admitted attempt proves (the M5
+ *          gateway's `/delegate` lane); `config: {}`
  *          because Hugin does not durably record per-task model-config detail
  *          (quantization/temperature/etc) -- left empty rather than guessed.
  *        - `logging`/`testHarness`/`routing`: Hugin does not yet durably
@@ -117,8 +117,8 @@ import type { LearningTaskExecutionEvidence } from "../learning-task-handshake.j
 
 const DEFAULT_LOOKBACK_MONTHS = 2;
 
-/** The one dispatch surface Hugin's own registry can honestly attribute a
- * model identity through today -- the M5 gateway's `/delegate` endpoint (see
+/** The dispatch surface an admitted candidate can honestly attribute today --
+ * the M5 gateway's `/delegate` endpoint (see
  * `m5-provenance.ts` and `learning-task-handshake.ts`'s
  * `HARNESS_CONFIG_DOCUMENT.settings.adapter`). Never a guess at the
  * underlying model's own real provider/runtime, which Hugin does not own
@@ -182,6 +182,7 @@ export interface AssembleCandidatePoolOptions {
 export type SkippedCandidateReason =
   | "outcome-not-completed"
   | "missing-model-identity"
+  | "missing-evidence-identity"
   | "missing-or-invalid-task-type"
   | "missing-attempt-outcome-ref"
   | "attempt-outcome-not-admitted"
@@ -267,6 +268,14 @@ async function resolveCandidate(
   if (!modelId) {
     return { skip: { taskId, attemptId, reason: "missing-model-identity" } };
   }
+  const evidenceIdentityHash = event.payload.delegation?.evidenceIdentityHash;
+  if (!evidenceIdentityHash) {
+    return { skip: { taskId, attemptId, reason: "missing-evidence-identity" } };
+  }
+  // Presence proves the registry writer completed the authoritative Gille
+  // ledger join. Do not use the full hash as a configuration axis: Gille's
+  // evidence identity intentionally includes logical-task/prompt identity, so
+  // it differs across matched samples even when their configuration is equal.
 
   const rawTaskType = event.payload.delegation?.taskType;
   const taskTypeParsed = rawTaskType ? taskTypeSchema.safeParse(rawTaskType) : undefined;

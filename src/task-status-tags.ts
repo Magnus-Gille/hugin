@@ -26,6 +26,9 @@ const DELIVERY_PREFIX = "delivery:";
 // (`publication:failed` -> `publication:recovered`/`publication:abandoned`)
 // so `buildTerminalStatusTags` does not silently drop it mid-transition.
 const PUBLICATION_PREFIX = "publication:";
+// Durable post-terminal learning capture. `pending` survives restart until
+// the authoritative M5 ledger join and all idempotent registry writes finish.
+const LEARNING_REGISTRY_PREFIX = "learning-registry:";
 
 function dedupeTags(tags: string[]): string[] {
   const seen = new Set<string>();
@@ -56,6 +59,7 @@ export function getPersistentStatusTags(
   const routingTags = tags.filter((tag) => tag.startsWith(ROUTING_PREFIX));
   const deliveryTags = tags.filter((tag) => tag.startsWith(DELIVERY_PREFIX));
   const publicationTags = tags.filter((tag) => tag.startsWith(PUBLICATION_PREFIX));
+  const learningRegistryTags = tags.filter((tag) => tag.startsWith(LEARNING_REGISTRY_PREFIX));
   const brokerTags = tags.filter((tag) => tag.startsWith(BROKER_PREFIX));
   const aliasTags = tags.filter((tag) => tag.startsWith(ALIAS_PREFIX));
   const taskTypeTags = tags.filter((tag) => tag.startsWith(TASK_TYPE_PREFIX));
@@ -72,6 +76,7 @@ export function getPersistentStatusTags(
     ...routingTags,
     ...deliveryTags,
     ...publicationTags,
+    ...learningRegistryTags,
     ...brokerTags,
     ...aliasTags,
     ...taskTypeTags,

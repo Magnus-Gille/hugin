@@ -124,7 +124,14 @@ const PERIOD = "2026-07";
 async function seedResolvableCandidate(
   m: InMemoryMunin & MuninClient,
   store: LearningRegistryStore,
-  input: { taskId: string; taskType: string; modelId: string; rating: "pass" | "partial" | "redo" | "wrong"; occurredAt: string },
+  input: {
+    taskId: string;
+    taskType: string;
+    modelId: string;
+    rating: "pass" | "partial" | "redo" | "wrong";
+    occurredAt: string;
+    reviewerIndependence?: "independent" | "self" | "unknown";
+  },
 ): Promise<{ attemptId: string }> {
   const { attemptId, attemptOutcomeRef, evidence } = buildFixtureAdmittedAttempt({
     taskId: input.taskId,
@@ -147,7 +154,12 @@ async function seedResolvableCandidate(
     outcome: "completed",
     taskOutcomeRef,
     attemptOutcomeRef,
-    delegation: { modelId: input.modelId, taskType: input.taskType, lane: "harness" },
+    delegation: {
+      modelId: input.modelId,
+      taskType: input.taskType,
+      lane: "harness",
+      evidenceIdentityHash: hash(`evidence:${input.taskId}`),
+    },
     occurredAt: input.occurredAt,
   });
 
@@ -160,7 +172,7 @@ async function seedResolvableCandidate(
   const receipt = buildQualityReceipt({
     taskId: input.taskId,
     reviewerPrincipal: "codex",
-    reviewerIndependence: "independent",
+    reviewerIndependence: input.reviewerIndependence ?? "independent",
     rating: input.rating,
     ratingReason: `SECRET-RAW-EVIDENCE-TEXT-${input.taskId}`,
     verificationOutcome: input.rating === "pass" ? "accepted_unchanged" : "major_rewrite",
@@ -245,7 +257,7 @@ describe("assembleCandidatePool", () => {
     });
     await store.recordTerminalOutcome({
       taskId, attemptId, outcome: "failed", taskOutcomeRef, attemptOutcomeRef,
-      delegation: { modelId: "model-a", taskType: "code-edit" },
+      delegation: { modelId: "model-a", taskType: "code-edit", evidenceIdentityHash: hash("failed") },
       occurredAt: "2026-07-05T00:00:00.000Z",
     });
 
@@ -275,6 +287,28 @@ describe("assembleCandidatePool", () => {
     expect(result.skipped).toEqual([{ taskId, attemptId, reason: "missing-model-identity" }]);
   });
 
+  it("skips a completed outcome whose model lacks an authoritative evidence identity", async () => {
+    const m = munin();
+    const store = new LearningRegistryStore(m);
+    const taskId = "task-no-evidence-identity";
+    const attemptId = "some-attempt-id";
+    const taskOutcomeRef = ref(`tasks/${taskId}`, "result-structured");
+    await store.recordSubmission({ taskId, taskOutcomeRef, occurredAt: "2026-07-05T00:00:00.000Z" });
+    await store.recordAttemptReference({
+      taskId, attemptId, attemptStartRef: ref(`tasks/${taskId}`, `learning-attempt-${attemptId}`), taskOutcomeRef,
+      occurredAt: "2026-07-05T00:00:00.000Z",
+    });
+    await store.recordTerminalOutcome({
+      taskId, attemptId, outcome: "completed", taskOutcomeRef,
+      delegation: { modelId: "model-a", taskType: "code-edit" },
+      occurredAt: "2026-07-05T00:00:00.000Z",
+    });
+
+    const result = await assembleCandidatePool({ registry: store, munin: m }, { periods: [PERIOD] });
+    expect(result.candidates).toEqual([]);
+    expect(result.skipped).toEqual([{ taskId, attemptId, reason: "missing-evidence-identity" }]);
+  });
+
   it("skips a completed outcome missing an attempt-outcome ref", async () => {
     const m = munin();
     const store = new LearningRegistryStore(m);
@@ -288,7 +322,7 @@ describe("assembleCandidatePool", () => {
     });
     await store.recordTerminalOutcome({
       taskId, attemptId, outcome: "completed", taskOutcomeRef,
-      delegation: { modelId: "model-a", taskType: "code-edit" },
+      delegation: { modelId: "model-a", taskType: "code-edit", evidenceIdentityHash: hash("no-ref") },
       occurredAt: "2026-07-05T00:00:00.000Z",
     });
 
@@ -323,7 +357,7 @@ describe("assembleCandidatePool", () => {
     });
     await store.recordTerminalOutcome({
       taskId, attemptId, outcome: "completed", taskOutcomeRef, attemptOutcomeRef,
-      delegation: { modelId: "model-a", taskType: "code-edit" },
+      delegation: { modelId: "model-a", taskType: "code-edit", evidenceIdentityHash: hash("not-admitted") },
       occurredAt: "2026-07-05T00:00:00.000Z",
     });
 
@@ -346,10 +380,28 @@ describe("assembleCandidatePool", () => {
     });
     await store.recordTerminalOutcome({
       taskId, attemptId, outcome: "completed", taskOutcomeRef, attemptOutcomeRef,
-      delegation: { modelId: "model-a", taskType: "code-edit" },
+      delegation: { modelId: "model-a", taskType: "code-edit", evidenceIdentityHash: hash("no-receipt") },
       occurredAt: "2026-07-05T00:00:00.000Z",
     });
     // No status/result-structured/feedback docs written -- nothing to bind a receipt against.
+
+    const result = await assembleCandidatePool({ registry: store, munin: m }, { periods: [PERIOD] });
+    expect(result.candidates).toEqual([]);
+    expect(result.skipped).toEqual([{ taskId, attemptId, reason: "missing-quality-receipt" }]);
+  });
+
+  it("skips an exact-bound receipt when the reviewer is not independent", async () => {
+    const m = munin();
+    const store = new LearningRegistryStore(m);
+    const taskId = "task-self-reviewed";
+    const { attemptId } = await seedResolvableCandidate(m, store, {
+      taskId,
+      taskType: "code-edit",
+      modelId: "model-a",
+      rating: "pass",
+      occurredAt: "2026-07-05T00:00:00.000Z",
+      reviewerIndependence: "self",
+    });
 
     const result = await assembleCandidatePool({ registry: store, munin: m }, { periods: [PERIOD] });
     expect(result.candidates).toEqual([]);

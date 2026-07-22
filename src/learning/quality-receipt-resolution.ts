@@ -32,8 +32,10 @@ import {
 /**
  * `null` when the task's status/result documents are missing (nothing to
  * bind against), the feedback ledger is missing/unreadable/unparseable, no
- * receipt is bound to the CURRENT task content, or no bound receipt survives
- * as the effective one for this exact attempt. Never fabricates or guesses.
+ * receipt is bound to the CURRENT task content, or no independently-reviewed
+ * bound receipt survives as the effective one for this exact attempt. Never
+ * fabricates or guesses. A self/unknown correction still supersedes its
+ * predecessor; it does not resurrect an older independent verdict.
  *
  * A schemaVersion-2 (attempt-bound) effective receipt naming this exact
  * `attemptId` wins. Otherwise a legacy schemaVersion-1 (task-level, no
@@ -86,12 +88,15 @@ export async function resolveEffectiveQualityReceipt(
   if (effective.length === 0) return null;
 
   const attemptBound = effective
-    .filter((receipt) => receipt.schemaVersion === 2 && receipt.attemptId === attemptId)
+    .filter((receipt) => receipt.schemaVersion === 2
+      && receipt.attemptId === attemptId
+      && receipt.reviewer.independence === "independent")
     .sort((a, b) => b.ratedAt.localeCompare(a.ratedAt));
   if (attemptBound.length > 0) return attemptBound[0]!;
 
   const taskLevel = effective
-    .filter((receipt) => receipt.schemaVersion === 1)
+    .filter((receipt) => receipt.schemaVersion === 1
+      && receipt.reviewer.independence === "independent")
     .sort((a, b) => b.ratedAt.localeCompare(a.ratedAt));
   return taskLevel[0] ?? null;
 }

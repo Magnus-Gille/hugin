@@ -1,6 +1,9 @@
 # Continuous Hugin/M5 learning loop
 
-**Status:** first production-safe slice (2026-07-13)
+**Status:** production cadence active; admitted-attempt candidate capture is
+implemented fail-closed but awaits the authoritative Gille ledger binding
+tracked in [gille-inference #61](https://github.com/Magnus-Gille/gille-inference/issues/61)
+(2026-07-22).
 
 ## Goal
 
@@ -116,6 +119,45 @@ Automated runners normally record `product_outcome: unrated` as soon as protecte
 and optional review time. This is a one-way, audited transition: an existing rating cannot be
 overwritten. An experiment that requires product coverage therefore remains in `gathering` until
 enough runs have been rated.
+
+## Production candidate cadence
+
+The default cadence candidate pool is assembled from native learning-registry
+terminal outcomes. A direct `Runtime: homeserver` task becomes eligible only
+when all of these independently bind to the same task and attempt:
+
+- an authenticated, accepted LearningTaskContract M5 admission;
+- an authenticated `GET /ledger/{id}` row whose evidence-identity hash,
+  admitted task/attempt IDs, model, and canonical task type all match;
+- the durable task result plus an effective independently bound Quality Receipt; and
+- repository outcome `not-managed`.
+
+The final condition is an authority ceiling, not a missing feature. Direct
+Broker/M5 one-shot tasks keep `tool_policy:none`, receive no managed checkout,
+and cannot claim file edits. Hugin records them as the M5 one-shot population;
+it does not borrow repository evidence from a separate Claude, Codex, or
+OpenCode run. Invalid, cross-task, non-admitted, provenance-incomplete, or
+managed-repository combinations fail closed and do not enter the pool.
+
+Capture is a recoverable post-terminal side effect. Eligible task status moves
+through `learning-registry:pending` to `learning-registry:captured`; startup
+and periodic reconciliation replay the natural-key-idempotent submission,
+attempt-reference, and terminal-outcome writes. A registry or ledger-read
+outage therefore cannot rerun paid inference or strand a task as `running`.
+Permanent identity mismatches become `learning-registry:rejected`.
+
+The deployed Gille gateway must expose the content-blind attempt binding
+defined by gille-inference #61 before the first candidate can pass this gate.
+Hugin must not accept the current looser pair of a gateway admission echo and
+an unbound ledger ID merely to make the pool non-empty.
+
+One task cannot create an experiment. Under the default proposer settings an
+operator must collect **at least three accepted samples per arm** (six total)
+for the same canonical task type. The two populations must differ on exactly
+one configuration axis, and every candidate needs its own exact Quality
+Receipt binding. Re-running the cadence against unchanged evidence is
+idempotent: it reuses the same proposal identity and never creates a duplicate
+in-flight experiment.
 
 ## First M5 iteration
 

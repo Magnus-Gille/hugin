@@ -146,6 +146,7 @@ export type CandidateRejectionReason =
   | { code: "outcome-not-completed"; outcome: string }
   | { code: "quality-receipt-task-mismatch" }
   | { code: "quality-receipt-attempt-mismatch" }
+  | { code: "quality-receipt-not-independent"; independence: "self" | "unknown" }
   | { code: "quality-rating-insufficient"; rating: PackagerQualityRating };
 
 export interface RejectedCandidate {
