@@ -177,6 +177,8 @@ const INTERNAL_PATH_PREFIXES = [
 export interface SensitivityAssessment {
   declared?: Sensitivity;
   effective: Sensitivity;
+  /** Highest classification produced by detector inputs before declaration/override. */
+  detectorMax: Sensitivity;
   /**
    * True when the detector signals were strictly higher than the declared
    * sensitivity. This is audit-facing: owner overrides still set `mismatch`
@@ -545,6 +547,7 @@ export function buildSensitivityAssessment(input: {
   const assessment: SensitivityAssessment = {
     declared: input.declared,
     effective,
+    detectorMax,
     // Mismatch reflects the *detector's* disagreement with `declared`,
     // regardless of whether the override was honored. This keeps the
     // audit trail surfacing every false-positive we tune against.

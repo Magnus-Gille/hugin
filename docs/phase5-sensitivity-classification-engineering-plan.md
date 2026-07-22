@@ -249,6 +249,8 @@ Update [src/task-result-schema.ts](/Users/magnus/repos/hugin/src/task-result-sch
 - declared sensitivity when present
 - effective sensitivity
 - mismatch indicator when declared < effective
+- for mismatches, the content-blind detector maximum and reason codes, plus
+  owner-override evidence when one was applied
 
 Use a compact structured shape, for example:
 
@@ -256,9 +258,16 @@ Use a compact structured shape, for example:
 {
   "declared": "public",
   "effective": "private",
-  "mismatch": true
+  "mismatch": true,
+  "detectorMax": "private",
+  "reasons": ["declared:public", "prompt:private"]
 }
 ```
+
+Reason codes describe detector sources and lattice levels only. They must never
+contain matched prompt text, context content, credentials, or customer data.
+Legacy schema-version-1 results without the additive evidence fields remain
+readable.
 
 Per-phase summaries should expose effective phase sensitivity; top-level summaries should expose effective pipeline sensitivity.
 

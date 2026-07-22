@@ -1,7 +1,127 @@
 import { describe, expect, it } from "vitest";
-import { buildStructuredTaskResult } from "../src/task-result-schema.js";
+import {
+  buildStructuredTaskResult,
+  buildTaskSensitivitySnapshot,
+} from "../src/task-result-schema.js";
+import { buildSensitivityAssessment } from "../src/sensitivity.js";
 
 describe("structured task result schema", () => {
+  it("builds mismatch evidence from the detector assessment without content (#280)", () => {
+    const assessment = buildSensitivityAssessment({
+      declared: "internal",
+      baseline: "internal",
+      prompt: "private",
+      allowOwnerOverride: true,
+    });
+
+    expect(buildTaskSensitivitySnapshot(assessment)).toEqual({
+      declared: "internal",
+      effective: "internal",
+      mismatch: true,
+      detectorMax: "private",
+      reasons: [
+        "declared:internal",
+        "prompt:private",
+        "owner-override:internal<private",
+      ],
+      override: { applied: true, detectorMax: "private" },
+    });
+  });
+
+  it("preserves content-blind sensitivity mismatch evidence (#280)", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "sensitivity-1",
+      taskNamespace: "tasks/sensitivity-1",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "homeserver",
+      executor: "homeserver-delegate",
+      resultSource: "homeserver-delegate",
+      exitCode: 0,
+      completedAt: "2026-07-22T12:00:00Z",
+      bodyKind: "response",
+      bodyText: "ok",
+      sensitivity: {
+        declared: "internal",
+        effective: "internal",
+        mismatch: true,
+        detectorMax: "private",
+        reasons: [
+          "declared:internal",
+          "prompt:private",
+          "owner-override:internal<private",
+        ],
+        override: { applied: true, detectorMax: "private" },
+      },
+    });
+
+    expect(result.sensitivity).toEqual({
+      declared: "internal",
+      effective: "internal",
+      mismatch: true,
+      detectorMax: "private",
+      reasons: [
+        "declared:internal",
+        "prompt:private",
+        "owner-override:internal<private",
+      ],
+      override: { applied: true, detectorMax: "private" },
+    });
+  });
+
+  it("rejects prompt-derived prose in sensitivity reasons (#280)", () => {
+    expect(() => buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "sensitivity-unsafe",
+      taskNamespace: "tasks/sensitivity-unsafe",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "homeserver",
+      executor: "homeserver-delegate",
+      resultSource: "homeserver-delegate",
+      exitCode: 0,
+      completedAt: "2026-07-22T12:00:00Z",
+      bodyKind: "response",
+      bodyText: "ok",
+      sensitivity: {
+        declared: "internal",
+        effective: "internal",
+        mismatch: true,
+        detectorMax: "private",
+        reasons: ["prompt:private:Faktura F-2214"],
+      },
+    })).toThrow();
+  });
+
+  it("keeps legacy mismatch results readable without the additive evidence (#280)", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1,
+      taskId: "sensitivity-legacy",
+      taskNamespace: "tasks/sensitivity-legacy",
+      lifecycle: "completed",
+      outcome: "completed",
+      runtime: "claude",
+      executor: "claude-sdk",
+      resultSource: "sdk-result",
+      exitCode: 0,
+      completedAt: "2026-07-22T12:00:00Z",
+      bodyKind: "response",
+      bodyText: "ok",
+      sensitivity: {
+        declared: "internal",
+        effective: "private",
+        mismatch: true,
+      },
+    });
+
+    expect(result.sensitivity).toEqual({
+      declared: "internal",
+      effective: "private",
+      mismatch: true,
+    });
+  });
+
   it("preserves exact content-blind repository change evidence", () => {
     const result = buildStructuredTaskResult({
       schemaVersion: 1, taskId: "daily-1", taskNamespace: "tasks/daily-1",

@@ -162,6 +162,7 @@ import { runHarnessLaneSampledAttempt, type LaneAttemptOutcome } from "./harness
 import { decideHarnessLane, isHarnessLaneEligibleTaskType } from "./harness-lane-sampler.js";
 import { sanitizeProviderTokenCount } from "./m5-provenance.js";
 import {
+  buildTaskSensitivitySnapshot,
   buildStructuredTaskResult,
   type DispatcherRuntime,
   type StructuredTaskResult,
@@ -1055,17 +1056,6 @@ function buildLearningTaskSource(
     brokerAttestedNamespace: task.brokerAttestedNamespace,
     brokerAttestationError: task.brokerAttestationError,
   });
-}
-
-function buildTaskSensitivitySnapshot(
-  assessment: SensitivityAssessment | undefined,
-): TaskExecutionSensitivity | undefined {
-  if (!assessment) return undefined;
-  return {
-    declared: assessment.declared,
-    effective: assessment.effective,
-    mismatch: assessment.mismatch,
-  };
 }
 
 function getDeclaredSensitivityFromContent(
