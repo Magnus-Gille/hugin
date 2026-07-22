@@ -138,6 +138,12 @@ export function qualifyCandidate(
   if (receipt.schemaVersion === 2 && receipt.attemptId !== candidate.attemptId) {
     reasons.push({ code: "quality-receipt-attempt-mismatch" });
   }
+  if (receipt.reviewer.independence !== "independent") {
+    reasons.push({
+      code: "quality-receipt-not-independent",
+      independence: receipt.reviewer.independence,
+    });
+  }
   const minRating = options.minQualityRating ?? DEFAULT_MIN_QUALITY_RATING;
   if (RATING_RANK[receipt.rating] < RATING_RANK[minRating]) {
     reasons.push({ code: "quality-rating-insufficient", rating: receipt.rating });

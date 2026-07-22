@@ -1,11 +1,24 @@
 # Durable append-only task/outcome learning registry (#232)
 
-**Status:** mechanism implemented; not yet wired into the dispatcher's normal
-task lifecycle. `src/learning-registry-schema.ts`, `src/learning-registry-store.ts`,
-and `src/learning-registry-view.ts` are a self-contained, tested library. Wiring
-calls into `src/index.ts`/`src/broker/handlers.ts` is deliberately left to the
-tickets that actually need it (#233), to avoid broadening this PR's blast
-radius across in-flight sibling work on `src/broker/handlers.ts` (#250/#251).
+**Status:** mechanism and managed capture are active. Direct homeserver capture
+is implemented fail-closed and becomes operational when the authenticated
+Gille ledger join in
+[gille-inference #61](https://github.com/Magnus-Gille/gille-inference/issues/61)
+is deployed.
+`src/learning-registry-schema.ts`, `src/learning-registry-store.ts`, and
+`src/learning-registry-view.ts` own the append-only mechanism. The dispatcher
+now writes native events for the standing managed harness sampler and, through
+`src/homeserver-learning-registry-bridge.ts`, authenticated direct
+homeserver/M5 attempts. The latter is deliberately restricted to
+`repositoryOutcome: not-managed`; it does not grant Broker tasks a checkout or
+file-edit authority.
+The dispatcher first terminalizes the task and writes `result-structured`,
+then resolves the held `ledgerId` through authenticated `GET /ledger/{id}`.
+The returned evidence-identity hash, task ID, attempt ID, model, and task type
+must all be present and match before registry writes begin. Status tag
+`learning-registry:pending` is the durable retry checkpoint; idempotent replay
+advances it to `learning-registry:captured`, while a permanent mismatch becomes
+`learning-registry:rejected`.
 External Codex/Pi receipt ingestion (#237) is now implemented on top of this
 mechanism — see `docs/external-receipt-intake.md`; it widened
 `submissionEventSchema.payload.originComponent` from `z.literal("hugin")` to
@@ -191,6 +204,6 @@ on.
 - Ingesting external Codex/Pi receipts — implemented in #237 as a consumer of
   this mechanism (`docs/external-receipt-intake.md`), not inside it.
 - Candidate packaging/promotion — #233.
-- Wiring `record*` calls into the live dispatcher lifecycle in
-  `src/index.ts`/`src/broker/handlers.ts` — left to the consuming tickets so
-  this PR stays a self-contained, independently testable library.
+- Adding new live producer paths beyond the managed sampler and admitted
+  direct homeserver bridge. Every new writer must define its authority and
+  evidence bindings explicitly rather than copying another attempt's refs.

@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { describe, expect, it, afterEach } from "vitest";
 import { MuninWriteRejectedError, type MuninClient } from "../src/munin-client.js";
 import { LearningRegistryStore } from "../src/learning-registry-store.js";
+import { recordAdmittedHomeserverAttempt } from "../src/homeserver-learning-registry-bridge.js";
 import { LearningExperimentStore } from "../src/learning/experiment-store.js";
 import { buildQualityBinding, buildQualityReceipt } from "../src/quality-receipt.js";
 import { createCandidatePoolAssembler } from "../src/learning/candidate-pool-assembler.js";
@@ -128,17 +129,34 @@ async function seedResolvableCandidate(
   });
   await m.write(attemptOutcomeRef.namespace, attemptOutcomeRef.key, JSON.stringify(evidence), []);
 
-  const taskOutcomeRef = ref(`tasks/${input.taskId}`, "result-structured");
-  await store.recordSubmission({ taskId: input.taskId, taskOutcomeRef, occurredAt: input.occurredAt });
-  await store.recordAttemptReference({
-    taskId: input.taskId, attemptId, attemptStartRef: ref(`tasks/${input.taskId}`, `learning-attempt-${attemptId}`),
-    taskOutcomeRef, occurredAt: input.occurredAt,
-  });
-  await store.recordTerminalOutcome({
-    taskId: input.taskId, attemptId, outcome: "completed", taskOutcomeRef, attemptOutcomeRef,
-    delegation: { modelId: input.modelId, taskType: input.taskType, nodeId: "m5" },
+  const ledgerId = `ledger:${input.taskId}`;
+  const bridge = await recordAdmittedHomeserverAttempt({
+    registry: store,
+    resolveLedgerAttemptBinding: async () => ({
+      id: ledgerId,
+      evidenceIdentityHash: "a".repeat(64),
+      taskInstanceId: input.taskId,
+      attemptId,
+      taskType: input.taskType,
+      modelId: input.modelId,
+    }),
+  }, {
+    taskId: input.taskId,
+    taskType: input.taskType,
     occurredAt: input.occurredAt,
+    outcome: "completed",
+    repositoryOutcomeState: "not-managed",
+    learningTask: evidence,
+    provenance: {
+      ledgerId,
+      modelId: input.modelId,
+      taskType: input.taskType,
+      nodeId: "m5",
+      outcome: input.rating === "pass" ? "pass" : "fail",
+      delegated: true,
+    },
   });
+  expect(bridge.status).toBe("recorded");
 
   const statusContent = buildFixtureStatusDocument(input.taskId, `prompt for ${input.taskId}`);
   const resultContent = buildFixtureResultStructuredDocument(input.taskId);
@@ -163,16 +181,20 @@ async function seedResolvableCandidate(
 async function seedOneAxisPopulation(
   m: InMemoryMunin & MuninClient,
   store: LearningRegistryStore,
-  input: { taskType: string; idPrefix: string; startIso: string },
+  input: { taskType: string; idPrefix: string; startIso: string; samplesPerArm?: number },
 ): Promise<void> {
-  const championRatings: Array<"pass" | "wrong"> = ["pass", "pass", "wrong", "wrong"];
-  for (let i = 0; i < 4; i += 1) {
+  const samplesPerArm = input.samplesPerArm ?? 4;
+  const championRatings: Array<"pass" | "wrong"> = Array.from(
+    { length: samplesPerArm },
+    (_, index) => index < 2 ? "pass" : "wrong",
+  );
+  for (let i = 0; i < samplesPerArm; i += 1) {
     await seedResolvableCandidate(m, store, {
       taskId: `${input.idPrefix}-champ-${i}`, taskType: input.taskType, modelId: `${input.idPrefix}-champion-model`,
       rating: championRatings[i]!, occurredAt: new Date(Date.parse(input.startIso) + i * 86_400_000).toISOString(),
     });
   }
-  for (let i = 0; i < 4; i += 1) {
+  for (let i = 0; i < samplesPerArm; i += 1) {
     await seedResolvableCandidate(m, store, {
       taskId: `${input.idPrefix}-chall-${i}`, taskType: input.taskType, modelId: `${input.idPrefix}-challenger-model`,
       rating: "pass", occurredAt: new Date(Date.parse(input.startIso) + (5 + i) * 86_400_000).toISOString(),
@@ -232,6 +254,27 @@ function baseDeps(
 }
 
 describe("runExperimentCadenceTick with the production candidate-pool assembler", () => {
+  it("proposes from the documented minimum campaign of three admitted samples per arm", async () => {
+    const m = munin();
+    const registry = new LearningRegistryStore(m);
+    const experimentStore = new LearningExperimentStore(m);
+    await seedOneAxisPopulation(m, registry, {
+      taskType: "code-edit",
+      idPrefix: "cadence-minimum",
+      startIso: "2026-07-01T00:00:00.000Z",
+      samplesPerArm: 3,
+    });
+
+    const tick = await runExperimentCadenceTick(
+      baseDeps(m, registry, experimentStore, "service:test-cadence-minimum"),
+    );
+
+    expect(tick.errors).toEqual([]);
+    expect(tick.candidatesLoaded).toBe(6);
+    expect(tick.proposalsConsidered).toBe(1);
+    expect(tick.packaged).not.toBeNull();
+  });
+
   it("proposes and packages exactly one experiment from real registry/receipt/evidence state, idempotently", async () => {
     const m = munin();
     const registry = new LearningRegistryStore(m);

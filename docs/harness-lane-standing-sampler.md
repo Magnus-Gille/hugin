@@ -1,18 +1,14 @@
 # Standing harness-lane sampler (#267)
 
-**Status:** mechanism implemented; not yet wired into the live dispatch loop.
+**Status:** wired into the live managed Claude/Codex mutation-task seam.
 `src/harness-lane-sampler.ts`, `src/harness-lane-executor.ts`, and
-`src/harness-lane-comparison-report.ts` are a self-contained, tested library —
-same "ship the mechanism first" shape as `docs/learning-registry.md` (#232)
-and `docs/external-receipt-intake.md` (#237). `runHarnessLaneSampledAttempt`
-takes both lane executors as injected callbacks rather than calling any real
-runtime itself, per #267's explicit instruction not to build a new executor.
-Wiring real callbacks (the Broker `/delegate` one-shot path and
-`src/opencode-executor.ts` / `src/learning/m5-code-loop-*` for harness) into
-`src/index.ts`'s dispatch loop is deliberately left to a follow-up so this
-ships as an independently testable, zero-blast-radius library — exactly like
-#232 did. The env default (`0%`) means that even once wired, the lane stays
-fully shadowed until a human deliberately raises it.
+`src/harness-lane-comparison-report.ts` remain independently tested, while
+`src/index.ts` supplies the existing direct executor and OpenCode harness
+callbacks after checkout and runtime preflight. The env default (`0%`) keeps
+the harness lane shadowed until a human deliberately raises it. Direct
+Broker/M5 one-shot capture is a separate path in
+`src/homeserver-learning-registry-bridge.ts`; it never enters this managed
+sampler or gains its checkout authority.
 
 ## Why a standing lane, not another campaign
 

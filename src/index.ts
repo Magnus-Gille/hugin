@@ -150,6 +150,13 @@ import {
 import { LearningLoopCollector } from "./learning-loop-collector.js";
 import { LearningRegistryStore } from "./learning-registry-store.js";
 import { LearningExperimentStore } from "./learning/experiment-store.js";
+import { isPotentialAdmittedHomeserverAttempt } from "./homeserver-learning-registry-bridge.js";
+import {
+  LEARNING_REGISTRY_PENDING_TAG,
+  capturePendingHomeserverLearningTask,
+  reconcilePendingHomeserverLearningTasks,
+} from "./homeserver-learning-registry-recovery.js";
+import { fetchM5LedgerAttemptBinding } from "./m5-ledger-attempt-binding.js";
 import { runHarnessLaneSampledAttempt, type LaneAttemptOutcome } from "./harness-lane-executor.js";
 import { decideHarnessLane, isHarnessLaneEligibleTaskType } from "./harness-lane-sampler.js";
 import { sanitizeProviderTokenCount } from "./m5-provenance.js";
@@ -6173,13 +6180,26 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // set so downstream consumers + startup reconciliation see a consistent
     // terminal delivery state. Shared by the cancelled and normal branches —
     // a cancel mid-delivery still set terminalDeliveryTag = "delivery:failed".
-    const finalizeBaseTags = terminalDeliveryTag
+    const deliveryAwareFinalizeTags = terminalDeliveryTag
       ? [
           ...entry.tags.filter((t) => !t.startsWith("delivery:")),
           terminalDeliveryTag,
         ]
       : entry.tags;
+    const learningCapturePending = isHomeserver
+      && repositoryOutcome.state === "not-managed"
+      && isPotentialAdmittedHomeserverAttempt(
+        homeserverResult?.learningTask,
+        runtimeMetadata?.delegation,
+      );
+    const finalizeBaseTags = learningCapturePending
+      ? [
+          ...deliveryAwareFinalizeTags.filter((tag) => !tag.startsWith("learning-registry:")),
+          LEARNING_REGISTRY_PENDING_TAG,
+        ]
+      : deliveryAwareFinalizeTags;
 
+    let terminalStructuredResultOk = false;
     if (isCancelled && cancellation) {
       await munin.write(
         taskNs,
@@ -6247,6 +6267,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         currentTaskConfig = null;
         return { hadTask: true, queueDepth };
       }
+      terminalStructuredResultOk = cancelledFinalize.structuredResultOk;
     } else {
       // Append the distinct failure tag (issue #129) and the publication
       // failure tag (issue #225) AFTER buildTerminalStatusTags, whose
@@ -6340,6 +6361,33 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         currentTaskConfig = null;
         return { hadTask: true, queueDepth };
       }
+      terminalStructuredResultOk = finalizeOutcome.structuredResultOk;
+    }
+
+    // hugin#284: capture from the DURABLE terminal result, never from mutable
+    // executor locals. A pending status survives partial registry writes and
+    // is replayed idempotently by startup/periodic reconciliation. The M5
+    // ledger read must independently bind ledger/model/task to this exact
+    // admitted task+attempt before the first registry event is accepted.
+    if (terminalStructuredResultOk && learningCapturePending) {
+      try {
+        const gateway = loadHomeserverGatewayConfig(process.env);
+        if (!gateway) throw new Error("homeserver gateway unavailable for authoritative ledger binding");
+        await capturePendingHomeserverLearningTask({
+          munin,
+          registry: learningRegistry,
+          resolveLedgerAttemptBinding: (ledgerId) => fetchM5LedgerAttemptBinding(gateway, ledgerId),
+        }, taskNs);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error(`Learning registry capture pending for ${taskNs}: ${detail}`);
+        await munin.log(
+          taskNs,
+          `Learning registry capture pending after terminalization: ${detail}`,
+        ).catch((logError) => {
+          console.error(`Learning registry failure log also failed for ${taskNs}:`, logError);
+        });
+      }
     }
 
     const shouldPromoteDependents =
@@ -6424,6 +6472,26 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   }
 }
 
+async function runHomeserverLearningRegistryReconciliation(): Promise<void> {
+  const gateway = loadHomeserverGatewayConfig(process.env);
+  if (!gateway) return;
+  try {
+    const result = await reconcilePendingHomeserverLearningTasks({
+      munin,
+      registry: learningRegistry,
+      resolveLedgerAttemptBinding: (ledgerId) => fetchM5LedgerAttemptBinding(gateway, ledgerId),
+    });
+    if (result.scanned > 0 || result.truncated) {
+      console.log(
+        `Learning registry reconciliation: scanned=${result.scanned} captured=${result.captured} `
+        + `rejected=${result.rejected} failed=${result.failed} truncated=${result.truncated}`,
+      );
+    }
+  } catch (error) {
+    console.error("Learning registry reconciliation failed:", error);
+  }
+}
+
 async function pollLoop(): Promise<void> {
   console.log(
     `Hugin dispatcher started (poll interval: ${config.pollIntervalMs}ms)`
@@ -6435,6 +6503,7 @@ async function pollLoop(): Promise<void> {
   // Recover any tasks left running from a previous crash
   await recoverStaleTasks();
   await reconcileBlockedTasks();
+  await runHomeserverLearningRegistryReconciliation();
   await primeTrackedPipelineSummaries();
   await reconcileTrackedPipelineSummaries();
 
@@ -6484,6 +6553,9 @@ async function pollLoop(): Promise<void> {
       const poll = await pollOnce();
       if (pollCount % 5 === 0) {
         await reconcileBlockedTasks();
+      }
+      if (pollCount % 60 === 0) {
+        await runHomeserverLearningRegistryReconciliation();
       }
       lastBlockedTaskCount = await countTasksWithLifecycle("blocked");
       // Fire-and-forget heartbeat
