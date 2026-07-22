@@ -1,6 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 
+import { taskMetadataPrefix } from "../task-document-metadata.js";
 import {
   delegationEnvelopeSchema,
   type DelegationEnvelope,
@@ -128,7 +129,9 @@ export function validateBrokerAttestation(input: {
 }
 
 export function parseStoredBrokerAttestation(content: string): unknown | null {
-  const match = content.match(/### Broker attestation\s*\n```json\s*\n([\s\S]*?)\n```/i);
+  const match = taskMetadataPrefix(content).match(
+    /### Broker attestation\s*\n```json\s*\n([\s\S]*?)\n```/i,
+  );
   if (!match?.[1]) return null;
   try {
     return JSON.parse(match[1]);

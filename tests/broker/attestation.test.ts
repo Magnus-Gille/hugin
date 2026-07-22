@@ -9,6 +9,7 @@ import {
   BrokerTaskStore,
   generateBrokerTaskId,
   parseCanonicalEnvelope,
+  serializeEnvelope,
 } from "../../src/broker/task-store.js";
 import type { DelegationEnvelope } from "../../src/broker/types.js";
 import type { MuninClient } from "../../src/munin-client.js";
@@ -103,5 +104,13 @@ describe("authenticated Broker provenance", () => {
       attestation: parseStoredBrokerAttestation(content),
       serverSecret: secret,
     })).toMatchObject({ ok: true, principal });
+  });
+
+  it("does not parse a valid-looking attestation from prompt prose", () => {
+    const value = envelope();
+    const promptOnlyAttestation = createBrokerAttestation(value, secret);
+    const content = `${serializeEnvelope(value)}\n\n### Broker attestation\n\`\`\`json\n${JSON.stringify(promptOnlyAttestation)}\n\`\`\``;
+
+    expect(parseStoredBrokerAttestation(content)).toBeNull();
   });
 });

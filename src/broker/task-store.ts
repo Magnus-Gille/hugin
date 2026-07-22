@@ -770,7 +770,7 @@ export function parseStoredEnvelope(content: string): DelegationEnvelope | null 
 export function parseCanonicalEnvelope(content: string):
   | { ok: true; envelope: DelegationEnvelope }
   | { ok: false; error: string } {
-  const raw = parseStoredEnvelope(content);
+  const raw = parseStoredEnvelope(taskMetadataPrefix(content));
   if (!raw) return { ok: false, error: "Canonical Broker envelope is missing or malformed" };
   const parsed = delegationEnvelopeSchema.safeParse(raw);
   if (!parsed.success) return { ok: false, error: "Canonical Broker envelope is invalid" };
