@@ -54,9 +54,10 @@ The study is evidence for experiments, not authority to enable a challenger.
    unknown work look shorter, longer, or lower priority.
 8. Shadow persistence is best-effort after a successful champion claim. A
    telemetry failure cannot undo, delay, or fail the claimed task.
-9. A successful claim's scheduler identity and prediction digest survive lease
-   renewal, reclaim, delivery checkpoints, and terminal tag rewrites until the
-   outcome is durably recoverable.
+9. A successful claim's scheduler identity and prediction digest survive every
+   in-process rewrite backed by claim authority. A later recovery may preserve
+   them only after validating the create-only prediction against the exact
+   claim-bound digest; mutable lifecycle and lease tags are not proof.
 
 ## Why urgency is deferred
 
@@ -132,8 +133,11 @@ clock.
 An estimate is a persisted, versioned value derived from a bounded historical
 window. The initial implementation should use a robust statistic such as a
 rolling median, require a minimum sample count, and record the history
-high-water mark used to build it. Exact window length, minimum sample count,
-and grouping keys are calibration parameters, not implicit constants.
+high-water tuple used to build it. Equal release timestamps are ordered by the
+content-blind decision UUID; repeated identical outcomes are counted once and
+conflicting outcomes under one UUID fail closed. Exact window length, minimum
+sample count, and grouping keys are calibration parameters, not implicit
+constants.
 
 Every estimate carries:
 
@@ -144,7 +148,8 @@ Every estimate carries:
   "serviceClock": "claim-to-release-v1",
   "source": "verified-terminal-history",
   "sampleCount": 24,
-  "historyThrough": "2026-07-22T20:00:00.000Z"
+  "historyThrough": "2026-07-22T20:00:00.000Z",
+  "historyThroughDecisionId": "12953e2e-dfb0-44eb-abda-2725d12fa2fa"
 }
 ```
 
@@ -165,12 +170,14 @@ restart recovery can reuse the same identity and validate any stored
 prediction against the claim-bound digest instead of inventing a second
 prediction for the claim.
 
-The implementation must register both scheduler tag prefixes as persistent
-status tags and carry the winning claim tags—not the pre-claim entry tags—into
-lease renewal. Reclaim, delivery checkpoints, terminalization, and recovery
-must preserve the pointer. Executable slices add regression tests for every
-one of those transitions. Keeping the content-blind pointer after terminal
-outcome persistence is acceptable; it must not become a metric label.
+The implementation must register both scheduler tag prefixes as conditionally
+persistent status tags and carry the winning claim tags—not the pre-claim entry
+tags—into lease renewal. In-process delivery checkpoints and terminalization
+may preserve the pointer from that authoritative snapshot. Reclaim and later
+recovery must first validate the create-only prediction and its digest; until
+that validation is wired, they strip any pointer rather than promoting mutable
+status metadata. Keeping the content-blind pointer after terminal outcome
+persistence is acceptable; it must not become a metric label.
 
 After FIFO wins the CAS, Hugin may persist one internal, content-blind
 prediction under that durable decision identity. Prediction and outcome are
@@ -215,7 +222,8 @@ reported truncation; that case always carries an abstaining challenger.
       "serviceClock": "claim-to-release-v1",
       "source": "verified-terminal-history",
       "sampleCount": 24,
-      "historyThrough": "2026-07-22T20:00:00.000Z"
+      "historyThrough": "2026-07-22T20:00:00.000Z",
+      "historyThroughDecisionId": "12953e2e-dfb0-44eb-abda-2725d12fa2fa"
     }
   },
   "challenger": {
@@ -229,7 +237,8 @@ reported truncation; that case always carries an abstaining challenger.
       "serviceClock": "claim-to-release-v1",
       "source": "verified-terminal-history",
       "sampleCount": 24,
-      "historyThrough": "2026-07-22T20:00:00.000Z"
+      "historyThrough": "2026-07-22T20:00:00.000Z",
+      "historyThroughDecisionId": "12953e2e-dfb0-44eb-abda-2725d12fa2fa"
     }
   },
   "window": {

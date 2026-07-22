@@ -201,7 +201,7 @@ export async function handlePipelineTask(
       taskNs,
       "status",
       entry.content,
-      buildPipelineParentSuccessTags(entry.tags),
+      buildPipelineParentSuccessTags(entry.tags, true),
       entry.updated_at,
       sensitivityToMuninClassification(pipeline.sensitivity)
     );

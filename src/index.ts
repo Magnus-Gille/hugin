@@ -149,8 +149,12 @@ import {
 } from "./task-graph.js";
 import {
   buildAwaitingApprovalTags,
+  buildClaimedTerminalStatusTags,
+  buildLeasedStatusTags,
   buildTerminalStatusTags,
-  getPersistentStatusTags,
+  mergeClaimedSchedulerPointer,
+  shouldDeferCancellationToLocalOwner,
+  stripSchedulerDecisionPointers,
 } from "./task-status-tags.js";
 import { LearningLoopCollector } from "./learning-loop-collector.js";
 import { LearningRegistryStore } from "./learning-registry-store.js";
@@ -575,6 +579,9 @@ function sleepMs(ms: number): Promise<void> {
 
 let shuttingDown = false;
 let currentTask: string | null = null;
+// Exact post-CAS status snapshot for the in-process owner. Mutable status reads
+// may contribute control tags, but never replace this scheduler pointer pair.
+let currentClaimTags: string[] | null = null;
 let currentTaskConfig: TaskConfig | null = null;
 let currentChild: ChildProcess | null = null;
 let currentSdkAbort: AbortController | null = null;
@@ -2396,13 +2403,15 @@ function leaseExpiry(): string {
 function buildClaimTags(
   baseTags: string[],
   lifecycle: string,
+  preserveClaimedSchedulerPointer = false,
 ): string[] {
-  return [
+  return buildLeasedStatusTags(
+    baseTags,
     lifecycle,
-    ...getPersistentStatusTags(baseTags),
-    `claimed_by:${workerId}`,
-    `lease_expires:${leaseExpiry()}`,
-  ];
+    workerId,
+    leaseExpiry(),
+    preserveClaimedSchedulerPointer,
+  );
 }
 
 /** Strip lease metadata from tags (for final status updates). */
@@ -2421,7 +2430,7 @@ function startLeaseRenewal(taskNs: string, entryContent: string, baseTags: strin
       return;
     }
     try {
-      const renewedTags = buildClaimTags(baseTags, "running");
+      const renewedTags = buildClaimTags(baseTags, "running", true);
       await leaseMunin.write(taskNs, "status", entryContent, renewedTags);
       console.log(`Lease renewed for ${taskNs} (expires: ${leaseExpiry()})`);
     } catch (err) {
@@ -4119,6 +4128,14 @@ async function processCancellationRequests(): Promise<boolean> {
       continue;
     }
 
+    if (shouldDeferCancellationToLocalOwner(entry.namespace, currentTask)) {
+      // The live owner watches cancellation and terminalizes from its exact
+      // post-CAS claim snapshot. Every non-local status, including forged or
+      // legacy `running` without a lease, is cancelled generically below so it
+      // cannot preserve a mutable pointer or remain stuck until restart.
+      continue;
+    }
+
     await markTaskCancelled(
       entry.namespace,
       entry,
@@ -4180,6 +4197,7 @@ async function failTaskWithMessage(
   entry: MuninEntry & { found: true },
   errorMessage: string,
   runtimeTagOverride?: string,
+  preserveClaimedSchedulerPointer = false,
 ): Promise<void> {
   const runtime = (
     runtimeTagOverride ||
@@ -4196,7 +4214,9 @@ async function failTaskWithMessage(
     taskNs,
     "status",
     entry.content,
-    buildTerminalStatusTags("failed", entry.tags, runtimeTagOverride),
+    preserveClaimedSchedulerPointer
+      ? buildClaimedTerminalStatusTags("failed", entry.tags, runtimeTagOverride)
+      : buildTerminalStatusTags("failed", entry.tags, runtimeTagOverride),
     entry.updated_at,
     classification
   );
@@ -4666,12 +4686,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
   // Claim the task with compare-and-swap, attaching worker identity and lease
   // For auto-routed tasks: replace runtime:auto with the resolved runtime and add routing:auto
-  const tagsForClaim = parsedTask?.autoRouted && parsedTask.runtime
+  const claimInputTags = parsedTask?.autoRouted && parsedTask.runtime
     ? entry.tags
         .map((t) => (t === "runtime:auto" ? `runtime:${parsedTask!.runtime}` : t))
         .concat("routing:auto")
     : entry.tags;
-  const claimTags = buildClaimTags(tagsForClaim, "running");
+  // Until the dispatcher adds its own schema-valid prediction in the next
+  // slice, never carry caller-supplied scheduler identities into a winning
+  // claim. attachSchedulerDecisionPointer performs the same replacement when
+  // prediction persistence is wired.
+  const tagsForClaim = stripSchedulerDecisionPointers(claimInputTags);
+  const claimTags = buildClaimTags(tagsForClaim, "running", true);
 
   // Rotate the mcp-session-id so all MCP calls for this task execution share
   // one stable session (enables Munin's outcome-aware retrieval and telemetry
@@ -4691,6 +4716,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       entry.updated_at = claimResult.updated_at;
       claimAcceptedAt = claimResult.updated_at;
     }
+    // From this point onward the winning claim tags are authoritative. In
+    // particular, dispatcher-owned scheduler pointers added to the claim CAS
+    // must not be replaced by the pre-claim pending snapshot during renewal,
+    // delivery checkpoints, terminalization, or recovery hand-off.
+    entry.tags = claimTags;
   } catch (err) {
     // Another dispatcher won the CAS. Its claim-time assessment owns the
     // eventual result; retaining ours risks applying stale identity to a
@@ -4705,6 +4735,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   updatePendingQueueSnapshotAfterDeparture();
 
   currentTask = taskNs;
+  currentClaimTags = [...claimTags];
   currentCancellation = null;
   const acceptedAtMs = Date.parse(claimAcceptedAt);
   const startedAt = new Date(
@@ -4714,7 +4745,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   console.log(`Executing task ${taskNs}...`);
 
   // Start periodic lease renewal
-  startLeaseRenewal(taskNs, entry.content, entry.tags);
+  startLeaseRenewal(taskNs, entry.content, claimTags);
 
   try {
     if (declaredRuntime === "pipeline") {
@@ -4722,7 +4753,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       const pipelineResult = await dispatchPipelineTask(
         munin,
         {
-          failTaskWithMessage,
+          failTaskWithMessage: (namespace, claimedEntry, message, runtimeTag) =>
+            failTaskWithMessage(namespace, claimedEntry, message, runtimeTag, true),
           promoteDependents,
           refreshPipelineSummary,
           writeStructuredResult: writeStructuredTaskResult,
@@ -5899,12 +5931,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       //    never terminal (Ratatoskr would read the checkpoint as final).
       const checkpointEntry = await munin.read(taskNs, "status");
       const checkpointContent = checkpointEntry?.content ?? entry.content;
-      const checkpointBaseTags = (
+      const checkpointMutableTags = (
         checkpointEntry?.tags ?? entry.tags
       ).filter((t) => !t.startsWith("delivery:"));
+      const checkpointBaseTags = mergeClaimedSchedulerPointer(
+        checkpointMutableTags,
+        claimTags,
+      );
       const checkpointTags = buildClaimTags(
         [...checkpointBaseTags, "delivery:pending"],
         "running",
+        true,
       );
       const checkpointBody = `${finalResultBody}\n\n### Artifact Delivery\n\n- **Delivery:** in progress (Hugin runtime owns delivery — see log)\n`;
       await munin.write(
@@ -6322,7 +6359,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       );
       const cancelledFinalize = await finalizeTaskCompletion(munin, taskNs, {
         statusContent: entry.content,
-        terminalTags: buildTerminalStatusTags("cancelled", finalizeBaseTags, `runtime:${task.runtime}`),
+        terminalTags: buildClaimedTerminalStatusTags("cancelled", finalizeBaseTags, `runtime:${task.runtime}`),
         classification: taskClassification,
         // Single-owner CAS for runtime-owned delivery (#68, Codex review C):
         // if a startup reconciler reclaimed the delivery checkpoint while we
@@ -6368,10 +6405,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       terminalStructuredResultOk = cancelledFinalize.structuredResultOk;
     } else {
       // Append the distinct failure tag (issue #129) and the publication
-      // failure tag (issue #225) AFTER buildTerminalStatusTags, whose
+      // failure tag (issue #225) AFTER the claimed terminal-tag transform, whose
       // persistent-tag filter would otherwise drop tags not already present
       // on the pre-task entry.
-      const terminalTags = buildTerminalStatusTags(
+      const terminalTags = buildClaimedTerminalStatusTags(
         ok ? "completed" : "failed",
         finalizeBaseTags,
         `runtime:${task.runtime}`,
@@ -6563,6 +6600,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     currentOrchestratorAbort = null;
     currentCancellation = null;
     currentTask = null;
+    currentClaimTags = null;
     currentTaskConfig = null;
     // Rotate session off the task scope so subsequent poll/heartbeat writes
     // don't pollute the task's session window.
@@ -6785,11 +6823,15 @@ async function shutdown(signal: string): Promise<void> {
         );
       } else if (entry) {
         const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
+        const shutdownTags = mergeClaimedSchedulerPointer(
+          entry.tags,
+          currentClaimTags ?? [],
+        );
         await munin.write(
           currentTask,
           "status",
           entry.content,
-          buildTerminalStatusTags("failed", entry.tags),
+          buildClaimedTerminalStatusTags("failed", shutdownTags),
           entry.updated_at
         );
         await munin.write(

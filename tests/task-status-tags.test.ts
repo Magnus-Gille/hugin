@@ -1,14 +1,276 @@
 import { describe, expect, it } from "vitest";
 import { BROKER_TASK_TYPE_TAXONOMY_VERSION } from "../src/broker/task-type-metadata.js";
 import {
+  attachSchedulerDecisionPointer,
   buildAwaitingApprovalTags,
+  buildClaimedTerminalStatusTags,
+  buildLeasedStatusTags,
   buildPipelineParentCancelledTags,
   buildPipelineParentSuccessTags,
   buildTerminalStatusTags,
   getPersistentStatusTags,
+  mergeClaimedSchedulerPointer,
+  shouldDeferCancellationToLocalOwner,
+  stripSchedulerDecisionPointers,
 } from "../src/task-status-tags.js";
 
 describe("task status tag helpers", () => {
+  it("replaces caller scheduler pointers and preserves the dispatcher pointer", () => {
+    const decisionId = "34f2d430-6c31-47de-860a-8b22bc97f4d4";
+    const predictionDigest = "a".repeat(64);
+    const attached = attachSchedulerDecisionPointer([
+      "pending",
+      "runtime:codex",
+      "scheduler-decision:caller-controlled",
+      `scheduler-prediction-sha256:${"b".repeat(64)}`,
+    ], { decisionId, predictionDigest });
+
+    expect(attached).toEqual([
+      "pending",
+      "runtime:codex",
+      `scheduler-decision:${decisionId}`,
+      `scheduler-prediction-sha256:${predictionDigest}`,
+    ]);
+    expect(buildClaimedTerminalStatusTags("completed", attached)).toEqual([
+      "completed",
+      "runtime:codex",
+      `scheduler-decision:${decisionId}`,
+      `scheduler-prediction-sha256:${predictionDigest}`,
+    ]);
+    expect(buildLeasedStatusTags(
+      attached,
+      "running",
+      "hugin-pi",
+      "1784757000000",
+      true,
+    )).toEqual([
+      "running",
+      "runtime:codex",
+      `scheduler-decision:${decisionId}`,
+      `scheduler-prediction-sha256:${predictionDigest}`,
+      "claimed_by:hugin-pi",
+      "lease_expires:1784757000000",
+    ]);
+    expect(stripSchedulerDecisionPointers(attached)).toEqual([
+      "pending",
+      "runtime:codex",
+    ]);
+  });
+
+  it("keeps scheduler pointers through delivery and pipeline terminal rewrites", () => {
+    const decisionTag = "scheduler-decision:34f2d430-6c31-47de-860a-8b22bc97f4d4";
+    const digestTag = `scheduler-prediction-sha256:${"a".repeat(64)}`;
+    const deliveryTags = buildLeasedStatusTags([
+      "runtime:codex",
+      decisionTag,
+      digestTag,
+      "delivery:pending",
+    ], "running", "hugin-pi", "1784757000000", true);
+
+    expect(buildClaimedTerminalStatusTags("completed", [
+      ...deliveryTags.filter((tag) => !tag.startsWith("delivery:")),
+      "delivery:verified",
+    ])).toEqual([
+      "completed",
+      "runtime:codex",
+      "delivery:verified",
+      decisionTag,
+      digestTag,
+    ]);
+    expect(buildPipelineParentSuccessTags([
+      "running",
+      "runtime:pipeline",
+      decisionTag,
+      digestTag,
+    ], true)).toEqual([
+      "completed",
+      "runtime:pipeline",
+      decisionTag,
+      digestTag,
+      "type:pipeline",
+    ]);
+    expect(buildPipelineParentCancelledTags([
+      "pending",
+      "runtime:pipeline",
+      decisionTag,
+      digestTag,
+    ])).toEqual([
+      "cancelled",
+      "runtime:pipeline",
+      "type:pipeline",
+    ]);
+    expect(buildPipelineParentCancelledTags([
+      "running",
+      "runtime:pipeline",
+      decisionTag,
+      digestTag,
+    ], true)).toEqual([
+      "cancelled",
+      "runtime:pipeline",
+      decisionTag,
+      digestTag,
+      "type:pipeline",
+    ]);
+  });
+
+  it("drops incomplete, malformed, or ambiguous scheduler pointers", () => {
+    const validDecision = "scheduler-decision:34f2d430-6c31-47de-860a-8b22bc97f4d4";
+    const otherDecision = "scheduler-decision:5f1848e1-d3fb-46bf-9121-e1f38e79d158";
+    const validDigest = `scheduler-prediction-sha256:${"a".repeat(64)}`;
+
+    expect(getPersistentStatusTags(["runtime:codex", validDecision])).toEqual([
+      "runtime:codex",
+    ]);
+    expect(getPersistentStatusTags([
+      "runtime:codex",
+      validDecision,
+      otherDecision,
+      validDigest,
+    ])).toEqual(["runtime:codex"]);
+    expect(getPersistentStatusTags([
+      "runtime:codex",
+      "scheduler-decision:not-a-uuid",
+      validDigest,
+    ])).toEqual(["runtime:codex"]);
+  });
+
+  it("never promotes a valid-looking caller pointer before a successful claim", () => {
+    const decisionTag = "scheduler-decision:34f2d430-6c31-47de-860a-8b22bc97f4d4";
+    const digestTag = `scheduler-prediction-sha256:${"a".repeat(64)}`;
+    const untrustedPending = ["pending", "runtime:codex", decisionTag, digestTag];
+
+    expect(buildTerminalStatusTags("failed", untrustedPending)).toEqual([
+      "failed",
+      "runtime:codex",
+    ]);
+    expect(buildAwaitingApprovalTags(untrustedPending)).toEqual([
+      "awaiting-approval",
+      "runtime:codex",
+    ]);
+    expect(buildPipelineParentSuccessTags([
+      "pending",
+      "runtime:pipeline",
+      decisionTag,
+      digestTag,
+    ])).toEqual([
+      "completed",
+      "runtime:pipeline",
+      "type:pipeline",
+    ]);
+    expect(buildClaimedTerminalStatusTags("completed", [
+      "running",
+      "runtime:codex",
+      decisionTag,
+      digestTag,
+    ])).toEqual([
+      "completed",
+      "runtime:codex",
+      decisionTag,
+      digestTag,
+    ]);
+  });
+
+  it("defers cancellation only to the actual in-process claim owner", () => {
+    const decisionTag = "scheduler-decision:34f2d430-6c31-47de-860a-8b22bc97f4d4";
+    const digestTag = `scheduler-prediction-sha256:${"a".repeat(64)}`;
+    const pointerTags = [decisionTag, digestTag];
+
+    expect(buildTerminalStatusTags("cancelled", [
+      "pending",
+      "runtime:codex",
+      ...pointerTags,
+    ])).toEqual(["cancelled", "runtime:codex"]);
+    expect(buildTerminalStatusTags("cancelled", [
+      "blocked",
+      "runtime:codex",
+      ...pointerTags,
+    ])).toEqual(["cancelled", "runtime:codex"]);
+    const forgedRunningTags = [
+      "pending",
+      "running",
+      "cancel-requested",
+      "runtime:codex",
+      ...pointerTags,
+    ];
+    expect(buildTerminalStatusTags("cancelled", forgedRunningTags)).toEqual([
+      "cancelled",
+      "runtime:codex",
+    ]);
+    expect(shouldDeferCancellationToLocalOwner(
+      "tasks/forged-running",
+      null,
+    )).toBe(false);
+    expect(shouldDeferCancellationToLocalOwner(
+      "tasks/forged-running",
+      "tasks/other-task",
+    )).toBe(false);
+    expect(shouldDeferCancellationToLocalOwner(
+      "tasks/active-task",
+      "tasks/active-task",
+    )).toBe(true);
+  });
+
+  it("strips unverified scheduler pointers during reclaim and recovery", () => {
+    const forgedRecoveryTags = [
+      "running",
+      "cancel-requested",
+      "runtime:codex",
+      "claimed_by:hugin-pi",
+      "lease_expires:1",
+      "scheduler-decision:34f2d430-6c31-47de-860a-8b22bc97f4d4",
+      `scheduler-prediction-sha256:${"a".repeat(64)}`,
+    ];
+
+    expect(buildLeasedStatusTags(
+      forgedRecoveryTags,
+      "running",
+      "hugin-pi",
+      "1784757000000",
+    )).toEqual([
+      "running",
+      "runtime:codex",
+      "claimed_by:hugin-pi",
+      "lease_expires:1784757000000",
+    ]);
+    expect(buildTerminalStatusTags("failed", forgedRecoveryTags)).toEqual([
+      "failed",
+      "runtime:codex",
+    ]);
+  });
+
+  it("replaces mutable scheduler pointers with the exact in-process claim snapshot", () => {
+    const authoritativeDecision = "scheduler-decision:34f2d430-6c31-47de-860a-8b22bc97f4d4";
+    const authoritativeDigest = `scheduler-prediction-sha256:${"a".repeat(64)}`;
+    const mutableTags = [
+      "running",
+      "runtime:codex",
+      "delivery:pending",
+      "scheduler-decision:5f1848e1-d3fb-46bf-9121-e1f38e79d158",
+      `scheduler-prediction-sha256:${"b".repeat(64)}`,
+    ];
+
+    expect(mergeClaimedSchedulerPointer(mutableTags, [
+      "running",
+      "runtime:codex",
+      authoritativeDecision,
+      authoritativeDigest,
+    ])).toEqual([
+      "running",
+      "runtime:codex",
+      "delivery:pending",
+      authoritativeDecision,
+      authoritativeDigest,
+    ]);
+    expect(mergeClaimedSchedulerPointer(mutableTags, [
+      "running",
+      "runtime:codex",
+    ])).toEqual([
+      "running",
+      "runtime:codex",
+      "delivery:pending",
+    ]);
+  });
+
   it("preserves durable MCP Broker identity and query tags", () => {
     const input = [
       "running",
