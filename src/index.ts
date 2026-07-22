@@ -2523,7 +2523,10 @@ async function killOrphanDispatchers(): Promise<void> {
     const myPid = process.pid;
     const cwd = process.cwd();
     const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-      const child = spawn("pgrep", ["-f", "node dist/index.js"], { stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn("pgrep", ["-f", "node dist/index.js"], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: buildTaskSubprocessEnv(),
+      });
       let stdout = "";
       let stderr = "";
       child.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));

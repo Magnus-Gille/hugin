@@ -25,4 +25,28 @@ describe("task subprocess environment", () => {
     expect(spawnRuntime).toContain("...buildTaskSubprocessEnv()");
     expect(spawnRuntime).not.toContain("...process.env");
   });
+
+  it("scrubs the secret from the Pi harness and operational subprocesses", () => {
+    const sources = [
+      "src/artifact-delivery.ts",
+      "src/orchestrator/worker-executor.ts",
+      "src/task-helpers.ts",
+    ].map((relativePath) =>
+      readFileSync(path.join(__dirname, "..", relativePath), "utf8"),
+    );
+
+    for (const source of sources) {
+      expect(source).toContain("buildTaskSubprocessEnv()");
+    }
+
+    const indexSource = readFileSync(
+      path.join(__dirname, "..", "src", "index.ts"),
+      "utf8",
+    );
+    const pgrepStart = indexSource.indexOf('spawn("pgrep"');
+    const pgrepEnd = indexSource.indexOf("});", pgrepStart);
+    expect(indexSource.slice(pgrepStart, pgrepEnd)).toContain(
+      "env: buildTaskSubprocessEnv()",
+    );
+  });
 });

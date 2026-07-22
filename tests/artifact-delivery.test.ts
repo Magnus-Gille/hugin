@@ -15,7 +15,11 @@ import { buildTaskResultDocument } from "../src/result-format.js";
 
 // --- spawn mock (FIFO behaviors) -------------------------------------------
 
-const spawnCalls: Array<{ cmd: string; args: string[] }> = [];
+const spawnCalls: Array<{
+  cmd: string;
+  args: string[];
+  options?: { env?: NodeJS.ProcessEnv };
+}> = [];
 let spawnBehaviors: Array<{ code: number; stdout?: string; stderr?: string }> =
   [];
 let spawnIdx = 0;
@@ -28,8 +32,12 @@ class MockChild extends EventEmitter {
   }
 }
 
-const mockSpawn = ((cmd: string, args: string[]) => {
-  spawnCalls.push({ cmd, args });
+const mockSpawn = ((
+  cmd: string,
+  args: string[],
+  options?: { env?: NodeJS.ProcessEnv },
+) => {
+  spawnCalls.push({ cmd, args, options });
   const child = new MockChild();
   const behavior = spawnBehaviors[spawnIdx] ?? { code: 0 };
   spawnIdx++;
@@ -289,6 +297,39 @@ const manifestOf = parseArtifactManifest(
 ).manifest!;
 
 describe("deliverArtifacts", () => {
+  it("does not expose the dispatcher checkpoint secret to delivery subprocesses", async () => {
+    const previousSecret = process.env.HUGIN_SENSITIVITY_CHECKPOINT_SECRET;
+    process.env.HUGIN_SENSITIVITY_CHECKPOINT_SECRET = "dispatcher-only-secret";
+    spawnBehaviors = [
+      { code: 0 },
+      { code: 0 },
+      { code: 0, stdout: "abc123  file\n" },
+      { code: 0 },
+    ];
+
+    try {
+      await deliverArtifacts({
+        manifest: manifestOf,
+        appendLog: () => {},
+        spawnFn: mockSpawn,
+        statFn: () => ({ size: 42 }),
+        hashFn: () => "abc123",
+      });
+      expect(spawnCalls.length).toBeGreaterThan(0);
+      for (const call of spawnCalls) {
+        expect(call.options?.env).not.toHaveProperty(
+          "HUGIN_SENSITIVITY_CHECKPOINT_SECRET",
+        );
+      }
+    } finally {
+      if (previousSecret === undefined) {
+        delete process.env.HUGIN_SENSITIVITY_CHECKPOINT_SECRET;
+      } else {
+        process.env.HUGIN_SENSITIVITY_CHECKPOINT_SECRET = previousSecret;
+      }
+    }
+  });
+
   it("succeeds: stat -> mkdir -> rsync -> sha match -> mv", async () => {
     spawnBehaviors = [
       { code: 0 }, // ssh mkdir -p

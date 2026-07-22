@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
 
 // Runtime-owned artefact delivery (issue #68). The task declares an
 // `### Artifacts` JSON manifest; the agent only writes content to the declared
@@ -420,8 +421,8 @@ function runSpawn(
   return new Promise((resolve) => {
     // Force HOME so systemd-user SSH finds keys/known_hosts (the git helper
     // already learned this lesson — see task-helpers.ts runGitFetch).
-    const env: Record<string, string> = {
-      ...(process.env as Record<string, string>),
+    const env: NodeJS.ProcessEnv = {
+      ...buildTaskSubprocessEnv(),
       HOME: process.env.HOME || "/home/magnus",
     };
     const child = spawnFn(cmd, args, {

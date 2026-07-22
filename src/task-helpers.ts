@@ -766,6 +766,7 @@ export async function checkoutTaskBranch(
     const child = spawn("git", ["rev-parse", "--git-dir"], {
       cwd: workingDir,
       stdio: "ignore",
+      env: buildTaskSubprocessEnv(),
     });
     child.on("close", (code) => resolve(code === 0));
     child.on("error", () => resolve(false));
@@ -777,6 +778,7 @@ export async function checkoutTaskBranch(
     const child = spawn("git", ["remote", "get-url", "origin"], {
       cwd: workingDir,
       stdio: "ignore",
+      env: buildTaskSubprocessEnv(),
     });
     child.on("close", (code) => resolve(code === 0));
     child.on("error", () => resolve(false));
