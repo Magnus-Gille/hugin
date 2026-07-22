@@ -100,6 +100,49 @@ describe("MuninClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("composes cancellation without AbortSignal.any and cleans up fallback listeners", async () => {
+    const anyDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, "any");
+    Object.defineProperty(AbortSignal, "any", {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+    try {
+      const controller = new AbortController();
+      const addListener = vi.spyOn(controller.signal, "addEventListener");
+      const removeListener = vi.spyOn(controller.signal, "removeEventListener");
+      let requestSignal: AbortSignal | null = null;
+      vi.spyOn(globalThis, "fetch").mockImplementationOnce(async (_url, init) => {
+        requestSignal = (init as RequestInit).signal!;
+        return new Promise<Response>((_resolve, reject) => {
+          requestSignal!.addEventListener("abort", () => reject(requestSignal!.reason), { once: true });
+        });
+      });
+      const client = new MuninClient({
+        baseUrl: "http://munin.test",
+        apiKey: "test-key",
+        minRequestSpacingMs: 0,
+      });
+
+      const read = client.read("tasks/demo", "status", {
+        signal: controller.signal,
+        maxRetries: 0,
+      });
+      await vi.waitFor(() => expect(requestSignal).not.toBeNull());
+      const reason = new Error("operator cancelled task");
+      controller.abort(reason);
+
+      await expect(read).rejects.toBe(reason);
+      expect(requestSignal).not.toBe(controller.signal);
+      expect(requestSignal?.reason).toBe(reason);
+      expect(addListener).toHaveBeenCalledWith("abort", expect.any(Function), { once: true });
+      expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
+    } finally {
+      if (anyDescriptor) Object.defineProperty(AbortSignal, "any", anyDescriptor);
+      else delete (AbortSignal as { any?: unknown }).any;
+    }
+  });
+
   it("supports batch reads", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       rpcResponse({

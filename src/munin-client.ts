@@ -91,6 +91,40 @@ function abortReason(signal: AbortSignal): Error {
   return error;
 }
 
+export function composeAbortSignals(signals: readonly AbortSignal[]): {
+  signal: AbortSignal;
+  cleanup: () => void;
+} {
+  if (typeof AbortSignal.any === "function") {
+    return { signal: AbortSignal.any([...signals]), cleanup: () => {} };
+  }
+
+  const controller = new AbortController();
+  const listeners: Array<{ signal: AbortSignal; listener: () => void }> = [];
+  const cleanup = (): void => {
+    for (const { signal, listener } of listeners) {
+      signal.removeEventListener("abort", listener);
+    }
+    listeners.length = 0;
+  };
+
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      cleanup();
+      break;
+    }
+    const listener = (): void => {
+      controller.abort(signal.reason);
+      cleanup();
+    };
+    listeners.push({ signal, listener });
+    signal.addEventListener("abort", listener, { once: true });
+  }
+
+  return { signal: controller.signal, cleanup };
+}
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
   if (signal.aborted) return Promise.reject(abortReason(signal));
@@ -254,9 +288,14 @@ export class MuninClient {
       const requestTimeoutMs = options.requestTimeoutMs ?? this.requestTimeoutMs;
 
       while (true) {
+        let cleanupRequestSignal = (): void => {};
         try {
           if (options.signal?.aborted) throw abortReason(options.signal);
           const timeoutSignal = AbortSignal.timeout(requestTimeoutMs);
+          const requestAbort = options.signal
+            ? composeAbortSignals([options.signal, timeoutSignal])
+            : { signal: timeoutSignal, cleanup: () => {} };
+          cleanupRequestSignal = requestAbort.cleanup;
           const res = await fetch(`${this.baseUrl}/mcp`, {
             method: "POST",
             headers: {
@@ -266,9 +305,7 @@ export class MuninClient {
               "mcp-session-id": this.sessionId,
             },
             body: JSON.stringify(body),
-            signal: options.signal
-              ? AbortSignal.any([options.signal, timeoutSignal])
-              : timeoutSignal,
+            signal: requestAbort.signal,
           });
 
           if (!res.ok) {
@@ -330,6 +367,8 @@ export class MuninClient {
             throw new Error(`Munin request timed out after ${requestTimeoutMs}ms`);
           }
           throw err;
+        } finally {
+          cleanupRequestSignal();
         }
       }
     }, options.signal);

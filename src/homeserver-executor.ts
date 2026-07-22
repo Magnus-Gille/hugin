@@ -425,6 +425,7 @@ export async function executeHomeserverTask(
   const recoverAmbiguousLearningTask = async (): Promise<void> => {
     const original = result.learningTask;
     if (!options?.recoverAmbiguousLearningTask
+      || options.abortController?.signal.aborted
       || !original
       || original.state !== "m5-not-admitted"
       || original.evidenceAccepted

@@ -5223,7 +5223,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         abortController: homeserverAbort,
         recoverAmbiguousLearningTask: async (failureEvidence) => {
           const preparation = preparedLearningTask?.preparation;
-          if (preparation?.kind !== "ready") return null;
+          if (homeserverAbort.signal.aborted || preparation?.kind !== "ready") return null;
           const recovered = await recoverAmbiguousStoredLearningTaskCandidate({
             munin,
             taskNamespace: taskNs,
@@ -5231,6 +5231,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             preparedDispatchRef: preparation.preparedDispatch.preparedDispatchRef,
             failureEvidence,
             gateway,
+            signal: homeserverAbort.signal,
           });
           return recovered?.evidence ?? null;
         },

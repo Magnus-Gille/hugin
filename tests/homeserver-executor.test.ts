@@ -552,6 +552,34 @@ describe("executeHomeserverTask — delegate path", () => {
     });
   });
 
+  it("does not invoke immediate recovery after the external abort controller fires", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-cancelled-before-recovery",
+    );
+    const externalAbort = new AbortController();
+    vi.spyOn(globalThis, "fetch").mockImplementationOnce(async (_url, init) => {
+      externalAbort.abort(new Error("operator cancelled task"));
+      const signal = (init as RequestInit).signal!;
+      throw signal.reason;
+    });
+    const recovery = vi.fn(async () => null);
+
+    const result = await executeHomeserverTask(
+      task,
+      "delegate-cancelled-before-recovery",
+      tmpLogDir,
+      { abortController: externalAbort, recoverAmbiguousLearningTask: recovery },
+    );
+
+    expect(recovery).not.toHaveBeenCalled();
+    expect(result.learningTask).toMatchObject({
+      state: "m5-not-admitted",
+      evidenceAccepted: false,
+      failureCode: "transport-not-admitted",
+    });
+  });
+
   it("keeps the truthful transport failure when immediate recovery is mismatched", async () => {
     const task = withLearningTaskContext(
       makeTaskConfig({ path: "delegate", taskType: "extract" }),

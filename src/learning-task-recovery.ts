@@ -1,4 +1,4 @@
-import type { MuninClient, MuninEntry } from "./munin-client.js";
+import { composeAbortSignals, type MuninClient, type MuninEntry } from "./munin-client.js";
 import type { HuginTaskIdentity } from "./task-identity.js";
 import {
   learningTaskExecutionEvidenceSchema,
@@ -75,9 +75,11 @@ export async function recoverAmbiguousStoredLearningTaskCandidate(input: {
   preparedDispatchRef: { namespace: string; key: string };
   failureEvidence: LearningTaskExecutionEvidence;
   gateway: { baseUrl: string; apiKey: string } | null;
+  signal?: AbortSignal;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
 }): Promise<RecoveredStoredLearningTask | null> {
+  if (input.signal?.aborted) return null;
   const failure = learningTaskExecutionEvidenceSchema.safeParse(input.failureEvidence);
   if (!failure.success
     || failure.data.state !== "m5-not-admitted"
@@ -94,7 +96,12 @@ export async function recoverAmbiguousStoredLearningTaskCandidate(input: {
     IMMEDIATE_LEARNING_TASK_RECOVERY_TIMEOUT_MS,
     Math.max(1, input.timeoutMs ?? IMMEDIATE_LEARNING_TASK_RECOVERY_TIMEOUT_MS),
   );
-  const signal = AbortSignal.timeout(timeoutMs);
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const recoveryAbort = input.signal
+    ? composeAbortSignals([input.signal, timeoutSignal])
+    : { signal: timeoutSignal, cleanup: () => {} };
+  const signal = recoveryAbort.signal;
+  try {
   const preparedEntry = await readLearningEntryBeforeDeadline(
     input.munin,
     input.preparedDispatchRef.namespace,
@@ -207,6 +214,9 @@ export async function recoverAmbiguousStoredLearningTaskCandidate(input: {
     };
   } catch {
     return null;
+  }
+  } finally {
+    recoveryAbort.cleanup();
   }
 }
 

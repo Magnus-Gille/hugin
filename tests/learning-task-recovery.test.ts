@@ -152,6 +152,58 @@ describe("stored LearningTaskContract recovery", () => {
     expect(input.writes).toHaveLength(0);
   });
 
+  it("does not start immediate recovery when the external signal is already aborted", async () => {
+    const input = fixture();
+    const controller = new AbortController();
+    controller.abort(new Error("operator cancelled task"));
+
+    const recovered = await recoverAmbiguousStoredLearningTaskCandidate({
+      munin: input.client,
+      taskNamespace: `tasks/${TASK_ID}`,
+      taskClassification: CLASSIFICATION,
+      preparedDispatchRef: input.prepared.preparedDispatchRef,
+      failureEvidence: transportFailure(input),
+      gateway: { baseUrl: "https://m5.test", apiKey: "owner-key" },
+      signal: controller.signal,
+      fetchImpl: input.fetchImpl as typeof fetch,
+    });
+
+    expect(recovered).toBeNull();
+    expect(input.fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("aborts an in-flight immediate recovery probe when the external signal fires", async () => {
+    const input = fixture();
+    const controller = new AbortController();
+    let probeSignal: AbortSignal | null = null;
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      probeSignal = init?.signal as AbortSignal;
+      controller.abort(new Error("operator cancelled task"));
+      await new Promise<void>((_resolve, reject) => {
+        if (probeSignal!.aborted) reject(probeSignal!.reason);
+        else probeSignal!.addEventListener("abort", () => reject(probeSignal!.reason), { once: true });
+      });
+      throw new Error("unreachable");
+    });
+
+    const recovered = await recoverAmbiguousStoredLearningTaskCandidate({
+      munin: input.client,
+      taskNamespace: `tasks/${TASK_ID}`,
+      taskClassification: CLASSIFICATION,
+      preparedDispatchRef: input.prepared.preparedDispatchRef,
+      failureEvidence: transportFailure(input),
+      gateway: { baseUrl: "https://m5.test", apiKey: "owner-key" },
+      signal: controller.signal,
+      timeoutMs: 1_000,
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(recovered).toBeNull();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(probeSignal?.aborted).toBe(true);
+    expect(probeSignal?.reason).toBe(controller.signal.reason);
+  });
+
   it("does not probe when immediate recovery storage classification differs", async () => {
     const input = fixture();
     input.entries.set(
