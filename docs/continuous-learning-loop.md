@@ -1,9 +1,9 @@
 # Continuous Hugin/M5 learning loop
 
-**Status:** production cadence active; admitted-attempt candidate capture is
-implemented fail-closed but awaits the authoritative Gille ledger binding
-tracked in [gille-inference #61](https://github.com/Magnus-Gille/gille-inference/issues/61)
-(2026-07-22).
+**Status:** production cadence and admitted-attempt candidate capture are
+active. The authoritative Gille ledger binding tracked in
+[gille-inference #61](https://github.com/Magnus-Gille/gille-inference/issues/61)
+was deployed on 2026-07-22.
 
 ## Goal
 
@@ -146,10 +146,10 @@ attempt-reference, and terminal-outcome writes. A registry or ledger-read
 outage therefore cannot rerun paid inference or strand a task as `running`.
 Permanent identity mismatches become `learning-registry:rejected`.
 
-The deployed Gille gateway must expose the content-blind attempt binding
-defined by gille-inference #61 before the first candidate can pass this gate.
-Hugin must not accept the current looser pair of a gateway admission echo and
-an unbound ledger ID merely to make the pool non-empty.
+The deployed Gille gateway exposes the content-blind attempt binding defined
+by gille-inference #61. Hugin still rejects the looser pair of a gateway
+admission echo and an unbound ledger ID; a ledger join failure leaves capture
+pending for idempotent recovery rather than weakening the gate.
 
 One task cannot create an experiment. Under the default proposer settings an
 operator must collect **at least three accepted samples per arm** (six total)
@@ -158,6 +158,14 @@ one configuration axis, and every candidate needs its own exact Quality
 Receipt binding. Re-running the cadence against unchanged evidence is
 idempotent: it reuses the same proposal identity and never creates a duplicate
 in-flight experiment.
+
+For a deliberate model-axis campaign, submit direct authenticated
+`Runtime: homeserver` tasks with the same canonical task type and pin each arm
+through the task document's `Model` field. Hugin forwards that value as the
+gateway's `modelId`; omitting it leaves model selection with M5. A Broker task
+remains owner-isolated and cannot manufacture its own independent receipt, so
+the independent reviewer rates the direct tasks through the authenticated
+Broker review surface.
 
 ## First M5 iteration
 

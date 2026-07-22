@@ -67,6 +67,7 @@ import { executeOllamaTask } from "./ollama-executor.js";
 import {
   executeHomeserverTask,
   buildFreshHomeserverDelegateRequestBody,
+  buildHomeserverDelegateTaskConfig,
   loadHomeserverGatewayConfig,
   renderHomeserverUserMessage,
   type HomeserverExecutorResult,
@@ -188,6 +189,7 @@ import {
   type Sensitivity,
   type SensitivityAssessment,
 } from "./sensitivity.js";
+import { parseTaskModelField } from "./task-document-metadata.js";
 import { routeTask, type RouterDecision } from "./router.js";
 import {
   buildRuntimeCandidates,
@@ -838,9 +840,7 @@ function parseTask(content: string): TaskConfig | null {
   const sequenceStr = content.match(
     /\*\*Sequence:\*\*\s*(\d+)/i
   )?.[1];
-  const modelRaw = content.match(
-    /\*\*Model:\*\*\s*(.+)/i
-  )?.[1]?.trim();
+  const modelRaw = parseTaskModelField(content);
   const ollamaHostRaw = content.match(
     /\*\*Ollama-host:\*\*\s*(.+)/i
   )?.[1]?.trim();
@@ -5173,18 +5173,18 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         maxOutputChars: config.maxOutputChars,
         injectedContext: task.contextResolution?.content || undefined,
       });
-      const homeserverTaskConfig = {
+      const homeserverTaskConfig = buildHomeserverDelegateTaskConfig({
         prompt: task.prompt,
         gatewayBaseUrl: gateway.baseUrl,
         apiKey: gateway.apiKey,
-        path: "delegate" as const,
         taskType: task.homeserverTaskType,
+        model: task.model,
         maxTokens: task.maxOutputTokens,
         verifier: task.homeserverVerifier,
         timeoutMs: task.timeoutMs,
         maxOutputChars: config.maxOutputChars,
         injectedContext: task.contextResolution?.content || undefined,
-      };
+      });
       let authenticatedLearningSource: LearningTaskSource | undefined;
       try {
         authenticatedLearningSource = buildLearningTaskSource(

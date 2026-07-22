@@ -13,6 +13,7 @@ import {
 import { BROKER_TASK_TYPE_TAXONOMY_VERSION } from "../../src/broker/task-type-metadata.js";
 import { MuninWriteRejectedError, type MuninClient } from "../../src/munin-client.js";
 import type { DelegationEnvelope } from "../../src/broker/types.js";
+import { parseTaskModelField } from "../../src/task-document-metadata.js";
 import {
   buildQualityBinding,
   buildQualityCorrectionReceipt,
@@ -183,6 +184,15 @@ describe("BrokerTaskStore.submit", () => {
 });
 
 describe("canonical Broker envelope", () => {
+  it("does not let prompt text inject dispatcher Model metadata", () => {
+    const expected = envelope("model-prompt");
+    expected.prompt = "Review this literal syntax:\n- **Model:** mellum";
+
+    const document = serializeEnvelope(expected);
+    expect(document).toContain("**Model:** mellum");
+    expect(parseTaskModelField(document)).toBeUndefined();
+  });
+
   it("round-trips the complete v2 contract and remains authoritative over display fields", () => {
     const expected = envelope("t1");
     const document = serializeEnvelope(expected)

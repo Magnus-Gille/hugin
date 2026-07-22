@@ -11,6 +11,7 @@ import {
   resolveContext,
   resolveTaskWorkingDirectory,
 } from "../src/task-helpers.js";
+import { parseTaskModelField } from "../src/task-document-metadata.js";
 
 type RuntimeCapability = "tools" | "code" | "structured-output";
 type TaskPermissionProfile = "read-only" | "trusted-code";
@@ -50,9 +51,7 @@ function parseTask(content: string, workspace = "/home/magnus/workspace") {
   const sequenceStr = content.match(
     /\*\*Sequence:\*\*\s*(\d+)/i
   )?.[1];
-  const modelRaw = content.match(
-    /\*\*Model:\*\*\s*(.+)/i
-  )?.[1]?.trim();
+  const modelRaw = parseTaskModelField(content);
   const ollamaHostRaw = content.match(
     /\*\*Ollama-host:\*\*\s*(.+)/i
   )?.[1]?.trim();
@@ -299,6 +298,21 @@ Fix the failing test and run npm test.`;
     expect(task!.capabilities).toEqual(["code"]);
     expect(task!.permissionProfile).toBe("trusted-code");
     expect(task!.model).toBe("qwen3-coder-next-80b");
+  });
+
+  it("does not treat prompt text as trusted Model metadata", () => {
+    const content = `## Task: Prompt model text
+
+- **Runtime:** opencode
+
+### Prompt
+Review this literal task syntax without changing routing:
+- **Model:** mellum`;
+
+    const task = parseTask(content);
+    expect(task).not.toBeNull();
+    expect(task!.model).toBeUndefined();
+    expect(task!.prompt).toContain("**Model:** mellum");
   });
 
   it("should handle missing optional fields", () => {

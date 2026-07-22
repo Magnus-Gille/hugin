@@ -1,10 +1,9 @@
 # Durable append-only task/outcome learning registry (#232)
 
-**Status:** mechanism and managed capture are active. Direct homeserver capture
-is implemented fail-closed and becomes operational when the authenticated
-Gille ledger join in
+**Status:** mechanism, managed capture, and direct homeserver capture are
+active. The authenticated Gille ledger join in
 [gille-inference #61](https://github.com/Magnus-Gille/gille-inference/issues/61)
-is deployed.
+was deployed on 2026-07-22.
 `src/learning-registry-schema.ts`, `src/learning-registry-store.ts`, and
 `src/learning-registry-view.ts` own the append-only mechanism. The dispatcher
 now writes native events for the standing managed harness sampler and, through
