@@ -260,12 +260,15 @@ assert_contains "$full_calls" "health.codex_sandbox?.available !== true" "deploy
 assert_contains "$full_calls" "in-service Codex sandbox self-test unavailable after 15 attempts" "deployment waits for a definitive in-service probe result"
 assert_contains "$full_calls" "codex sandbox -- /bin/true" "deployment host preflight exercises Codex's zero-token sandbox entry point"
 assert_contains "$full_calls" "enable --now hugin-daily-exam-factory.timer" "deployment enables the automatic daily factory"
+assert_contains "$full_calls" "enable --now hugin-experiment-cadence.timer" "deployment enables the automatic experiment cadence"
 assert_contains "$full_calls" "start hugin-daily-exam-factory.service" "deployment runs a factory acceptance sweep"
+assert_contains "$full_calls" "start hugin-experiment-cadence.service" "deployment runs a cadence acceptance tick"
 assert_contains "$full_calls" "daily exam manifest must be schema v2" "deployment requires the cross-client exposure manifest contract"
 assert_contains "$full_calls" "provisional candidate lacks complete cross-client exposure coverage" "deployment rejects an unjoined provisional candidate"
 assert_contains "$full_calls" "$full_sha" "deployment stamps the exact local full SHA"
 assert_order "$full_calls" "curl -fsS http://127.0.0.1:3032/health" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "health acceptance precedes atomic marker stamp"
 assert_order "$full_calls" "start hugin-daily-exam-factory.service" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "factory acceptance precedes atomic marker stamp"
+assert_order "$full_calls" "start hugin-experiment-cadence.service" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "cadence acceptance precedes atomic marker stamp"
 
 # If the marker cannot be invalidated, the script must not begin payload sync.
 : >"$CALL_LOG"
@@ -310,6 +313,21 @@ export FAKE_SSH_FAIL_MATCH=""
 factory_fail_calls="$(cat "$CALL_LOG")"
 assert_contains "$factory_fail_calls" "start hugin-daily-exam-factory.service" "factory failure reaches the new acceptance gate"
 assert_not_contains "$factory_fail_calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "failed factory acceptance remains markerless"
+
+# The cadence is also a deployed production mechanism. Its service must start
+# successfully before the exact revision can be marked accepted.
+: >"$CALL_LOG"
+export FAKE_SSH_FAIL_MATCH="start hugin-experiment-cadence.service"
+export FAKE_SSH_FAIL_RC=71
+set +e
+(cd "$FULL_SOURCE" && bash "$DEPLOY_SCRIPT" testhost >/dev/null 2>&1)
+cadence_fail_rc=$?
+set -e
+export FAKE_SSH_FAIL_MATCH=""
+[[ "$cadence_fail_rc" -ne 0 ]] || fail "failed cadence acceptance must fail deployment"
+cadence_fail_calls="$(cat "$CALL_LOG")"
+assert_contains "$cadence_fail_calls" "start hugin-experiment-cadence.service" "cadence failure reaches the acceptance gate"
+assert_not_contains "$cadence_fail_calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "failed cadence acceptance remains markerless"
 
 if [[ "$failures" -gt 0 ]]; then
   echo "$failures assertion(s) failed" >&2
