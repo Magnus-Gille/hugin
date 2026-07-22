@@ -67,6 +67,7 @@ import { executeOllamaTask } from "./ollama-executor.js";
 import {
   executeHomeserverTask,
   buildFreshHomeserverDelegateRequestBody,
+  buildHomeserverDelegateTaskConfig,
   loadHomeserverGatewayConfig,
   renderHomeserverUserMessage,
   type HomeserverExecutorResult,
@@ -5173,18 +5174,18 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         maxOutputChars: config.maxOutputChars,
         injectedContext: task.contextResolution?.content || undefined,
       });
-      const homeserverTaskConfig = {
+      const homeserverTaskConfig = buildHomeserverDelegateTaskConfig({
         prompt: task.prompt,
         gatewayBaseUrl: gateway.baseUrl,
         apiKey: gateway.apiKey,
-        path: "delegate" as const,
         taskType: task.homeserverTaskType,
+        model: task.model,
         maxTokens: task.maxOutputTokens,
         verifier: task.homeserverVerifier,
         timeoutMs: task.timeoutMs,
         maxOutputChars: config.maxOutputChars,
         injectedContext: task.contextResolution?.content || undefined,
-      };
+      });
       let authenticatedLearningSource: LearningTaskSource | undefined;
       try {
         authenticatedLearningSource = buildLearningTaskSource(

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import {
+  buildHomeserverDelegateTaskConfig,
   executeHomeserverTask,
   loadHomeserverGatewayConfig,
   type HomeserverTaskConfig,
@@ -134,6 +135,35 @@ describe("loadHomeserverGatewayConfig", () => {
         HOMESERVER_GATEWAY_API_KEY: "k",
       } as NodeJS.ProcessEnv)).toBeNull();
     }
+  });
+});
+
+describe("buildHomeserverDelegateTaskConfig", () => {
+  it("maps the dispatcher Model field to the gateway modelId pin", () => {
+    expect(buildHomeserverDelegateTaskConfig({
+      prompt: "Review this code.",
+      gatewayBaseUrl: "http://m5.test:8080",
+      apiKey: "owner-key",
+      taskType: "code-review",
+      model: "mellum",
+      timeoutMs: 30_000,
+      maxOutputChars: 5_000,
+    })).toMatchObject({
+      path: "delegate",
+      taskType: "code-review",
+      modelId: "mellum",
+    });
+  });
+
+  it("leaves model selection with the gateway when Model is absent", () => {
+    expect(buildHomeserverDelegateTaskConfig({
+      prompt: "Review this code.",
+      gatewayBaseUrl: "http://m5.test:8080",
+      apiKey: "owner-key",
+      taskType: "code-review",
+      timeoutMs: 30_000,
+      maxOutputChars: 5_000,
+    })).not.toHaveProperty("modelId");
   });
 });
 

@@ -95,6 +95,39 @@ export interface HomeserverTaskConfig {
   learningTask?: LearningTaskPreparation | { kind: "ineligible" };
 }
 
+export interface HomeserverDelegateTaskConfigInput {
+  prompt: string;
+  gatewayBaseUrl: string;
+  apiKey: string;
+  taskType: string;
+  /** Dispatcher task-document `Model` field. */
+  model?: string;
+  maxTokens?: number;
+  verifier?: HomeserverVerifierSpec;
+  timeoutMs: number;
+  maxOutputChars: number;
+  injectedContext?: string;
+}
+
+/** Map dispatcher task fields onto the gateway's `/delegate` contract. */
+export function buildHomeserverDelegateTaskConfig(
+  input: HomeserverDelegateTaskConfigInput,
+): HomeserverTaskConfig {
+  return {
+    prompt: input.prompt,
+    gatewayBaseUrl: input.gatewayBaseUrl,
+    apiKey: input.apiKey,
+    path: "delegate",
+    taskType: input.taskType,
+    ...(input.model !== undefined ? { modelId: input.model } : {}),
+    ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+    ...(input.verifier !== undefined ? { verifier: input.verifier } : {}),
+    timeoutMs: input.timeoutMs,
+    maxOutputChars: input.maxOutputChars,
+    ...(input.injectedContext !== undefined ? { injectedContext: input.injectedContext } : {}),
+  };
+}
+
 export type Backpressure = "none" | "quota" | "admission";
 
 export interface HomeserverExecutorResult {
