@@ -1174,6 +1174,8 @@ export async function recoverPreparedLearningTaskDispatch(input: {
   replayPayload: unknown;
   gatewayBaseUrl: string;
   apiKey: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
   fetchImpl?: typeof fetch;
 }): Promise<LearningTaskExecutionEvidence> {
   const prepared = preparedLearningTaskDispatchSchema.parse(input.prepared);
@@ -1190,7 +1192,8 @@ export async function recoverPreparedLearningTaskDispatch(input: {
         ...(input.apiKey ? { Authorization: `Bearer ${input.apiKey}` } : {}),
       },
       body: JSON.stringify(replay.requestBody),
-      signal: AbortSignal.timeout(30_000),
+      signal: input.signal
+        ?? AbortSignal.timeout(Math.min(30_000, Math.max(1, input.timeoutMs ?? 30_000))),
     });
     if (!response.ok) {
       return learningTaskRecoveryFailure(

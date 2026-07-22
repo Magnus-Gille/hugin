@@ -8,6 +8,7 @@ import {
   loadHomeserverGatewayConfig,
   type HomeserverTaskConfig,
 } from "../src/homeserver-executor.js";
+import { recoverPreparedLearningTaskDispatch } from "../src/learning-task-handshake.js";
 import {
   withLearningTaskContext,
   withLearningTaskGatewayEcho,
@@ -50,6 +51,25 @@ function streamResponse(chunks: string[]): Response {
     },
   });
   return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
+function immediateRecoveryOptions(task: HomeserverTaskConfig) {
+  if (task.learningTask?.kind !== "ready") throw new Error("fixture is not learning-ready");
+  const { preparedDispatch, replayPayload } = task.learningTask;
+  return {
+    recoverAmbiguousLearningTask: async () => {
+      const recovered = await recoverPreparedLearningTaskDispatch({
+        prepared: preparedDispatch,
+        replayPayload,
+        gatewayBaseUrl: task.gatewayBaseUrl,
+        apiKey: task.apiKey,
+        timeoutMs: 5_000,
+      });
+      return recovered.state === "m5-admitted" && recovered.evidenceAccepted
+        ? recovered
+        : null;
+    },
+  };
 }
 
 let tmpLogDir: string;
@@ -470,6 +490,239 @@ describe("executeHomeserverTask — delegate path", () => {
     expect(result.output).not.toContain("must not be accepted");
   });
 
+  it("rejects malformed 2xx JSON without treating it as transport ambiguity", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-malformed-200",
+    );
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("{not-json", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const recovery = vi.fn(immediateRecoveryOptions(task).recoverAmbiguousLearningTask);
+
+    const result = await executeHomeserverTask(
+      task,
+      "delegate-malformed-200",
+      tmpLogDir,
+      { recoverAmbiguousLearningTask: recovery },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(recovery).not.toHaveBeenCalled();
+    expect(result.learningTask).toMatchObject({
+      state: "join-failed",
+      evidenceAccepted: false,
+      failureCode: "gateway-echo-invalid",
+    });
+  });
+
+  it("immediately recovers one exact stored admission after an ambiguous transport failure", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-immediate-recovery",
+    );
+    const recoveredResponse = withLearningTaskGatewayEcho(task, "delegate-immediate-recovery", {
+      learningTaskAdmission: { recovered: true, outcomeAvailable: false },
+      output: "recovery output must not be accepted",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new TypeError("socket closed after admission"))
+      .mockResolvedValueOnce(jsonResponse(recoveredResponse));
+
+    const result = await executeHomeserverTask(
+      task,
+      "delegate-immediate-recovery",
+      tmpLogDir,
+      immediateRecoveryOptions(task),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect((fetchMock.mock.calls[1]?.[1] as RequestInit).body)
+      .toBe((fetchMock.mock.calls[0]?.[1] as RequestInit).body);
+    expect(result.exitCode).toBe(1);
+    expect(result.resultText).toBeNull();
+    expect(result.provenance).toBeNull();
+    expect(result.output).not.toContain("recovery output must not be accepted");
+    expect(result.learningTask).toMatchObject({
+      state: "m5-admitted",
+      evidenceAccepted: true,
+    });
+  });
+
+  it("does not invoke immediate recovery after the external abort controller fires", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-cancelled-before-recovery",
+    );
+    const externalAbort = new AbortController();
+    vi.spyOn(globalThis, "fetch").mockImplementationOnce(async (_url, init) => {
+      externalAbort.abort(new Error("operator cancelled task"));
+      const signal = (init as RequestInit).signal!;
+      throw signal.reason;
+    });
+    const recovery = vi.fn(async () => null);
+
+    const result = await executeHomeserverTask(
+      task,
+      "delegate-cancelled-before-recovery",
+      tmpLogDir,
+      { abortController: externalAbort, recoverAmbiguousLearningTask: recovery },
+    );
+
+    expect(recovery).not.toHaveBeenCalled();
+    expect(result.learningTask).toMatchObject({
+      state: "m5-not-admitted",
+      evidenceAccepted: false,
+      failureCode: "transport-not-admitted",
+    });
+  });
+
+  it("keeps the truthful transport failure when immediate recovery is mismatched", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-recovery-mismatch",
+    );
+    const mismatched = withLearningTaskGatewayEcho(task, "delegate-recovery-mismatch", {
+      learningTaskAdmission: { recovered: true, outcomeAvailable: false },
+    }) as any;
+    mismatched.learningTaskGatewayEcho.echoed_request.attempt_id =
+      "hugin-attempt:99999999-9999-4999-8999-999999999999";
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new TypeError("socket closed after admission"))
+      .mockResolvedValueOnce(jsonResponse(mismatched));
+
+    const result = await executeHomeserverTask(
+      task,
+      "delegate-recovery-mismatch",
+      tmpLogDir,
+      immediateRecoveryOptions(task),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.learningTask).toMatchObject({
+      state: "m5-not-admitted",
+      evidenceAccepted: false,
+      failureCode: "transport-not-admitted",
+      failureReason: "gateway request failed before an exact admission echo",
+    });
+  });
+
+  it("keeps the truthful transport failure when immediate recovery is unavailable", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-recovery-unavailable",
+    );
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new TypeError("socket closed after admission"))
+      .mockRejectedValueOnce(new TypeError("recovery endpoint unavailable"));
+
+    const result = await executeHomeserverTask(
+      task,
+      "delegate-recovery-unavailable",
+      tmpLogDir,
+      immediateRecoveryOptions(task),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.learningTask).toMatchObject({
+      state: "m5-not-admitted",
+      evidenceAccepted: false,
+      failureCode: "transport-not-admitted",
+      failureReason: "gateway request failed before an exact admission echo",
+    });
+  });
+
+  it("rejects a fresh response during immediate recovery without starting a third request", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-recovery-fresh",
+    );
+    const fresh = withLearningTaskGatewayEcho(task, "delegate-recovery-fresh", {
+      outcome: "pass",
+      output: "fresh duplicate inference must not be accepted",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new TypeError("socket closed after admission"))
+      .mockResolvedValueOnce(jsonResponse(fresh));
+
+    const result = await executeHomeserverTask(
+      task,
+      "delegate-recovery-fresh",
+      tmpLogDir,
+      immediateRecoveryOptions(task),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.resultText).toBeNull();
+    expect(result.provenance).toBeNull();
+    expect(result.output).not.toContain("fresh duplicate inference must not be accepted");
+    expect(result.learningTask).toMatchObject({
+      state: "m5-not-admitted",
+      evidenceAccepted: false,
+      failureCode: "transport-not-admitted",
+    });
+  });
+
+  it("probes one eligible 5xx without accepting either response body as output", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-recovery-500",
+    );
+    const recovered = withLearningTaskGatewayEcho(task, "delegate-recovery-500", {
+      learningTaskAdmission: { recovered: true, outcomeAvailable: false },
+      output: "recovery output must stay untrusted",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({ output: "ambiguous 500 output" }, 500))
+      .mockResolvedValueOnce(jsonResponse(recovered));
+
+    const result = await executeHomeserverTask(
+      task,
+      "delegate-recovery-500",
+      tmpLogDir,
+      immediateRecoveryOptions(task),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.exitCode).toBe(500);
+    expect(result.resultText).toBeNull();
+    expect(result.provenance).toBeNull();
+    expect(result.output).not.toContain("ambiguous 500 output");
+    expect(result.output).not.toContain("recovery output must stay untrusted");
+    expect(result.learningTask).toMatchObject({ state: "m5-admitted", evidenceAccepted: true });
+  });
+
+  it("does not probe a 5xx that already carries an authoritative exact echo", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-echo-500",
+    );
+    const responseBody = withLearningTaskGatewayEcho(task, "delegate-echo-500", {
+      output: "5xx output must stay untrusted",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(responseBody, 500));
+    const recovery = vi.fn(immediateRecoveryOptions(task).recoverAmbiguousLearningTask);
+
+    const result = await executeHomeserverTask(
+      task,
+      "delegate-echo-500",
+      tmpLogDir,
+      { recoverAmbiguousLearningTask: recovery },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(recovery).not.toHaveBeenCalled();
+    expect(result.exitCode).toBe(500);
+    expect(result.resultText).toBeNull();
+    expect(result.provenance).toBeNull();
+    expect(result.output).not.toContain("5xx output must stay untrusted");
+    expect(result.learningTask).toMatchObject({ state: "m5-admitted", evidenceAccepted: true });
+  });
+
   it("maps outcome 'fail'/'error' to a non-zero exit code, but 'unverified' to 0", async () => {
     const failTask = withLearningTaskContext(
       makeTaskConfig({ path: "delegate", taskType: "extract" }),
@@ -514,7 +767,7 @@ describe("executeHomeserverTask — delegate path", () => {
 
 describe("executeHomeserverTask — backpressure & errors", () => {
   it("flags 503 as admission backpressure and parses Retry-After", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response("owner preempted the GPU", { status: 503, headers: { "Retry-After": "5" } }),
     );
 
@@ -526,8 +779,10 @@ describe("executeHomeserverTask — backpressure & errors", () => {
       task,
       "bp-503",
       tmpLogDir,
+      immediateRecoveryOptions(task),
     );
 
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result.exitCode).toBe(1);
     expect(result.backpressure).toBe("admission");
     expect(result.retryAfterS).toBe(5);
@@ -544,12 +799,22 @@ describe("executeHomeserverTask — backpressure & errors", () => {
   });
 
   it("flags 429 as quota backpressure", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "bp-429",
+    );
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       jsonResponse({ error: { message: "rpm exceeded" } }, 429),
     );
 
-    const result = await executeHomeserverTask(makeTaskConfig(), "bp-429", tmpLogDir);
+    const result = await executeHomeserverTask(
+      task,
+      "bp-429",
+      tmpLogDir,
+      immediateRecoveryOptions(task),
+    );
 
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result.backpressure).toBe("quota");
     expect(result.exitCode).toBe(1);
   });

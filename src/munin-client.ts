@@ -41,6 +41,12 @@ export interface MuninReadRequest {
   key: string;
 }
 
+export interface MuninRequestOptions {
+  signal?: AbortSignal;
+  requestTimeoutMs?: number;
+  maxRetries?: number;
+}
+
 export type MuninReadResult =
   | (MuninEntry & { found: true })
   | { namespace: string; key: string; found: false };
@@ -78,8 +84,84 @@ export class MuninWriteRejectedError extends Error {
 
 let rpcId = 0;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function abortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const error = new Error("Munin request aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+export function composeAbortSignals(signals: readonly AbortSignal[]): {
+  signal: AbortSignal;
+  cleanup: () => void;
+} {
+  if (typeof AbortSignal.any === "function") {
+    return { signal: AbortSignal.any([...signals]), cleanup: () => {} };
+  }
+
+  const controller = new AbortController();
+  const listeners: Array<{ signal: AbortSignal; listener: () => void }> = [];
+  const cleanup = (): void => {
+    for (const { signal, listener } of listeners) {
+      signal.removeEventListener("abort", listener);
+    }
+    listeners.length = 0;
+  };
+
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      cleanup();
+      break;
+    }
+    const listener = (): void => {
+      controller.abort(signal.reason);
+      cleanup();
+    };
+    listeners.push({ signal, listener });
+    signal.addEventListener("abort", listener, { once: true });
+  }
+
+  return { signal: controller.signal, cleanup };
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function waitForRequestSlot(
+  previous: Promise<void>,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (signal.aborted) return false;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (acquired: boolean): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve(acquired);
+    };
+    const onAbort = (): void => finish(false);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    previous.then(() => finish(true));
+  });
 }
 
 function parseRetryAfterMs(headerValue: string | null): number | null {
@@ -157,19 +239,29 @@ export class MuninClient {
     return this.retryBaseDelayMs * 2 ** attempt;
   }
 
-  private async withRequestSlot<T>(fn: () => Promise<T>): Promise<T> {
+  private async withRequestSlot<T>(
+    fn: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     const previous = this.requestQueue;
     let release!: () => void;
     this.requestQueue = new Promise<void>((resolve) => {
       release = resolve;
     });
 
-    await previous;
+    let acquired = true;
+    if (signal) acquired = await waitForRequestSlot(previous, signal);
+    else await previous;
+    if (!acquired) {
+      // Preserve queue ordering even though this canceled caller returns now.
+      void previous.then(release);
+      throw abortReason(signal!);
+    }
 
     try {
       const waitMs = this.nextRequestAt - Date.now();
       if (waitMs > 0) {
-        await sleep(waitMs);
+        await sleep(waitMs, signal);
       }
       return await fn();
     } finally {
@@ -180,7 +272,8 @@ export class MuninClient {
 
   private async callTool(
     name: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    options: MuninRequestOptions = {},
   ): Promise<unknown> {
     return this.withRequestSlot(async () => {
       const body = {
@@ -191,9 +284,18 @@ export class MuninClient {
       };
 
       let attempt = 0;
+      const maxRetries = options.maxRetries ?? this.maxRetries;
+      const requestTimeoutMs = options.requestTimeoutMs ?? this.requestTimeoutMs;
 
       while (true) {
+        let cleanupRequestSignal = (): void => {};
         try {
+          if (options.signal?.aborted) throw abortReason(options.signal);
+          const timeoutSignal = AbortSignal.timeout(requestTimeoutMs);
+          const requestAbort = options.signal
+            ? composeAbortSignals([options.signal, timeoutSignal])
+            : { signal: timeoutSignal, cleanup: () => {} };
+          cleanupRequestSignal = requestAbort.cleanup;
           const res = await fetch(`${this.baseUrl}/mcp`, {
             method: "POST",
             headers: {
@@ -203,21 +305,21 @@ export class MuninClient {
               "mcp-session-id": this.sessionId,
             },
             body: JSON.stringify(body),
-            signal: AbortSignal.timeout(this.requestTimeoutMs),
+            signal: requestAbort.signal,
           });
 
           if (!res.ok) {
             const text = await res.text().catch(() => "");
             const shouldRetry =
               (res.status === 429 || res.status >= 500) &&
-              attempt < this.maxRetries;
+              attempt < maxRetries;
             if (shouldRetry) {
               const retryDelayMs = this.getRetryDelayMs(
                 attempt,
                 res.headers.get("retry-after")
               );
               this.deferNextRequest(retryDelayMs);
-              await sleep(retryDelayMs);
+              await sleep(retryDelayMs, options.signal);
               attempt++;
               continue;
             }
@@ -253,30 +355,34 @@ export class MuninClient {
           }
           return rpc.result;
         } catch (err) {
-          if (attempt < this.maxRetries && isRetryableFetchError(err)) {
+          if (options.signal?.aborted) throw abortReason(options.signal);
+          if (attempt < maxRetries && isRetryableFetchError(err)) {
             const retryDelayMs = this.getRetryDelayMs(attempt, null);
             this.deferNextRequest(retryDelayMs);
-            await sleep(retryDelayMs);
+            await sleep(retryDelayMs, options.signal);
             attempt++;
             continue;
           }
           if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
-            throw new Error(`Munin request timed out after ${this.requestTimeoutMs}ms`);
+            throw new Error(`Munin request timed out after ${requestTimeoutMs}ms`);
           }
           throw err;
+        } finally {
+          cleanupRequestSignal();
         }
       }
-    });
+    }, options.signal);
   }
 
   async read(
     namespace: string,
-    key: string
+    key: string,
+    options: MuninRequestOptions = {},
   ): Promise<(MuninEntry & { found: true }) | null> {
     const result = (await this.callTool("memory_read", {
       namespace,
       key,
-    })) as { found: boolean } & MuninEntry;
+    }, options)) as { found: boolean } & MuninEntry;
     return result.found ? (result as MuninEntry & { found: true }) : null;
   }
 

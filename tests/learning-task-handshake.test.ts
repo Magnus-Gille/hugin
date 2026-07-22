@@ -505,6 +505,8 @@ describe("LearningTaskContract v1 producer handshake", () => {
     expect(recovered).toMatchObject({ state: "m5-admitted", evidenceAccepted: true });
     expect(validatePreparedLearningTaskOutcome(prepared.preparedDispatch, recovered))
       .toEqual(recovered);
+    expect((fetchImpl.mock.calls[0]?.[1] as RequestInit).body)
+      .toBe(JSON.stringify(prepared.replayPayload.requestBody));
     expect(JSON.parse((fetchImpl.mock.calls[0]?.[1] as RequestInit).body as string))
       .toEqual(prepared.replayPayload.requestBody);
     const crossAttempt = structuredClone(recovered);

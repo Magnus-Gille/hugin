@@ -111,6 +111,18 @@ reported as outcome-persistence failure without an `attemptOutcomeRef`; startup
 continues with the ordinary failed task result rather than pointing at an
 unusable row.
 
+After an eligible stamped request gets an ambiguous transport failure or a
+non-backpressure 5xx without an authoritative echo, Hugin also makes one
+immediate, short-timeout probe through this same stored-row validation path.
+The probe reuses the byte-identical classified replay payload and every original
+task, attempt, request, idempotency, principal, namespace, and stamp identity.
+Only an authenticated exact stored-admission recovery may improve the admission
+join. Missing, malformed, mismatched, unavailable, or fresh/non-recovery
+responses leave the original `transport-not-admitted` evidence unchanged.
+This improves evidence coverage only: the ambiguous task remains failed, and
+neither the ambiguous response nor the recovery response supplies trusted task
+output or provenance. Normal 429/503 backpressure never enters this probe path.
+
 This contract does not create the learning registry, choose a model, or promote
 evidence. Those remain Hugin #232 and Gille policy/capture responsibilities.
 
