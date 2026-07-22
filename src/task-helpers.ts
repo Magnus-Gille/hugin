@@ -116,7 +116,10 @@ function compareTaskClaimOrder(
 ): number {
   const aCreatedAtMs = Date.parse(a.created_at);
   const bCreatedAtMs = Date.parse(b.created_at);
-  if (Number.isFinite(aCreatedAtMs) && Number.isFinite(bCreatedAtMs)) {
+  const aCreatedAtValid = Number.isFinite(aCreatedAtMs);
+  const bCreatedAtValid = Number.isFinite(bCreatedAtMs);
+  if (aCreatedAtValid !== bCreatedAtValid) return aCreatedAtValid ? -1 : 1;
+  if (aCreatedAtValid && bCreatedAtValid) {
     if (aCreatedAtMs !== bCreatedAtMs) return aCreatedAtMs - bCreatedAtMs;
   } else if (a.created_at !== b.created_at) {
     return a.created_at < b.created_at ? -1 : 1;

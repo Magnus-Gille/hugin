@@ -61,9 +61,21 @@ export function snapshotPendingQueueAfterClaim(
   paginationTruncated: boolean,
   claimedNamespace: string,
 ): PendingQueueSnapshot {
+  return snapshotPendingQueueAfterDeparture(
+    results,
+    paginationTruncated,
+    claimedNamespace,
+  );
+}
+
+export function snapshotPendingQueueAfterDeparture(
+  results: MuninQueryResult[],
+  paginationTruncated: boolean,
+  departedNamespace: string,
+): PendingQueueSnapshot {
   return snapshotPendingQueue(
     results.filter((result) =>
-      result.key !== "status" || result.namespace !== claimedNamespace
+      result.key !== "status" || result.namespace !== departedNamespace
     ),
     paginationTruncated,
   );

@@ -6,6 +6,7 @@ import {
   shouldWarnQueueTruncation,
   snapshotPendingQueue,
   snapshotPendingQueueAfterClaim,
+  snapshotPendingQueueAfterDeparture,
 } from "../src/queue-observability.js";
 
 function makeEntry(
@@ -71,6 +72,42 @@ describe("pending queue observability", () => {
     )).toMatchObject({
       queue_depth: 1,
       oldest_pending_age_s: 60,
+    });
+  });
+
+  it("removes a cancelled task from the pending snapshot", () => {
+    const cancelled = makeEntry("tasks/cancelled", "2026-07-21T20:00:00.000Z");
+    const remaining = makeEntry("tasks/remaining", "2026-07-21T20:04:00.000Z");
+
+    const snapshot = snapshotPendingQueueAfterDeparture(
+      [cancelled, remaining],
+      false,
+      cancelled.namespace,
+    );
+
+    expect(buildQueueObservabilityFields(snapshot)).toMatchObject({
+      queue_depth: 1,
+      queue_depth_lower_bound: 1,
+    });
+  });
+
+  it("removes a task transitioned to awaiting approval from the pending snapshot", () => {
+    const awaitingApproval = makeEntry(
+      "tasks/awaiting-approval",
+      "2026-07-21T20:00:00.000Z",
+    );
+
+    const snapshot = snapshotPendingQueueAfterDeparture(
+      [awaitingApproval],
+      false,
+      awaitingApproval.namespace,
+    );
+
+    expect(buildQueueObservabilityFields(snapshot)).toEqual({
+      queue_depth: 0,
+      queue_depth_lower_bound: 0,
+      oldest_pending_age_s: 0,
+      pagination_truncated: false,
     });
   });
 

@@ -24,7 +24,7 @@ import {
   buildQueueObservabilityFields,
   shouldWarnQueueTruncation,
   snapshotPendingQueue,
-  snapshotPendingQueueAfterClaim,
+  snapshotPendingQueueAfterDeparture,
   type PendingQueueSnapshot,
 } from "./queue-observability.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
@@ -4201,18 +4201,34 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   if (!taskResult) return { hadTask: false, queueDepth };
 
   const taskNs = taskResult.namespace;
+  const updatePendingQueueSnapshotAfterDeparture = (): void => {
+    lastPendingQueueSnapshot = snapshotPendingQueueAfterDeparture(
+      results,
+      pendingPage.truncated,
+      taskNs,
+    );
+  };
+  const pendingTaskDeparted = (hadTask: boolean = true) => {
+    updatePendingQueueSnapshotAfterDeparture();
+    return { hadTask, queueDepth };
+  };
   const entry = await munin.read(taskNs, "status");
   if (!entry) return { hadTask: false, queueDepth };
 
   // Verify it's still pending (another dispatcher might have claimed it)
   if (!entry.tags.includes("pending")) {
     console.log(`Task ${taskNs} no longer pending, skipping`);
-    return { hadTask: false, queueDepth };
+    return pendingTaskDeparted(false);
   }
 
   if (entry.tags.includes(CANCEL_REQUESTED_TAG)) {
     if (parseDeclaredRuntime(entry.content) === "pipeline" || entry.tags.includes("runtime:pipeline")) {
-      await processPipelineCancellationRequest(entry);
+      const processed = await processPipelineCancellationRequest(entry);
+      if (!processed) return { hadTask: true, queueDepth };
+      const refreshedEntry = await munin.read(taskNs, "status");
+      if (refreshedEntry?.tags.includes("pending")) {
+        return { hadTask: true, queueDepth };
+      }
     } else {
       await markTaskCancelled(
         taskNs,
@@ -4224,7 +4240,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         }
       );
     }
-    return { hadTask: true, queueDepth };
+    return pendingTaskDeparted();
   }
 
   const declaredRuntime = parseDeclaredRuntime(entry.content);
@@ -4237,7 +4253,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     );
     await promoteDependents(extractTaskId(taskNs));
     await refreshPipelineSummaryFromContent(entry.content);
-    return { hadTask: true, queueDepth };
+    return pendingTaskDeparted();
   }
 
   const parsedTask =
@@ -4251,7 +4267,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     );
     await promoteDependents(extractTaskId(taskNs));
     await refreshPipelineSummaryFromContent(entry.content);
-    return { hadTask: true, queueDepth };
+    return pendingTaskDeparted();
   }
 
   // Validate submitter against allowlist
@@ -4272,7 +4288,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     );
     await promoteDependents(extractTaskId(taskNs));
     await refreshPipelineSummaryFromContent(entry.content);
-    return { hadTask: true, queueDepth };
+    return pendingTaskDeparted();
   }
 
   // Verify task signature per HUGIN_SIGNING_POLICY
@@ -4298,7 +4314,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     await munin.log(taskNs, `Task rejected by signing policy: ${signingVerdict.message}`);
     await promoteDependents(extractTaskId(taskNs));
     await refreshPipelineSummaryFromContent(entry.content);
-    return { hadTask: true, queueDepth };
+    return pendingTaskDeparted();
   }
 
   if (parsedTask?.baseBranchError) {
@@ -4308,7 +4324,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     await munin.log(taskNs, `Task rejected before execution: ${rejection}`);
     await promoteDependents(extractTaskId(taskNs));
     await refreshPipelineSummaryFromContent(entry.content);
-    return { hadTask: true, queueDepth };
+    return pendingTaskDeparted();
   }
 
   if (declaredRuntime !== "pipeline" && parsedTask) {
@@ -4435,7 +4451,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         );
         await promoteDependents(extractTaskId(taskNs));
         await refreshPipelineSummaryFromContent(entry.content);
-        return { hadTask: true, queueDepth };
+        return pendingTaskDeparted();
       }
     }
 
@@ -4486,7 +4502,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       await munin.log(taskNs, `Task rejected: ${rejection}`);
       await promoteDependents(extractTaskId(taskNs));
       await refreshPipelineSummaryFromContent(entry.content);
-      return { hadTask: true, queueDepth };
+      return pendingTaskDeparted();
     }
 
     const securityViolation =
@@ -4531,7 +4547,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       );
       await promoteDependents(extractTaskId(taskNs));
       await refreshPipelineSummaryFromContent(entry.content);
-      return { hadTask: true, queueDepth };
+      return pendingTaskDeparted();
     }
   }
 
@@ -4544,7 +4560,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // task that can sit for days and may be edited/re-signed before it is
     // returned to pending; it will be assessed again on the next claim.
     taskProvenance.delete(taskNs);
-    return { hadTask: true, queueDepth };
+    return pendingTaskDeparted();
   }
 
   console.log(
@@ -4589,11 +4605,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
   // The selected status is now running. Keep /health accurate while the task
   // executes instead of reporting the accepted claim as still pending.
-  lastPendingQueueSnapshot = snapshotPendingQueueAfterClaim(
-    results,
-    pendingPage.truncated,
-    taskNs,
-  );
+  updatePendingQueueSnapshotAfterDeparture();
 
   currentTask = taskNs;
   currentCancellation = null;
