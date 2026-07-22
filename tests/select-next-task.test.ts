@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { selectNextTask, parseGroupField, parseSequenceField } from "../src/task-helpers.js";
+import {
+  listEligibleTasks,
+  selectNextTask,
+  parseGroupField,
+  parseSequenceField,
+} from "../src/task-helpers.js";
 import type { MuninQueryResult } from "../src/munin-client.js";
 
 function makeTask(
@@ -253,5 +258,30 @@ describe("selectNextTask", () => {
       "**Group:** batch-a\n**Runtime:** claude",
     );
     expect(selectNextTask([noSeqGroupTask], NO_RUNNING)).toBe(noSeqGroupTask);
+  });
+
+  it("exposes the complete FIFO-ordered eligible window without changing the champion", () => {
+    const blocked = makeTask(
+      "tasks/a-blocked",
+      "2026-01-01T07:00:00Z",
+      "**Group:** batch-a\n**Sequence:** 2",
+    );
+    const oldestEligible = makeTask("tasks/b-oldest", "2026-01-01T08:00:00Z");
+    const newestEligible = makeTask("tasks/c-newest", "2026-01-01T09:00:00Z");
+    const runningSeq1 = makeRunning(
+      "tasks/a-running",
+      "**Group:** batch-a\n**Sequence:** 1",
+    );
+
+    const eligible = listEligibleTasks(
+      [newestEligible, blocked, oldestEligible],
+      [runningSeq1],
+    );
+
+    expect(eligible).toEqual([oldestEligible, newestEligible]);
+    expect(selectNextTask(
+      [newestEligible, blocked, oldestEligible],
+      [runningSeq1],
+    )).toBe(eligible[0]);
   });
 });

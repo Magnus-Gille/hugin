@@ -17,7 +17,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, selectNextTask, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, prepareManagedCheckout, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt, PUBLICATION_FAILED_TAG } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, listEligibleTasks, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, prepareManagedCheckout, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt, PUBLICATION_FAILED_TAG } from "./task-helpers.js";
 import { persistPublicationFailure } from "./publication-recovery.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
 import {
@@ -148,6 +148,7 @@ import {
   type DependencyState,
 } from "./task-graph.js";
 import {
+  attachSchedulerDecisionPointer,
   buildAwaitingApprovalTags,
   buildClaimedTerminalStatusTags,
   buildLeasedStatusTags,
@@ -156,6 +157,14 @@ import {
   shouldDeferCancellationToLocalOwner,
   stripSchedulerDecisionPointers,
 } from "./task-status-tags.js";
+import {
+  hashSchedulerPrediction,
+  schedulerDecisionPredictionSchema,
+  type SchedulerDecisionPrediction,
+} from "./scheduler-evidence.js";
+import {
+  persistSchedulerPrediction,
+} from "./scheduler-evidence-store.js";
 import { LearningLoopCollector } from "./learning-loop-collector.js";
 import { LearningRegistryStore } from "./learning-registry-store.js";
 import { LearningExperimentStore } from "./learning/experiment-store.js";
@@ -699,6 +708,10 @@ const learningRegistry = new LearningRegistryStore(munin);
 const leaseMunin = createMuninClient();
 const cancelWatchMunin = createMuninClient();
 const reaperMunin = createMuninClient();
+// Shadow scheduling evidence is non-authoritative telemetry. A dedicated
+// request queue plus fire-and-forget writes ensures Munin latency cannot hold
+// up execution after the claim CAS.
+const schedulerEvidenceMunin = createMuninClient();
 // Verdict-store traffic (batched record + confidence-source read, Fix #2c)
 // gets its own dedicated client, same precedent as leaseMunin/cancelWatchMunin
 // above: verdict recording is fire-and-forget background work and must never
@@ -3154,7 +3167,6 @@ async function reapExpiredLeases(): Promise<void> {
       }
       const classification = getTaskArtifactClassification(task || undefined, entry.content);
       const runtime = getRuntimeFromTags(entry.tags);
-
       try {
         await reaperMunin.write(
           result.namespace,
@@ -4306,8 +4318,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   );
   const queueDepth = lastPendingQueueSnapshot.pendingCount;
 
-  // Select the next eligible task respecting Group/Sequence ordering (FIFO within eligible set)
-  const taskResult = selectNextTask(dispatchableResults, runningResults);
+  // Enumerate the same eligible FIFO window used for selection. Shadow
+  // scheduling records this content-blind window but does not alter its order.
+  const eligibleTasks = listEligibleTasks(dispatchableResults, runningResults);
+  const taskResult = eligibleTasks[0];
   if (!taskResult) return { hadTask: false, queueDepth };
 
   const taskNs = taskResult.namespace;
@@ -4691,11 +4705,54 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         .map((t) => (t === "runtime:auto" ? `runtime:${parsedTask!.runtime}` : t))
         .concat("routing:auto")
     : entry.tags;
-  // Until the dispatcher adds its own schema-valid prediction in the next
-  // slice, never carry caller-supplied scheduler identities into a winning
-  // claim. attachSchedulerDecisionPointer performs the same replacement when
-  // prediction persistence is wired.
-  const tagsForClaim = stripSchedulerDecisionPointers(claimInputTags);
+  let schedulerPrediction: SchedulerDecisionPrediction | null = null;
+  let tagsForClaim = stripSchedulerDecisionPointers(claimInputTags);
+  try {
+    const candidatePrediction = schedulerDecisionPredictionSchema.parse({
+      schemaVersion: 1,
+      decisionId: randomUUID(),
+      observedAt: new Date().toISOString(),
+      champion: {
+        policy: pendingPage.truncated || runningPage.truncated
+          ? "visible-window-fifo-v1"
+          : "complete-fifo-v1",
+        taskRef: { namespace: taskNs, key: "status" },
+        serviceEstimate: null,
+      },
+      challenger: {
+        policy: "bounded-sejf-v1",
+        overdueThresholdSeconds: 1800,
+        taskRef: null,
+        reason: "insufficient-evidence",
+        evidenceReasons: [
+          ...(pendingPage.truncated || runningPage.truncated ? ["window-truncated"] : []),
+          "estimate-missing",
+        ],
+        serviceEstimate: null,
+      },
+      window: {
+        eligibleTasks: eligibleTasks.length,
+        pendingEnumerationComplete: !pendingPage.truncated,
+        runningEnumerationComplete: !runningPage.truncated,
+        eligibilityAuthority: "legacy-unbound-group-sequence",
+        estimatedWorkMinutes: null,
+        missingEstimates: eligibleTasks.length,
+      },
+      estimatorVersion: "scheduler-duration-v1",
+    });
+    schedulerPrediction = candidatePrediction;
+    tagsForClaim = attachSchedulerDecisionPointer(claimInputTags, {
+      decisionId: candidatePrediction.decisionId,
+      predictionDigest: hashSchedulerPrediction(candidatePrediction),
+    });
+  } catch (err) {
+    // Shadow evidence can fail closed without becoming dispatch authority.
+    // Caller-controlled pointer tags remain stripped in this fallback.
+    console.warn(
+      `Scheduler shadow prediction construction failed for ${taskNs}: ` +
+        (err instanceof Error ? err.message : String(err)),
+    );
+  }
   const claimTags = buildClaimTags(tagsForClaim, "running", true);
 
   // Rotate the mcp-session-id so all MCP calls for this task execution share
@@ -4728,6 +4785,20 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     taskProvenance.delete(taskNs);
     console.log(`Failed to claim ${taskNs} (concurrent claim?):`, err);
     return { hadTask: false, queueDepth };
+  }
+
+  // The claim is the scheduling authority. Prediction persistence happens
+  // only after that CAS and is deliberately best-effort: telemetry must never
+  // delay, fail, or reorder a production dispatch.
+  if (schedulerPrediction) {
+    const acceptedPrediction = schedulerPrediction;
+    void persistSchedulerPrediction(schedulerEvidenceMunin, acceptedPrediction)
+      .catch((err: unknown) => {
+        console.warn(
+          `Scheduler shadow prediction persistence failed for ${taskNs} (${acceptedPrediction.decisionId}): ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      });
   }
 
   // The selected status is now running. Keep /health accurate while the task

@@ -171,54 +171,54 @@ export function parseSequenceField(content: string): number | undefined {
  * Both pendingTasks and runningTasks are arrays of MuninQueryResult; Group and
  * Sequence are parsed from content_preview which contains the task metadata.
  */
-export function selectNextTask(
+export function listEligibleTasks(
   pendingTasks: MuninQueryResult[],
   runningTasks: MuninQueryResult[],
-): MuninQueryResult | undefined {
+): MuninQueryResult[] {
   // Work in deterministic FIFO order (earliest first, then stable task namespace)
   const statusEntries = pendingTasks.filter((r) => r.key === "status");
-  if (statusEntries.length === 0) return undefined;
+  if (statusEntries.length === 0) return [];
 
   const sorted = [...statusEntries].sort(compareTaskClaimOrder);
+  const minimumSequenceByGroup = (
+    tasks: MuninQueryResult[],
+  ): Map<string, number> => {
+    const minimums = new Map<string, number>();
+    for (const task of tasks) {
+      const group = parseGroupField(task.content_preview);
+      const sequence = parseSequenceField(task.content_preview);
+      if (!group || sequence === undefined) continue;
+      const current = minimums.get(group);
+      if (current === undefined || sequence < current) minimums.set(group, sequence);
+    }
+    return minimums;
+  };
+  const pendingMinimums = minimumSequenceByGroup(statusEntries);
+  const runningMinimums = minimumSequenceByGroup(runningTasks);
 
-  for (const candidate of sorted) {
+  return sorted.filter((candidate) => {
     const group = parseGroupField(candidate.content_preview);
     if (!group) {
       // No group field — always eligible
-      return candidate;
+      return true;
     }
 
     const sequence = parseSequenceField(candidate.content_preview);
     if (sequence === undefined) {
       // Has group but no sequence — treat as eligible (no ordering constraint)
-      return candidate;
+      return true;
     }
 
-    // Check if any lower-sequence sibling exists in pending tasks
-    const blockedByPending = statusEntries.some((other) => {
-      if (other === candidate) return false;
-      const otherGroup = parseGroupField(other.content_preview);
-      if (otherGroup !== group) return false;
-      const otherSeq = parseSequenceField(other.content_preview);
-      return otherSeq !== undefined && otherSeq < sequence;
-    });
+    return (pendingMinimums.get(group) ?? sequence) >= sequence
+      && (runningMinimums.get(group) ?? sequence) >= sequence;
+  });
+}
 
-    if (blockedByPending) continue;
-
-    // Check if any lower-sequence sibling is currently running
-    const blockedByRunning = runningTasks.some((r) => {
-      const otherGroup = parseGroupField(r.content_preview);
-      if (otherGroup !== group) return false;
-      const otherSeq = parseSequenceField(r.content_preview);
-      return otherSeq !== undefined && otherSeq < sequence;
-    });
-
-    if (blockedByRunning) continue;
-
-    return candidate;
-  }
-
-  return undefined;
+export function selectNextTask(
+  pendingTasks: MuninQueryResult[],
+  runningTasks: MuninQueryResult[],
+): MuninQueryResult | undefined {
+  return listEligibleTasks(pendingTasks, runningTasks)[0];
 }
 
 // --- Lease reaping (#38) ---

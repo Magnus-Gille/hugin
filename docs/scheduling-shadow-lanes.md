@@ -1,6 +1,7 @@
 # Scheduling shadow lanes and work-minute admission
 
-**Status:** design contract; no scheduling behavior change
+**Status:** prediction persistence active in shadow; recovery preservation
+deferred; no scheduling behavior change
 
 **Issue:** [#282](https://github.com/Magnus-Gille/hugin/issues/282)
 
@@ -188,6 +189,21 @@ the same identity is a conflict, never an update. After a restart, a missing
 prediction remains explicitly missing because the original queue snapshot
 cannot be reconstructed; recovery must not generate a new prediction from the
 later queue state.
+
+The first live shadow slice attempts to persist an explicit `estimate-missing`
+abstention for each accepted claim because no production duration estimator
+is active yet. Evidence construction fails open to an unmodified FIFO claim
+with caller pointer tags stripped. Eligible-window collection uses indexed
+per-group minimum sequences rather than a nested scan. A dedicated Munin client
+and fire-and-forget write ensure evidence latency cannot enter the
+claim-to-execution critical path.
+
+Startup, lease-reaper, and interrupted-delivery recovery continue to strip the
+pointer. Schema and digest validation proves content integrity but not that the
+first writer was Hugin or that the pointer came from the successful claim CAS.
+Recovery preservation therefore requires a future immutable, authenticated
+claim-instance binding; mutable status tags plus create-only evidence are not
+sufficient authority.
 
 Prediction and outcome use separate retry comparisons. A prediction retry
 must match the claim-bound prediction digest. An outcome is deterministically
