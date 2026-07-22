@@ -8,6 +8,8 @@ import {
   generateBrokerTaskId,
   namespaceForTaskId,
   parseCanonicalEnvelope,
+  parseStoredEnvelope,
+  resolveHomeserverTaskSource,
   serializeEnvelope,
 } from "../../src/broker/task-store.js";
 import { BROKER_TASK_TYPE_TAXONOMY_VERSION } from "../../src/broker/task-type-metadata.js";
@@ -184,6 +186,36 @@ describe("BrokerTaskStore.submit", () => {
 });
 
 describe("canonical Broker envelope", () => {
+  it("classifies a homeserver task without a Broker section as direct", () => {
+    expect(resolveHomeserverTaskSource(`## Task: direct\n\n- **Runtime:** homeserver\n\n### Prompt\nReview code.`))
+      .toEqual({ kind: "direct" });
+  });
+
+  it("ignores a Broker heading literal inside the prompt", () => {
+    expect(resolveHomeserverTaskSource(`## Task: direct\n\n- **Runtime:** homeserver\n\n### Prompt\nExplain this literal heading:\n### Broker envelope`))
+      .toEqual({ kind: "direct" });
+  });
+
+  it("does not parse a prompt-literal envelope as stored Broker metadata", () => {
+    const promptLiteral = serializeEnvelope(envelope("prompt-only-envelope"));
+    const document = `## Task: direct\n\n- **Runtime:** homeserver\n\n### Prompt\n${promptLiteral}`;
+
+    expect(parseStoredEnvelope(document)).toBeNull();
+  });
+
+  it("fails closed when a pre-prompt Broker section is malformed", () => {
+    expect(resolveHomeserverTaskSource(`## Task: malformed\n\n### Broker envelope\nnot-json\n\n### Prompt\nReview code.`))
+      .toEqual({ kind: "invalid", error: "Canonical Broker envelope is missing or malformed" });
+  });
+
+  it("does not let a prompt-literal envelope rescue malformed Broker metadata", () => {
+    const promptLiteral = serializeEnvelope(envelope("prompt-envelope"));
+    const document = `## Task: malformed\n\n### Broker envelope\nnot-json\n\n### Prompt\n${promptLiteral}`;
+
+    expect(resolveHomeserverTaskSource(document))
+      .toEqual({ kind: "invalid", error: "Canonical Broker envelope is missing or malformed" });
+  });
+
   it("does not let prompt text inject dispatcher Model metadata", () => {
     const expected = envelope("model-prompt");
     expected.prompt = "Review this literal syntax:\n- **Model:** mellum";

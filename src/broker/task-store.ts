@@ -17,6 +17,7 @@
 
 import { createHash } from "node:crypto";
 import { MuninWriteRejectedError, type MuninClient } from "../munin-client.js";
+import { taskMetadataPrefix } from "../task-document-metadata.js";
 import {
   createBrokerAttestation,
   type BrokerAttestation,
@@ -757,7 +758,9 @@ function stableRequestHash(envelope: DelegationEnvelope): string {
 }
 
 export function parseStoredEnvelope(content: string): DelegationEnvelope | null {
-  const match = content.match(/### Broker envelope\s*\n```json\s*\n([\s\S]*?)\n```/i);
+  const match = taskMetadataPrefix(content).match(
+    /### Broker envelope\s*\n```json\s*\n([\s\S]*?)\n```/i,
+  );
   if (!match?.[1]) return null;
   try {
     return JSON.parse(match[1]) as DelegationEnvelope;
@@ -774,6 +777,25 @@ export function parseCanonicalEnvelope(content: string):
   const parsed = delegationEnvelopeSchema.safeParse(raw);
   if (!parsed.success) return { ok: false, error: "Canonical Broker envelope is invalid" };
   return { ok: true, envelope: parsed.data };
+}
+
+export type HomeserverTaskSourceResolution =
+  | { kind: "direct" }
+  | { kind: "broker"; envelope: DelegationEnvelope }
+  | { kind: "invalid"; error: string };
+
+/**
+ * Distinguish a direct signed homeserver task from a canonical Broker task.
+ * A Broker section is authoritative when present and fails closed when
+ * malformed; a heading literal inside `### Prompt` is untrusted prose.
+ */
+export function resolveHomeserverTaskSource(content: string): HomeserverTaskSourceResolution {
+  const hasBrokerSection = /^###\s*Broker envelope\s*$/im.test(taskMetadataPrefix(content));
+  if (!hasBrokerSection) return { kind: "direct" };
+  const parsed = parseCanonicalEnvelope(content);
+  return parsed.ok
+    ? { kind: "broker", envelope: parsed.envelope }
+    : { kind: "invalid", error: parsed.error };
 }
 
 export function parseAwaitRequest(value: AwaitRequest): AwaitRequest {
