@@ -3,6 +3,7 @@ import { BROKER_TASK_TYPE_TAXONOMY_VERSION } from "../src/broker/task-type-metad
 import {
   attachSchedulerDecisionPointer,
   buildAwaitingApprovalTags,
+  buildCancellationTerminalStatusTags,
   buildClaimedTerminalStatusTags,
   buildLeasedStatusTags,
   buildPipelineParentCancelledTags,
@@ -164,6 +165,32 @@ describe("task status tag helpers", () => {
       "runtime:codex",
       decisionTag,
       digestTag,
+    ]);
+  });
+
+  it("preserves scheduler pointers only for cancellations known to follow a claim", () => {
+    const decisionTag = "scheduler-decision:34f2d430-6c31-47de-860a-8b22bc97f4d4";
+    const digestTag = `scheduler-prediction-sha256:${"a".repeat(64)}`;
+    const pointerTags = [decisionTag, digestTag];
+
+    expect(buildCancellationTerminalStatusTags([
+      "pending",
+      "runtime:codex",
+      ...pointerTags,
+    ])).toEqual(["cancelled", "runtime:codex"]);
+    expect(buildCancellationTerminalStatusTags([
+      "blocked",
+      "runtime:codex",
+      ...pointerTags,
+    ])).toEqual(["cancelled", "runtime:codex"]);
+    expect(buildCancellationTerminalStatusTags([
+      "running",
+      "runtime:codex",
+      ...pointerTags,
+    ], true)).toEqual([
+      "cancelled",
+      "runtime:codex",
+      ...pointerTags,
     ]);
   });
 

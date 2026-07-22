@@ -149,6 +149,7 @@ import {
 } from "./task-graph.js";
 import {
   buildAwaitingApprovalTags,
+  buildCancellationTerminalStatusTags,
   buildClaimedTerminalStatusTags,
   buildLeasedStatusTags,
   buildTerminalStatusTags,
@@ -3701,6 +3702,7 @@ async function markTaskCancelled(
     bodyText?: string;
     logFile?: string;
     runtimeMetadata?: TaskExecutionRuntimeMetadata;
+    preserveClaimedSchedulerPointer?: boolean;
   }
 ): Promise<void> {
   const task = parseTask(entry.content);
@@ -3759,7 +3761,10 @@ async function markTaskCancelled(
       taskNs,
       "status",
       entry.content,
-      buildTerminalStatusTags("cancelled", entry.tags),
+      buildCancellationTerminalStatusTags(
+        entry.tags,
+        options.preserveClaimedSchedulerPointer,
+      ),
       entry.updated_at,
       classification
     );
@@ -4123,6 +4128,7 @@ async function processCancellationRequests(): Promise<boolean> {
       {
         executor: "dispatcher",
         resultSource: "cancellation",
+        preserveClaimedSchedulerPointer: entry.tags.includes("running"),
       }
     );
     processed = true;

@@ -194,6 +194,17 @@ export function buildClaimedTerminalStatusTags(
   return [status, ...getClaimedPersistentStatusTags(tags, runtimeFallback)];
 }
 
+/** Build cancelled tags using explicit call-site knowledge of a successful claim. */
+export function buildCancellationTerminalStatusTags(
+  tags: string[],
+  preserveClaimedSchedulerPointer = false,
+  runtimeFallback?: string,
+): string[] {
+  return preserveClaimedSchedulerPointer
+    ? buildClaimedTerminalStatusTags("cancelled", tags, runtimeFallback)
+    : buildTerminalStatusTags("cancelled", tags, runtimeFallback);
+}
+
 export function buildAwaitingApprovalTags(
   tags: string[],
   runtimeFallback?: string
