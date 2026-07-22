@@ -23,7 +23,7 @@ import {
   type PublicationRecoveryOutcome,
   type PublicationRecoveryRecord,
 } from "./task-helpers.js";
-import { buildClaimedTerminalStatusTags } from "./task-status-tags.js";
+import { buildTerminalStatusTags } from "./task-status-tags.js";
 import {
   buildStructuredTaskResult,
   structuredTaskResultSchema,
@@ -267,7 +267,7 @@ export async function recoverPublicationForTask(
   // published / reconciled / abandoned are all TERMINAL recovery outcomes.
   const newTag = attemptResult.outcome === "abandoned" ? PUBLICATION_ABANDONED_TAG : PUBLICATION_RECOVERED_TAG;
   const runtimeTag = statusEntry.tags.find((t) => t.startsWith("runtime:"));
-  const newTags = buildClaimedTerminalStatusTags(
+  const newTags = buildTerminalStatusTags(
     currentLifecycle(statusEntry.tags),
     [...statusEntry.tags.filter((t) => !t.startsWith("publication:")), newTag],
     runtimeTag,

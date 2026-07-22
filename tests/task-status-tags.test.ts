@@ -41,6 +41,7 @@ describe("task status tag helpers", () => {
       "running",
       "hugin-pi",
       "1784757000000",
+      true,
     )).toEqual([
       "running",
       "runtime:codex",
@@ -63,7 +64,7 @@ describe("task status tag helpers", () => {
       decisionTag,
       digestTag,
       "delivery:pending",
-    ], "running", "hugin-pi", "1784757000000");
+    ], "running", "hugin-pi", "1784757000000", true);
 
     expect(buildClaimedTerminalStatusTags("completed", [
       ...deliveryTags.filter((tag) => !tag.startsWith("delivery:")),
@@ -200,6 +201,34 @@ describe("task status tag helpers", () => {
       "cancel-requested",
       "runtime:codex",
     ])).toBe(false);
+  });
+
+  it("strips unverified scheduler pointers during reclaim and recovery", () => {
+    const forgedRecoveryTags = [
+      "running",
+      "cancel-requested",
+      "runtime:codex",
+      "claimed_by:hugin-pi",
+      "lease_expires:1",
+      "scheduler-decision:34f2d430-6c31-47de-860a-8b22bc97f4d4",
+      `scheduler-prediction-sha256:${"a".repeat(64)}`,
+    ];
+
+    expect(buildLeasedStatusTags(
+      forgedRecoveryTags,
+      "running",
+      "hugin-pi",
+      "1784757000000",
+    )).toEqual([
+      "running",
+      "runtime:codex",
+      "claimed_by:hugin-pi",
+      "lease_expires:1784757000000",
+    ]);
+    expect(buildTerminalStatusTags("failed", forgedRecoveryTags)).toEqual([
+      "failed",
+      "runtime:codex",
+    ]);
   });
 
   it("preserves durable MCP Broker identity and query tags", () => {

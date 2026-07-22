@@ -174,10 +174,13 @@ export function buildLeasedStatusTags(
   lifecycle: string,
   claimedBy: string,
   leaseExpires: string,
+  preserveClaimedSchedulerPointer = false,
 ): string[] {
   return [
     lifecycle,
-    ...getClaimedPersistentStatusTags(baseTags),
+    ...(preserveClaimedSchedulerPointer
+      ? getClaimedPersistentStatusTags(baseTags)
+      : getPersistentStatusTags(baseTags)),
     `claimed_by:${claimedBy}`,
     `lease_expires:${leaseExpires}`,
   ];

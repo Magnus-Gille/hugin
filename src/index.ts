@@ -2399,8 +2399,15 @@ function leaseExpiry(): string {
 function buildClaimTags(
   baseTags: string[],
   lifecycle: string,
+  preserveClaimedSchedulerPointer = false,
 ): string[] {
-  return buildLeasedStatusTags(baseTags, lifecycle, workerId, leaseExpiry());
+  return buildLeasedStatusTags(
+    baseTags,
+    lifecycle,
+    workerId,
+    leaseExpiry(),
+    preserveClaimedSchedulerPointer,
+  );
 }
 
 /** Strip lease metadata from tags (for final status updates). */
@@ -2419,7 +2426,7 @@ function startLeaseRenewal(taskNs: string, entryContent: string, baseTags: strin
       return;
     }
     try {
-      const renewedTags = buildClaimTags(baseTags, "running");
+      const renewedTags = buildClaimTags(baseTags, "running", true);
       await leaseMunin.write(taskNs, "status", entryContent, renewedTags);
       console.log(`Lease renewed for ${taskNs} (expires: ${leaseExpiry()})`);
     } catch (err) {
@@ -2835,7 +2842,7 @@ async function reconcileDeliveryPending(
     taskNs,
     "status",
     entry.content,
-    buildClaimedTerminalStatusTags(
+    buildTerminalStatusTags(
       ok ? "completed" : "failed",
       [
         ...entry.tags.filter((t) => !t.startsWith("delivery:")),
@@ -3007,7 +3014,7 @@ async function recoverStaleTasks(): Promise<void> {
         result.namespace,
         "status",
         entry.content,
-        buildClaimedTerminalStatusTags("failed", entry.tags),
+        buildTerminalStatusTags("failed", entry.tags),
         entry.updated_at,
         recoveryOutputClassification,
       );
@@ -3149,7 +3156,7 @@ async function reapExpiredLeases(): Promise<void> {
           result.namespace,
           "status",
           entry.content,
-          buildClaimedTerminalStatusTags("failed", entry.tags),
+          buildTerminalStatusTags("failed", entry.tags),
           entry.updated_at,
           classification,
         );
@@ -4685,7 +4692,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   // claim. attachSchedulerDecisionPointer performs the same replacement when
   // prediction persistence is wired.
   const tagsForClaim = stripSchedulerDecisionPointers(claimInputTags);
-  const claimTags = buildClaimTags(tagsForClaim, "running");
+  const claimTags = buildClaimTags(tagsForClaim, "running", true);
 
   // Rotate the mcp-session-id so all MCP calls for this task execution share
   // one stable session (enables Munin's outcome-aware retrieval and telemetry
