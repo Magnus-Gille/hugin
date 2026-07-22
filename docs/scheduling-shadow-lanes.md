@@ -54,6 +54,9 @@ The study is evidence for experiments, not authority to enable a challenger.
    unknown work look shorter, longer, or lower priority.
 8. Shadow persistence is best-effort after a successful champion claim. A
    telemetry failure cannot undo, delay, or fail the claimed task.
+9. A successful claim's scheduler identity and prediction digest survive lease
+   renewal, reclaim, delivery checkpoints, and terminal tag rewrites until the
+   outcome is durably recoverable.
 
 ## Why urgency is deferred
 
@@ -112,13 +115,19 @@ single poller from claiming its next task. The shadow outcome records:
 - a bounded scheduler terminal class derived explicitly for this schema; and
 - whether the service clock is complete.
 
-The initial estimator trains only on completed successful tasks with a
-complete scheduler-service clock and mechanically known grouping identity.
-Cancelled, timed-out, recovered, crashed, and failed attempts are recorded as
-censored or excluded with a bounded reason, not silently treated as ordinary
-durations. Their inclusion requires a later versioned sampling policy. The old
-executor-span `durationSeconds` may be compared during calibration but never
-substituted for the new service clock.
+The initial estimator trains on every terminal attempt with a complete
+scheduler-service clock and mechanically known grouping identity, including
+successful, failed, timed-out, and cleanly cancelled attempts. Terminal class
+is retained for calibration and stratified reporting but cannot filter the
+estimate based on an outcome unknown at claim time. Otherwise a class that
+succeeds quickly but often times out would look artificially cheap.
+
+Only genuinely incomplete clocks—such as a crash where the exact release
+boundary cannot be recovered—are censored or excluded with a bounded reason.
+Recovered tasks with a mechanically proven complete clock remain eligible;
+recovery alone is not an exclusion. The old executor-span `durationSeconds`
+may be compared during calibration but never substituted for the new service
+clock.
 
 An estimate is a persisted, versioned value derived from a bounded historical
 window. The initial implementation should use a robust statistic such as a
@@ -156,6 +165,13 @@ restart recovery can reuse the same identity and validate any stored
 prediction against the claim-bound digest instead of inventing a second
 prediction for the claim.
 
+The implementation must register both scheduler tag prefixes as persistent
+status tags and carry the winning claim tags—not the pre-claim entry tags—into
+lease renewal. Reclaim, delivery checkpoints, terminalization, and recovery
+must preserve the pointer. Executable slices add regression tests for every
+one of those transitions. Keeping the content-blind pointer after terminal
+outcome persistence is acceptable; it must not become a metric label.
+
 After FIFO wins the CAS, Hugin may persist one internal, content-blind
 prediction under that durable decision identity. Prediction and outcome are
 separate `create_if_absent` records so a crash cannot rewrite what the
@@ -165,6 +181,14 @@ the same identity is a conflict, never an update. After a restart, a missing
 prediction remains explicitly missing because the original queue snapshot
 cannot be reconstructed; recovery must not generate a new prediction from the
 later queue state.
+
+Prediction and outcome use separate retry comparisons. A prediction retry
+must match the claim-bound prediction digest. An outcome is deterministically
+derived from the same decision ID plus the exact terminal
+`result-structured` revision and SHA-256 used for its terminal class and
+service-clock evidence. An outcome retry reads the create-only record and
+compares its full JCS digest and terminal-result binding with that expected
+outcome; it does not compare outcome bytes with the prediction digest.
 
 Suggested storage:
 
@@ -272,7 +296,7 @@ pipeline_blocked_work_minutes
 approval_gated_work_minutes
 other_nonterminal_work_minutes
 running_remaining_work_minutes
-possible_total_work_minutes = sum(all available buckets)
+possible_total_work_minutes = sum(one estimate per distinct task ref in the bucket union)
 ```
 
 Every bucket records task count, missing-estimate count, and enumeration
@@ -283,6 +307,13 @@ is truncated, estimates are missing, or running remainder is unavailable, the
 affected bucket and possible total are explicitly incomplete/lower-bound and
 cannot support enforcement. `dispatchable_work_minutes` alone is never named
 or used as total admitted load.
+
+Bucket memberships may overlap for diagnostics: for example, one task can be
+both group-blocked and approval-gated. `possible_total_work_minutes` is
+therefore computed from the deduplicated union of safe task references, using
+at most one authoritative estimate per task—not by arithmetically adding the
+displayed bucket totals. Conflicting estimates for the same task make the
+total incomplete instead of choosing one silently.
 
 The first stage only reports workload bands and compares them with observed
 wait and throughput. A later enforcing policy must define, in a separate PR:
@@ -327,11 +358,16 @@ capacity, Hugin must say so truthfully.
   caller-supplied decision tags are removed, prediction is create-only,
   outcome cannot replace it, restart retries reuse only exact records, and a
   crash gap never creates a prediction from a later queue snapshot;
+- scheduler pointers survive lease renewal, reclaim, delivery, terminal, and
+  recovery tag transforms; prediction and outcome retries use their distinct
+  exact digest/binding rules;
 - prediction persistence failure does not fail or release the champion claim;
 - persisted records and metric labels contain no task content or credentials;
 - each nonterminal work bucket and the possible total are marked
   incomplete/lower-bound whenever enumeration, estimates, classification, or
   running remainder are incomplete.
+- a multiply blocked task may appear in multiple diagnostic buckets but is
+  counted exactly once in the deduplicated possible total.
 
 ## Not decided here
 
