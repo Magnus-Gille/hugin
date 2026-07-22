@@ -5,7 +5,6 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=magnus
 WorkingDirectory=/home/magnus/repos/hugin
 # hugin#272: no --candidates flag -- the default production candidate-pool
 # assembler scans the #232 registry itself. A leftover

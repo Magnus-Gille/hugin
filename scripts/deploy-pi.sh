@@ -256,6 +256,12 @@ ssh "$REMOTE" "
   /usr/bin/node -e 'const m=JSON.parse(require(\"node:fs\").readFileSync(process.argv[1],\"utf8\")); if(m.schemaVersion!==2) throw new Error(\"daily exam manifest must be schema v2\"); if(m.candidates.some((c)=>c.lane===\"provisional-holdout\"&&c.crossClientExposure?.state!==\"unseen-covered\")) throw new Error(\"provisional candidate lacks complete cross-client exposure coverage\"); const states=Object.fromEntries([\"not-checked\",\"seen\",\"unseen-covered\",\"incomplete\",\"error\"].map((s)=>[s,m.candidates.filter((c)=>c.crossClientExposure?.state===s).length])); process.stdout.write(JSON.stringify({schemaVersion:m.schemaVersion,generatedAt:m.generatedAt,inspectedTasks:m.inspectedTasks,historyComplete:m.historyComplete,counts:m.counts,crossClientExposureStates:states})+\"\\n\")' /home/$DEPLOY_USER/.hugin/daily-exam-candidates/latest.json
 "
 
+echo "==> Experiment cadence acceptance..."
+# A successful tick durably logs even when the candidate pool is empty. This
+# catches user-unit credential/sandbox failures before an accepted deployment
+# can wait until the next morning to reveal them.
+ssh "$REMOTE" "XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start hugin-experiment-cadence.service"
+
 echo ""
 echo "Acceptance gates passed; finalizing deployment."
 echo "Health check: curl http://$PI_HOST:3032/health"
