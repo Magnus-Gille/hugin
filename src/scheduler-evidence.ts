@@ -90,6 +90,8 @@ const challengerEvidenceReasonSchema = z.enum([
   "window-truncated",
   "estimate-missing",
   "estimator-version-mismatch",
+  "candidate-timestamp-invalid",
+  "shadow-disabled",
 ]);
 
 export const schedulerDecisionPredictionSchema = z.object({
@@ -106,7 +108,7 @@ export const schedulerDecisionPredictionSchema = z.object({
     overdueThresholdSeconds: z.literal(1800),
     taskRef: schedulerTaskRefSchema.nullable(),
     reason: z.enum(["shortest-estimate", "oldest-overdue", "insufficient-evidence"]),
-    evidenceReasons: z.array(challengerEvidenceReasonSchema).max(3).default([]),
+    evidenceReasons: z.array(challengerEvidenceReasonSchema).max(5).default([]),
     serviceEstimate: schedulerServiceEstimateSchema.nullable(),
   }).strict(),
   window: z.object({
@@ -195,6 +197,117 @@ export const schedulerDecisionPredictionSchema = z.object({
   }
 });
 export type SchedulerDecisionPrediction = z.infer<typeof schedulerDecisionPredictionSchema>;
+
+export interface SchedulerShadowCandidate {
+  taskRef: z.input<typeof schedulerTaskRefSchema>;
+  createdAt: string;
+  serviceEstimate: unknown | null;
+}
+
+export interface BuildSchedulerDecisionPredictionInput {
+  decisionId: string;
+  observedAt: string;
+  championTaskRef: z.input<typeof schedulerTaskRefSchema>;
+  candidates: SchedulerShadowCandidate[];
+  pendingEnumerationComplete: boolean;
+  runningEnumerationComplete: boolean;
+  shadowEnabled: boolean;
+}
+
+/**
+ * Build one behavior-neutral FIFO/challenger observation. Candidate order is
+ * the champion's already-filtered FIFO order; this function can observe that
+ * order but cannot replace its first element as the enforced claim.
+ */
+export function buildSchedulerDecisionPrediction(
+  input: BuildSchedulerDecisionPredictionInput,
+): SchedulerDecisionPrediction {
+  const championTaskRef = schedulerTaskRefSchema.parse(input.championTaskRef);
+  const observedAtMs = Date.parse(input.observedAt);
+  if (!Number.isFinite(observedAtMs)) throw new Error("scheduler observation time is invalid");
+  if (input.candidates.length === 0) throw new Error("scheduler prediction requires candidates");
+
+  const candidates = input.candidates.map((candidate) => {
+    const taskRef = schedulerTaskRefSchema.parse(candidate.taskRef);
+    const estimateResult = candidate.serviceEstimate === null
+      ? null
+      : schedulerServiceEstimateSchema.safeParse(candidate.serviceEstimate);
+    const estimateValid = estimateResult?.success === true
+      && Date.parse(estimateResult.data.historyThrough) <= observedAtMs;
+    return {
+      taskRef,
+      createdAt: candidate.createdAt,
+      createdAtMs: Date.parse(candidate.createdAt),
+      estimate: estimateValid ? estimateResult.data : null,
+      estimateInvalid: estimateResult !== null && !estimateValid,
+    };
+  });
+  if (candidates[0]!.taskRef.namespace !== championTaskRef.namespace) {
+    throw new Error("scheduler champion must remain the first eligible FIFO task");
+  }
+
+  const missingEstimates = candidates.filter((candidate) => candidate.estimate === null).length;
+  const invalidEstimate = candidates.some((candidate) => candidate.estimateInvalid);
+  const invalidTimestamp = candidates.some((candidate) => !Number.isFinite(candidate.createdAtMs));
+  const windowComplete = input.pendingEnumerationComplete && input.runningEnumerationComplete;
+  const evidenceReasons: z.infer<typeof challengerEvidenceReasonSchema>[] = [];
+  if (!windowComplete) evidenceReasons.push("window-truncated");
+  if (missingEstimates > 0) evidenceReasons.push("estimate-missing");
+  if (invalidEstimate) evidenceReasons.push("estimator-version-mismatch");
+  if (invalidTimestamp) evidenceReasons.push("candidate-timestamp-invalid");
+  if (!input.shadowEnabled) evidenceReasons.push("shadow-disabled");
+
+  let chosen: (typeof candidates)[number] | null = null;
+  let reason: "shortest-estimate" | "oldest-overdue" | "insufficient-evidence" =
+    "insufficient-evidence";
+  if (evidenceReasons.length === 0) {
+    const oldestOverdue = candidates.find(
+      (candidate) => observedAtMs - candidate.createdAtMs >= 1_800_000,
+    );
+    if (oldestOverdue) {
+      chosen = oldestOverdue;
+      reason = "oldest-overdue";
+    } else {
+      chosen = candidates.reduce((shortest, candidate) =>
+        candidate.estimate!.seconds < shortest.estimate!.seconds ? candidate : shortest,
+      );
+      reason = "shortest-estimate";
+    }
+  }
+
+  const champion = candidates[0]!;
+  const estimatedWorkMinutes = missingEstimates === 0
+    ? candidates.reduce((total, candidate) => total + candidate.estimate!.seconds, 0) / 60
+    : null;
+
+  return schedulerDecisionPredictionSchema.parse({
+    schemaVersion: 1,
+    decisionId: input.decisionId,
+    observedAt: input.observedAt,
+    champion: {
+      policy: windowComplete ? "complete-fifo-v1" : "visible-window-fifo-v1",
+      taskRef: championTaskRef,
+      serviceEstimate: champion.estimate,
+    },
+    challenger: {
+      policy: "bounded-sejf-v1",
+      overdueThresholdSeconds: 1800,
+      taskRef: chosen?.taskRef ?? null,
+      reason,
+      evidenceReasons,
+      serviceEstimate: chosen?.estimate ?? null,
+    },
+    window: {
+      eligibleTasks: candidates.length,
+      pendingEnumerationComplete: input.pendingEnumerationComplete,
+      runningEnumerationComplete: input.runningEnumerationComplete,
+      eligibilityAuthority: "legacy-unbound-group-sequence",
+      estimatedWorkMinutes,
+      missingEstimates,
+    },
+    estimatorVersion: SCHEDULER_ESTIMATOR_VERSION,
+  });
+}
 
 export const schedulerTerminalClassSchema = z.enum([
   "completed",
@@ -423,4 +536,60 @@ export function buildRollingMedianDurationEstimate(
     historyThrough: samples.at(-1)!.clock.releasedAt,
     historyThroughDecisionId: samples.at(-1)!.decisionId,
   });
+}
+
+/**
+ * Bounded estimator state trusted only for this dispatcher process. Callers
+ * add an outcome only after their create-only Munin write returns `created`;
+ * exact-existing or post-restart rows are deliberately not admitted because
+ * durable claim-instance authentication is not available yet.
+ */
+export class SchedulerRuntimeEstimatorCache {
+  private readonly samplesByRuntime = new Map<DispatcherRuntime, Map<string, SchedulerDecisionOutcome>>();
+
+  constructor(private readonly options: SchedulerEstimatorOptions) {
+    if (!Number.isInteger(options.minimumSamples) || options.minimumSamples < 1) {
+      throw new Error("minimumSamples must be a positive integer");
+    }
+    if (!Number.isInteger(options.windowSize) || options.windowSize < options.minimumSamples) {
+      throw new Error("windowSize must be an integer greater than or equal to minimumSamples");
+    }
+  }
+
+  recordCreated(input: unknown): void {
+    const outcome = schedulerDecisionOutcomeSchema.parse(input);
+    for (const samples of this.samplesByRuntime.values()) {
+      const existing = samples.get(outcome.decisionId);
+      if (existing && hashSchedulerOutcome(existing) !== hashSchedulerOutcome(outcome)) {
+        throw new Error(`conflicting scheduler outcomes for decision ${outcome.decisionId}`);
+      }
+      if (existing) return;
+    }
+    if (!outcome.clock.clockComplete) return;
+
+    const samples = this.samplesByRuntime.get(outcome.requestedRuntime) ?? new Map();
+    samples.set(outcome.decisionId, outcome);
+    const ordered = [...samples.values()].sort((left, right) => {
+      const leftTime = left.clock.clockComplete
+        ? left.clock.releasedAt
+        : left.terminalResult.updatedAt;
+      const rightTime = right.clock.clockComplete
+        ? right.clock.releasedAt
+        : right.terminalResult.updatedAt;
+      const timeOrder = Date.parse(leftTime) - Date.parse(rightTime);
+      return timeOrder || left.decisionId.localeCompare(right.decisionId);
+    });
+    for (const stale of ordered.slice(0, Math.max(0, ordered.length - this.options.windowSize))) {
+      samples.delete(stale.decisionId);
+    }
+    this.samplesByRuntime.set(outcome.requestedRuntime, samples);
+  }
+
+  get(runtime: DispatcherRuntime): z.infer<typeof schedulerServiceEstimateSchema> | null {
+    dispatcherRuntimeSchema.parse(runtime);
+    return buildRollingMedianDurationEstimate(
+      [...(this.samplesByRuntime.get(runtime)?.values() ?? [])],
+      this.options,
+    );
+  }
 }
