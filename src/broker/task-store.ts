@@ -758,7 +758,9 @@ function stableRequestHash(envelope: DelegationEnvelope): string {
 }
 
 export function parseStoredEnvelope(content: string): DelegationEnvelope | null {
-  const match = content.match(/### Broker envelope\s*\n```json\s*\n([\s\S]*?)\n```/i);
+  const match = taskMetadataPrefix(content).match(
+    /### Broker envelope\s*\n```json\s*\n([\s\S]*?)\n```/i,
+  );
   if (!match?.[1]) return null;
   try {
     return JSON.parse(match[1]) as DelegationEnvelope;
@@ -770,7 +772,7 @@ export function parseStoredEnvelope(content: string): DelegationEnvelope | null 
 export function parseCanonicalEnvelope(content: string):
   | { ok: true; envelope: DelegationEnvelope }
   | { ok: false; error: string } {
-  const raw = parseStoredEnvelope(taskMetadataPrefix(content));
+  const raw = parseStoredEnvelope(content);
   if (!raw) return { ok: false, error: "Canonical Broker envelope is missing or malformed" };
   const parsed = delegationEnvelopeSchema.safeParse(raw);
   if (!parsed.success) return { ok: false, error: "Canonical Broker envelope is invalid" };

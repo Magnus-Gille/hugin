@@ -8,6 +8,7 @@ import {
   generateBrokerTaskId,
   namespaceForTaskId,
   parseCanonicalEnvelope,
+  parseStoredEnvelope,
   resolveHomeserverTaskSource,
   serializeEnvelope,
 } from "../../src/broker/task-store.js";
@@ -193,6 +194,13 @@ describe("canonical Broker envelope", () => {
   it("ignores a Broker heading literal inside the prompt", () => {
     expect(resolveHomeserverTaskSource(`## Task: direct\n\n- **Runtime:** homeserver\n\n### Prompt\nExplain this literal heading:\n### Broker envelope`))
       .toEqual({ kind: "direct" });
+  });
+
+  it("does not parse a prompt-literal envelope as stored Broker metadata", () => {
+    const promptLiteral = serializeEnvelope(envelope("prompt-only-envelope"));
+    const document = `## Task: direct\n\n- **Runtime:** homeserver\n\n### Prompt\n${promptLiteral}`;
+
+    expect(parseStoredEnvelope(document)).toBeNull();
   });
 
   it("fails closed when a pre-prompt Broker section is malformed", () => {
