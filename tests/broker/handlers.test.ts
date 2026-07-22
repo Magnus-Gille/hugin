@@ -8,7 +8,7 @@ import { BrokerTaskStore, ORCH_V1_TAG } from "../../src/broker/task-store.js";
 import { DelegationJournal } from "../../src/broker/journal.js";
 import { IdempotencyIndex } from "../../src/broker/idempotency.js";
 import { brokerExecutorCapabilities } from "../../src/broker/executor-capabilities.js";
-import type { MuninClient } from "../../src/munin-client.js";
+import { MuninWriteRejectedError, type MuninClient } from "../../src/munin-client.js";
 import {
   buildStructuredTaskResult,
   type StructuredTaskResult,
@@ -36,9 +36,12 @@ class FakeMunin {
     content: string;
     tags?: string[];
     classification?: string;
+    createIfAbsent?: boolean;
   }> = [];
   reads: Record<string, unknown> = {};
   queryCalls = 0;
+  readCalls = 0;
+  readBatchCalls = 0;
   queryReturn: { results: unknown[]; total: number } = { results: [], total: 0 };
   async write(
     namespace: string,
@@ -49,7 +52,13 @@ class FakeMunin {
     classification?: string,
     createIfAbsent?: boolean,
   ): Promise<Record<string, unknown>> {
-    this.writes.push({ namespace, key, content, tags, classification });
+    if (createIfAbsent && this.reads[`${namespace}/${key}`]) {
+      throw new MuninWriteRejectedError(namespace, key, {
+        error: "conflict",
+        conflict_reason: "already_exists",
+      });
+    }
+    this.writes.push({ namespace, key, content, tags, classification, createIfAbsent });
     this.reads[`${namespace}/${key}`] = {
       namespace, key, content, tags: tags ?? [],
       classification,
@@ -59,7 +68,17 @@ class FakeMunin {
     return { ok: true, status: createIfAbsent ? "created" : "updated" };
   }
   async read(namespace: string, key: string): Promise<unknown> {
+    this.readCalls += 1;
     return this.reads[`${namespace}/${key}`] ?? null;
+  }
+  async readBatch(reads: Array<{ namespace: string; key: string }>) {
+    this.readBatchCalls += 1;
+    return reads.map(({ namespace, key }) => {
+      const entry = this.reads[`${namespace}/${key}`] as Record<string, unknown> | undefined;
+      return entry
+        ? { namespace, key, found: true, ...entry }
+        : { namespace, key, found: false };
+    });
   }
   async query(): Promise<{ results: unknown[]; total: number }> {
     this.queryCalls += 1;
@@ -362,6 +381,19 @@ describe("POST /v1/delegate/submit", () => {
     expect(harness.munin.writes).toHaveLength(1);
     expect(harness.munin.writes[0]!.tags).toContain("broker:mcp-v2");
     expect(harness.munin.writes[0]!.tags).not.toContain("orch-v1");
+  });
+
+  it("persists a fresh submit atomically without a preflight Munin read", async () => {
+    const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest()),
+    });
+
+    expect(res.status).toBe(202);
+    expect(harness.munin.readCalls).toBe(0);
+    expect((harness.munin.writes[0] as { createIfAbsent?: boolean })?.createIfAbsent)
+      .toBe(true);
   });
 
   it("returns 200 reused_idempotency on retry with same payload", async () => {

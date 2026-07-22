@@ -39,6 +39,8 @@ class FakeMunin {
   queries: Parameters<MuninClient["query"]>[0][] = [];
   readReturn: Record<string, unknown> = {};
   queryReturn: { results: unknown[]; total: number } = { results: [], total: 0 };
+  readBatchCalls: Array<Array<{ namespace: string; key: string }>> = [];
+  createStatus: string = "created";
   queryOverride?: (
     opts: Parameters<MuninClient["query"]>[0],
   ) => { results: unknown[]; total: number };
@@ -65,11 +67,22 @@ class FakeMunin {
       classification,
       createIfAbsent,
     });
-    return { ok: true, status: createIfAbsent ? "created" : "updated" };
+    return { ok: true, status: createIfAbsent ? this.createStatus : "updated" };
   }
   async read(namespace: string, key: string): Promise<unknown> {
     this.reads.push({ namespace, key });
     return this.readReturn[`${namespace}/${key}`] ?? null;
+  }
+  async readBatch(reads: Array<{ namespace: string; key: string }>) {
+    this.readBatchCalls.push(reads);
+    return reads.map(({ namespace, key }) => {
+      const entry = this.readReturn[`${namespace}/${key}`] as
+        | Record<string, unknown>
+        | undefined;
+      return entry
+        ? { namespace, key, found: true, ...entry }
+        : { namespace, key, found: false };
+    });
   }
   async query(opts: Parameters<MuninClient["query"]>[0]) {
     this.queries.push(opts);
@@ -174,6 +187,7 @@ describe("BrokerTaskStore.submit", () => {
     expect(w.content).toContain("**Runtime:** homeserver");
     expect(w.content).toContain("### Broker envelope");
     expect(w.classification).toBe("internal");
+    expect(w.createIfAbsent).toBe(true);
   });
 
   it("stores private task content at the restricted classification floor", async () => {
@@ -182,6 +196,15 @@ describe("BrokerTaskStore.submit", () => {
     privateEnvelope.sensitivity = "private";
     await new BrokerTaskStore(munin as unknown as MuninClient).submit({ envelope: privateEnvelope });
     expect(munin.writes[0]?.classification).toBe("client-restricted");
+  });
+
+  it("does not acknowledge a create_if_absent write without atomic-create confirmation", async () => {
+    const munin = new FakeMunin();
+    munin.createStatus = "updated";
+
+    await expect(
+      new BrokerTaskStore(munin as unknown as MuninClient).submit({ envelope: envelope("t1") }),
+    ).rejects.toThrow(/did not return status created/);
   });
 });
 
@@ -377,6 +400,9 @@ describe("BrokerTaskStore.listCanonical", () => {
     expect(result.truncated).toBe(false);
     expect(munin.queries.length).toBeGreaterThan(2);
     expect(munin.queries.every((query) => query.query === undefined)).toBe(true);
+    expect(munin.readBatchCalls).toHaveLength(1);
+    expect(munin.readBatchCalls[0]).toHaveLength(130);
+    expect(munin.reads).toHaveLength(0);
   });
 
   // Codex review of #181/PR182: a caller-requested small output limit must

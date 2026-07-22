@@ -24,13 +24,24 @@ Retries compare the normalized behavior payload stored at that namespace;
 rotating the MCP session ID does not create a collision. The same key and
 payload returns the original task, including after Broker restart. The same key
 with a different behavior payload is rejected. An in-process reservation closes
-the concurrent-submit race before the first Munin write completes. Both the
+the concurrent-submit race before the first Munin write completes. The fresh
+path uses one atomic `create_if_absent` write rather than a preflight read plus
+write. If that create loses to an existing durable task, the Broker reads and
+compares the stored envelope before returning reuse or collision. Both the
 durable identity and that reservation are scoped by authenticated principal.
 
 Await and list are principal-isolated. A Broker key cannot discover or read
 another principal's canonical results. Rate remains owner-only for Broker
 tasks; the same authenticated endpoint can also review an ordinary terminal
 Hugin task, which has no Broker owner.
+
+Each of list discovery's two unioned channels walks a bounded 1,000-candidate
+Munin history budget. The response reports `truncated: true` whenever either
+budget or an ambiguous timestamp boundary may omit matches. Discovered status
+entries are fetched through Munin's batch-read surface. Do not replace that
+batch with nominally concurrent individual reads: the Munin client deliberately
+serializes and spaces requests, and the resulting queue can exceed the MCP
+transport deadline and delay unrelated submissions.
 
 `hugin_await` preserves its canonical full response by default and when called
 with `verbosity: "full"`. Callers that only need the actionable outcome can use
