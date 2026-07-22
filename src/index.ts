@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { type Server } from "node:http";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
@@ -158,11 +158,14 @@ import {
   stripSchedulerDecisionPointers,
 } from "./task-status-tags.js";
 import {
+  buildSchedulerDecisionOutcomeFromTerminalResult,
   hashSchedulerPrediction,
   schedulerDecisionPredictionSchema,
   type SchedulerDecisionPrediction,
+  type SchedulerTerminalResultRevision,
 } from "./scheduler-evidence.js";
 import {
+  persistSchedulerOutcome,
   persistSchedulerPrediction,
 } from "./scheduler-evidence-store.js";
 import { LearningLoopCollector } from "./learning-loop-collector.js";
@@ -1429,12 +1432,14 @@ async function writeStructuredTaskResult(
   result: StructuredTaskResult,
   classification?: string,
   client: MuninClient = munin,
-): Promise<void> {
+): Promise<(SchedulerTerminalResultRevision & { result: StructuredTaskResult }) | null> {
   const provenance = result.provenance ?? await resolveTaskProvenance(taskNs, client);
-  await client.write(
+  const durableResult = buildStructuredTaskResult({ ...result, provenance });
+  const content = JSON.stringify(durableResult, null, 2);
+  const writeResult = await client.write(
     taskNs,
     "result-structured",
-    JSON.stringify(buildStructuredTaskResult({ ...result, provenance }), null, 2),
+    content,
     ["type:task-result", "type:task-result-structured"],
     undefined,
     classification,
@@ -1448,6 +1453,15 @@ async function writeStructuredTaskResult(
       err instanceof Error ? err.message : String(err),
     );
   }
+  return typeof writeResult.updated_at === "string"
+    ? {
+        namespace: taskNs,
+        key: "result-structured",
+        updatedAt: writeResult.updated_at,
+        sha256: createHash("sha256").update(content, "utf8").digest("hex"),
+        result: durableResult,
+      }
+    : null;
 }
 
 async function refreshPipelineSummary(
@@ -2432,6 +2446,49 @@ function stripLeaseTags(tags: string[]): string[] {
   return tags.filter(
     (t) => !t.startsWith("claimed_by:") && !t.startsWith("lease_expires:")
   );
+}
+
+function releaseCurrentClaimWithSchedulerOutcome(input: {
+  taskNamespace: string;
+  prediction: SchedulerDecisionPrediction | null;
+  claimedAt: string | null;
+  requestedRuntime: DispatcherRuntime;
+  effectiveRuntime: DispatcherRuntime;
+  terminalResult: (SchedulerTerminalResultRevision & { result: StructuredTaskResult }) | null;
+  taskType?: string;
+  harness?: string;
+  model?: string;
+}): void {
+  const releasedAt = new Date().toISOString();
+  currentTask = null;
+  currentTaskConfig = null;
+  if (!input.prediction || !input.terminalResult) return;
+
+  try {
+    const outcome = buildSchedulerDecisionOutcomeFromTerminalResult({
+      prediction: input.prediction,
+      claimedAt: input.claimedAt,
+      releasedAt,
+      requestedRuntime: input.requestedRuntime,
+      effectiveRuntime: input.effectiveRuntime,
+      terminalResult: input.terminalResult,
+      taskType: input.taskType,
+      harness: input.harness,
+      model: input.model,
+    });
+    void persistSchedulerOutcome(schedulerEvidenceMunin, outcome)
+      .catch((err: unknown) => {
+        console.warn(
+          `Scheduler shadow outcome persistence failed for ${input.taskNamespace} ` +
+            `(${outcome.decisionId}): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+  } catch (err) {
+    console.warn(
+      `Scheduler shadow outcome construction failed for ${input.taskNamespace}: ` +
+        (err instanceof Error ? err.message : String(err)),
+    );
+  }
 }
 
 /** Start periodic lease renewal for the current task. */
@@ -4210,7 +4267,7 @@ async function failTaskWithMessage(
   errorMessage: string,
   runtimeTagOverride?: string,
   preserveClaimedSchedulerPointer = false,
-): Promise<void> {
+): Promise<(SchedulerTerminalResultRevision & { result: StructuredTaskResult }) | null> {
   const runtime = (
     runtimeTagOverride ||
     entry.tags.find((tag) => tag.startsWith("runtime:")) ||
@@ -4240,7 +4297,7 @@ async function failTaskWithMessage(
     undefined,
     classification
   );
-  await writeStructuredTaskResult(
+  return writeStructuredTaskResult(
     taskNs,
     createFailureStructuredResult(taskNs, runtime, errorMessage, {
       executor: "dispatcher",
@@ -4760,6 +4817,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   // session-flow analysis). A fresh ID is set again in the finally block below.
   munin.setSessionId(randomUUID());
   let claimAcceptedAt = entry.updated_at;
+  let schedulerClaimedAt: string | null = null;
   try {
     const claimResult = await munin.write(
       taskNs,
@@ -4772,6 +4830,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     if (typeof claimResult.updated_at === "string") {
       entry.updated_at = claimResult.updated_at;
       claimAcceptedAt = claimResult.updated_at;
+      schedulerClaimedAt = claimResult.updated_at;
     }
     // From this point onward the winning claim tags are authoritative. In
     // particular, dispatcher-owned scheduler pointers added to the claim CAS
@@ -4821,14 +4880,32 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   try {
     if (declaredRuntime === "pipeline") {
       currentTaskConfig = null;
+      let pipelineTerminalResult:
+        | (SchedulerTerminalResultRevision & { result: StructuredTaskResult })
+        | null = null;
       const pipelineResult = await dispatchPipelineTask(
         munin,
         {
-          failTaskWithMessage: (namespace, claimedEntry, message, runtimeTag) =>
-            failTaskWithMessage(namespace, claimedEntry, message, runtimeTag, true),
+          failTaskWithMessage: async (namespace, claimedEntry, message, runtimeTag) => {
+            const revision = await failTaskWithMessage(
+              namespace,
+              claimedEntry,
+              message,
+              runtimeTag,
+              true,
+            );
+            if (namespace === taskNs) pipelineTerminalResult = revision;
+          },
           promoteDependents,
           refreshPipelineSummary,
-          writeStructuredResult: writeStructuredTaskResult,
+          writeStructuredResult: async (namespace, result, classification) => {
+            const revision = await writeStructuredTaskResult(
+              namespace,
+              result,
+              classification,
+            );
+            if (namespace === taskNs) pipelineTerminalResult = revision;
+          },
         },
         taskNs,
         entry,
@@ -4841,8 +4918,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       );
       stopLeaseRenewal();
       stopCancellationWatch();
-      currentTask = null;
-      currentTaskConfig = null;
+      releaseCurrentClaimWithSchedulerOutcome({
+        taskNamespace: taskNs,
+        prediction: schedulerPrediction,
+        claimedAt: schedulerClaimedAt,
+        requestedRuntime: "pipeline",
+        effectiveRuntime: "pipeline",
+        terminalResult: pipelineTerminalResult,
+      });
       return pipelineResult;
     }
 
@@ -6406,6 +6489,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       : deliveryAwareFinalizeTags;
 
     let terminalStructuredResultOk = false;
+    let terminalStructuredResult:
+      | (SchedulerTerminalResultRevision & { result: StructuredTaskResult })
+      | null = null;
     if (isCancelled && cancellation) {
       await munin.write(
         taskNs,
@@ -6438,28 +6524,30 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         // the task never entered delivery this is undefined → no CAS, same as
         // the prior behaviour.
         expectedUpdatedAt: deliveryCheckpointUpdatedAt,
-        writeStructuredResult: () => writeStructuredTaskResult(
-          taskNs,
-          createCancelledStructuredResult(taskNs, task.runtime, cancellation.reason, {
-            executor: effectiveExecutor,
-            resultSource,
-            startedAt,
-            completedAt,
-            durationSeconds: Math.round(durationMs / 1000),
-            logFile: `~/.hugin/logs/${taskId}.log`,
-            replyTo: task.replyTo,
-            replyFormat: task.replyFormat,
-            group: task.group,
-            sequence: task.sequence,
-            pipeline: task.pipeline,
-            runtimeMetadata,
-            approval: approvalMetadata,
-            bodyKind: structuredBodyKind,
-            bodyText: structuredBodyText,
-            sensitivity: taskSensitivitySnapshot,
-          }),
-          taskClassification,
-        ),
+        writeStructuredResult: async () => {
+          terminalStructuredResult = await writeStructuredTaskResult(
+            taskNs,
+            createCancelledStructuredResult(taskNs, task.runtime, cancellation.reason, {
+              executor: effectiveExecutor,
+              resultSource,
+              startedAt,
+              completedAt,
+              durationSeconds: Math.round(durationMs / 1000),
+              logFile: `~/.hugin/logs/${taskId}.log`,
+              replyTo: task.replyTo,
+              replyFormat: task.replyFormat,
+              group: task.group,
+              sequence: task.sequence,
+              pipeline: task.pipeline,
+              runtimeMetadata,
+              approval: approvalMetadata,
+              bodyKind: structuredBodyKind,
+              bodyText: structuredBodyText,
+              sensitivity: taskSensitivitySnapshot,
+            }),
+            taskClassification,
+          );
+        },
         logMessage: `Task cancelled in ${Math.round(durationMs / 1000)}s (reason: ${cancellation.reason}, executor: ${executorLabel})`,
       });
       if (cancelledFinalize.statusCasLost) {
@@ -6498,62 +6586,64 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         // reconciler reclaimed the checkpoint while we were delivering, this
         // CAS is rejected and we must NOT finalize — the new owner stands.
         expectedUpdatedAt: deliveryCheckpointUpdatedAt,
-        writeStructuredResult: () => writeStructuredTaskResult(
-          taskNs,
-          buildStructuredTaskResult({
-            schemaVersion: 1,
-            taskId,
-            taskNamespace: taskNs,
-            lifecycle: ok ? "completed" : "failed",
-            outcome: ok ? "completed" : isTimeout ? "timed_out" : "failed",
-            runtime: task.runtime,
-            executor: effectiveExecutor,
-            resultSource,
-            exitCode,
-            startedAt,
-            completedAt,
-            durationSeconds: Math.round(durationMs / 1000),
-            logFile: `~/.hugin/logs/${taskId}.log`,
-            replyTo: task.replyTo,
-            replyFormat: task.replyFormat,
-            group: task.group,
-            sequence: task.sequence,
-            costUsd: costUsd ?? undefined,
-            prUrl,
-            repositoryOutcome,
-            repositoryChange,
-            bodyKind: structuredBodyKind,
-            bodyText: structuredBodyText,
-            errorMessage: ok
-              ? undefined
-              : failureClassification
-                ? failureClassification.reason
-                : deliveryResult && !deliveryResult.ok
-                  ? deliveryResult.error ?? structuredBodyText
-                  : structuredBodyText,
-            runtimeMetadata,
-            pipeline: task.pipeline,
-            approval: approvalMetadata,
-            sensitivity: taskSensitivitySnapshot,
-            artifactDelivery: deliveryResult
-              ? {
-                  ok: deliveryResult.ok,
-                  failureKind: deliveryResult.failureKind,
-                  artifacts: deliveryResult.records.map((r) => ({
-                    id: r.id,
-                    status: r.status,
-                    remote: r.remote,
-                    bytes: r.bytes,
-                    sha256: r.sha256,
-                    error: r.error,
-                  })),
-                }
-              : undefined,
-            orchestratorOutcomes,
-            savings: savingsResult,
-          }),
-          taskClassification,
-        ),
+        writeStructuredResult: async () => {
+          terminalStructuredResult = await writeStructuredTaskResult(
+            taskNs,
+            buildStructuredTaskResult({
+              schemaVersion: 1,
+              taskId,
+              taskNamespace: taskNs,
+              lifecycle: ok ? "completed" : "failed",
+              outcome: ok ? "completed" : isTimeout ? "timed_out" : "failed",
+              runtime: task.runtime,
+              executor: effectiveExecutor,
+              resultSource,
+              exitCode,
+              startedAt,
+              completedAt,
+              durationSeconds: Math.round(durationMs / 1000),
+              logFile: `~/.hugin/logs/${taskId}.log`,
+              replyTo: task.replyTo,
+              replyFormat: task.replyFormat,
+              group: task.group,
+              sequence: task.sequence,
+              costUsd: costUsd ?? undefined,
+              prUrl,
+              repositoryOutcome,
+              repositoryChange,
+              bodyKind: structuredBodyKind,
+              bodyText: structuredBodyText,
+              errorMessage: ok
+                ? undefined
+                : failureClassification
+                  ? failureClassification.reason
+                  : deliveryResult && !deliveryResult.ok
+                    ? deliveryResult.error ?? structuredBodyText
+                    : structuredBodyText,
+              runtimeMetadata,
+              pipeline: task.pipeline,
+              approval: approvalMetadata,
+              sensitivity: taskSensitivitySnapshot,
+              artifactDelivery: deliveryResult
+                ? {
+                    ok: deliveryResult.ok,
+                    failureKind: deliveryResult.failureKind,
+                    artifacts: deliveryResult.records.map((r) => ({
+                      id: r.id,
+                      status: r.status,
+                      remote: r.remote,
+                      bytes: r.bytes,
+                      sha256: r.sha256,
+                      error: r.error,
+                    })),
+                  }
+                : undefined,
+              orchestratorOutcomes,
+              savings: savingsResult,
+            }),
+            taskClassification,
+          );
+        },
         logMessage: `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`,
       });
       if (finalizeOutcome.statusCasLost) {
@@ -6659,8 +6749,26 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       ...opencodeJournalExtras,
     });
 
-    currentTask = null;
-    currentTaskConfig = null;
+    const effectiveSchedulerRuntime: DispatcherRuntime = sampledHarnessLane
+      ? "opencode"
+      : fallbackTriggered
+        ? "claude"
+        : task.runtime;
+    const effectiveSchedulerModel = opencodeResult?.model
+      ?? (isOllama && !fallbackTriggered
+        ? task.model || config.ollamaDefaultModel
+        : undefined);
+    releaseCurrentClaimWithSchedulerOutcome({
+      taskNamespace: taskNs,
+      prediction: schedulerPrediction,
+      claimedAt: schedulerClaimedAt,
+      requestedRuntime: declaredRuntime as DispatcherRuntime,
+      effectiveRuntime: effectiveSchedulerRuntime,
+      terminalResult: terminalStructuredResultOk ? terminalStructuredResult : null,
+      taskType: task.homeserverTaskType,
+      harness: sampledHarnessLane ? "opencode-sampled" : undefined,
+      model: effectiveSchedulerModel,
+    });
     return { hadTask: true, queueDepth };
   } finally {
     stopLeaseRenewal();
