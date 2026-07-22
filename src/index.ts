@@ -189,6 +189,7 @@ import {
   type Sensitivity,
   type SensitivityAssessment,
 } from "./sensitivity.js";
+import { parseTaskModelField } from "./task-document-metadata.js";
 import { routeTask, type RouterDecision } from "./router.js";
 import {
   buildRuntimeCandidates,
@@ -839,9 +840,7 @@ function parseTask(content: string): TaskConfig | null {
   const sequenceStr = content.match(
     /\*\*Sequence:\*\*\s*(\d+)/i
   )?.[1];
-  const modelRaw = content.match(
-    /\*\*Model:\*\*\s*(.+)/i
-  )?.[1]?.trim();
+  const modelRaw = parseTaskModelField(content);
   const ollamaHostRaw = content.match(
     /\*\*Ollama-host:\*\*\s*(.+)/i
   )?.[1]?.trim();
