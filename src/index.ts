@@ -164,7 +164,6 @@ import { sanitizeProviderTokenCount } from "./m5-provenance.js";
 import {
   buildTaskSensitivitySnapshot,
   buildStructuredTaskResult,
-  taskExecutionSensitivitySchema,
   type DispatcherRuntime,
   type StructuredTaskResult,
   type TaskExecutionApprovalMetadata,
@@ -174,6 +173,12 @@ import {
   type TaskExecutionSensitivity,
   type SkillRoute,
 } from "./task-result-schema.js";
+import {
+  buildSensitivityCheckpoint,
+  parseSensitivityCheckpoint,
+  SENSITIVITY_CHECKPOINT_KEY,
+  SENSITIVITY_CHECKPOINT_TAGS,
+} from "./sensitivity-checkpoint.js";
 import {
   buildSensitivityAssessment,
   buildSensitivityPolicyError,
@@ -729,6 +734,7 @@ interface TaskConfig {
   declaredSensitivity?: Sensitivity;
   effectiveSensitivity?: Sensitivity;
   sensitivityAssessment?: SensitivityAssessment;
+  sensitivitySnapshot?: TaskExecutionSensitivity;
   contextResolution?: Awaited<ReturnType<typeof resolveContextRefs>>;
   pipeline?: TaskExecutionPipelineContext;
   capabilities?: RuntimeCapability[];
@@ -1098,7 +1104,7 @@ function getTaskSensitivityAssessment(task: TaskConfig): SensitivityAssessment {
   const refsSensitivity = task.contextResolution?.maxSensitivity;
   return buildSensitivityAssessment({
     declared,
-    baseline: "internal",
+    baseline: task.pipeline?.sensitivity ?? "internal",
     context: contextSensitivity,
     prompt: promptDetection.sensitivity,
     refs: refsSensitivity,
@@ -1107,12 +1113,10 @@ function getTaskSensitivityAssessment(task: TaskConfig): SensitivityAssessment {
     // dependency-driven mismatches remain useful to content-blind mining.
     inherited: task.pipeline?.sensitivity,
     hardPrivate: promptDetection.hardPrivate,
-    // Generated phase tasks are submitted by Hugin itself, but override
-    // authority belongs to the original pipeline submitter. Otherwise every
-    // generated phase would accidentally inherit Hugin's owner privilege.
-    allowOwnerOverride: isOwnerSubmitter(
-      task.pipeline?.submittedBy ?? task.submittedBy,
-    ),
+    // Pipeline-phase authority is accepted only through the separate,
+    // content-hash-bound Hugin checkpoint. Free-form pipeline metadata must
+    // never upgrade a task's owner privileges, even when Submitted-by is hugin.
+    allowOwnerOverride: !task.pipeline && isOwnerSubmitter(task.submittedBy),
   });
 }
 
@@ -1121,7 +1125,10 @@ function getTaskRuntimeLabel(task: TaskConfig): string {
   return task.ollamaHost ? `ollama:${task.ollamaHost}` : "ollama";
 }
 
-async function assessTaskSecurity(task: TaskConfig): Promise<SensitivityAssessment> {
+async function assessTaskSecurity(
+  task: TaskConfig,
+  trustedSnapshot?: TaskExecutionSensitivity,
+): Promise<SensitivityAssessment> {
   if (task.contextRefs?.length) {
     task.contextResolution = await resolveContextRefs(
       task.contextRefs,
@@ -1131,9 +1138,19 @@ async function assessTaskSecurity(task: TaskConfig): Promise<SensitivityAssessme
     );
   }
 
-  const assessment = getTaskSensitivityAssessment(task);
+  const assessment = trustedSnapshot
+    ? {
+        declared: trustedSnapshot.declared,
+        effective: trustedSnapshot.effective,
+        detectorMax: trustedSnapshot.detectorMax ?? trustedSnapshot.effective,
+        mismatch: trustedSnapshot.mismatch,
+        reasons: trustedSnapshot.reasons ?? [],
+        override: trustedSnapshot.override,
+      }
+    : getTaskSensitivityAssessment(task);
   task.effectiveSensitivity = assessment.effective;
   task.sensitivityAssessment = assessment;
+  task.sensitivitySnapshot = trustedSnapshot;
 
   if (assessment.override?.applied) {
     // Owner override is visible in logs so we can mine false positives and
@@ -2569,10 +2586,9 @@ async function writeDeliveryRetryMeta(
   );
 }
 
-const SENSITIVITY_CHECKPOINT_KEY = "sensitivity-checkpoint";
-
 async function writeSensitivityCheckpoint(
   taskNs: string,
+  taskContent: string,
   sensitivity: TaskExecutionSensitivity | undefined,
   client: MuninClient,
   classification?: string,
@@ -2581,8 +2597,8 @@ async function writeSensitivityCheckpoint(
   await client.write(
     taskNs,
     SENSITIVITY_CHECKPOINT_KEY,
-    JSON.stringify(sensitivity),
-    ["type:task-sensitivity-checkpoint"],
+    buildSensitivityCheckpoint(taskNs, taskContent, sensitivity),
+    [...SENSITIVITY_CHECKPOINT_TAGS],
     undefined,
     classification,
   );
@@ -2590,15 +2606,13 @@ async function writeSensitivityCheckpoint(
 
 async function readSensitivityCheckpoint(
   taskNs: string,
+  taskContent: string,
   client: MuninClient,
 ): Promise<TaskExecutionSensitivity | undefined> {
   try {
     const entry = await client.read(taskNs, SENSITIVITY_CHECKPOINT_KEY);
     if (!entry?.content) return undefined;
-    const parsed = taskExecutionSensitivitySchema.safeParse(
-      JSON.parse(entry.content),
-    );
-    return parsed.success ? parsed.data : undefined;
+    return parseSensitivityCheckpoint(entry.content, taskNs, taskContent);
   } catch {
     return undefined;
   }
@@ -2629,7 +2643,7 @@ async function reconcileDeliveryPending(
     "",
   ) as DispatcherRuntime;
   const recoverySensitivity =
-    await readSensitivityCheckpoint(taskNs, client) ??
+    await readSensitivityCheckpoint(taskNs, entry.content, client) ??
     (task
       ? buildTaskSensitivitySnapshot(getTaskSensitivityAssessment(task))
       : undefined);
@@ -4376,7 +4390,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   }
 
   if (declaredRuntime !== "pipeline" && parsedTask) {
-    const sensitivityAssessment = await assessTaskSecurity(parsedTask);
+    const trustedPipelineSensitivity =
+      parsedTask.pipeline && entry.tags.includes("type:pipeline-phase")
+        ? await readSensitivityCheckpoint(taskNs, entry.content, munin)
+        : undefined;
+    const sensitivityAssessment = await assessTaskSecurity(
+      parsedTask,
+      trustedPipelineSensitivity,
+    );
 
     // Local-skill lane pre-step (issue #84), GUARDED by HUGIN_SKILL_LANE.
     // Default OFF ⇒ consultSkillLane returns null ⇒ a true no-op: the dispatcher
@@ -4756,9 +4777,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
     currentTaskConfig = task;
     const taskClassification = getTaskArtifactClassification(task);
-    const taskSensitivitySnapshot = buildTaskSensitivitySnapshot(
-      task.sensitivityAssessment,
-    );
+    const taskSensitivitySnapshot = task.sensitivitySnapshot ??
+      buildTaskSensitivitySnapshot(task.sensitivityAssessment);
     let approvalMetadata: TaskExecutionApprovalMetadata | undefined;
     if (task.pipeline?.authority === "gated") {
       const [approvalRequestEntry, approvalDecisionEntry] = await Promise.all([
@@ -5883,6 +5903,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       );
       await writeSensitivityCheckpoint(
         taskNs,
+        checkpointContent,
         taskSensitivitySnapshot,
         munin,
         taskClassification,

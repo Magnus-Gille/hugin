@@ -276,7 +276,10 @@ checkpoints the exact content-blind snapshot before the nonterminal
 `delivery:pending` transition and reuses it when writing the terminal result.
 Pipeline phase IR likewise retains the full assessment, and generated child
 tasks keep the phase's original declared sensitivity so execution cannot erase
-the mismatch by relabelling the declaration as the effective value.
+the mismatch by relabelling the declaration as the effective value. Phase
+execution trusts an owner override only from Hugin's separately written
+sensitivity checkpoint, bound to both the child namespace and exact task-content
+SHA-256; free-form pipeline metadata never grants override authority.
 
 Per-phase summaries should expose effective phase sensitivity; top-level summaries should expose effective pipeline sensitivity.
 

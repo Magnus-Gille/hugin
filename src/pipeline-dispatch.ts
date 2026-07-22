@@ -3,7 +3,7 @@ import {
   buildPipelineDecompositionResult,
   compilePipelineTask,
 } from "./pipeline-compiler.js";
-import type { PipelineIR, PipelineSensitivity } from "./pipeline-ir.js";
+import type { PipelineIR, PipelinePhaseTaskDraft } from "./pipeline-ir.js";
 import type { MuninEntry, MuninReadRequest, MuninReadResult } from "./munin-client.js";
 import type { OllamaHost } from "./ollama-hosts.js";
 import { getFoundBatchEntry, extractTaskId } from "./task-helpers.js";
@@ -13,9 +13,15 @@ import {
   buildTerminalStatusTags,
 } from "./task-status-tags.js";
 import {
+  buildTaskSensitivitySnapshot,
   buildStructuredTaskResult,
   type StructuredTaskResult,
 } from "./task-result-schema.js";
+import {
+  buildSensitivityCheckpoint,
+  SENSITIVITY_CHECKPOINT_KEY,
+  SENSITIVITY_CHECKPOINT_TAGS,
+} from "./sensitivity-checkpoint.js";
 
 export interface PipelineDispatchClient {
   readBatch(reads: MuninReadRequest[]): Promise<MuninReadResult[]>;
@@ -50,12 +56,7 @@ export interface PipelineDispatchHooks {
 async function cancelCreatedChildren(
   client: PipelineDispatchClient,
   hooks: PipelineDispatchHooks,
-  createdDrafts: Array<{
-    namespace: string;
-    content: string;
-    tags: string[];
-    classification: PipelineSensitivity;
-  }>
+  createdDrafts: PipelinePhaseTaskDraft[],
 ): Promise<void> {
   for (const draft of createdDrafts) {
     try {
@@ -93,6 +94,7 @@ async function cancelCreatedChildren(
           bodyKind: "error",
           bodyText: "Pipeline decomposition aborted before parent commit",
           errorMessage: "Pipeline decomposition aborted before parent commit",
+          sensitivity: buildTaskSensitivitySnapshot(draft.sensitivityAssessment),
         }),
         sensitivityToMuninClassification(draft.classification),
       );
@@ -163,6 +165,23 @@ export async function handlePipelineTask(
     );
 
     for (const draft of phaseDrafts) {
+      const sensitivity = buildTaskSensitivitySnapshot(
+        draft.sensitivityAssessment,
+      );
+      if (sensitivity) {
+        await client.write(
+          draft.namespace,
+          SENSITIVITY_CHECKPOINT_KEY,
+          buildSensitivityCheckpoint(
+            draft.namespace,
+            draft.content,
+            sensitivity,
+          ),
+          [...SENSITIVITY_CHECKPOINT_TAGS],
+          undefined,
+          sensitivityToMuninClassification(draft.classification),
+        );
+      }
       await client.write(
         draft.namespace,
         "status",

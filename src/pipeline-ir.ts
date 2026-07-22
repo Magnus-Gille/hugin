@@ -3,6 +3,7 @@ import {
   sensitivityAssessmentSchema,
   sensitivitySchema,
   type Sensitivity,
+  type SensitivityAssessment,
 } from "./sensitivity.js";
 
 export const pipelineSensitivitySchema = sensitivitySchema;
@@ -85,4 +86,5 @@ export interface PipelinePhaseTaskDraft {
   content: string;
   tags: string[];
   classification: PipelineSensitivity;
+  sensitivityAssessment?: SensitivityAssessment;
 }

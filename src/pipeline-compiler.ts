@@ -641,6 +641,7 @@ export function buildPhaseTaskDrafts(pipeline: PipelineIR): PipelinePhaseTaskDra
       content: buildPhaseTaskContent(pipeline, phase, index),
       tags,
       classification: phase.effectiveSensitivity,
+      sensitivityAssessment: phase.sensitivityAssessment,
     };
   });
 }

@@ -9,6 +9,10 @@ import {
 } from "../src/pipeline-summary.js";
 import { buildTerminalStatusTags } from "../src/task-status-tags.js";
 import type { MuninEntry, MuninReadRequest, MuninReadResult } from "../src/munin-client.js";
+import {
+  parseSensitivityCheckpoint,
+  SENSITIVITY_CHECKPOINT_KEY,
+} from "../src/sensitivity-checkpoint.js";
 
 type StoredEntry = MuninEntry & { found: true };
 
@@ -268,6 +272,21 @@ describe("handlePipelineTask", () => {
       "sensitivity:internal",
     ]);
     expect(exploreStatus?.content).toContain("- **Pipeline:** 20260403-valid-pipeline");
+    const exploreSensitivity = client.get(
+      "tasks/20260403-valid-pipeline-explore",
+      SENSITIVITY_CHECKPOINT_KEY,
+    );
+    expect(exploreSensitivity?.tags).toEqual(["type:task-sensitivity-checkpoint"]);
+    expect(
+      parseSensitivityCheckpoint(
+        exploreSensitivity?.content ?? "",
+        "tasks/20260403-valid-pipeline-explore",
+        exploreStatus?.content ?? "",
+      ),
+    ).toEqual({
+      effective: "internal",
+      mismatch: false,
+    });
 
     const synthesizeStatus = client.get(
       "tasks/20260403-valid-pipeline-synthesize",
@@ -307,6 +326,44 @@ describe("handlePipelineTask", () => {
       namespace: taskNs,
       content: "Pipeline compiled and decomposed into 2 phase task(s)",
       tags: [],
+    });
+  });
+
+  it("checkpoints an explicitly public phase without introducing an internal mismatch", async () => {
+    const client = new FakePipelineDispatchClient();
+    const { hooks } = createPipelineHooks(client);
+    const taskNs = "tasks/20260403-public-pipeline";
+    const parentEntry = client.seed({
+      namespace: taskNs,
+      key: "status",
+      content: `## Task: Public research
+
+- **Runtime:** pipeline
+- **Submitted by:** ratatoskr
+- **Sensitivity:** public
+
+### Pipeline
+Phase: Explore
+  Runtime: claude-sdk
+  Prompt: |
+    Gather public sources.`,
+      tags: ["running", "runtime:pipeline"],
+    });
+
+    await handlePipelineTask(client, hooks, taskNs, parentEntry, 0);
+
+    const childNs = "tasks/20260403-public-pipeline-explore";
+    const childStatus = client.get(childNs, "status");
+    const checkpoint = client.get(childNs, SENSITIVITY_CHECKPOINT_KEY);
+    expect(
+      parseSensitivityCheckpoint(
+        checkpoint?.content ?? "",
+        childNs,
+        childStatus?.content ?? "",
+      ),
+    ).toEqual({
+      effective: "public",
+      mismatch: false,
     });
   });
 
