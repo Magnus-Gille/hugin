@@ -245,7 +245,7 @@ async function finalizePipelineCancellationIfReady(
     pipelineNs,
     "status",
     refreshedEntry.content,
-    buildPipelineParentCancelledTags(refreshedEntry.tags),
+    buildPipelineParentCancelledTags(refreshedEntry.tags, true),
     refreshedEntry.updated_at
   );
   await client.log(pipelineNs, `Pipeline cancelled: ${reason}`);
@@ -452,7 +452,8 @@ export async function processPipelineResumeRequest(
         buildPipelineParentSuccessTags(
           entry.tags.filter(
             (tag) => tag !== "resume-requested" && tag !== "cancel-requested"
-          )
+          ),
+          true,
         ),
         entry.updated_at
       );
@@ -556,7 +557,8 @@ export async function processPipelineResumeRequest(
     buildPipelineParentSuccessTags(
       entry.tags.filter(
         (tag) => tag !== "resume-requested" && tag !== "cancel-requested"
-      )
+      ),
+      true,
     ),
     entry.updated_at
   );

@@ -132,8 +132,11 @@ clock.
 An estimate is a persisted, versioned value derived from a bounded historical
 window. The initial implementation should use a robust statistic such as a
 rolling median, require a minimum sample count, and record the history
-high-water mark used to build it. Exact window length, minimum sample count,
-and grouping keys are calibration parameters, not implicit constants.
+high-water tuple used to build it. Equal release timestamps are ordered by the
+content-blind decision UUID; repeated identical outcomes are counted once and
+conflicting outcomes under one UUID fail closed. Exact window length, minimum
+sample count, and grouping keys are calibration parameters, not implicit
+constants.
 
 Every estimate carries:
 
@@ -144,7 +147,8 @@ Every estimate carries:
   "serviceClock": "claim-to-release-v1",
   "source": "verified-terminal-history",
   "sampleCount": 24,
-  "historyThrough": "2026-07-22T20:00:00.000Z"
+  "historyThrough": "2026-07-22T20:00:00.000Z",
+  "historyThroughDecisionId": "12953e2e-dfb0-44eb-abda-2725d12fa2fa"
 }
 ```
 
@@ -215,7 +219,8 @@ reported truncation; that case always carries an abstaining challenger.
       "serviceClock": "claim-to-release-v1",
       "source": "verified-terminal-history",
       "sampleCount": 24,
-      "historyThrough": "2026-07-22T20:00:00.000Z"
+      "historyThrough": "2026-07-22T20:00:00.000Z",
+      "historyThroughDecisionId": "12953e2e-dfb0-44eb-abda-2725d12fa2fa"
     }
   },
   "challenger": {
@@ -229,7 +234,8 @@ reported truncation; that case always carries an abstaining challenger.
       "serviceClock": "claim-to-release-v1",
       "source": "verified-terminal-history",
       "sampleCount": 24,
-      "historyThrough": "2026-07-22T20:00:00.000Z"
+      "historyThrough": "2026-07-22T20:00:00.000Z",
+      "historyThroughDecisionId": "12953e2e-dfb0-44eb-abda-2725d12fa2fa"
     }
   },
   "window": {

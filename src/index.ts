@@ -149,9 +149,9 @@ import {
 } from "./task-graph.js";
 import {
   buildAwaitingApprovalTags,
+  buildClaimedTerminalStatusTags,
   buildLeasedStatusTags,
   buildTerminalStatusTags,
-  getPersistentStatusTags,
   stripSchedulerDecisionPointers,
 } from "./task-status-tags.js";
 import { LearningLoopCollector } from "./learning-loop-collector.js";
@@ -2834,7 +2834,7 @@ async function reconcileDeliveryPending(
     taskNs,
     "status",
     entry.content,
-    buildTerminalStatusTags(
+    buildClaimedTerminalStatusTags(
       ok ? "completed" : "failed",
       [
         ...entry.tags.filter((t) => !t.startsWith("delivery:")),
@@ -3006,7 +3006,7 @@ async function recoverStaleTasks(): Promise<void> {
         result.namespace,
         "status",
         entry.content,
-        buildTerminalStatusTags("failed", entry.tags),
+        buildClaimedTerminalStatusTags("failed", entry.tags),
         entry.updated_at,
         recoveryOutputClassification,
       );
@@ -3148,7 +3148,7 @@ async function reapExpiredLeases(): Promise<void> {
           result.namespace,
           "status",
           entry.content,
-          buildTerminalStatusTags("failed", entry.tags),
+          buildClaimedTerminalStatusTags("failed", entry.tags),
           entry.updated_at,
           classification,
         );
@@ -4177,6 +4177,7 @@ async function failTaskWithMessage(
   entry: MuninEntry & { found: true },
   errorMessage: string,
   runtimeTagOverride?: string,
+  preserveClaimedSchedulerPointer = false,
 ): Promise<void> {
   const runtime = (
     runtimeTagOverride ||
@@ -4193,7 +4194,9 @@ async function failTaskWithMessage(
     taskNs,
     "status",
     entry.content,
-    buildTerminalStatusTags("failed", entry.tags, runtimeTagOverride),
+    preserveClaimedSchedulerPointer
+      ? buildClaimedTerminalStatusTags("failed", entry.tags, runtimeTagOverride)
+      : buildTerminalStatusTags("failed", entry.tags, runtimeTagOverride),
     entry.updated_at,
     classification
   );
@@ -4729,7 +4732,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       const pipelineResult = await dispatchPipelineTask(
         munin,
         {
-          failTaskWithMessage,
+          failTaskWithMessage: (namespace, claimedEntry, message, runtimeTag) =>
+            failTaskWithMessage(namespace, claimedEntry, message, runtimeTag, true),
           promoteDependents,
           refreshPipelineSummary,
           writeStructuredResult: writeStructuredTaskResult,
@@ -6329,7 +6333,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       );
       const cancelledFinalize = await finalizeTaskCompletion(munin, taskNs, {
         statusContent: entry.content,
-        terminalTags: buildTerminalStatusTags("cancelled", finalizeBaseTags, `runtime:${task.runtime}`),
+        terminalTags: buildClaimedTerminalStatusTags("cancelled", finalizeBaseTags, `runtime:${task.runtime}`),
         classification: taskClassification,
         // Single-owner CAS for runtime-owned delivery (#68, Codex review C):
         // if a startup reconciler reclaimed the delivery checkpoint while we
@@ -6375,10 +6379,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       terminalStructuredResultOk = cancelledFinalize.structuredResultOk;
     } else {
       // Append the distinct failure tag (issue #129) and the publication
-      // failure tag (issue #225) AFTER buildTerminalStatusTags, whose
+      // failure tag (issue #225) AFTER the claimed terminal-tag transform, whose
       // persistent-tag filter would otherwise drop tags not already present
       // on the pre-task entry.
-      const terminalTags = buildTerminalStatusTags(
+      const terminalTags = buildClaimedTerminalStatusTags(
         ok ? "completed" : "failed",
         finalizeBaseTags,
         `runtime:${task.runtime}`,
@@ -6796,7 +6800,7 @@ async function shutdown(signal: string): Promise<void> {
           currentTask,
           "status",
           entry.content,
-          buildTerminalStatusTags("failed", entry.tags),
+          buildClaimedTerminalStatusTags("failed", entry.tags),
           entry.updated_at
         );
         await munin.write(

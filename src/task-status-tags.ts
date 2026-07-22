@@ -67,9 +67,10 @@ function getRuntimeTag(tags: string[], runtimeFallback?: string): string | undef
   return tags.find((tag) => tag.startsWith(RUNTIME_PREFIX)) || runtimeFallback;
 }
 
-export function getPersistentStatusTags(
+function collectPersistentStatusTags(
   tags: string[],
   runtimeFallback?: string,
+  preserveClaimedSchedulerPointer = false,
 ): string[] {
   const runtimeTag = getRuntimeTag(tags, runtimeFallback);
   const typeTags = tags.filter((tag) => tag.startsWith(TYPE_PREFIX));
@@ -96,7 +97,8 @@ export function getPersistentStatusTags(
     const value = tag.slice(SCHEDULER_PREDICTION_DIGEST_PREFIX.length);
     return SHA256_PATTERN.test(value);
   });
-  const schedulerPointerTags = rawSchedulerDecisionTags.length === 1
+  const schedulerPointerTags = preserveClaimedSchedulerPointer
+    && rawSchedulerDecisionTags.length === 1
     && rawSchedulerPredictionTags.length === 1
     && schedulerDecisionTags.length === 1
     && schedulerPredictionTags.length === 1
@@ -121,6 +123,22 @@ export function getPersistentStatusTags(
     ...idempotencyTags,
     ...schedulerPointerTags,
   ]);
+}
+
+/** Persistent metadata safe for pre-claim and generic lifecycle rewrites. */
+export function getPersistentStatusTags(
+  tags: string[],
+  runtimeFallback?: string,
+): string[] {
+  return collectPersistentStatusTags(tags, runtimeFallback, false);
+}
+
+/** Persistent metadata from a status known to follow a successful claim CAS. */
+export function getClaimedPersistentStatusTags(
+  tags: string[],
+  runtimeFallback?: string,
+): string[] {
+  return collectPersistentStatusTags(tags, runtimeFallback, true);
 }
 
 /**
@@ -154,7 +172,7 @@ export function buildLeasedStatusTags(
 ): string[] {
   return [
     lifecycle,
-    ...getPersistentStatusTags(baseTags),
+    ...getClaimedPersistentStatusTags(baseTags),
     `claimed_by:${claimedBy}`,
     `lease_expires:${leaseExpires}`,
   ];
@@ -168,6 +186,14 @@ export function buildTerminalStatusTags(
   return [status, ...getPersistentStatusTags(tags, runtimeFallback)];
 }
 
+export function buildClaimedTerminalStatusTags(
+  status: "completed" | "failed" | "cancelled",
+  tags: string[],
+  runtimeFallback?: string,
+): string[] {
+  return [status, ...getClaimedPersistentStatusTags(tags, runtimeFallback)];
+}
+
 export function buildAwaitingApprovalTags(
   tags: string[],
   runtimeFallback?: string
@@ -175,12 +201,22 @@ export function buildAwaitingApprovalTags(
   return ["awaiting-approval", ...getPersistentStatusTags(tags, runtimeFallback)];
 }
 
-export function buildPipelineParentSuccessTags(tags: string[]): string[] {
-  const terminalTags = buildTerminalStatusTags("completed", tags, "runtime:pipeline");
+export function buildPipelineParentSuccessTags(
+  tags: string[],
+  preserveClaimedSchedulerPointer = false,
+): string[] {
+  const terminalTags = preserveClaimedSchedulerPointer
+    ? buildClaimedTerminalStatusTags("completed", tags, "runtime:pipeline")
+    : buildTerminalStatusTags("completed", tags, "runtime:pipeline");
   return dedupeTags([...terminalTags, "type:pipeline"]);
 }
 
-export function buildPipelineParentCancelledTags(tags: string[]): string[] {
-  const terminalTags = buildTerminalStatusTags("cancelled", tags, "runtime:pipeline");
+export function buildPipelineParentCancelledTags(
+  tags: string[],
+  preserveClaimedSchedulerPointer = false,
+): string[] {
+  const terminalTags = preserveClaimedSchedulerPointer
+    ? buildClaimedTerminalStatusTags("cancelled", tags, "runtime:pipeline")
+    : buildTerminalStatusTags("cancelled", tags, "runtime:pipeline");
   return dedupeTags([...terminalTags, "type:pipeline"]);
 }

@@ -3,6 +3,7 @@ import { BROKER_TASK_TYPE_TAXONOMY_VERSION } from "../src/broker/task-type-metad
 import {
   attachSchedulerDecisionPointer,
   buildAwaitingApprovalTags,
+  buildClaimedTerminalStatusTags,
   buildLeasedStatusTags,
   buildPipelineParentCancelledTags,
   buildPipelineParentSuccessTags,
@@ -28,7 +29,7 @@ describe("task status tag helpers", () => {
       `scheduler-decision:${decisionId}`,
       `scheduler-prediction-sha256:${predictionDigest}`,
     ]);
-    expect(buildTerminalStatusTags("completed", attached)).toEqual([
+    expect(buildClaimedTerminalStatusTags("completed", attached)).toEqual([
       "completed",
       "runtime:codex",
       `scheduler-decision:${decisionId}`,
@@ -63,7 +64,7 @@ describe("task status tag helpers", () => {
       "delivery:pending",
     ], "running", "hugin-pi", "1784757000000");
 
-    expect(buildTerminalStatusTags("completed", [
+    expect(buildClaimedTerminalStatusTags("completed", [
       ...deliveryTags.filter((tag) => !tag.startsWith("delivery:")),
       "delivery:verified",
     ])).toEqual([
@@ -78,8 +79,30 @@ describe("task status tag helpers", () => {
       "runtime:pipeline",
       decisionTag,
       digestTag,
-    ])).toEqual([
+    ], true)).toEqual([
       "completed",
+      "runtime:pipeline",
+      decisionTag,
+      digestTag,
+      "type:pipeline",
+    ]);
+    expect(buildPipelineParentCancelledTags([
+      "pending",
+      "runtime:pipeline",
+      decisionTag,
+      digestTag,
+    ])).toEqual([
+      "cancelled",
+      "runtime:pipeline",
+      "type:pipeline",
+    ]);
+    expect(buildPipelineParentCancelledTags([
+      "running",
+      "runtime:pipeline",
+      decisionTag,
+      digestTag,
+    ], true)).toEqual([
+      "cancelled",
       "runtime:pipeline",
       decisionTag,
       digestTag,
@@ -106,6 +129,42 @@ describe("task status tag helpers", () => {
       "scheduler-decision:not-a-uuid",
       validDigest,
     ])).toEqual(["runtime:codex"]);
+  });
+
+  it("never promotes a valid-looking caller pointer before a successful claim", () => {
+    const decisionTag = "scheduler-decision:34f2d430-6c31-47de-860a-8b22bc97f4d4";
+    const digestTag = `scheduler-prediction-sha256:${"a".repeat(64)}`;
+    const untrustedPending = ["pending", "runtime:codex", decisionTag, digestTag];
+
+    expect(buildTerminalStatusTags("failed", untrustedPending)).toEqual([
+      "failed",
+      "runtime:codex",
+    ]);
+    expect(buildAwaitingApprovalTags(untrustedPending)).toEqual([
+      "awaiting-approval",
+      "runtime:codex",
+    ]);
+    expect(buildPipelineParentSuccessTags([
+      "pending",
+      "runtime:pipeline",
+      decisionTag,
+      digestTag,
+    ])).toEqual([
+      "completed",
+      "runtime:pipeline",
+      "type:pipeline",
+    ]);
+    expect(buildClaimedTerminalStatusTags("completed", [
+      "running",
+      "runtime:codex",
+      decisionTag,
+      digestTag,
+    ])).toEqual([
+      "completed",
+      "runtime:codex",
+      decisionTag,
+      digestTag,
+    ]);
   });
 
   it("preserves durable MCP Broker identity and query tags", () => {

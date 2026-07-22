@@ -22,6 +22,7 @@ export const schedulerServiceEstimateSchema = z.object({
   source: z.literal("verified-terminal-history"),
   sampleCount: z.number().int().positive(),
   historyThrough: isoTimestampSchema,
+  historyThroughDecisionId: z.string().uuid(),
 }).strict();
 
 const completeServiceClockSchema = z.object({
@@ -116,6 +117,12 @@ export const schedulerDecisionPredictionSchema = z.object({
   const windowComplete = value.window.pendingEnumerationComplete
     && value.window.runningEnumerationComplete;
   const abstained = value.challenger.reason === "insufficient-evidence";
+  if (value.window.eligibleTasks < 1) {
+    ctx.addIssue({ code: "custom", path: ["window", "eligibleTasks"], message: "a champion claim requires an eligible task" });
+  }
+  if (value.window.missingEstimates > value.window.eligibleTasks) {
+    ctx.addIssue({ code: "custom", path: ["window", "missingEstimates"], message: "missing estimates cannot exceed eligible tasks" });
+  }
   if ((value.champion.policy === "complete-fifo-v1") !== windowComplete) {
     ctx.addIssue({
       code: "custom",
@@ -138,6 +145,40 @@ export const schedulerDecisionPredictionSchema = z.object({
   if (!abstained && value.challenger.serviceEstimate === null) {
     ctx.addIssue({ code: "custom", path: ["challenger", "serviceEstimate"], message: "a challenger choice requires an estimate" });
   }
+  if (!abstained && value.champion.serviceEstimate === null) {
+    ctx.addIssue({ code: "custom", path: ["champion", "serviceEstimate"], message: "a comparison requires the persisted champion estimate" });
+  }
+  if (value.window.missingEstimates > 0 && !abstained) {
+    ctx.addIssue({ code: "custom", path: ["challenger", "reason"], message: "missing estimates require abstention" });
+  }
+  if (value.window.missingEstimates > 0
+    && !value.challenger.evidenceReasons.includes("estimate-missing")) {
+    ctx.addIssue({ code: "custom", path: ["challenger", "evidenceReasons"], message: "missing estimates must be explicit" });
+  }
+  if (value.window.missingEstimates === 0 && value.champion.serviceEstimate === null) {
+    ctx.addIssue({ code: "custom", path: ["champion", "serviceEstimate"], message: "zero missing estimates requires a champion estimate" });
+  }
+  if (value.window.missingEstimates === 0
+    && value.challenger.evidenceReasons.includes("estimate-missing")) {
+    ctx.addIssue({ code: "custom", path: ["challenger", "evidenceReasons"], message: "estimate-missing contradicts a complete estimate set" });
+  }
+  if (value.window.missingEstimates > 0 && value.window.estimatedWorkMinutes !== null) {
+    ctx.addIssue({ code: "custom", path: ["window", "estimatedWorkMinutes"], message: "partial estimates cannot be represented as total work" });
+  }
+  if (value.window.missingEstimates === 0 && value.window.estimatedWorkMinutes === null) {
+    ctx.addIssue({ code: "custom", path: ["window", "estimatedWorkMinutes"], message: "complete estimates require total work minutes" });
+  }
+  if (!abstained && value.challenger.evidenceReasons.length > 0) {
+    ctx.addIssue({ code: "custom", path: ["challenger", "evidenceReasons"], message: "a completed comparison cannot carry abstention evidence" });
+  }
+  for (const [path, estimate] of [
+    [["champion", "serviceEstimate"], value.champion.serviceEstimate],
+    [["challenger", "serviceEstimate"], value.challenger.serviceEstimate],
+  ] as const) {
+    if (estimate && Date.parse(estimate.historyThrough) > Date.parse(value.observedAt)) {
+      ctx.addIssue({ code: "custom", path: [...path, "historyThrough"], message: "estimate history cannot look ahead past observation" });
+    }
+  }
   if (!windowComplete && !value.challenger.evidenceReasons.includes("window-truncated")) {
     ctx.addIssue({ code: "custom", path: ["challenger", "evidenceReasons"], message: "truncated enumeration must be explicit" });
   }
@@ -154,16 +195,12 @@ export const schedulerTerminalClassSchema = z.enum([
   "cancelled",
 ]);
 
-export const schedulerDurationSampleSchema = z.object({
-  terminalClass: schedulerTerminalClassSchema,
-  requestedRuntime: dispatcherRuntimeSchema,
-  effectiveRuntime: dispatcherRuntimeSchema,
-  taskType: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/).optional(),
-  harness: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/).optional(),
-  model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/).optional(),
-  clock: schedulerServiceClockEvidenceSchema,
+const schedulerTerminalResultBindingSchema = z.object({
+  namespace: taskNamespaceSchema,
+  key: z.literal("result-structured"),
+  updatedAt: isoTimestampSchema,
+  sha256: sha256Schema,
 }).strict();
-export type SchedulerDurationSample = z.infer<typeof schedulerDurationSampleSchema>;
 
 export const schedulerDecisionOutcomeSchema = z.object({
   schemaVersion: z.literal(1),
@@ -179,12 +216,7 @@ export const schedulerDecisionOutcomeSchema = z.object({
   championEstimateSeconds: z.number().finite().nonnegative().nullable(),
   absolutePredictionErrorSeconds: z.number().finite().nonnegative().nullable(),
   longJob: z.boolean(),
-  terminalResult: z.object({
-    namespace: taskNamespaceSchema,
-    key: z.literal("result-structured"),
-    updatedAt: isoTimestampSchema,
-    sha256: sha256Schema,
-  }).strict(),
+  terminalResult: schedulerTerminalResultBindingSchema,
 }).strict().superRefine((value, ctx) => {
   if (value.terminalResult.namespace !== value.taskRef.namespace) {
     ctx.addIssue({
@@ -254,11 +286,28 @@ export function buildRollingMedianDurationEstimate(
   if (!Number.isInteger(options.windowSize) || options.windowSize < options.minimumSamples) {
     throw new Error("windowSize must be an integer greater than or equal to minimumSamples");
   }
-  const samples = z.array(schedulerDurationSampleSchema).parse(input)
-    .filter((sample): sample is SchedulerDurationSample & {
+  const parsed = z.array(schedulerDecisionOutcomeSchema).parse(input);
+  const uniqueByDecision = new Map<string, SchedulerDecisionOutcome>();
+  for (const sample of parsed) {
+    const existing = uniqueByDecision.get(sample.decisionId);
+    if (existing && hashSchedulerOutcome(existing) !== hashSchedulerOutcome(sample)) {
+      throw new Error(`conflicting scheduler outcomes for decision ${sample.decisionId}`);
+    }
+    uniqueByDecision.set(sample.decisionId, sample);
+  }
+  const samples = [...uniqueByDecision.values()]
+    .filter((sample): sample is SchedulerDecisionOutcome & {
       clock: z.infer<typeof completeServiceClockSchema>;
     } => sample.clock.clockComplete)
-    .sort((left, right) => Date.parse(left.clock.releasedAt) - Date.parse(right.clock.releasedAt))
+    .sort((left, right) => {
+      const timestampOrder = Date.parse(left.clock.releasedAt) - Date.parse(right.clock.releasedAt);
+      if (timestampOrder !== 0) return timestampOrder;
+      return left.decisionId < right.decisionId
+        ? -1
+        : left.decisionId > right.decisionId
+          ? 1
+          : 0;
+    })
     .slice(-options.windowSize);
   if (samples.length < options.minimumSamples) return null;
 
@@ -277,5 +326,6 @@ export function buildRollingMedianDurationEstimate(
     source: "verified-terminal-history",
     sampleCount: samples.length,
     historyThrough: samples.at(-1)!.clock.releasedAt,
+    historyThroughDecisionId: samples.at(-1)!.decisionId,
   });
 }
