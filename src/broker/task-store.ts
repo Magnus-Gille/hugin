@@ -65,7 +65,6 @@ export const RESULT_ERROR_KEY = "result-error";
 /** Durable-handoff evidence for the #165 trial (#164). */
 export const AWAIT_OBSERVATION_KEY = "await-observation";
 const CANONICAL_HISTORY_SCAN_BUDGET = { maxPages: 20, maxResults: 1_000 } as const;
-const CANONICAL_HISTORY_READ_CONCURRENCY = 25;
 export interface TaskStoreConfig {
   munin: MuninClient;
 }
@@ -198,14 +197,20 @@ export class BrokerTaskStore {
       ? createBrokerAttestation(params.envelope, secret)
       : undefined;
     const content = serializeEnvelope(params.envelope, attestation);
-    await this.munin.write(
+    const result = await this.munin.write(
       ns,
       STATUS_KEY,
       content,
       tags,
       undefined,
       params.envelope.sensitivity === "private" ? "client-restricted" : "internal",
+      true,
     );
+    if (result.status !== "created") {
+      throw new Error(
+        "Munin create_if_absent did not return status created; refusing to acknowledge submit",
+      );
+    }
   }
 
   /**
@@ -511,8 +516,10 @@ export class BrokerTaskStore {
    * matched (any key, either tag) only to learn the task's *namespace*, union
    * with a `runtime:homeserver` tag query (carried only by `status` entries,
    * so it is immune to feedback/await-observation pollution), then read each
-   * unique namespace's `status` entry directly rather than relying on it
-   * having survived inside the raw query window.
+   * unique namespace's `status` entry in bounded Munin batches rather than
+   * relying on it having survived inside the raw query window. A batch is
+   * load-bearing here: Munin serializes and spaces requests, so one read per
+   * namespace can exceed the Broker transport deadline even when idle (#278).
    *
    * Candidate discovery uses the shared capped-window paginator (#183). It
    * selects Munin's temporally ordered filter-only mode, walks backward by
@@ -546,22 +553,11 @@ export class BrokerTaskStore {
     }
 
     const namespaceList = [...namespaces];
-    const entries = [];
-    for (
-      let offset = 0;
-      offset < namespaceList.length;
-      offset += CANONICAL_HISTORY_READ_CONCURRENCY
-    ) {
-      const chunk = namespaceList.slice(
-        offset,
-        offset + CANONICAL_HISTORY_READ_CONCURRENCY,
-      );
-      entries.push(
-        ...(await Promise.all(
-          chunk.map((namespace) => this.munin.read(namespace, STATUS_KEY)),
-        )),
-      );
-    }
+    const entries = namespaceList.length === 0
+      ? []
+      : (await this.munin.readBatch(
+          namespaceList.map((namespace) => ({ namespace, key: STATUS_KEY })),
+        )).filter((entry) => entry.found);
 
     const rows = [];
     for (const entry of entries) {

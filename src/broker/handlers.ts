@@ -54,6 +54,7 @@ import {
   buildQualityReceipt,
 } from "../quality-receipt.js";
 import { structuredTaskResultSchema } from "../task-result-schema.js";
+import { MuninWriteRejectedError } from "../munin-client.js";
 
 const brokerFrictionInputSchema = reportFrictionInputSchema.extend({
   event_id: z.string().uuid(),
@@ -204,45 +205,6 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
     }
 
     const taskId = generateBrokerTaskId(principal, request.idempotency_key);
-    const persisted = await deps.taskStore.readStatus(taskId);
-    if (persisted) {
-      const persistedEnvelopeResult = parseCanonicalEnvelope(persisted.content);
-      if (!persistedEnvelopeResult.ok) {
-        res.status(409).json({
-          error: "policy_rejected",
-          message: "idempotency task exists but its canonical envelope is unreadable",
-          existing_task_id: taskId,
-        });
-        return;
-      }
-      const persistedEnvelope = persistedEnvelopeResult.envelope;
-      const persistedRequestResult = delegationRequestSchema.safeParse(persistedEnvelope);
-      if (!persistedRequestResult.success) {
-        res.status(409).json({
-          error: "policy_rejected",
-          message: "idempotency task exists but its request contract is invalid",
-          existing_task_id: taskId,
-        });
-        return;
-      }
-      const persistedRequest = persistedRequestResult.data;
-      if (hashPayload(persistedRequest) !== hashPayload(request)) {
-        res.status(409).json({
-          error: "policy_rejected",
-          message: "idempotency_key reused with a different payload",
-          existing_task_id: taskId,
-        });
-        return;
-      }
-      res.status(200).json({
-        task_id: taskId,
-        received_at: persistedEnvelope.received_at,
-        reused_idempotency: true,
-        ...(submitWarnings.length > 0 ? { warnings: submitWarnings } : {}),
-      });
-      return;
-    }
-
     const reservationKey = scopedIdempotencyKey(principal, request.idempotency_key);
     const idemOutcome = deps.idempotency.reserve(reservationKey, request);
     if (idemOutcome.kind === "retry") {
@@ -283,6 +245,58 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
     try {
       await deps.taskStore.submit({ envelope });
     } catch (err) {
+      if (
+        err instanceof MuninWriteRejectedError &&
+        err.conflictReason === "already_exists"
+      ) {
+        const persisted = await deps.taskStore.readStatus(taskId).catch(() => null);
+        if (!persisted) {
+          deps.idempotency.release(reservationKey);
+          res.status(500).json({
+            error: "internal",
+            message: "idempotency task exists but its canonical envelope is unavailable",
+          });
+          return;
+        }
+        const persistedEnvelopeResult = parseCanonicalEnvelope(persisted.content);
+        if (!persistedEnvelopeResult.ok) {
+          deps.idempotency.release(reservationKey);
+          res.status(409).json({
+            error: "policy_rejected",
+            message: "idempotency task exists but its canonical envelope is unreadable",
+            existing_task_id: taskId,
+          });
+          return;
+        }
+        const persistedEnvelope = persistedEnvelopeResult.envelope;
+        const persistedRequestResult = delegationRequestSchema.safeParse(persistedEnvelope);
+        if (!persistedRequestResult.success) {
+          deps.idempotency.release(reservationKey);
+          res.status(409).json({
+            error: "policy_rejected",
+            message: "idempotency task exists but its request contract is invalid",
+            existing_task_id: taskId,
+          });
+          return;
+        }
+        if (hashPayload(persistedRequestResult.data) !== hashPayload(request)) {
+          deps.idempotency.release(reservationKey);
+          res.status(409).json({
+            error: "policy_rejected",
+            message: "idempotency_key reused with a different payload",
+            existing_task_id: taskId,
+          });
+          return;
+        }
+        deps.idempotency.record(reservationKey, request, taskId);
+        res.status(200).json({
+          task_id: taskId,
+          received_at: persistedEnvelope.received_at,
+          reused_idempotency: true,
+          ...(submitWarnings.length > 0 ? { warnings: submitWarnings } : {}),
+        });
+        return;
+      }
       deps.idempotency.release(reservationKey);
       res.status(500).json({
         error: "internal",

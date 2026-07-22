@@ -16,6 +16,7 @@ class PersistingMunin {
     tags: string[] = [],
     _expectedUpdatedAt?: string,
     classification = "internal",
+    createIfAbsent?: boolean,
   ): Promise<Record<string, unknown>> {
     if (key === "status") {
       this.status = {
@@ -29,7 +30,7 @@ class PersistingMunin {
         updated_at: "2026-07-18T10:00:00.000Z",
       };
     }
-    return { ok: true };
+    return { ok: true, status: createIfAbsent ? "created" : "updated" };
   }
 }
 
