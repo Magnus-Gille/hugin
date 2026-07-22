@@ -50,6 +50,20 @@ export function stripSchedulerDecisionPointers(tags: string[]): string[] {
   );
 }
 
+/** Replace mutable pointer tags with the exact pair retained after a claim CAS. */
+export function mergeClaimedSchedulerPointer(
+  targetTags: string[],
+  claimedSnapshotTags: string[],
+): string[] {
+  const claimedPointerTags = getClaimedPersistentStatusTags(claimedSnapshotTags)
+    .filter((tag) => tag.startsWith(SCHEDULER_DECISION_PREFIX)
+      || tag.startsWith(SCHEDULER_PREDICTION_DIGEST_PREFIX));
+  return dedupeTags([
+    ...stripSchedulerDecisionPointers(targetTags),
+    ...claimedPointerTags,
+  ]);
+}
+
 /** Running cancellation belongs to an active owner or claimed-task recovery. */
 export function shouldDeferCancellationToClaimOwner(tags: string[]): boolean {
   return tags.includes("running");

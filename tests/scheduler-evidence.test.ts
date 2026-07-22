@@ -88,6 +88,13 @@ describe("scheduler evidence", () => {
       window: { ...prediction.window },
     }));
     expect(hashSchedulerPrediction(prediction)).toMatch(/^[0-9a-f]{64}$/);
+    expect(schedulerDecisionPredictionSchema.safeParse({
+      ...prediction,
+      challenger: {
+        ...prediction.challenger,
+        evidenceReasons: ["estimate-missing", "window-truncated"],
+      },
+    }).success).toBe(false);
   });
 
   it("rejects free-form challenger reasons and unsafe task references", () => {

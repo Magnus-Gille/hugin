@@ -152,6 +152,7 @@ import {
   buildClaimedTerminalStatusTags,
   buildLeasedStatusTags,
   buildTerminalStatusTags,
+  mergeClaimedSchedulerPointer,
   shouldDeferCancellationToClaimOwner,
   stripSchedulerDecisionPointers,
 } from "./task-status-tags.js";
@@ -578,6 +579,9 @@ function sleepMs(ms: number): Promise<void> {
 
 let shuttingDown = false;
 let currentTask: string | null = null;
+// Exact post-CAS status snapshot for the in-process owner. Mutable status reads
+// may contribute control tags, but never replace this scheduler pointer pair.
+let currentClaimTags: string[] | null = null;
 let currentTaskConfig: TaskConfig | null = null;
 let currentChild: ChildProcess | null = null;
 let currentSdkAbort: AbortController | null = null;
@@ -4731,6 +4735,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   updatePendingQueueSnapshotAfterDeparture();
 
   currentTask = taskNs;
+  currentClaimTags = [...claimTags];
   currentCancellation = null;
   const acceptedAtMs = Date.parse(claimAcceptedAt);
   const startedAt = new Date(
@@ -5926,12 +5931,17 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       //    never terminal (Ratatoskr would read the checkpoint as final).
       const checkpointEntry = await munin.read(taskNs, "status");
       const checkpointContent = checkpointEntry?.content ?? entry.content;
-      const checkpointBaseTags = (
+      const checkpointMutableTags = (
         checkpointEntry?.tags ?? entry.tags
       ).filter((t) => !t.startsWith("delivery:"));
+      const checkpointBaseTags = mergeClaimedSchedulerPointer(
+        checkpointMutableTags,
+        claimTags,
+      );
       const checkpointTags = buildClaimTags(
         [...checkpointBaseTags, "delivery:pending"],
         "running",
+        true,
       );
       const checkpointBody = `${finalResultBody}\n\n### Artifact Delivery\n\n- **Delivery:** in progress (Hugin runtime owns delivery — see log)\n`;
       await munin.write(
@@ -6590,6 +6600,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     currentOrchestratorAbort = null;
     currentCancellation = null;
     currentTask = null;
+    currentClaimTags = null;
     currentTaskConfig = null;
     // Rotate session off the task scope so subsequent poll/heartbeat writes
     // don't pollute the task's session window.
@@ -6812,11 +6823,15 @@ async function shutdown(signal: string): Promise<void> {
         );
       } else if (entry) {
         const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
+        const shutdownTags = mergeClaimedSchedulerPointer(
+          entry.tags,
+          currentClaimTags ?? [],
+        );
         await munin.write(
           currentTask,
           "status",
           entry.content,
-          buildClaimedTerminalStatusTags("failed", entry.tags),
+          buildClaimedTerminalStatusTags("failed", shutdownTags),
           entry.updated_at
         );
         await munin.write(

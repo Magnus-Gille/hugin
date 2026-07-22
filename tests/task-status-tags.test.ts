@@ -9,6 +9,7 @@ import {
   buildPipelineParentSuccessTags,
   buildTerminalStatusTags,
   getPersistentStatusTags,
+  mergeClaimedSchedulerPointer,
   shouldDeferCancellationToClaimOwner,
   stripSchedulerDecisionPointers,
 } from "../src/task-status-tags.js";
@@ -228,6 +229,39 @@ describe("task status tag helpers", () => {
     expect(buildTerminalStatusTags("failed", forgedRecoveryTags)).toEqual([
       "failed",
       "runtime:codex",
+    ]);
+  });
+
+  it("replaces mutable scheduler pointers with the exact in-process claim snapshot", () => {
+    const authoritativeDecision = "scheduler-decision:34f2d430-6c31-47de-860a-8b22bc97f4d4";
+    const authoritativeDigest = `scheduler-prediction-sha256:${"a".repeat(64)}`;
+    const mutableTags = [
+      "running",
+      "runtime:codex",
+      "delivery:pending",
+      "scheduler-decision:5f1848e1-d3fb-46bf-9121-e1f38e79d158",
+      `scheduler-prediction-sha256:${"b".repeat(64)}`,
+    ];
+
+    expect(mergeClaimedSchedulerPointer(mutableTags, [
+      "running",
+      "runtime:codex",
+      authoritativeDecision,
+      authoritativeDigest,
+    ])).toEqual([
+      "running",
+      "runtime:codex",
+      "delivery:pending",
+      authoritativeDecision,
+      authoritativeDigest,
+    ]);
+    expect(mergeClaimedSchedulerPointer(mutableTags, [
+      "running",
+      "runtime:codex",
+    ])).toEqual([
+      "running",
+      "runtime:codex",
+      "delivery:pending",
     ]);
   });
 

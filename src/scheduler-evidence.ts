@@ -182,6 +182,9 @@ export const schedulerDecisionPredictionSchema = z.object({
   if (!windowComplete && !value.challenger.evidenceReasons.includes("window-truncated")) {
     ctx.addIssue({ code: "custom", path: ["challenger", "evidenceReasons"], message: "truncated enumeration must be explicit" });
   }
+  if (windowComplete && value.challenger.evidenceReasons.includes("window-truncated")) {
+    ctx.addIssue({ code: "custom", path: ["challenger", "evidenceReasons"], message: "window-truncated contradicts complete enumeration" });
+  }
   if (value.champion.policy === "visible-window-fifo-v1" && !abstained) {
     ctx.addIssue({ code: "custom", path: ["challenger", "reason"], message: "truncated FIFO window requires abstention" });
   }
