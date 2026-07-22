@@ -470,6 +470,54 @@ describe("buildTools — hugin_await", () => {
     });
   });
 
+  it("preserves content-blind mismatch evidence in a compact terminal summary", async () => {
+    const await_ = vi.fn(async () => ({
+      status: "completed",
+      result: {
+        outcome: "completed",
+        exitCode: 0,
+        bodyText: "done",
+        sensitivity: {
+          declared: "internal",
+          effective: "internal",
+          mismatch: true,
+          detectorMax: "private",
+          reasons: [
+            "declared:internal",
+            "prompt:private",
+            "owner-override:internal<private",
+          ],
+          override: { applied: true, detectorMax: "private" },
+        },
+      },
+    }));
+    const tools = buildTools({
+      broker: fakeBroker({ await_ }),
+      sessionId: "sess",
+      submitter: "claude-code",
+    });
+
+    const result = await tools.await_.handler({
+      task_id: "t-mismatch",
+      verbosity: "summary",
+    });
+
+    expect(parseResult(result)).toMatchObject({
+      sensitivity: {
+        declared: "internal",
+        effective: "internal",
+        mismatch: true,
+        detectorMax: "private",
+        reasons: [
+          "declared:internal",
+          "prompt:private",
+          "owner-override:internal<private",
+        ],
+        override: { applied: true, detectorMax: "private" },
+      },
+    });
+  });
+
   it("keeps polling evidence in a compact running summary", async () => {
     const await_ = vi.fn(async () => ({
       status: "running",

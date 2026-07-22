@@ -174,9 +174,21 @@ const INTERNAL_PATH_PREFIXES = [
   "/home/magnus/scratch",
 ];
 
-export interface SensitivityAssessment {
-  declared?: Sensitivity;
-  effective: Sensitivity;
+export const sensitivityReasonSchema = z.string().regex(
+  /^(?:(?:declared|context|prompt|context-refs|inherited):(public|internal|private)|owner-override:(public|internal|private)<(public|internal|private)|owner-override-blocked:hard-private)$/,
+  "sensitivity reasons must use the content-blind detector vocabulary",
+);
+
+export const sensitivityOverrideSchema = z.object({
+  applied: z.literal(true),
+  detectorMax: sensitivitySchema,
+}).strict();
+
+export const sensitivityAssessmentSchema = z.object({
+  declared: sensitivitySchema.optional(),
+  effective: sensitivitySchema,
+  /** Highest classification produced by detector inputs before declaration/override. */
+  detectorMax: sensitivitySchema,
   /**
    * True when the detector signals were strictly higher than the declared
    * sensitivity. This is audit-facing: owner overrides still set `mismatch`
@@ -184,8 +196,8 @@ export interface SensitivityAssessment {
    * {@link override} to check whether the effective value was actually
    * lowered by an owner override.
    */
-  mismatch: boolean;
-  reasons: string[];
+  mismatch: z.boolean(),
+  reasons: z.array(sensitivityReasonSchema).max(8),
   /**
    * Present only when an owner override was applied — the effective value
    * was clamped DOWN to `declared` because the detector's signals were
@@ -193,11 +205,10 @@ export interface SensitivityAssessment {
    * `detectorMax` field records what the detector would have returned
    * without the override, so audit logs can surface the false positive.
    */
-  override?: {
-    applied: true;
-    detectorMax: Sensitivity;
-  };
-}
+  override: sensitivityOverrideSchema.optional(),
+}).strict();
+
+export type SensitivityAssessment = z.infer<typeof sensitivityAssessmentSchema>;
 
 export function compareSensitivity(a: Sensitivity, b: Sensitivity): number {
   return SENSITIVITY_ORDER[a] - SENSITIVITY_ORDER[b];
@@ -545,6 +556,7 @@ export function buildSensitivityAssessment(input: {
   const assessment: SensitivityAssessment = {
     declared: input.declared,
     effective,
+    detectorMax,
     // Mismatch reflects the *detector's* disagreement with `declared`,
     // regardless of whether the override was honored. This keeps the
     // audit trail surfacing every false-positive we tune against.

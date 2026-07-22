@@ -248,7 +248,10 @@ Update [src/task-result-schema.ts](/Users/magnus/repos/hugin/src/task-result-sch
 
 - declared sensitivity when present
 - effective sensitivity
-- mismatch indicator when declared < effective
+- mismatch indicator when the detector maximum is higher than the declared
+  sensitivity (including owner overrides where declared equals effective)
+- for mismatches, the content-blind detector maximum and reason codes, plus
+  owner-override evidence when one was applied
 
 Use a compact structured shape, for example:
 
@@ -256,9 +259,33 @@ Use a compact structured shape, for example:
 {
   "declared": "public",
   "effective": "private",
-  "mismatch": true
+  "mismatch": true,
+  "detectorMax": "private",
+  "reasons": ["declared:public", "prompt:private"]
 }
 ```
+
+Reason codes describe detector sources and lattice levels only. They must never
+contain matched prompt text, context content, credentials, or customer data.
+Legacy schema-version-1 results without the additive evidence fields remain
+readable.
+
+The compact `hugin_await` summary preserves this evidence when present, while
+continuing to link to the complete durable result. Artifact-delivery recovery
+checkpoints the exact content-blind snapshot before the nonterminal
+`delivery:pending` transition and reuses it when writing the terminal result.
+Pipeline phase IR likewise retains the full assessment, and generated child
+tasks keep the phase's original declared sensitivity so execution cannot erase
+the mismatch by relabelling the declaration as the effective value. Phase
+execution trusts an owner override only from Hugin's separately written
+sensitivity checkpoint, bound to both the child namespace and exact task-content
+SHA-256 and authenticated with a domain-separated HMAC. The Hugin service must
+set a dedicated, randomly generated `HUGIN_SENSITIVITY_CHECKPOINT_SECRET` of at
+least 32 characters; it must not reuse the Munin API key because Munin writers
+are inside the threat model. The dispatcher scrubs this variable from every
+spawned model and operational subprocess environment. Missing or invalid
+authentication fails closed, and free-form pipeline metadata never grants
+override authority.
 
 Per-phase summaries should expose effective phase sensitivity; top-level summaries should expose effective pipeline sensitivity.
 

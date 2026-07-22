@@ -9,8 +9,16 @@ import {
 } from "../src/pipeline-summary.js";
 import { buildTerminalStatusTags } from "../src/task-status-tags.js";
 import type { MuninEntry, MuninReadRequest, MuninReadResult } from "../src/munin-client.js";
+import {
+  parseSensitivityCheckpoint,
+  SENSITIVITY_CHECKPOINT_KEY,
+} from "../src/sensitivity-checkpoint.js";
 
 type StoredEntry = MuninEntry & { found: true };
+const CHECKPOINT_SECRET = "test-only-hugin-checkpoint-secret";
+const PIPELINE_OPTIONS = {
+  sensitivityCheckpointSecret: CHECKPOINT_SECRET,
+} as const;
 
 class FakePipelineDispatchClient implements PipelineDispatchClient {
   private entries = new Map<string, StoredEntry>();
@@ -220,7 +228,15 @@ describe("handlePipelineTask", () => {
       tags: ["running", "runtime:pipeline", "type:research", "type:evaluation"],
     });
 
-    const result = await handlePipelineTask(client, hooks, taskNs, parentEntry, 4);
+    const result = await handlePipelineTask(
+      client,
+      hooks,
+      taskNs,
+      parentEntry,
+      4,
+      undefined,
+      PIPELINE_OPTIONS,
+    );
 
     expect(result).toEqual({ hadTask: true, queueDepth: 4 });
 
@@ -268,6 +284,22 @@ describe("handlePipelineTask", () => {
       "sensitivity:internal",
     ]);
     expect(exploreStatus?.content).toContain("- **Pipeline:** 20260403-valid-pipeline");
+    const exploreSensitivity = client.get(
+      "tasks/20260403-valid-pipeline-explore",
+      SENSITIVITY_CHECKPOINT_KEY,
+    );
+    expect(exploreSensitivity?.tags).toEqual(["type:task-sensitivity-checkpoint"]);
+    expect(
+      parseSensitivityCheckpoint(
+        exploreSensitivity?.content ?? "",
+        "tasks/20260403-valid-pipeline-explore",
+        exploreStatus?.content ?? "",
+        CHECKPOINT_SECRET,
+      ),
+    ).toEqual({
+      effective: "internal",
+      mismatch: false,
+    });
 
     const synthesizeStatus = client.get(
       "tasks/20260403-valid-pipeline-synthesize",
@@ -310,6 +342,73 @@ describe("handlePipelineTask", () => {
     });
   });
 
+  it("checkpoints an explicitly public phase without introducing an internal mismatch", async () => {
+    const client = new FakePipelineDispatchClient();
+    const { hooks } = createPipelineHooks(client);
+    const taskNs = "tasks/20260403-public-pipeline";
+    const parentEntry = client.seed({
+      namespace: taskNs,
+      key: "status",
+      content: `## Task: Public research
+
+- **Runtime:** pipeline
+- **Submitted by:** ratatoskr
+- **Sensitivity:** public
+
+### Pipeline
+Phase: Explore
+  Runtime: claude-sdk
+  Prompt: |
+    Gather public sources.`,
+      tags: ["running", "runtime:pipeline"],
+    });
+
+    await handlePipelineTask(
+      client,
+      hooks,
+      taskNs,
+      parentEntry,
+      0,
+      undefined,
+      PIPELINE_OPTIONS,
+    );
+
+    const childNs = "tasks/20260403-public-pipeline-explore";
+    const childStatus = client.get(childNs, "status");
+    const checkpoint = client.get(childNs, SENSITIVITY_CHECKPOINT_KEY);
+    expect(
+      parseSensitivityCheckpoint(
+        checkpoint?.content ?? "",
+        childNs,
+        childStatus?.content ?? "",
+        CHECKPOINT_SECRET,
+      ),
+    ).toEqual({
+      effective: "public",
+      mismatch: false,
+    });
+  });
+
+  it("fails closed before creating a child when the Hugin checkpoint secret is absent", async () => {
+    const client = new FakePipelineDispatchClient();
+    const { hooks } = createPipelineHooks(client);
+    const taskNs = "tasks/20260403-no-checkpoint-secret";
+    const parentEntry = client.seed({
+      namespace: taskNs,
+      key: "status",
+      content: makeValidPipelineContent(),
+      tags: ["running", "runtime:pipeline"],
+    });
+
+    await handlePipelineTask(client, hooks, taskNs, parentEntry, 0);
+
+    expect(client.get(taskNs, "status")?.tags).toContain("failed");
+    expect(client.get(taskNs, "result")?.content).toContain(
+      "sensitivity checkpoint secret must contain at least 32 characters",
+    );
+    expect(client.get("tasks/20260403-no-checkpoint-secret-explore", "status")).toBeNull();
+  });
+
   it("fails the parent task cleanly when pipeline compile validation fails", async () => {
     const client = new FakePipelineDispatchClient();
     const { hooks, promotedTaskIds, refreshedPipelineIds } = createPipelineHooks(client);
@@ -330,7 +429,7 @@ Phase: Explore
       tags: ["running", "runtime:pipeline", "type:research"],
     });
 
-    await handlePipelineTask(client, hooks, taskNs, parentEntry, 1);
+    await handlePipelineTask(client, hooks, taskNs, parentEntry, 1, undefined, PIPELINE_OPTIONS);
 
     expect(client.get(taskNs, "spec")).toBeNull();
     expect(client.listByNamespace(`${taskNs}-`)).toHaveLength(0);
@@ -378,7 +477,7 @@ Phase: Explore
       tags: ["pending", "runtime:claude"],
     });
 
-    await handlePipelineTask(client, hooks, taskNs, parentEntry, 2);
+    await handlePipelineTask(client, hooks, taskNs, parentEntry, 2, undefined, PIPELINE_OPTIONS);
 
     expect(client.get(taskNs, "spec")).toBeNull();
     expect(client.get(compiled.phases[1]!.taskNamespace, "status")).toBeNull();
@@ -424,7 +523,7 @@ Phase: Explore
       "simulated child write failure"
     );
 
-    await handlePipelineTask(client, hooks, taskNs, parentEntry, 3);
+    await handlePipelineTask(client, hooks, taskNs, parentEntry, 3, undefined, PIPELINE_OPTIONS);
 
     const rolledBackChild = client.get(compiled.phases[0]!.taskNamespace, "status");
     expect(rolledBackChild?.tags).toEqual([

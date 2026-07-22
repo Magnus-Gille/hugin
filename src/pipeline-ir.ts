@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { sensitivitySchema, type Sensitivity } from "./sensitivity.js";
+import {
+  sensitivityAssessmentSchema,
+  sensitivitySchema,
+  type Sensitivity,
+  type SensitivityAssessment,
+} from "./sensitivity.js";
 
 export const pipelineSensitivitySchema = sensitivitySchema;
 export type PipelineSensitivity = Sensitivity;
@@ -51,6 +56,7 @@ export const pipelinePhaseIRSchema = z.object({
   sideEffects: z.array(pipelineSideEffectIdSchema).default([]),
   declaredSensitivity: pipelineSensitivitySchema.optional(),
   effectiveSensitivity: pipelineSensitivitySchema,
+  sensitivityAssessment: sensitivityAssessmentSchema.optional(),
   autoRouted: z.boolean().optional(),
   routingReason: z.string().min(1).optional(),
 });
@@ -80,4 +86,5 @@ export interface PipelinePhaseTaskDraft {
   content: string;
   tags: string[];
   classification: PipelineSensitivity;
+  sensitivityAssessment?: SensitivityAssessment;
 }

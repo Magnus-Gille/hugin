@@ -157,6 +157,18 @@ function seededStatus(tags: string[]): Record<string, Record<string, FakeEntry>>
           completedAt: "2026-07-15T09:40:00.000Z",
           bodyKind: "response",
           bodyText: "done",
+          sensitivity: {
+            declared: "internal",
+            effective: "internal",
+            mismatch: true,
+            detectorMax: "private",
+            reasons: [
+              "declared:internal",
+              "prompt:private",
+              "owner-override:internal<private",
+            ],
+            override: { applied: true, detectorMax: "private" },
+          },
           repositoryOutcome: { state: "publication-failed", baseBranch: "master", baseCommit: "a".repeat(40) },
           repositoryChange: {
             baseBranch: "master",
@@ -249,6 +261,18 @@ describe("recoverPublicationForTask", () => {
     const resultStructured = JSON.parse(store.get(NS)!.get("result-structured")!.content);
     expect(resultStructured.repositoryOutcome.state).toBe("publication-recovered");
     expect(resultStructured.prUrl).toBe("https://github.com/Magnus-Gille/cassette/pull/28");
+    expect(resultStructured.sensitivity).toEqual({
+      declared: "internal",
+      effective: "internal",
+      mismatch: true,
+      detectorMax: "private",
+      reasons: [
+        "declared:internal",
+        "prompt:private",
+        "owner-override:internal<private",
+      ],
+      override: { applied: true, detectorMax: "private" },
+    });
 
     const resultDoc = store.get(NS)!.get("result")!.content;
     expect(resultDoc).toContain("### Publication Recovery");

@@ -23,7 +23,11 @@ interface SpawnBehavior {
   delayMs?: number;
 }
 
-const spawnCalls: Array<{ cmd: string; args: string[] }> = [];
+const spawnCalls: Array<{
+  cmd: string;
+  args: string[];
+  options?: { env?: NodeJS.ProcessEnv };
+}> = [];
 let spawnBehaviors: SpawnBehavior[] = [];
 let spawnCallIndex = 0;
 
@@ -39,8 +43,8 @@ class MockChildProcess extends EventEmitter {
 }
 
 vi.mock("node:child_process", () => ({
-  spawn: (cmd: string, args: string[]) => {
-    spawnCalls.push({ cmd, args });
+  spawn: (cmd: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => {
+    spawnCalls.push({ cmd, args, options });
     const child = new MockChildProcess();
     const behavior = spawnBehaviors[spawnCallIndex] ?? { exitCode: 0 };
     spawnCallIndex++;
@@ -1516,6 +1520,26 @@ describe("PiHarnessExecutor — success path", () => {
     // prompt flag
     expect(args).toContain("-p");
     expect(args).toContain("hello");
+  });
+
+  it("does not expose the dispatcher checkpoint secret to the Pi harness", async () => {
+    vi.stubEnv("HUGIN_SENSITIVITY_CHECKPOINT_SECRET", "dispatcher-only-secret");
+    vi.stubEnv("HUGIN_ORDINARY_CHILD_VALUE", "preserved");
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    await new PiHarnessExecutor().run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hello",
+      timeoutMs: 5000,
+    });
+
+    expect(spawnCalls[0]?.options?.env).not.toHaveProperty(
+      "HUGIN_SENSITIVITY_CHECKPOINT_SECRET",
+    );
+    expect(spawnCalls[0]?.options?.env?.HUGIN_ORDINARY_CHILD_VALUE).toBe(
+      "preserved",
+    );
   });
 
   it("uses alternate_tokens field if content field absent (text field)", async () => {

@@ -312,6 +312,7 @@ describe("sensitivity helpers", () => {
 
     expect(assessment.effective).toBe("private");
     expect(assessment.mismatch).toBe(true);
+    expect(assessment.detectorMax).toBe("private");
     expect(assessment.reasons).toContain("declared:public");
     expect(assessment.reasons).toContain("context-refs:private");
   });

@@ -5,7 +5,12 @@ import {
   pipelineSensitivitySchema,
 } from "./pipeline-ir.js";
 import { M5_OUTCOMES } from "./m5-provenance.js";
-import { sensitivitySchema } from "./sensitivity.js";
+import {
+  sensitivityOverrideSchema,
+  sensitivityReasonSchema,
+  sensitivitySchema,
+  type SensitivityAssessment,
+} from "./sensitivity.js";
 import {
   SIGNING_POLICIES,
   TASK_SIGNATURE_STATUSES,
@@ -175,10 +180,57 @@ export const taskExecutionSensitivitySchema = z.object({
   declared: sensitivitySchema.optional(),
   effective: sensitivitySchema,
   mismatch: z.boolean().default(false),
+  // Optional for schema-v1 compatibility. New producers emit this complete
+  // content-blind evidence bundle whenever mismatch=true (#280).
+  detectorMax: sensitivitySchema.optional(),
+  reasons: z.array(sensitivityReasonSchema).min(1).max(8).optional(),
+  override: sensitivityOverrideSchema.optional(),
+}).superRefine((value, ctx) => {
+  const hasEvidence = value.detectorMax !== undefined
+    || value.reasons !== undefined
+    || value.override !== undefined;
+  if (hasEvidence && (!value.detectorMax || !value.reasons)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["detectorMax"],
+      message: "sensitivity mismatch evidence requires detectorMax and reasons together",
+    });
+  }
+  if (hasEvidence && !value.mismatch) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["mismatch"],
+      message: "sensitivity mismatch evidence requires mismatch=true",
+    });
+  }
+  if (value.override && value.detectorMax !== value.override.detectorMax) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["override", "detectorMax"],
+      message: "override detectorMax must match the sensitivity detectorMax",
+    });
+  }
 });
 export type TaskExecutionSensitivity = z.infer<
   typeof taskExecutionSensitivitySchema
 >;
+
+export function buildTaskSensitivitySnapshot(
+  assessment: SensitivityAssessment | undefined,
+): TaskExecutionSensitivity | undefined {
+  if (!assessment) return undefined;
+  const snapshot: TaskExecutionSensitivity = {
+    declared: assessment.declared,
+    effective: assessment.effective,
+    mismatch: assessment.mismatch,
+  };
+  if (assessment.mismatch) {
+    snapshot.detectorMax = assessment.detectorMax;
+    snapshot.reasons = [...assessment.reasons];
+    if (assessment.override) snapshot.override = { ...assessment.override };
+  }
+  return taskExecutionSensitivitySchema.parse(snapshot);
+}
 
 // Optional runtime-owned artefact delivery state (issue #68). Added under
 // schemaVersion 1 WITHOUT a version bump or `outcome` enum widening: Codex's

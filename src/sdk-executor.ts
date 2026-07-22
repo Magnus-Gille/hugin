@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { query, type Query } from "@anthropic-ai/claude-agent-sdk";
+import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
 
 type HttpMcpServer = { type: "http"; url: string; headers?: Record<string, string> };
 type StdioMcpServer = { type: "stdio"; command: string; args: string[]; env: Record<string, string> };
@@ -276,7 +277,7 @@ export async function executeSdkTask(
         ...(task.model ? { model: task.model } : {}),
         ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
         env: {
-          ...process.env,
+          ...buildTaskSubprocessEnv(),
           HOME: "/home/magnus",
           HUGIN_TASK_ID: taskId,
         },

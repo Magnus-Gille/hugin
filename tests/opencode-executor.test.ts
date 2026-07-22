@@ -203,7 +203,8 @@ fs.writeFileSync(path.join(process.cwd(), "observed.json"), JSON.stringify({
   argv: process.argv.slice(2),
   configDir,
   config: JSON.parse(fs.readFileSync(path.join(configDir, "opencode.json"), "utf8")),
-  apiKey: process.env.HUGIN_OPENCODE_PROVIDER_API_KEY
+  apiKey: process.env.HUGIN_OPENCODE_PROVIDER_API_KEY,
+  checkpointSecret: process.env.HUGIN_SENSITIVITY_CHECKPOINT_SECRET
 }));
 console.log(JSON.stringify({ type: "tool_use", part: { type: "tool", tool: "bash", state: { status: "completed", input: { command: "npm test 2>&1" }, metadata: { exit: 0 } } } }));
 console.log(JSON.stringify({ type: "tool_use", part: { type: "tool", tool: "edit", state: { status: "completed", metadata: { filediff: { file: path.join(process.cwd(), "math.js"), additions: 1, deletions: 1 }, diff: "@@ diff" } } } }));
@@ -212,15 +213,24 @@ console.log(JSON.stringify({ type: "text", part: { text: "Fixed math.js and test
       { mode: 0o755 },
     );
 
-    const result = await executeOpencodeTask(
-      makeTask({
-        workingDir: repoDir,
-        apiKey: "owner-key",
-        opencodeCommand: fakeOpencode,
-      }),
-      "opencode-ok",
-      logDir,
-    );
+    const checkpointKey = "HUGIN_SENSITIVITY_CHECKPOINT_SECRET";
+    const previousCheckpointSecret = process.env[checkpointKey];
+    process.env[checkpointKey] = "dispatcher-only-secret-at-least-32-chars";
+    let result;
+    try {
+      result = await executeOpencodeTask(
+        makeTask({
+          workingDir: repoDir,
+          apiKey: "owner-key",
+          opencodeCommand: fakeOpencode,
+        }),
+        "opencode-ok",
+        logDir,
+      );
+    } finally {
+      if (previousCheckpointSecret === undefined) delete process.env[checkpointKey];
+      else process.env[checkpointKey] = previousCheckpointSecret;
+    }
 
     expect(result.exitCode).toBe(0);
     expect(result.resultText).toContain("Fixed math.js");
@@ -245,6 +255,7 @@ console.log(JSON.stringify({ type: "text", part: { text: "Fixed math.js and test
       "json",
       "Fix the failing test.",
     ]);
+    expect(observed.checkpointSecret).toBeUndefined();
     expect(observed.config.permission).toEqual({ edit: "allow", bash: "allow" });
     expect(observed.apiKey).toBe("owner-key");
   });

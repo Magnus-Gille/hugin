@@ -23,6 +23,7 @@ import { extractM5Provenance, sanitizeProviderTokenCount } from "../m5-provenanc
 import type { M5DelegationProvenance } from "../m5-provenance.js";
 import { estimateCostUsd } from "../model-pricing.js";
 import { getRegistryEntryById } from "../runtime-registry.js";
+import { buildTaskSubprocessEnv } from "../task-subprocess-env.js";
 import {
   getProviderConfig,
   resolveGatewayRootUrl,
@@ -949,6 +950,7 @@ export class PiHarnessExecutor implements WorkerExecutor {
       try {
         child = spawn(entry.harnessCmd ?? "pi", args, {
           stdio: ["ignore", "pipe", "pipe"],
+          env: buildTaskSubprocessEnv(),
         });
       } catch (spawnErr) {
         resolve({
