@@ -1,12 +1,17 @@
 import { z } from "zod";
 import type { HomeserverGatewayConfig } from "./homeserver-executor.js";
 
-const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+const wireSha256Schema = z.string()
+  .regex(/^sha256:[a-f0-9]{64}$/)
+  .transform((value) => value.slice("sha256:".length));
 
 /** Content-blind join returned by Gille's authenticated GET /ledger/{id}. */
 export const m5LedgerAttemptBindingSchema = z.object({
   id: z.string().min(1),
-  evidenceIdentityHash: sha256Schema,
+  // Gille's ledger contract uses the explicit `sha256:` wire prefix. Hugin's
+  // durable schemas use the canonical bare digest, so normalize only after
+  // validating the exact upstream representation.
+  evidenceIdentityHash: wireSha256Schema,
   taskInstanceId: z.string().min(1),
   attemptId: z.string().min(1),
   taskType: z.string().min(1),

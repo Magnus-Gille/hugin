@@ -12,13 +12,17 @@ const binding: M5LedgerAttemptBinding = {
   taskType: "code-edit",
   modelId: "qwen3-coder-next",
 };
+const wireBinding = {
+  ...binding,
+  evidenceIdentityHash: `sha256:${binding.evidenceIdentityHash}`,
+};
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("fetchM5LedgerAttemptBinding", () => {
   it("reads the exact authenticated, id-addressable content-blind join", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      ...binding,
+      ...wireBinding,
       outcome: "pass",
       score: 1,
     }), { status: 200 }));
@@ -38,9 +42,10 @@ describe("fetchM5LedgerAttemptBinding", () => {
   });
 
   it.each([
-    ["missing evidence identity", { ...binding, evidenceIdentityHash: undefined }],
-    ["legacy unstamped row", { ...binding, taskInstanceId: null, attemptId: null }],
-    ["different ledger row", { ...binding, id: "ledger:other" }],
+    ["missing evidence identity", { ...wireBinding, evidenceIdentityHash: undefined }],
+    ["unprefixed evidence identity", binding],
+    ["legacy unstamped row", { ...wireBinding, taskInstanceId: null, attemptId: null }],
+    ["different ledger row", { ...wireBinding, id: "ledger:other" }],
   ])("fails closed for %s", async (_label, body) => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })));
     await expect(fetchM5LedgerAttemptBinding(
