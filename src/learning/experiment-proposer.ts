@@ -10,6 +10,11 @@
  * an experiment -- that stays entirely inside candidate-packager.ts and
  * experiment-store.ts.
  *
+ * Quality-floor contract: the proposer deliberately includes every rated
+ * outcome down to `wrong` so failures can reveal a configuration signal; the
+ * downstream packager independently defaults to `pass` when freezing a
+ * verifiable-quality experiment package, so packaging may shrink a proposal.
+ *
  * Read-only guarantee: `proposeExperiments` is a pure function over
  * caller-supplied candidates and timelines. `proposeExperimentsFromRegistry`
  * only calls `listEventsForTask` (via `buildTaskLifecycleTimeline`, itself

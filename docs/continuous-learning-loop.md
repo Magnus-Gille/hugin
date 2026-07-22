@@ -139,6 +139,13 @@ it does not borrow repository evidence from a separate Claude, Codex, or
 OpenCode run. Invalid, cross-task, non-admitted, provenance-incomplete, or
 managed-repository combinations fail closed and do not enter the pool.
 
+The cadence intentionally applies two different quality floors. The proposer
+includes every independently rated outcome down to `wrong`, because failures
+are necessary to detect a quality-rate difference between configurations. The
+packager then defaults to `pass` and freezes only the verifiable-quality
+subset, so a valid proposal can shrink or be refused during packaging; that is
+a trust boundary, not lost evidence.
+
 Capture is a recoverable post-terminal side effect. Eligible task status moves
 through `learning-registry:pending` to `learning-registry:captured`; startup
 and periodic reconciliation replay the natural-key-idempotent submission,
