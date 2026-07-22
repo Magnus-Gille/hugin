@@ -8,6 +8,11 @@
  * runs, evaluates, or promotes an experiment -- it hands a frozen package to
  * the existing `LearningExperimentStore.create` surface for that.
  *
+ * Quality-floor contract: unlike the proposer, which includes failed ratings
+ * to detect a configuration signal, this packager defaults to `pass` and
+ * freezes only the verifiable-quality subset; a proposed population may
+ * therefore shrink or be refused here without contradicting the proposal.
+ *
  * Read-only guarantee: every function here either takes already-fetched
  * evidence (the pure `qualifyCandidate` / `packageExperimentCandidates`
  * core) or, in `packageAndHandOff`, only calls `listEventsForTask` (a read)
