@@ -161,6 +161,7 @@ import {
   buildSchedulerDecisionPrediction,
   buildSchedulerDecisionOutcomeFromTerminalResult,
   hashSchedulerPrediction,
+  resolveSchedulerRuntimeEstimates,
   SchedulerRuntimeEstimatorCache,
   type SchedulerDecisionPrediction,
   type SchedulerTerminalResultRevision,
@@ -4801,18 +4802,36 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   let schedulerPrediction: SchedulerDecisionPrediction | null = null;
   let tagsForClaim = stripSchedulerDecisionPointers(claimInputTags);
   try {
+    const compareShadow = config.schedulerShadowEnabled
+      && !pendingPage.truncated
+      && !runningPage.truncated;
+    const schedulerCandidates = compareShadow
+      ? (() => {
+          const runtimes = eligibleTasks.map((candidate) =>
+            schedulerRequestedRuntimeFromTags(candidate.tags),
+          );
+          const estimates = resolveSchedulerRuntimeEstimates(
+            runtimes,
+            true,
+            (runtime) => schedulerRuntimeEstimator.get(runtime),
+          );
+          return eligibleTasks.map((candidate, index) => ({
+            taskRef: { namespace: candidate.namespace, key: "status" as const },
+            createdAt: candidate.created_at,
+            serviceEstimate: estimates[index] ?? null,
+          }));
+        })()
+      : [{
+          taskRef: { namespace: taskNs, key: "status" as const },
+          createdAt: taskResult.created_at,
+          serviceEstimate: null,
+        }];
     const candidatePrediction = buildSchedulerDecisionPrediction({
       decisionId: randomUUID(),
       observedAt: new Date().toISOString(),
       championTaskRef: { namespace: taskNs, key: "status" },
-      candidates: eligibleTasks.map((candidate) => {
-        const runtime = schedulerRequestedRuntimeFromTags(candidate.tags);
-        return {
-          taskRef: { namespace: candidate.namespace, key: "status" },
-          createdAt: candidate.created_at,
-          serviceEstimate: runtime ? schedulerRuntimeEstimator.get(runtime) : null,
-        };
-      }),
+      candidates: schedulerCandidates,
+      eligibleTaskCount: eligibleTasks.length,
       pendingEnumerationComplete: !pendingPage.truncated,
       runningEnumerationComplete: !runningPage.truncated,
       shadowEnabled: config.schedulerShadowEnabled,

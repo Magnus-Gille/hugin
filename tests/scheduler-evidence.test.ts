@@ -9,6 +9,7 @@ import {
   schedulerDecisionOutcomeSchema,
   schedulerDecisionPredictionSchema,
   schedulerServiceClockEvidenceSchema,
+  resolveSchedulerRuntimeEstimates,
   SchedulerRuntimeEstimatorCache,
 } from "../src/scheduler-evidence.js";
 import { createHash } from "node:crypto";
@@ -88,7 +89,7 @@ describe("scheduler evidence", () => {
     expect(disabled.challenger).toMatchObject({
       taskRef: null,
       reason: "insufficient-evidence",
-      evidenceReasons: ["shadow-disabled"],
+      evidenceReasons: ["estimate-missing", "shadow-disabled"],
     });
     expect(enabled.challenger).toMatchObject({
       taskRef: candidates[1].taskRef,
@@ -125,7 +126,7 @@ describe("scheduler evidence", () => {
     });
   });
 
-  it("abstains deterministically for missing estimates, invalid time, and truncated windows", () => {
+  it("abstains deterministically for missing estimates and truncated windows", () => {
     const missing = buildSchedulerDecisionPrediction({
       decisionId,
       observedAt: "2026-07-22T21:00:00.000Z",
@@ -145,7 +146,7 @@ describe("scheduler evidence", () => {
       overdueThresholdSeconds: 1800,
       taskRef: null,
       reason: "insufficient-evidence",
-      evidenceReasons: ["window-truncated", "estimate-missing", "candidate-timestamp-invalid"],
+      evidenceReasons: ["window-truncated", "estimate-missing"],
       serviceEstimate: null,
     });
     expect(missing.window).toMatchObject({
@@ -178,6 +179,48 @@ describe("scheduler evidence", () => {
         evidenceReasons: ["estimate-missing", "estimator-version-mismatch"],
       });
     }
+  });
+
+  it("treats future-dated candidates as invalid timing evidence", () => {
+    const prediction = buildSchedulerDecisionPrediction({
+      decisionId,
+      observedAt: "2026-07-22T21:00:00.000Z",
+      championTaskRef: taskRef,
+      candidates: [{
+        taskRef,
+        createdAt: "2026-07-22T21:00:00.001Z",
+        serviceEstimate: estimate(10),
+      }],
+      pendingEnumerationComplete: true,
+      runningEnumerationComplete: true,
+      shadowEnabled: true,
+    });
+
+    expect(prediction.challenger).toMatchObject({
+      reason: "insufficient-evidence",
+      evidenceReasons: ["candidate-timestamp-invalid"],
+    });
+  });
+
+  it("skips disabled lookups and memoizes enabled runtime estimates for large queues", () => {
+    const runtimes = Array.from({ length: 4_000 }, (_, index) =>
+      index % 2 === 0 ? "codex" as const : "claude" as const,
+    );
+    let lookups = 0;
+    const lookup = (runtime: "codex" | "claude") => {
+      lookups += 1;
+      return estimate(runtime === "codex" ? 10 : 20);
+    };
+
+    expect(resolveSchedulerRuntimeEstimates(runtimes, false, lookup)).toEqual(
+      Array.from({ length: 4_000 }, () => null),
+    );
+    expect(lookups).toBe(0);
+
+    const resolved = resolveSchedulerRuntimeEstimates(runtimes, true, lookup);
+    expect(lookups).toBe(2);
+    expect(resolved[0]?.seconds).toBe(10);
+    expect(resolved[1]?.seconds).toBe(20);
   });
 
   it("uses only live-process created outcomes in the runtime estimator cache", () => {

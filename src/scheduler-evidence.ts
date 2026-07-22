@@ -209,6 +209,7 @@ export interface BuildSchedulerDecisionPredictionInput {
   observedAt: string;
   championTaskRef: z.input<typeof schedulerTaskRefSchema>;
   candidates: SchedulerShadowCandidate[];
+  eligibleTaskCount?: number;
   pendingEnumerationComplete: boolean;
   runningEnumerationComplete: boolean;
   shadowEnabled: boolean;
@@ -226,10 +227,19 @@ export function buildSchedulerDecisionPrediction(
   const observedAtMs = Date.parse(input.observedAt);
   if (!Number.isFinite(observedAtMs)) throw new Error("scheduler observation time is invalid");
   if (input.candidates.length === 0) throw new Error("scheduler prediction requires candidates");
+  const windowComplete = input.pendingEnumerationComplete && input.runningEnumerationComplete;
+  const evaluateCandidates = input.shadowEnabled && windowComplete;
+  const eligibleTaskCount = input.eligibleTaskCount ?? input.candidates.length;
+  if (!Number.isInteger(eligibleTaskCount) || eligibleTaskCount < input.candidates.length) {
+    throw new Error("eligible task count cannot be smaller than supplied candidates");
+  }
+  if (evaluateCandidates && eligibleTaskCount !== input.candidates.length) {
+    throw new Error("enabled complete-window comparison requires every eligible candidate");
+  }
 
   const candidates = input.candidates.map((candidate) => {
     const taskRef = schedulerTaskRefSchema.parse(candidate.taskRef);
-    const estimateResult = candidate.serviceEstimate === null
+    const estimateResult = !evaluateCandidates || candidate.serviceEstimate === null
       ? null
       : schedulerServiceEstimateSchema.safeParse(candidate.serviceEstimate);
     const estimateValid = estimateResult?.success === true
@@ -239,17 +249,20 @@ export function buildSchedulerDecisionPrediction(
       createdAt: candidate.createdAt,
       createdAtMs: Date.parse(candidate.createdAt),
       estimate: estimateValid ? estimateResult.data : null,
-      estimateInvalid: estimateResult !== null && !estimateValid,
+      estimateInvalid: evaluateCandidates && estimateResult !== null && !estimateValid,
     };
   });
   if (candidates[0]!.taskRef.namespace !== championTaskRef.namespace) {
     throw new Error("scheduler champion must remain the first eligible FIFO task");
   }
 
-  const missingEstimates = candidates.filter((candidate) => candidate.estimate === null).length;
+  const missingEstimates = evaluateCandidates
+    ? candidates.filter((candidate) => candidate.estimate === null).length
+    : eligibleTaskCount;
   const invalidEstimate = candidates.some((candidate) => candidate.estimateInvalid);
-  const invalidTimestamp = candidates.some((candidate) => !Number.isFinite(candidate.createdAtMs));
-  const windowComplete = input.pendingEnumerationComplete && input.runningEnumerationComplete;
+  const invalidTimestamp = evaluateCandidates && candidates.some(
+    (candidate) => !Number.isFinite(candidate.createdAtMs) || candidate.createdAtMs > observedAtMs,
+  );
   const evidenceReasons: z.infer<typeof challengerEvidenceReasonSchema>[] = [];
   if (!windowComplete) evidenceReasons.push("window-truncated");
   if (missingEstimates > 0) evidenceReasons.push("estimate-missing");
@@ -298,7 +311,7 @@ export function buildSchedulerDecisionPrediction(
       serviceEstimate: chosen?.estimate ?? null,
     },
     window: {
-      eligibleTasks: candidates.length,
+      eligibleTasks: eligibleTaskCount,
       pendingEnumerationComplete: input.pendingEnumerationComplete,
       runningEnumerationComplete: input.runningEnumerationComplete,
       eligibilityAuthority: "legacy-unbound-group-sequence",
@@ -306,6 +319,21 @@ export function buildSchedulerDecisionPrediction(
       missingEstimates,
     },
     estimatorVersion: SCHEDULER_ESTIMATOR_VERSION,
+  });
+}
+
+/** Resolve at most one bounded estimate per finite requested runtime per poll. */
+export function resolveSchedulerRuntimeEstimates<T extends DispatcherRuntime>(
+  runtimes: readonly (T | null)[],
+  enabled: boolean,
+  lookup: (runtime: T) => z.infer<typeof schedulerServiceEstimateSchema> | null,
+): Array<z.infer<typeof schedulerServiceEstimateSchema> | null> {
+  if (!enabled) return runtimes.map(() => null);
+  const memoized = new Map<T, z.infer<typeof schedulerServiceEstimateSchema> | null>();
+  return runtimes.map((runtime) => {
+    if (runtime === null) return null;
+    if (!memoized.has(runtime)) memoized.set(runtime, lookup(runtime));
+    return memoized.get(runtime) ?? null;
   });
 }
 
