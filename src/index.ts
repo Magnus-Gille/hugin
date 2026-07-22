@@ -149,8 +149,10 @@ import {
 } from "./task-graph.js";
 import {
   buildAwaitingApprovalTags,
+  buildLeasedStatusTags,
   buildTerminalStatusTags,
   getPersistentStatusTags,
+  stripSchedulerDecisionPointers,
 } from "./task-status-tags.js";
 import { LearningLoopCollector } from "./learning-loop-collector.js";
 import { LearningRegistryStore } from "./learning-registry-store.js";
@@ -2397,12 +2399,7 @@ function buildClaimTags(
   baseTags: string[],
   lifecycle: string,
 ): string[] {
-  return [
-    lifecycle,
-    ...getPersistentStatusTags(baseTags),
-    `claimed_by:${workerId}`,
-    `lease_expires:${leaseExpiry()}`,
-  ];
+  return buildLeasedStatusTags(baseTags, lifecycle, workerId, leaseExpiry());
 }
 
 /** Strip lease metadata from tags (for final status updates). */
@@ -4666,11 +4663,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
   // Claim the task with compare-and-swap, attaching worker identity and lease
   // For auto-routed tasks: replace runtime:auto with the resolved runtime and add routing:auto
-  const tagsForClaim = parsedTask?.autoRouted && parsedTask.runtime
+  const claimInputTags = parsedTask?.autoRouted && parsedTask.runtime
     ? entry.tags
         .map((t) => (t === "runtime:auto" ? `runtime:${parsedTask!.runtime}` : t))
         .concat("routing:auto")
     : entry.tags;
+  // Until the dispatcher adds its own schema-valid prediction in the next
+  // slice, never carry caller-supplied scheduler identities into a winning
+  // claim. attachSchedulerDecisionPointer performs the same replacement when
+  // prediction persistence is wired.
+  const tagsForClaim = stripSchedulerDecisionPointers(claimInputTags);
   const claimTags = buildClaimTags(tagsForClaim, "running");
 
   // Rotate the mcp-session-id so all MCP calls for this task execution share
@@ -4691,6 +4693,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       entry.updated_at = claimResult.updated_at;
       claimAcceptedAt = claimResult.updated_at;
     }
+    // From this point onward the winning claim tags are authoritative. In
+    // particular, dispatcher-owned scheduler pointers added to the claim CAS
+    // must not be replaced by the pre-claim pending snapshot during renewal,
+    // delivery checkpoints, terminalization, or recovery hand-off.
+    entry.tags = claimTags;
   } catch (err) {
     // Another dispatcher won the CAS. Its claim-time assessment owns the
     // eventual result; retaining ours risks applying stale identity to a
@@ -4714,7 +4721,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   console.log(`Executing task ${taskNs}...`);
 
   // Start periodic lease renewal
-  startLeaseRenewal(taskNs, entry.content, entry.tags);
+  startLeaseRenewal(taskNs, entry.content, claimTags);
 
   try {
     if (declaredRuntime === "pipeline") {

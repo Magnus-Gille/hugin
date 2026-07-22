@@ -29,6 +29,26 @@ const PUBLICATION_PREFIX = "publication:";
 // Durable post-terminal learning capture. `pending` survives restart until
 // the authoritative M5 ledger join and all idempotent registry writes finish.
 const LEARNING_REGISTRY_PREFIX = "learning-registry:";
+// Dispatcher-owned content-blind scheduler decision pointers. These bind the
+// winning claim to create-only prediction/outcome evidence and therefore must
+// survive every lifecycle rewrite until recovery can finish.
+export const SCHEDULER_DECISION_PREFIX = "scheduler-decision:";
+export const SCHEDULER_PREDICTION_DIGEST_PREFIX = "scheduler-prediction-sha256:";
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+export interface SchedulerDecisionPointer {
+  decisionId: string;
+  predictionDigest: string;
+}
+
+export function stripSchedulerDecisionPointers(tags: string[]): string[] {
+  return tags.filter(
+    (tag) => !tag.startsWith(SCHEDULER_DECISION_PREFIX)
+      && !tag.startsWith(SCHEDULER_PREDICTION_DIGEST_PREFIX),
+  );
+}
 
 function dedupeTags(tags: string[]): string[] {
   const seen = new Set<string>();
@@ -66,6 +86,22 @@ export function getPersistentStatusTags(
   const taskTaxonomyTags = tags.filter((tag) => tag.startsWith(TASK_TAXONOMY_PREFIX));
   const runtimeRowTags = tags.filter((tag) => tag.startsWith(RUNTIME_ROW_PREFIX));
   const idempotencyTags = tags.filter((tag) => tag.startsWith(IDEMPOTENCY_PREFIX));
+  const rawSchedulerDecisionTags = tags.filter((tag) => tag.startsWith(SCHEDULER_DECISION_PREFIX));
+  const rawSchedulerPredictionTags = tags.filter((tag) => tag.startsWith(SCHEDULER_PREDICTION_DIGEST_PREFIX));
+  const schedulerDecisionTags = rawSchedulerDecisionTags.filter((tag) => {
+    const value = tag.slice(SCHEDULER_DECISION_PREFIX.length);
+    return UUID_PATTERN.test(value);
+  });
+  const schedulerPredictionTags = rawSchedulerPredictionTags.filter((tag) => {
+    const value = tag.slice(SCHEDULER_PREDICTION_DIGEST_PREFIX.length);
+    return SHA256_PATTERN.test(value);
+  });
+  const schedulerPointerTags = rawSchedulerDecisionTags.length === 1
+    && rawSchedulerPredictionTags.length === 1
+    && schedulerDecisionTags.length === 1
+    && schedulerPredictionTags.length === 1
+    ? [...schedulerDecisionTags, ...schedulerPredictionTags]
+    : [];
 
   return dedupeTags([
     ...(runtimeTag ? [runtimeTag] : []),
@@ -83,7 +119,45 @@ export function getPersistentStatusTags(
     ...taskTaxonomyTags,
     ...runtimeRowTags,
     ...idempotencyTags,
+    ...schedulerPointerTags,
   ]);
+}
+
+/**
+ * Strip any caller-supplied scheduler pointers and attach exactly one
+ * dispatcher-owned identity/digest pair before the claim CAS.
+ */
+export function attachSchedulerDecisionPointer(
+  tags: string[],
+  pointer: SchedulerDecisionPointer,
+): string[] {
+  if (!UUID_PATTERN.test(pointer.decisionId)) {
+    throw new Error("scheduler decision id must be a UUID");
+  }
+  if (!SHA256_PATTERN.test(pointer.predictionDigest)) {
+    throw new Error("scheduler prediction digest must be lowercase SHA-256");
+  }
+  const sanitized = stripSchedulerDecisionPointers(tags);
+  return dedupeTags([
+    ...sanitized,
+    `${SCHEDULER_DECISION_PREFIX}${pointer.decisionId}`,
+    `${SCHEDULER_PREDICTION_DIGEST_PREFIX}${pointer.predictionDigest}`,
+  ]);
+}
+
+/** Build one running/reclaimed lease tag set from authoritative base tags. */
+export function buildLeasedStatusTags(
+  baseTags: string[],
+  lifecycle: string,
+  claimedBy: string,
+  leaseExpires: string,
+): string[] {
+  return [
+    lifecycle,
+    ...getPersistentStatusTags(baseTags),
+    `claimed_by:${claimedBy}`,
+    `lease_expires:${leaseExpires}`,
+  ];
 }
 
 export function buildTerminalStatusTags(
