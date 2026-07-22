@@ -497,6 +497,78 @@ describe("buildTools — hugin_await", () => {
       },
     });
   });
+
+  it("keeps terminal error details while compacting a failed structured result", async () => {
+    const await_ = vi.fn(async () => ({
+      status: "failed",
+      result: {
+        outcome: "failed",
+        exitCode: 1,
+        bodyText: "executor failed",
+        runtimeMetadata: { learningTask: { durable: "full provenance" } },
+      },
+      error: {
+        task_id: "t-failed",
+        kind: "executor_failed",
+        message: "executor failed",
+        retryable: false,
+      },
+    }));
+    const tools = buildTools({
+      broker: fakeBroker({ await_ }),
+      sessionId: "sess",
+      submitter: "claude-code",
+    });
+
+    const result = await tools.await_.handler({
+      task_id: "t-failed",
+      verbosity: "summary",
+    });
+
+    expect(parseResult(result)).toEqual({
+      task_id: "t-failed",
+      status: "failed",
+      outcome: "failed",
+      exitCode: 1,
+      bodyText: "executor failed",
+      error: {
+        task_id: "t-failed",
+        kind: "executor_failed",
+        message: "executor failed",
+        retryable: false,
+      },
+      refs: {
+        status: { namespace: "tasks/t-failed", key: "status" },
+        fullResult: { namespace: "tasks/t-failed", key: "result-structured" },
+      },
+    });
+  });
+
+  it("returns a compact unknown response with only the reachable status ref", async () => {
+    const await_ = vi.fn(async () => ({
+      status: "unknown",
+      reason: "task_id_not_found",
+    }));
+    const tools = buildTools({
+      broker: fakeBroker({ await_ }),
+      sessionId: "sess",
+      submitter: "claude-code",
+    });
+
+    const result = await tools.await_.handler({
+      task_id: "t-missing",
+      verbosity: "summary",
+    });
+
+    expect(parseResult(result)).toEqual({
+      task_id: "t-missing",
+      status: "unknown",
+      reason: "task_id_not_found",
+      refs: {
+        status: { namespace: "tasks/t-missing", key: "status" },
+      },
+    });
+  });
 });
 
 describe("buildTools — hugin_rate", () => {
