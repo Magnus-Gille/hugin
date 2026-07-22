@@ -115,7 +115,10 @@ export async function handlePipelineTask(
   entry: MuninEntry & { found: true },
   queueDepth: number,
   ollamaHosts?: OllamaHost[],
-  options?: { allowOwnerOverride?: boolean },
+  options?: {
+    allowOwnerOverride?: boolean;
+    sensitivityCheckpointSecret?: string;
+  },
 ): Promise<{ hadTask: boolean; queueDepth: number }> {
   const pipelineId = extractTaskId(taskNs);
   let pipeline: PipelineIR;
@@ -176,6 +179,7 @@ export async function handlePipelineTask(
             draft.namespace,
             draft.content,
             sensitivity,
+            options?.sensitivityCheckpointSecret ?? "",
           ),
           [...SENSITIVITY_CHECKPOINT_TAGS],
           undefined,

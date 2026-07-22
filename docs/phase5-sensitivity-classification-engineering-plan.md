@@ -279,7 +279,11 @@ tasks keep the phase's original declared sensitivity so execution cannot erase
 the mismatch by relabelling the declaration as the effective value. Phase
 execution trusts an owner override only from Hugin's separately written
 sensitivity checkpoint, bound to both the child namespace and exact task-content
-SHA-256; free-form pipeline metadata never grants override authority.
+SHA-256 and authenticated with a domain-separated HMAC. The Hugin service must
+set a dedicated, randomly generated `HUGIN_SENSITIVITY_CHECKPOINT_SECRET` of at
+least 32 characters; it must not reuse the Munin API key because Munin writers
+are inside the threat model. Missing or invalid authentication fails closed,
+and free-form pipeline metadata never grants override authority.
 
 Per-phase summaries should expose effective phase sensitivity; top-level summaries should expose effective pipeline sensitivity.
 

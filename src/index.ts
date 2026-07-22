@@ -365,6 +365,11 @@ const config = {
   host: process.env.HUGIN_HOST || "127.0.0.1",
   muninUrl: process.env.MUNIN_URL || "http://localhost:3030",
   muninApiKey: process.env.MUNIN_API_KEY || "",
+  // Hugin-only producer key for sensitivity checkpoints. This must not be a
+  // Munin credential: other agents can legitimately write tasks/* and must
+  // not be able to mint phase authority.
+  sensitivityCheckpointSecret:
+    process.env.HUGIN_SENSITIVITY_CHECKPOINT_SECRET?.trim() || "",
   pollIntervalMs: parseBoundedPositiveInt(
     process.env.HUGIN_POLL_INTERVAL_MS,
     30_000,
@@ -512,6 +517,13 @@ if (config.signingPolicy !== "off") {
       "HUGIN_SIGNING_POLICY=require but no keys configured (set HUGIN_SUBMITTER_KEYS or HUGIN_SUBMITTER_KEYS_FILE). All tasks will be rejected.",
     );
   }
+}
+
+if (config.sensitivityCheckpointSecret.length < 32) {
+  console.warn(
+    "HUGIN_SENSITIVITY_CHECKPOINT_SECRET is missing or shorter than 32 characters; " +
+      "pipeline decomposition will fail closed and delivery recovery will recompute sensitivity",
+  );
 }
 
 const legacyClaudeExecutor = process.env.HUGIN_CLAUDE_EXECUTOR?.trim().toLowerCase();
@@ -1104,14 +1116,13 @@ function getTaskSensitivityAssessment(task: TaskConfig): SensitivityAssessment {
   const refsSensitivity = task.contextResolution?.maxSensitivity;
   return buildSensitivityAssessment({
     declared,
-    baseline: task.pipeline?.sensitivity ?? "internal",
+    // Any authentic pipeline classification arrives through the HMAC-bound
+    // checkpoint and bypasses this fallback. Free-form pipeline fields are
+    // untrusted here and must never lower the ordinary internal floor.
+    baseline: "internal",
     context: contextSensitivity,
     prompt: promptDetection.sensitivity,
     refs: refsSensitivity,
-    // A pipeline phase inherits the compiler's effective classification. Keep
-    // it as an explicit reason rather than an unexplained elevated baseline so
-    // dependency-driven mismatches remain useful to content-blind mining.
-    inherited: task.pipeline?.sensitivity,
     hardPrivate: promptDetection.hardPrivate,
     // Pipeline-phase authority is accepted only through the separate,
     // content-hash-bound Hugin checkpoint. Free-form pipeline metadata must
@@ -2593,11 +2604,16 @@ async function writeSensitivityCheckpoint(
   client: MuninClient,
   classification?: string,
 ): Promise<void> {
-  if (!sensitivity) return;
+  if (!sensitivity || !config.sensitivityCheckpointSecret) return;
   await client.write(
     taskNs,
     SENSITIVITY_CHECKPOINT_KEY,
-    buildSensitivityCheckpoint(taskNs, taskContent, sensitivity),
+    buildSensitivityCheckpoint(
+      taskNs,
+      taskContent,
+      sensitivity,
+      config.sensitivityCheckpointSecret,
+    ),
     [...SENSITIVITY_CHECKPOINT_TAGS],
     undefined,
     classification,
@@ -2612,7 +2628,12 @@ async function readSensitivityCheckpoint(
   try {
     const entry = await client.read(taskNs, SENSITIVITY_CHECKPOINT_KEY);
     if (!entry?.content) return undefined;
-    return parseSensitivityCheckpoint(entry.content, taskNs, taskContent);
+    return parseSensitivityCheckpoint(
+      entry.content,
+      taskNs,
+      taskContent,
+      config.sensitivityCheckpointSecret,
+    );
   } catch {
     return undefined;
   }
@@ -4703,7 +4724,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         entry,
         queueDepth,
         await probeAllHosts(),
-        { allowOwnerOverride: isOwnerSubmitter(submittedBy) },
+        {
+          allowOwnerOverride: isOwnerSubmitter(submittedBy),
+          sensitivityCheckpointSecret: config.sensitivityCheckpointSecret,
+        },
       );
       stopLeaseRenewal();
       stopCancellationWatch();
