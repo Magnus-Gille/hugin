@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { isSovereignGatewayHost } from "./orchestrator/provider-config.js";
+import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
 
 export type OpencodePermissionProfile = "read-only" | "trusted-code";
 
@@ -485,7 +486,7 @@ export async function executeOpencodeTask(
       cwd: task.workingDir,
       stdio: ["ignore", "pipe", "pipe"],
       env: {
-        ...process.env,
+        ...buildTaskSubprocessEnv(),
         OPENCODE_CONFIG_DIR: configDir,
         [PROVIDER_API_KEY_ENV]: task.apiKey,
         HUGIN_TASK_ID: taskId,

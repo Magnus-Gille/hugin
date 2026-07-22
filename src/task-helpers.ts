@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import type { MuninEntry, MuninQueryResult, MuninReadResult } from "./munin-client.js";
+import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
 
 /**
  * Task-workspace roots (issue #139).
@@ -703,7 +704,10 @@ async function runGitFetch(
   bypassSystemSshConfig: boolean,
 ): Promise<{ ok: boolean; exitCode: number | null; output: string }> {
   const home = "/home/magnus";
-  const env: Record<string, string> = { ...process.env as Record<string, string>, HOME: home };
+  const env: Record<string, string> = {
+    ...buildTaskSubprocessEnv() as Record<string, string>,
+    HOME: home,
+  };
   if (bypassSystemSshConfig) {
     env.GIT_SSH_COMMAND = `ssh -F ${home}/.ssh/config`;
   }
@@ -840,7 +844,7 @@ export async function checkoutTaskBranch(
     const child = spawn("git", ["checkout", "-b", branchName, baseRef], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
     });
     let output = "";
     child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
@@ -911,7 +915,7 @@ export async function finalizeTaskBranch(
     const child = spawn("git", ["status", "--porcelain"], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
     });
     let out = "";
     child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
@@ -924,7 +928,7 @@ export async function finalizeTaskBranch(
       const child = spawn("git", ["add", "-A"], {
         cwd: workingDir,
         stdio: "ignore",
-        env: { ...process.env, HOME: "/home/magnus" },
+        env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
       });
       child.on("close", (code) => resolve(code === 0));
       child.on("error", () => resolve(false));
@@ -938,7 +942,7 @@ export async function finalizeTaskBranch(
           {
             cwd: workingDir,
             stdio: "ignore",
-            env: { ...process.env, HOME: "/home/magnus" },
+            env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
           },
         );
         child.on("close", () => resolve());
@@ -952,7 +956,7 @@ export async function finalizeTaskBranch(
     const child = spawn("git", ["rev-list", "--count", `${comparisonBase}..HEAD`], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
     });
     let out = "";
     child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
@@ -1005,7 +1009,7 @@ export async function finalizeTaskBranch(
     const child = spawn("git", ["remote", "get-url", "--push", "origin"], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "ignore"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
     });
     let out = "";
     child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
@@ -1029,7 +1033,7 @@ export async function finalizeTaskBranch(
     const child = spawn("git", ["push", "-u", "origin", branchName], {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
     });
     let output = "";
     child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
@@ -1090,7 +1094,7 @@ async function runGitCapture(
     const child = spawn("git", args, {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
     });
     const stdout: Buffer[] = [];
     let stderr = "";
@@ -1167,7 +1171,7 @@ async function cleanupLocalBranch(
     const child = spawn("git", ["checkout", "--detach", detachTarget], {
       cwd: workingDir,
       stdio: "ignore",
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
     });
     child.on("close", () => resolve());
     child.on("error", () => resolve());
@@ -1177,7 +1181,7 @@ async function cleanupLocalBranch(
     const child = spawn("git", ["branch", "-d", branchName], {
       cwd: workingDir,
       stdio: "ignore",
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
     });
     child.on("close", () => resolve());
     child.on("error", () => resolve());
@@ -1204,7 +1208,7 @@ async function createPullRequest(
       {
         cwd: workingDir,
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, HOME: "/home/magnus" },
+        env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
       },
     );
     let out = "";
@@ -1384,7 +1388,7 @@ async function runGitVoid(workingDir: string, args: string[]): Promise<{ ok: boo
     const child = spawn("git", args, {
       cwd: workingDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
     });
     let output = "";
     child.stdout?.on("data", (d: Buffer) => (output += d.toString()));
@@ -1663,7 +1667,7 @@ async function findExistingPullRequest(
       {
         cwd: workingDir,
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, HOME: "/home/magnus" },
+        env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
       },
     );
     let out = "";
@@ -1765,7 +1769,7 @@ export async function recoverPublication(
     const child = spawn("git", ["remote", "get-url", "--push", "origin"], {
       cwd: record.workingDir,
       stdio: ["ignore", "pipe", "ignore"],
-      env: { ...process.env, HOME: "/home/magnus" },
+      env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
     });
     let out = "";
     child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
@@ -1790,7 +1794,7 @@ export async function recoverPublication(
       const child = spawn("git", ["push", "-u", "origin", record.branchName], {
         cwd: record.workingDir,
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, HOME: "/home/magnus" },
+        env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
       });
       child.on("close", (code) => resolve(code === 0));
       child.on("error", () => resolve(false));

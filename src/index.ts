@@ -42,6 +42,10 @@ import {
   type CodexSandboxProbeResult,
 } from "./codex-sandbox.js";
 import {
+  buildTaskSubprocessEnv,
+  SENSITIVITY_CHECKPOINT_SECRET_ENV,
+} from "./task-subprocess-env.js";
+import {
   decideAuthAlarm,
   alertDeliveryCommitsTransition,
   hydratePersistedAuthAlarmState,
@@ -369,7 +373,7 @@ const config = {
   // Munin credential: other agents can legitimately write tasks/* and must
   // not be able to mint phase authority.
   sensitivityCheckpointSecret:
-    process.env.HUGIN_SENSITIVITY_CHECKPOINT_SECRET?.trim() || "",
+    process.env[SENSITIVITY_CHECKPOINT_SECRET_ENV]?.trim() || "",
   pollIntervalMs: parseBoundedPositiveInt(
     process.env.HUGIN_POLL_INTERVAL_MS,
     30_000,
@@ -2224,7 +2228,7 @@ function spawnRuntime(
       cwd: task.workingDir,
       stdio: ["ignore", "pipe", "pipe"],
       env: {
-        ...process.env,
+        ...buildTaskSubprocessEnv(),
         HOME: "/home/magnus",
         HUGIN_TASK_ID: taskId,
         HUGIN_TASK_NAMESPACE: ctx.taskNs,
@@ -2604,7 +2608,7 @@ async function writeSensitivityCheckpoint(
   client: MuninClient,
   classification?: string,
 ): Promise<void> {
-  if (!sensitivity || !config.sensitivityCheckpointSecret) return;
+  if (!sensitivity || config.sensitivityCheckpointSecret.length < 32) return;
   await client.write(
     taskNs,
     SENSITIVITY_CHECKPOINT_KEY,

@@ -31,16 +31,29 @@ function fakeExec(
 
 describe("probeCodexSandbox", () => {
   it("runs Codex's zero-token sandbox command", async () => {
+    const key = "HUGIN_SENSITIVITY_CHECKPOINT_SECRET";
+    const previous = process.env[key];
+    process.env[key] = "dispatcher-only-secret-at-least-32-chars";
     const execFileImpl = fakeExec((callback) => callback(null, "", ""));
-    const result = await probeCodexSandbox({
-      execFileImpl,
-      now: () => new Date("2026-07-15T09:00:00.000Z"),
-    });
+    let result;
+    try {
+      result = await probeCodexSandbox({
+        execFileImpl,
+        now: () => new Date("2026-07-15T09:00:00.000Z"),
+      });
+    } finally {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
 
     expect(execFileImpl).toHaveBeenCalledWith(
       "codex",
       ["sandbox", "--", "/bin/true"],
-      expect.objectContaining({ timeout: 10_000, encoding: "utf8" }),
+      expect.objectContaining({
+        timeout: 10_000,
+        encoding: "utf8",
+        env: expect.not.objectContaining({ [key]: expect.anything() }),
+      }),
       expect.any(Function),
     );
     expect(result).toEqual({

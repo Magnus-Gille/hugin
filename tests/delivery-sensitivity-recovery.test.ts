@@ -27,6 +27,9 @@ describe("delivery recovery preserves sensitivity evidence (#280)", () => {
     );
     expect(liveDelivery).toContain("writeSensitivityCheckpoint(");
     expect(liveDelivery).toContain("taskSensitivitySnapshot");
+    expect(SRC).toContain(
+      "config.sensitivityCheckpointSecret.length < 32",
+    );
   });
 
   it("reuses the checkpoint in delivery reconciliation's terminal result", () => {

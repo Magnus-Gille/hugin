@@ -139,6 +139,25 @@ afterEach(() => {
 });
 
 describe("SDK executor", () => {
+  it("does not expose the Hugin sensitivity checkpoint secret to Claude", async () => {
+    const key = "HUGIN_SENSITIVITY_CHECKPOINT_SECRET";
+    const previous = process.env[key];
+    process.env[key] = "dispatcher-only-secret-at-least-32-chars";
+    try {
+      mockedQuery.mockReturnValue(
+        createMockQuery([createMockResultSuccess("done")]) as ReturnType<typeof query>,
+      );
+      await executeSdkTask(makeTaskConfig(), "test-secret-scrub", tmpLogDir);
+      const call = mockedQuery.mock.calls[0]?.[0] as {
+        options?: { env?: Record<string, string | undefined> };
+      };
+      expect(call.options?.env?.[key]).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
+  });
+
   it("builds read-only Claude permission options by default", () => {
     const options = buildClaudePermissionOptions();
 

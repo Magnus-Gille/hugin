@@ -17,6 +17,7 @@ import {
   buildFrictionTags,
 } from "./friction/munin-key.js";
 import type { ReportFrictionInput } from "./friction/schema.js";
+import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
 
 export const CODEX_SANDBOX_FAILURE_KIND = "CODEX_SANDBOX_UNAVAILABLE";
 export const CODEX_SANDBOX_FAILURE_TAG = "failure:infra";
@@ -57,7 +58,7 @@ export function probeCodexSandbox(
         encoding: "utf8",
         timeout: timeoutMs,
         maxBuffer: 16 * 1024,
-        env: process.env,
+        env: buildTaskSubprocessEnv(),
       },
       (error: ExecFileException | null, stdout: string, stderr: string) => {
         const checkedAt = now().toISOString();
