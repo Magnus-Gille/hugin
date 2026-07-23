@@ -120,6 +120,7 @@ export const schedulerDecisionPredictionSchema = z.object({
     missingEstimates: z.number().int().nonnegative(),
   }).strict(),
   estimatorVersion: z.literal(SCHEDULER_ESTIMATOR_VERSION),
+  workloadSnapshotSha256: sha256Schema.optional(),
 }).strict().superRefine((value, ctx) => {
   const windowComplete = value.window.pendingEnumerationComplete
     && value.window.runningEnumerationComplete;
@@ -213,6 +214,7 @@ export interface BuildSchedulerDecisionPredictionInput {
   pendingEnumerationComplete: boolean;
   runningEnumerationComplete: boolean;
   shadowEnabled: boolean;
+  workloadSnapshotSha256?: string;
 }
 
 /**
@@ -319,6 +321,9 @@ export function buildSchedulerDecisionPrediction(
       missingEstimates,
     },
     estimatorVersion: SCHEDULER_ESTIMATOR_VERSION,
+    ...(input.workloadSnapshotSha256 === undefined
+      ? {}
+      : { workloadSnapshotSha256: input.workloadSnapshotSha256 }),
   });
 }
 

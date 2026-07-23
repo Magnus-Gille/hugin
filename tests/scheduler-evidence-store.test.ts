@@ -12,8 +12,13 @@ import {
   persistSchedulerOutcome,
   persistSchedulerOutcomeAttestation,
   persistSchedulerPrediction,
+  persistSchedulerWorkloadSnapshot,
   type SchedulerEvidenceStoreClient,
 } from "../src/scheduler-evidence-store.js";
+import {
+  buildSchedulerWorkloadSnapshot,
+  hashSchedulerWorkloadSnapshot,
+} from "../src/scheduler-workload.js";
 
 const taskNamespace = "tasks/20260723-001500-abcd";
 const decisionId = "34f2d430-6c31-47de-860a-8b22bc97f4d4";
@@ -76,6 +81,25 @@ function outcome(overrides: Record<string, unknown> = {}) {
     },
     ...overrides,
   };
+}
+
+function workloadSnapshot() {
+  return buildSchedulerWorkloadSnapshot({
+    observedAt: "2026-07-22T22:15:00.000Z",
+    bucketEnumerationComplete: {
+      dispatchable: true,
+      groupBlocked: true,
+      pipelineBlocked: false,
+      approvalGated: false,
+      otherNonterminal: false,
+      runningRemaining: true,
+    },
+    items: [{
+      taskRef: { namespace: taskNamespace, key: "status" },
+      buckets: ["dispatchable"],
+      serviceEstimate: null,
+    }],
+  });
 }
 
 function attestations() {
@@ -182,6 +206,40 @@ describe("scheduler evidence store", () => {
       ...value,
       terminalClass: "failed",
     })).rejects.toThrow(/different outcome/);
+  });
+
+  it("creates a workload snapshot separately and refuses a conflicting replay", async () => {
+    const munin = new FakeMunin();
+    const value = workloadSnapshot();
+    const digest = hashSchedulerWorkloadSnapshot(value);
+
+    expect(await persistSchedulerWorkloadSnapshot(munin, decisionId, digest, value)).toEqual({
+      status: "created",
+    });
+    expect(munin.writes[0]).toEqual({
+      namespace: `scheduler/decisions/${decisionId}`,
+      key: "workload-snapshot",
+      createIfAbsent: true,
+    });
+    expect(await persistSchedulerWorkloadSnapshot(munin, decisionId, digest, value)).toEqual({
+      status: "exact-existing",
+    });
+    const changed = {
+      ...value,
+      observedAt: "2026-07-22T22:16:00.000Z",
+    };
+    await expect(persistSchedulerWorkloadSnapshot(
+      munin,
+      decisionId,
+      hashSchedulerWorkloadSnapshot(changed),
+      changed,
+    )).rejects.toThrow(/different workload snapshot/);
+    await expect(persistSchedulerWorkloadSnapshot(
+      new FakeMunin(),
+      decisionId,
+      "f".repeat(64),
+      value,
+    )).rejects.toThrow(/digest does not match prediction/);
   });
 
   it("creates claim and outcome attestations immutably and tags outcomes by runtime", async () => {
