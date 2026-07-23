@@ -212,16 +212,18 @@ describe("scheduler evidence store", () => {
     const munin = new FakeMunin();
     const value = workloadSnapshot();
     const digest = hashSchedulerWorkloadSnapshot(value);
+    const boundPrediction = prediction({ workloadSnapshotSha256: digest });
+    await persistSchedulerPrediction(munin, boundPrediction);
 
-    expect(await persistSchedulerWorkloadSnapshot(munin, decisionId, digest, value)).toEqual({
+    expect(await persistSchedulerWorkloadSnapshot(munin, boundPrediction, value)).toEqual({
       status: "created",
     });
-    expect(munin.writes[0]).toEqual({
+    expect(munin.writes[1]).toEqual({
       namespace: `scheduler/decisions/${decisionId}`,
       key: "workload-snapshot",
       createIfAbsent: true,
     });
-    expect(await persistSchedulerWorkloadSnapshot(munin, decisionId, digest, value)).toEqual({
+    expect(await persistSchedulerWorkloadSnapshot(munin, boundPrediction, value)).toEqual({
       status: "exact-existing",
     });
     const changed = {
@@ -230,16 +232,36 @@ describe("scheduler evidence store", () => {
     };
     await expect(persistSchedulerWorkloadSnapshot(
       munin,
-      decisionId,
-      hashSchedulerWorkloadSnapshot(changed),
+      prediction({ workloadSnapshotSha256: hashSchedulerWorkloadSnapshot(changed) }),
       changed,
-    )).rejects.toThrow(/different workload snapshot/);
+    )).rejects.toThrow(/matching stored prediction/);
+    await expect(persistSchedulerWorkloadSnapshot(
+      munin,
+      boundPrediction,
+      changed,
+    )).rejects.toThrow(/digest does not match prediction/);
+  });
+
+  it("refuses workload evidence without the exact bound prediction already stored", async () => {
+    const value = workloadSnapshot();
+    const digest = hashSchedulerWorkloadSnapshot(value);
+    const boundPrediction = prediction({ workloadSnapshotSha256: digest });
+
     await expect(persistSchedulerWorkloadSnapshot(
       new FakeMunin(),
-      decisionId,
-      "f".repeat(64),
+      boundPrediction,
       value,
-    )).rejects.toThrow(/digest does not match prediction/);
+    )).rejects.toThrow(/matching stored prediction/);
+
+    const munin = new FakeMunin();
+    await persistSchedulerPrediction(munin, prediction({
+      workloadSnapshotSha256: "f".repeat(64),
+    }));
+    await expect(persistSchedulerWorkloadSnapshot(
+      munin,
+      boundPrediction,
+      value,
+    )).rejects.toThrow(/matching stored prediction/);
   });
 
   it("creates claim and outcome attestations immutably and tags outcomes by runtime", async () => {

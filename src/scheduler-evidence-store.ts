@@ -58,6 +58,13 @@ export class SchedulerWorkloadSnapshotConflictError extends Error {
   }
 }
 
+export class SchedulerWorkloadPredictionBindingError extends Error {
+  constructor(decisionId: string) {
+    super(`scheduler workload snapshot requires the matching stored prediction for ${decisionId}`);
+    this.name = "SchedulerWorkloadPredictionBindingError";
+  }
+}
+
 export class SchedulerOutcomeConflictError extends Error {
   constructor(decisionId: string) {
     super(`scheduler decision ${decisionId} already contains a different outcome`);
@@ -129,18 +136,27 @@ export async function persistSchedulerPrediction(
 
 export async function persistSchedulerWorkloadSnapshot(
   munin: SchedulerEvidenceStoreClient,
-  decisionId: string,
-  expectedSha256: string,
+  predictionInput: unknown,
   input: unknown,
 ): Promise<{ status: "created" | "exact-existing" }> {
+  const prediction = schedulerDecisionPredictionSchema.parse(predictionInput);
   const snapshot = schedulerWorkloadSnapshotSchema.parse(input);
   const digest = hashSchedulerWorkloadSnapshot(snapshot);
-  if (digest !== expectedSha256) {
+  if (digest !== prediction.workloadSnapshotSha256) {
     throw new Error(
-      `scheduler workload snapshot digest does not match prediction for ${decisionId}`,
+      `scheduler workload snapshot digest does not match prediction for `
+        + `${prediction.decisionId}`,
     );
   }
-  const namespace = schedulerDecisionNamespace(decisionId);
+  const namespace = schedulerDecisionNamespace(prediction.decisionId);
+  const predictionEntry = await munin.read(namespace, PREDICTION_KEY);
+  const storedPrediction = predictionEntry
+    ? parseStoredPrediction(predictionEntry.content)
+    : null;
+  if (!storedPrediction
+    || hashSchedulerPrediction(storedPrediction) !== hashSchedulerPrediction(prediction)) {
+    throw new SchedulerWorkloadPredictionBindingError(prediction.decisionId);
+  }
   try {
     const result = await munin.write(
       namespace,
@@ -173,7 +189,7 @@ export async function persistSchedulerWorkloadSnapshot(
       stored = null;
     }
     if (!stored || hashSchedulerWorkloadSnapshot(stored) !== digest) {
-      throw new SchedulerWorkloadSnapshotConflictError(decisionId);
+      throw new SchedulerWorkloadSnapshotConflictError(prediction.decisionId);
     }
     return { status: "exact-existing" };
   }

@@ -491,10 +491,13 @@ pages and uses the same legacy group/sequence eligibility window as FIFO.
 Pending tasks receive the already-hydrated per-runtime estimate; lookups are
 memoized across the workload and SEJF observations. Running work has no
 authenticated elapsed-time boundary yet and is therefore present with a
-missing contribution. Pipeline-blocked, approval-gated, and other nonterminal
-enumeration remain explicitly incomplete. The possible total is consequently
-null while known pending minutes provide a conservative subtotal. Disabled or
-truncated shadow paths return before queue traversal or estimate lookup.
+missing contribution. Broker-owned `orch-v1` pending rows remain counted under
+the explicitly incomplete `otherNonterminal` bucket rather than disappearing
+with the legacy dispatch filter. Pipeline-blocked, approval-gated, and other
+nonterminal enumeration remain explicitly incomplete. The possible total is
+consequently null while known pending minutes provide a conservative subtotal.
+Disabled or truncated shadow paths return before queue traversal or estimate
+lookup.
 
 Later live-shadow slices must prove the remaining inputs rather than infer
 them from mutable previews:

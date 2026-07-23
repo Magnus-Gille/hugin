@@ -238,6 +238,11 @@ describe("scheduler work-minute snapshots", () => {
     const dispatchable = queueRow("aaaa", ["pending", "runtime:codex"]);
     const blocked = queueRow("bbbb", ["pending", "runtime:codex"]);
     const running = queueRow("cccc", ["running", "runtime:claude"]);
+    const orchestrated = queueRow("dddd", [
+      "pending",
+      "runtime:openrouter",
+      "orch-v1",
+    ]);
     let lookups = 0;
 
     const snapshot = buildSchedulerWorkloadSnapshotFromVisibleQueue({
@@ -245,7 +250,7 @@ describe("scheduler work-minute snapshots", () => {
       observedAt,
       pendingEnumerationComplete: true,
       runningEnumerationComplete: true,
-      pending: [dispatchable, blocked],
+      pending: [dispatchable, blocked, orchestrated],
       running: [running],
       eligibleTaskRefs: [{ namespace: dispatchable.namespace, key: "status" }],
       resolveServiceEstimate: () => {
@@ -274,11 +279,18 @@ describe("scheduler work-minute snapshots", () => {
       missingEstimates: 1,
       enumerationComplete: true,
     });
-    expect(snapshot?.possibleTotalWork).toMatchObject({
-      taskCount: 3,
-      knownWorkMinutes: 4,
+    expect(snapshot?.buckets.otherNonterminal).toMatchObject({
+      taskCount: 1,
+      knownWorkMinutes: 0,
       estimatedWorkMinutes: null,
       missingEstimates: 1,
+      enumerationComplete: false,
+    });
+    expect(snapshot?.possibleTotalWork).toMatchObject({
+      taskCount: 4,
+      knownWorkMinutes: 4,
+      estimatedWorkMinutes: null,
+      missingEstimates: 2,
       enumerationComplete: false,
     });
     expect(JSON.stringify(snapshot)).not.toContain("tasks/");

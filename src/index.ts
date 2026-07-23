@@ -4852,7 +4852,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           observedAt,
           pendingEnumerationComplete: true,
           runningEnumerationComplete: true,
-          pending: dispatchableResults,
+          pending: results,
           running: runningResults,
           eligibleTaskRefs: eligibleTasks.map((candidate) => ({
             namespace: candidate.namespace,
@@ -4972,8 +4972,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       if (acceptedWorkloadSnapshot) {
         await persistSchedulerWorkloadSnapshot(
           schedulerEvidenceMunin,
-          acceptedPrediction.decisionId,
-          acceptedPrediction.workloadSnapshotSha256!,
+          acceptedPrediction,
           acceptedWorkloadSnapshot,
         );
       }

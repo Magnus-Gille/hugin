@@ -298,10 +298,17 @@ export function buildSchedulerWorkloadSnapshotFromVisibleQueue(
       namespace: task.namespace,
       key: task.key,
     });
+    const orchestrated = task.tags.includes("orch-v1");
     items.push({
       taskRef,
-      buckets: [eligible.has(itemIdentity(taskRef)) ? "dispatchable" : "groupBlocked"],
-      serviceEstimate: input.resolveServiceEstimate(task),
+      buckets: [
+        orchestrated
+          ? "otherNonterminal"
+          : eligible.has(itemIdentity(taskRef))
+            ? "dispatchable"
+            : "groupBlocked",
+      ],
+      serviceEstimate: orchestrated ? null : input.resolveServiceEstimate(task),
     });
   }
   for (const task of input.running) {
