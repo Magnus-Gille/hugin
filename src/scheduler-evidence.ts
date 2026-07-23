@@ -567,10 +567,9 @@ export function buildRollingMedianDurationEstimate(
 }
 
 /**
- * Bounded estimator state trusted only for this dispatcher process. Callers
- * add an outcome only after their create-only Munin write returns `created`;
- * exact-existing or post-restart rows are deliberately not admitted because
- * durable claim-instance authentication is not available yet.
+ * Bounded estimator state for outcomes whose complete authenticated evidence
+ * chain has been verified. Callers may admit a freshly persisted chain or a
+ * post-restart chain loaded from exact immutable rows.
  */
 export class SchedulerRuntimeEstimatorCache {
   private readonly samplesByRuntime = new Map<DispatcherRuntime, Map<string, SchedulerDecisionOutcome>>();
@@ -584,7 +583,7 @@ export class SchedulerRuntimeEstimatorCache {
     }
   }
 
-  recordCreated(input: unknown): void {
+  recordVerified(input: unknown): void {
     const outcome = schedulerDecisionOutcomeSchema.parse(input);
     for (const samples of this.samplesByRuntime.values()) {
       const existing = samples.get(outcome.decisionId);

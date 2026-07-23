@@ -144,6 +144,7 @@ export function hashSchedulerClaimAttestation(input: unknown): string {
 export function verifySchedulerClaimAttestation(
   content: string,
   expected: {
+    decisionId: string;
     taskRef: z.input<typeof schedulerTaskRefSchema>;
     taskContent: string;
     predictionSha256: string;
@@ -154,6 +155,7 @@ export function verifySchedulerClaimAttestation(
     requireSecret(secret);
     const parsed = schedulerClaimAttestationSchema.parse(JSON.parse(content));
     const taskRef = schedulerTaskRefSchema.parse(expected.taskRef);
+    if (parsed.decisionId !== z.string().uuid().parse(expected.decisionId)) return undefined;
     if (parsed.taskRef.namespace !== taskRef.namespace) return undefined;
     if (parsed.taskContentSha256 !== sha256Text(expected.taskContent)) return undefined;
     if (parsed.predictionSha256 !== sha256Schema.parse(expected.predictionSha256)) {
@@ -175,6 +177,15 @@ function unsignedOutcome(value: Omit<SchedulerOutcomeAttestation, "hmacSha256">)
   };
 }
 
+function outcomeBindsClaim(
+  outcome: z.infer<typeof schedulerDecisionOutcomeSchema>,
+  claimAttestation: SchedulerClaimAttestation,
+): boolean {
+  return outcome.decisionId === claimAttestation.decisionId
+    && outcome.taskRef.namespace === claimAttestation.taskRef.namespace
+    && outcome.clock.claimedAt === claimAttestation.claimedAt;
+}
+
 export function buildSchedulerOutcomeAttestation(
   input: { claimAttestation: unknown; outcome: unknown },
   secret: string,
@@ -185,8 +196,7 @@ export function buildSchedulerOutcomeAttestation(
     throw new Error("scheduler outcome requires an authentic claim attestation");
   }
   const outcome = schedulerDecisionOutcomeSchema.parse(input.outcome);
-  if (outcome.decisionId !== claimAttestation.decisionId
-    || outcome.taskRef.namespace !== claimAttestation.taskRef.namespace) {
+  if (!outcomeBindsClaim(outcome, claimAttestation)) {
     throw new Error("scheduler outcome does not bind the attested claim");
   }
   const unsigned = unsignedOutcome({
@@ -206,6 +216,10 @@ export function buildSchedulerOutcomeAttestation(
   });
 }
 
+export function hashSchedulerOutcomeAttestation(input: unknown): string {
+  return sha256Text(canonicalizeJcs(schedulerOutcomeAttestationSchema.parse(input)));
+}
+
 export function verifySchedulerOutcomeAttestation(
   content: string,
   expected: { claimAttestation: unknown; outcome: unknown },
@@ -217,7 +231,7 @@ export function verifySchedulerOutcomeAttestation(
     const claimAttestation = schedulerClaimAttestationSchema.parse(expected.claimAttestation);
     if (!claimMacValid(claimAttestation, secret)) return undefined;
     const outcome = schedulerDecisionOutcomeSchema.parse(expected.outcome);
-    if (outcome.decisionId !== claimAttestation.decisionId) return undefined;
+    if (!outcomeBindsClaim(outcome, claimAttestation)) return undefined;
     if (parsed.decisionId !== outcome.decisionId) return undefined;
     if (parsed.claimAttestationSha256 !== hashSchedulerClaimAttestation(claimAttestation)) {
       return undefined;

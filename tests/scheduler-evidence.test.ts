@@ -239,12 +239,12 @@ describe("scheduler evidence", () => {
     );
 
     expect(cache.get("codex")).toBeNull();
-    cache.recordCreated(first);
+    cache.recordVerified(first);
     expect(cache.get("codex")).toBeNull();
-    cache.recordCreated(second);
+    cache.recordVerified(second);
     expect(cache.get("codex")).toMatchObject({ seconds: 15, sampleCount: 2 });
     expect(cache.get("claude")).toBeNull();
-    expect(() => cache.recordCreated({ ...second, terminalClass: "completed" })).toThrow(
+    expect(() => cache.recordVerified({ ...second, terminalClass: "completed" })).toThrow(
       /conflicting scheduler outcomes/,
     );
   });

@@ -3,16 +3,24 @@ import {
   type MuninEntry,
 } from "./munin-client.js";
 import {
+  hashSchedulerClaimAttestation,
+  hashSchedulerOutcomeAttestation,
+} from "./scheduler-evidence-attestation.js";
+import {
   hashSchedulerOutcome,
   hashSchedulerPrediction,
   schedulerDecisionOutcomeSchema,
   schedulerDecisionPredictionSchema,
 } from "./scheduler-evidence.js";
+import { dispatcherRuntimeSchema, type DispatcherRuntime } from "./task-result-schema.js";
 
 const PREDICTION_KEY = "prediction";
 const PREDICTION_TAGS = ["type:scheduler-decision-prediction", "scheduler-shadow:v1"];
 const OUTCOME_KEY = "outcome";
 const OUTCOME_TAGS = ["type:scheduler-decision-outcome", "scheduler-shadow:v1"];
+const CLAIM_ATTESTATION_KEY = "claim-attestation";
+const CLAIM_ATTESTATION_TAGS = ["type:scheduler-claim-attestation", "scheduler-shadow:v1"];
+const OUTCOME_ATTESTATION_KEY = "outcome-attestation";
 
 export interface SchedulerEvidenceStoreClient {
   read(
@@ -41,6 +49,20 @@ export class SchedulerOutcomeConflictError extends Error {
   constructor(decisionId: string) {
     super(`scheduler decision ${decisionId} already contains a different outcome`);
     this.name = "SchedulerOutcomeConflictError";
+  }
+}
+
+export class SchedulerClaimAttestationConflictError extends Error {
+  constructor(decisionId: string) {
+    super(`scheduler decision ${decisionId} already contains a different claim attestation`);
+    this.name = "SchedulerClaimAttestationConflictError";
+  }
+}
+
+export class SchedulerOutcomeAttestationConflictError extends Error {
+  constructor(decisionId: string) {
+    super(`scheduler decision ${decisionId} already contains a different outcome attestation`);
+    this.name = "SchedulerOutcomeAttestationConflictError";
   }
 }
 
@@ -130,6 +152,104 @@ export async function persistSchedulerOutcome(
     }
     if (!stored || hashSchedulerOutcome(stored) !== hashSchedulerOutcome(outcome)) {
       throw new SchedulerOutcomeConflictError(outcome.decisionId);
+    }
+    return { status: "exact-existing" };
+  }
+}
+
+export async function persistSchedulerClaimAttestation(
+  munin: SchedulerEvidenceStoreClient,
+  input: unknown,
+): Promise<{ status: "created" | "exact-existing" }> {
+  const content = JSON.stringify(input);
+  const digest = hashSchedulerClaimAttestation(input);
+  const parsed = JSON.parse(content) as { decisionId: string };
+  const namespace = schedulerDecisionNamespace(parsed.decisionId);
+  try {
+    const result = await munin.write(
+      namespace,
+      CLAIM_ATTESTATION_KEY,
+      content,
+      CLAIM_ATTESTATION_TAGS,
+      undefined,
+      "internal",
+      true,
+    );
+    if (result.status !== "created") {
+      throw new Error(
+        `scheduler claim attestation write returned non-created status for `
+          + `${namespace}/${CLAIM_ATTESTATION_KEY}`,
+      );
+    }
+    return { status: "created" };
+  } catch (error) {
+    if (!(error instanceof MuninWriteRejectedError)
+      || error.conflictReason !== "already_exists") {
+      throw error;
+    }
+    const existing = await munin.read(namespace, CLAIM_ATTESTATION_KEY);
+    let storedDigest: string | null = null;
+    try {
+      storedDigest = existing
+        ? hashSchedulerClaimAttestation(JSON.parse(existing.content))
+        : null;
+    } catch {
+      storedDigest = null;
+    }
+    if (storedDigest !== digest) {
+      throw new SchedulerClaimAttestationConflictError(parsed.decisionId);
+    }
+    return { status: "exact-existing" };
+  }
+}
+
+export async function persistSchedulerOutcomeAttestation(
+  munin: SchedulerEvidenceStoreClient,
+  input: unknown,
+  requestedRuntime: DispatcherRuntime,
+): Promise<{ status: "created" | "exact-existing" }> {
+  const runtime = dispatcherRuntimeSchema.parse(requestedRuntime);
+  const content = JSON.stringify(input);
+  const digest = hashSchedulerOutcomeAttestation(input);
+  const parsed = JSON.parse(content) as { decisionId: string };
+  const namespace = schedulerDecisionNamespace(parsed.decisionId);
+  try {
+    const result = await munin.write(
+      namespace,
+      OUTCOME_ATTESTATION_KEY,
+      content,
+      [
+        "type:scheduler-outcome-attestation",
+        `scheduler-runtime:${runtime}`,
+        "scheduler-shadow:v1",
+      ],
+      undefined,
+      "internal",
+      true,
+    );
+    if (result.status !== "created") {
+      throw new Error(
+        `scheduler outcome attestation write returned non-created status for `
+          + `${namespace}/${OUTCOME_ATTESTATION_KEY}`,
+      );
+    }
+    return { status: "created" };
+  } catch (error) {
+    if (!(error instanceof MuninWriteRejectedError)
+      || error.conflictReason !== "already_exists") {
+      throw error;
+    }
+    const existing = await munin.read(namespace, OUTCOME_ATTESTATION_KEY);
+    let storedDigest: string | null = null;
+    try {
+      storedDigest = existing
+        ? hashSchedulerOutcomeAttestation(JSON.parse(existing.content))
+        : null;
+    } catch {
+      storedDigest = null;
+    }
+    if (storedDigest !== digest) {
+      throw new SchedulerOutcomeAttestationConflictError(parsed.decisionId);
     }
     return { status: "exact-existing" };
   }
