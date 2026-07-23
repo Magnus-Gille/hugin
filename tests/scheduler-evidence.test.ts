@@ -250,6 +250,7 @@ describe("scheduler evidence", () => {
   });
 
   it("accepts a content-blind abstaining prediction and hashes it deterministically", () => {
+    const workloadSnapshotSha256 = "b".repeat(64);
     const prediction = schedulerDecisionPredictionSchema.parse({
       schemaVersion: 1,
       decisionId,
@@ -276,6 +277,7 @@ describe("scheduler evidence", () => {
         missingEstimates: 1,
       },
       estimatorVersion: "scheduler-duration-v1",
+      workloadSnapshotSha256,
     });
 
     expect(hashSchedulerPrediction(prediction)).toBe(hashSchedulerPrediction({
@@ -283,12 +285,40 @@ describe("scheduler evidence", () => {
       window: { ...prediction.window },
     }));
     expect(hashSchedulerPrediction(prediction)).toMatch(/^[0-9a-f]{64}$/);
+    expect(hashSchedulerPrediction(prediction)).not.toBe(hashSchedulerPrediction({
+      ...prediction,
+      workloadSnapshotSha256: "c".repeat(64),
+    }));
     expect(schedulerDecisionPredictionSchema.safeParse({
       ...prediction,
       challenger: {
         ...prediction.challenger,
         evidenceReasons: ["estimate-missing", "window-truncated"],
       },
+    }).success).toBe(false);
+  });
+
+  it("optionally binds an accepted workload snapshot into the prediction", () => {
+    const workloadSnapshotSha256 = "d".repeat(64);
+    const prediction = buildSchedulerDecisionPrediction({
+      decisionId,
+      observedAt: "2026-07-22T21:00:00.000Z",
+      championTaskRef: taskRef,
+      candidates: [{
+        taskRef,
+        createdAt: "2026-07-22T20:59:00.000Z",
+        serviceEstimate: estimate(60),
+      }],
+      pendingEnumerationComplete: true,
+      runningEnumerationComplete: true,
+      shadowEnabled: true,
+      workloadSnapshotSha256,
+    });
+
+    expect(prediction.workloadSnapshotSha256).toBe(workloadSnapshotSha256);
+    expect(schedulerDecisionPredictionSchema.safeParse({
+      ...prediction,
+      workloadSnapshotSha256: "not-a-digest",
     }).success).toBe(false);
   });
 

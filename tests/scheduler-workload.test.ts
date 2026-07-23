@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { MuninQueryResult } from "../src/munin-client.js";
 import {
   buildSchedulerWorkloadSnapshot,
+  buildSchedulerWorkloadSnapshotFromVisibleQueue,
+  hashSchedulerWorkloadSnapshot,
   schedulerWorkloadSnapshotSchema,
   type SchedulerWorkloadBucketKey,
 } from "../src/scheduler-workload.js";
@@ -41,6 +44,22 @@ function item(
     buckets,
     serviceEstimate,
     ...(runningElapsedSeconds === undefined ? {} : { runningElapsedSeconds }),
+  };
+}
+
+function queueRow(
+  suffix: string,
+  tags: string[],
+): MuninQueryResult {
+  return {
+    id: suffix,
+    namespace: `tasks/20260723-080000-${suffix}`,
+    key: "status",
+    entry_type: "state",
+    content_preview: "",
+    tags,
+    created_at: observedAt,
+    updated_at: observedAt,
   };
 }
 
@@ -205,5 +224,113 @@ describe("scheduler work-minute snapshots", () => {
         item("aaaa", ["groupBlocked"], estimate(60), 10),
       ],
     })).toThrow(/running elapsed requires runningRemaining/);
+    expect(() => buildSchedulerWorkloadSnapshot({
+      observedAt,
+      bucketEnumerationComplete: completeBuckets,
+      items: [
+        item("aaaa", ["groupBlocked"], estimate(60)),
+        item("aaaa", ["runningRemaining"], estimate(60), 10),
+      ],
+    })).toThrow(/runningRemaining must be exclusive/);
+  });
+
+  it("builds a content-blind lower bound from the already-visible queue", () => {
+    const dispatchable = queueRow("aaaa", ["pending", "runtime:codex"]);
+    const blocked = queueRow("bbbb", ["pending", "runtime:codex"]);
+    const running = queueRow("cccc", ["running", "runtime:claude"]);
+    const orchestrated = queueRow("dddd", [
+      "pending",
+      "runtime:openrouter",
+      "orch-v1",
+    ]);
+    let lookups = 0;
+
+    const snapshot = buildSchedulerWorkloadSnapshotFromVisibleQueue({
+      enabled: true,
+      observedAt,
+      pendingEnumerationComplete: true,
+      runningEnumerationComplete: true,
+      pending: [dispatchable, blocked, orchestrated],
+      running: [running],
+      eligibleTaskRefs: [{ namespace: dispatchable.namespace, key: "status" }],
+      resolveServiceEstimate: () => {
+        lookups += 1;
+        return estimate(120);
+      },
+    });
+
+    expect(lookups).toBe(2);
+    expect(snapshot?.buckets.dispatchable).toMatchObject({
+      taskCount: 1,
+      knownWorkMinutes: 2,
+      estimatedWorkMinutes: 2,
+      enumerationComplete: true,
+    });
+    expect(snapshot?.buckets.groupBlocked).toMatchObject({
+      taskCount: 1,
+      knownWorkMinutes: 2,
+      estimatedWorkMinutes: 2,
+      enumerationComplete: true,
+    });
+    expect(snapshot?.buckets.runningRemaining).toMatchObject({
+      taskCount: 1,
+      knownWorkMinutes: 0,
+      estimatedWorkMinutes: null,
+      missingEstimates: 1,
+      enumerationComplete: true,
+    });
+    expect(snapshot?.buckets.otherNonterminal).toMatchObject({
+      taskCount: 1,
+      knownWorkMinutes: 0,
+      estimatedWorkMinutes: null,
+      missingEstimates: 1,
+      enumerationComplete: false,
+    });
+    expect(snapshot?.possibleTotalWork).toMatchObject({
+      taskCount: 4,
+      knownWorkMinutes: 4,
+      estimatedWorkMinutes: null,
+      missingEstimates: 2,
+      enumerationComplete: false,
+    });
+    expect(JSON.stringify(snapshot)).not.toContain("tasks/");
+    expect(hashSchedulerWorkloadSnapshot(snapshot)).toMatch(/^[0-9a-f]{64}$/);
+    expect(hashSchedulerWorkloadSnapshot(snapshot)).toBe(
+      hashSchedulerWorkloadSnapshot({ ...snapshot!, buckets: { ...snapshot!.buckets } }),
+    );
+  });
+
+  it("does no queue processing or estimate lookup when disabled or truncated", () => {
+    const pending = Array.from({ length: 4_000 }, (_, index) =>
+      queueRow(String(index), ["pending", "runtime:codex"]),
+    );
+    let lookups = 0;
+    const input = {
+      observedAt,
+      pending,
+      running: [] as MuninQueryResult[],
+      eligibleTaskRefs: pending.map((row) => ({
+        namespace: row.namespace,
+        key: "status" as const,
+      })),
+      resolveServiceEstimate: () => {
+        lookups += 1;
+        return estimate(60);
+      },
+    };
+
+    expect(buildSchedulerWorkloadSnapshotFromVisibleQueue({
+      ...input,
+      enabled: false,
+      pendingEnumerationComplete: true,
+      runningEnumerationComplete: true,
+    })).toBeNull();
+    expect(buildSchedulerWorkloadSnapshotFromVisibleQueue({
+      ...input,
+      enabled: true,
+      pendingEnumerationComplete: false,
+      runningEnumerationComplete: true,
+    })).toBeNull();
+    expect(lookups).toBe(0);
   });
 });

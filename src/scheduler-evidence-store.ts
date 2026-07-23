@@ -12,10 +12,16 @@ import {
   schedulerDecisionOutcomeSchema,
   schedulerDecisionPredictionSchema,
 } from "./scheduler-evidence.js";
+import {
+  hashSchedulerWorkloadSnapshot,
+  schedulerWorkloadSnapshotSchema,
+} from "./scheduler-workload.js";
 import { dispatcherRuntimeSchema, type DispatcherRuntime } from "./task-result-schema.js";
 
 const PREDICTION_KEY = "prediction";
 const PREDICTION_TAGS = ["type:scheduler-decision-prediction", "scheduler-shadow:v1"];
+const WORKLOAD_SNAPSHOT_KEY = "workload-snapshot";
+const WORKLOAD_SNAPSHOT_TAGS = ["type:scheduler-workload-snapshot", "scheduler-shadow:v1"];
 const OUTCOME_KEY = "outcome";
 const OUTCOME_TAGS = ["type:scheduler-decision-outcome", "scheduler-shadow:v1"];
 const CLAIM_ATTESTATION_KEY = "claim-attestation";
@@ -42,6 +48,20 @@ export class SchedulerPredictionConflictError extends Error {
   constructor(decisionId: string) {
     super(`scheduler decision ${decisionId} already contains a different prediction`);
     this.name = "SchedulerPredictionConflictError";
+  }
+}
+
+export class SchedulerWorkloadSnapshotConflictError extends Error {
+  constructor(decisionId: string) {
+    super(`scheduler decision ${decisionId} already contains a different workload snapshot`);
+    this.name = "SchedulerWorkloadSnapshotConflictError";
+  }
+}
+
+export class SchedulerWorkloadPredictionBindingError extends Error {
+  constructor(decisionId: string) {
+    super(`scheduler workload snapshot requires the matching stored prediction for ${decisionId}`);
+    this.name = "SchedulerWorkloadPredictionBindingError";
   }
 }
 
@@ -109,6 +129,67 @@ export async function persistSchedulerPrediction(
     const stored = existing ? parseStoredPrediction(existing.content) : null;
     if (!stored || hashSchedulerPrediction(stored) !== hashSchedulerPrediction(prediction)) {
       throw new SchedulerPredictionConflictError(prediction.decisionId);
+    }
+    return { status: "exact-existing" };
+  }
+}
+
+export async function persistSchedulerWorkloadSnapshot(
+  munin: SchedulerEvidenceStoreClient,
+  predictionInput: unknown,
+  input: unknown,
+): Promise<{ status: "created" | "exact-existing" }> {
+  const prediction = schedulerDecisionPredictionSchema.parse(predictionInput);
+  const snapshot = schedulerWorkloadSnapshotSchema.parse(input);
+  const digest = hashSchedulerWorkloadSnapshot(snapshot);
+  if (digest !== prediction.workloadSnapshotSha256) {
+    throw new Error(
+      `scheduler workload snapshot digest does not match prediction for `
+        + `${prediction.decisionId}`,
+    );
+  }
+  const namespace = schedulerDecisionNamespace(prediction.decisionId);
+  const predictionEntry = await munin.read(namespace, PREDICTION_KEY);
+  const storedPrediction = predictionEntry
+    ? parseStoredPrediction(predictionEntry.content)
+    : null;
+  if (!storedPrediction
+    || hashSchedulerPrediction(storedPrediction) !== hashSchedulerPrediction(prediction)) {
+    throw new SchedulerWorkloadPredictionBindingError(prediction.decisionId);
+  }
+  try {
+    const result = await munin.write(
+      namespace,
+      WORKLOAD_SNAPSHOT_KEY,
+      JSON.stringify(snapshot),
+      WORKLOAD_SNAPSHOT_TAGS,
+      undefined,
+      "internal",
+      true,
+    );
+    if (result.status !== "created") {
+      throw new Error(
+        `scheduler workload snapshot write returned non-created status for `
+          + `${namespace}/${WORKLOAD_SNAPSHOT_KEY}`,
+      );
+    }
+    return { status: "created" };
+  } catch (error) {
+    if (!(error instanceof MuninWriteRejectedError)
+      || error.conflictReason !== "already_exists") {
+      throw error;
+    }
+    const existing = await munin.read(namespace, WORKLOAD_SNAPSHOT_KEY);
+    let stored: unknown = null;
+    try {
+      stored = existing
+        ? schedulerWorkloadSnapshotSchema.parse(JSON.parse(existing.content))
+        : null;
+    } catch {
+      stored = null;
+    }
+    if (!stored || hashSchedulerWorkloadSnapshot(stored) !== digest) {
+      throw new SchedulerWorkloadSnapshotConflictError(prediction.decisionId);
     }
     return { status: "exact-existing" };
   }

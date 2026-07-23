@@ -167,6 +167,11 @@ import {
   type SchedulerTerminalResultRevision,
 } from "./scheduler-evidence.js";
 import {
+  buildSchedulerWorkloadSnapshotFromVisibleQueue,
+  hashSchedulerWorkloadSnapshot,
+  type SchedulerWorkloadSnapshot,
+} from "./scheduler-workload.js";
+import {
   buildSchedulerClaimAttestation,
   buildSchedulerOutcomeAttestation,
   type SchedulerClaimAttestation,
@@ -179,6 +184,7 @@ import {
   persistSchedulerOutcome,
   persistSchedulerOutcomeAttestation,
   persistSchedulerPrediction,
+  persistSchedulerWorkloadSnapshot,
 } from "./scheduler-evidence-store.js";
 import { LearningLoopCollector } from "./learning-loop-collector.js";
 import { LearningRegistryStore } from "./learning-registry-store.js";
@@ -4818,6 +4824,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         .concat("routing:auto")
     : entry.tags;
   let schedulerPrediction: SchedulerDecisionPrediction | null = null;
+  let schedulerWorkloadSnapshot: SchedulerWorkloadSnapshot | null = null;
   let schedulerClaimAttestation: SchedulerClaimAttestation | null = null;
   let schedulerClaimEvidencePersistence: Promise<boolean> | null = null;
   let tagsForClaim = stripSchedulerDecisionPointers(claimInputTags);
@@ -4825,6 +4832,45 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     const compareShadow = config.schedulerShadowEnabled
       && !pendingPage.truncated
       && !runningPage.truncated;
+    const observedAt = new Date().toISOString();
+    const runtimeEstimateMemo = new Map<
+      DispatcherRuntime,
+      ReturnType<typeof schedulerRuntimeEstimator.get>
+    >();
+    const resolveRuntimeEstimate = (runtime: DispatcherRuntime) => {
+      if (runtimeEstimateMemo.has(runtime)) {
+        return runtimeEstimateMemo.get(runtime) ?? null;
+      }
+      const estimate = schedulerRuntimeEstimator.get(runtime);
+      runtimeEstimateMemo.set(runtime, estimate);
+      return estimate;
+    };
+    if (compareShadow) {
+      try {
+        schedulerWorkloadSnapshot = buildSchedulerWorkloadSnapshotFromVisibleQueue({
+          enabled: true,
+          observedAt,
+          pendingEnumerationComplete: true,
+          runningEnumerationComplete: true,
+          pending: results,
+          running: runningResults,
+          eligibleTaskRefs: eligibleTasks.map((candidate) => ({
+            namespace: candidate.namespace,
+            key: "status" as const,
+          })),
+          resolveServiceEstimate: (candidate) => {
+            const runtime = schedulerRequestedRuntimeFromTags(candidate.tags);
+            return runtime ? resolveRuntimeEstimate(runtime) : null;
+          },
+        });
+      } catch (err) {
+        schedulerWorkloadSnapshot = null;
+        console.warn(
+          `Scheduler workload snapshot construction failed for ${taskNs}: `
+            + (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
     const schedulerCandidates = compareShadow
       ? (() => {
           const runtimes = eligibleTasks.map((candidate) =>
@@ -4833,7 +4879,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           const estimates = resolveSchedulerRuntimeEstimates(
             runtimes,
             true,
-            (runtime) => schedulerRuntimeEstimator.get(runtime),
+            resolveRuntimeEstimate,
           );
           return eligibleTasks.map((candidate, index) => ({
             taskRef: { namespace: candidate.namespace, key: "status" as const },
@@ -4848,13 +4894,19 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         }];
     const candidatePrediction = buildSchedulerDecisionPrediction({
       decisionId: randomUUID(),
-      observedAt: new Date().toISOString(),
+      observedAt,
       championTaskRef: { namespace: taskNs, key: "status" },
       candidates: schedulerCandidates,
       eligibleTaskCount: eligibleTasks.length,
       pendingEnumerationComplete: !pendingPage.truncated,
       runningEnumerationComplete: !runningPage.truncated,
       shadowEnabled: config.schedulerShadowEnabled,
+      ...(schedulerWorkloadSnapshot
+        ? {
+            workloadSnapshotSha256:
+              hashSchedulerWorkloadSnapshot(schedulerWorkloadSnapshot),
+          }
+        : {}),
     });
     schedulerPrediction = candidatePrediction;
     tagsForClaim = attachSchedulerDecisionPointer(claimInputTags, {
@@ -4911,6 +4963,20 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   // stays on the isolated telemetry client and cannot delay dispatch.
   if (schedulerPrediction) {
     const acceptedPrediction = schedulerPrediction;
+    const acceptedWorkloadSnapshot = schedulerWorkloadSnapshot;
+    const persistAcceptedPredictionEvidence = async (): Promise<void> => {
+      await persistSchedulerPrediction(
+        schedulerEvidenceMunin,
+        acceptedPrediction,
+      );
+      if (acceptedWorkloadSnapshot) {
+        await persistSchedulerWorkloadSnapshot(
+          schedulerEvidenceMunin,
+          acceptedPrediction,
+          acceptedWorkloadSnapshot,
+        );
+      }
+    };
     try {
       if (!schedulerClaimedAt) {
         throw new Error("claim acknowledgement omitted updated_at");
@@ -4926,10 +4992,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         processInstanceId,
       }, config.sensitivityCheckpointSecret);
       const acceptedClaimAttestation = schedulerClaimAttestation;
-      schedulerClaimEvidencePersistence = persistSchedulerPrediction(
-        schedulerEvidenceMunin,
-        acceptedPrediction,
-      )
+      schedulerClaimEvidencePersistence = persistAcceptedPredictionEvidence()
         .then(() => persistSchedulerClaimAttestation(
           schedulerEvidenceMunin,
           acceptedClaimAttestation,
@@ -4946,10 +5009,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     } catch (err) {
       schedulerClaimAttestation = null;
       schedulerClaimEvidencePersistence = null;
-      void persistSchedulerPrediction(schedulerEvidenceMunin, acceptedPrediction).catch(
+      void persistAcceptedPredictionEvidence().catch(
         (persistErr: unknown) => {
           console.warn(
-            `Scheduler shadow prediction persistence failed for ${taskNs} `
+            `Scheduler shadow prediction evidence persistence failed for ${taskNs} `
               + `(${acceptedPrediction.decisionId}): `
               + (persistErr instanceof Error ? persistErr.message : String(persistErr)),
           );

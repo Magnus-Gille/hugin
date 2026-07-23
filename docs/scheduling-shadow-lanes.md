@@ -426,10 +426,12 @@ capacity, Hugin must say so truthfully.
 
 ### Executable workload snapshot primitive
 
-`src/scheduler-workload.ts` now defines the strict, behavior-neutral
-`schedulerWorkloadSnapshotSchema` and pure
-`buildSchedulerWorkloadSnapshot(...)` builder. It does not query Munin, write
-evidence, defer a task, reject a task, or influence the claim candidate.
+`src/scheduler-workload.ts` defines the strict, behavior-neutral
+`schedulerWorkloadSnapshotSchema` and pure builders. The live shadow path now
+converts only the complete pending/running pages already fetched by the claim
+loop into an aggregate lower-bound snapshot. It performs no additional Munin
+query, does not defer or reject a task, and cannot influence the claim
+candidate.
 
 The version-1 snapshot contains only aggregate summaries. This abbreviated
 example omits the other five required bucket members for readability:
@@ -478,12 +480,29 @@ past `observedAt` is missing evidence. For a running task, the contribution is
 `max(estimate.seconds - runningElapsedSeconds, 0)`; without a valid elapsed
 clock the running contribution is missing.
 
-A later live-shadow wiring slice must prove these inputs rather than infer
+Accepted snapshots are stored immutably beside the decision prediction. The
+prediction carries the snapshot's canonical SHA-256, so the authenticated
+claim receipt transitively binds the exact aggregate observation. Persistence
+uses the isolated telemetry client after the claim CAS and cannot delay task
+dispatch.
+
+The current binding proves complete pagination for the pending and running
+pages and uses the same legacy group/sequence eligibility window as FIFO.
+Pending tasks receive the already-hydrated per-runtime estimate; lookups are
+memoized across the workload and SEJF observations. Running work has no
+authenticated elapsed-time boundary yet and is therefore present with a
+missing contribution. Broker-owned `orch-v1` pending rows remain counted under
+the explicitly incomplete `otherNonterminal` bucket rather than disappearing
+with the legacy dispatch filter. Pipeline-blocked, approval-gated, and other
+nonterminal enumeration remain explicitly incomplete. The possible total is
+consequently null while known pending minutes provide a conservative subtotal.
+Disabled or truncated shadow paths return before queue traversal or estimate
+lookup.
+
+Later live-shadow slices must prove the remaining inputs rather than infer
 them from mutable previews:
 
-- complete pagination for every included lifecycle bucket;
 - bucket membership from the canonical status/lifecycle contract;
-- one verified estimator version selected for the observation;
 - running elapsed time derived from an authenticated claim boundary;
 - explicit incompleteness when a lifecycle category or classification cannot
   be enumerated safely.
@@ -503,9 +522,10 @@ policy only after live workload observations are calibrated.
    delivery step is complete.
 3. **Urgency authority:** add digest-bound authenticated urgency, then shadow
    low-to-normal promotion at half of the declared low-class SLA.
-4. **Work-minute shadow:** the strict aggregate primitive is implemented but
-   not live-wired. Next publish complete/known-subtotal queued work from
-   bounded enumerations and validate it against realized waits.
+4. **Work-minute shadow:** accepted decisions now publish hash-bound
+   known-subtotal queued work from complete bounded pending/running
+   enumerations. Next add authenticated running clocks and canonical lifecycle
+   buckets, then validate observations against realized waits.
 5. **Promotion gate:** require a predeclared production experiment, complete
    evidence, zero bound violations, acceptable estimate calibration, and an
    explicit human-reviewed policy decision. The cadence may package evidence;

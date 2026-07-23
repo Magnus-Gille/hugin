@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalizeJcs } from "./jcs.js";
+import type { MuninQueryResult } from "./munin-client.js";
 import {
   SCHEDULER_ESTIMATOR_VERSION,
   schedulerServiceEstimateSchema,
@@ -102,6 +104,17 @@ export interface BuildSchedulerWorkloadSnapshotInput {
   observedAt: string;
   bucketEnumerationComplete: z.input<typeof bucketCompletenessSchema>;
   items: SchedulerWorkloadItem[];
+}
+
+export interface BuildSchedulerWorkloadSnapshotFromVisibleQueueInput {
+  enabled: boolean;
+  observedAt: string;
+  pendingEnumerationComplete: boolean;
+  runningEnumerationComplete: boolean;
+  pending: readonly MuninQueryResult[];
+  running: readonly MuninQueryResult[];
+  eligibleTaskRefs: readonly z.input<typeof schedulerTaskRefSchema>[];
+  resolveServiceEstimate: (task: MuninQueryResult) => unknown | null;
 }
 
 interface NormalizedWorkItem {
@@ -218,6 +231,9 @@ export function buildSchedulerWorkloadSnapshot(
       });
       continue;
     }
+    if (existing.buckets.has("runningRemaining") !== running) {
+      throw new Error("runningRemaining must be exclusive of non-running buckets");
+    }
     for (const bucket of buckets) existing.buckets.add(bucket);
     if (existing.evidenceFingerprint !== normalized.evidenceFingerprint) {
       existing.contributionSeconds = null;
@@ -252,4 +268,78 @@ export function buildSchedulerWorkloadSnapshot(
     },
     possibleTotalWork: summarize(uniqueItems, allEnumerationComplete),
   });
+}
+
+/**
+ * Convert the pending/running pages already fetched by the claim loop into a
+ * conservative workload observation. Disabled or incomplete enumeration
+ * returns before traversing queue rows or resolving estimates.
+ *
+ * Pending tasks are the only tasks with enough evidence to carry estimates in
+ * this first live binding. Running tasks remain explicit missing work until an
+ * authenticated elapsed-time boundary exists.
+ */
+export function buildSchedulerWorkloadSnapshotFromVisibleQueue(
+  input: BuildSchedulerWorkloadSnapshotFromVisibleQueueInput,
+): SchedulerWorkloadSnapshot | null {
+  if (!input.enabled
+    || !input.pendingEnumerationComplete
+    || !input.runningEnumerationComplete) {
+    return null;
+  }
+
+  const eligible = new Set(input.eligibleTaskRefs.map((rawTaskRef) => {
+    const taskRef = schedulerTaskRefSchema.parse(rawTaskRef);
+    return itemIdentity(taskRef);
+  }));
+  const items: SchedulerWorkloadItem[] = [];
+  for (const task of input.pending) {
+    const taskRef = schedulerTaskRefSchema.parse({
+      namespace: task.namespace,
+      key: task.key,
+    });
+    const orchestrated = task.tags.includes("orch-v1");
+    items.push({
+      taskRef,
+      buckets: [
+        orchestrated
+          ? "otherNonterminal"
+          : eligible.has(itemIdentity(taskRef))
+            ? "dispatchable"
+            : "groupBlocked",
+      ],
+      serviceEstimate: orchestrated ? null : input.resolveServiceEstimate(task),
+    });
+  }
+  for (const task of input.running) {
+    const taskRef = schedulerTaskRefSchema.parse({
+      namespace: task.namespace,
+      key: task.key,
+    });
+    items.push({
+      taskRef,
+      buckets: ["runningRemaining"],
+      serviceEstimate: null,
+    });
+  }
+
+  return buildSchedulerWorkloadSnapshot({
+    observedAt: input.observedAt,
+    bucketEnumerationComplete: {
+      dispatchable: true,
+      groupBlocked: true,
+      pipelineBlocked: false,
+      approvalGated: false,
+      otherNonterminal: false,
+      runningRemaining: true,
+    },
+    items,
+  });
+}
+
+export function hashSchedulerWorkloadSnapshot(value: unknown): string {
+  const snapshot = schedulerWorkloadSnapshotSchema.parse(value);
+  return createHash("sha256")
+    .update(canonicalizeJcs(snapshot), "utf8")
+    .digest("hex");
 }
