@@ -467,12 +467,14 @@ and requires every bucket enumeration to be complete.
 
 The builder accepts safe task references only as transient deduplication
 identities; task references and task content are absent from its aggregate
-output. Overlapping diagnostic membership remains visible in each bucket, but
-the possible total counts one contribution per distinct task. Exact duplicate
-evidence is reusable. Conflicting estimates or running clocks for one task
-invalidate that task's contribution everywhere instead of selecting a value.
-An estimate whose history looks ahead past `observedAt` is missing evidence.
-For a running task, the contribution is
+output. Non-running diagnostic membership may overlap and remains visible in
+each bucket, but the possible total counts one contribution per distinct task.
+`runningRemaining` is mutually exclusive with those buckets, and a running
+elapsed clock on a non-running item is rejected; this prevents representation
+choices from changing the total. Exact duplicate evidence is reusable.
+Conflicting estimates for one task invalidate that task's contribution
+everywhere instead of selecting a value. An estimate whose history looks ahead
+past `observedAt` is missing evidence. For a running task, the contribution is
 `max(estimate.seconds - runningElapsedSeconds, 0)`; without a valid elapsed
 clock the running contribution is missing.
 

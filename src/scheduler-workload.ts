@@ -77,7 +77,18 @@ export const schedulerWorkloadSnapshotSchema = z.object({
     runningRemaining: schedulerWorkloadSummarySchema,
   }).strict(),
   possibleTotalWork: schedulerWorkloadSummarySchema,
-}).strict();
+}).strict().superRefine((value, ctx) => {
+  const allBucketsComplete = Object.values(value.buckets).every(
+    (bucket) => bucket.enumerationComplete,
+  );
+  if (value.possibleTotalWork.enumerationComplete !== allBucketsComplete) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["possibleTotalWork", "enumerationComplete"],
+      message: "possible total completeness must match every bucket",
+    });
+  }
+});
 export type SchedulerWorkloadSnapshot = z.infer<typeof schedulerWorkloadSnapshotSchema>;
 
 export interface SchedulerWorkloadItem {
@@ -185,6 +196,13 @@ export function buildSchedulerWorkloadSnapshot(
       .array()
       .min(1)
       .parse(rawItem.buckets);
+    const running = buckets.includes("runningRemaining");
+    if (running && buckets.length !== 1) {
+      throw new Error("runningRemaining must be exclusive of non-running buckets");
+    }
+    if (!running && rawItem.runningElapsedSeconds !== undefined) {
+      throw new Error("running elapsed requires runningRemaining membership");
+    }
     if (rawItem.runningElapsedSeconds !== undefined) {
       nonnegativeFiniteSchema.parse(rawItem.runningElapsedSeconds);
     }

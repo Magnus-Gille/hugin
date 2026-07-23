@@ -166,11 +166,44 @@ describe("scheduler work-minute snapshots", () => {
     });
     expect(() => schedulerWorkloadSnapshotSchema.parse({
       ...valid,
+      buckets: {
+        ...valid.buckets,
+        dispatchable: {
+          ...valid.buckets.dispatchable,
+          enumerationComplete: false,
+          estimatedWorkMinutes: null,
+        },
+      },
+    })).toThrow(/possible total completeness must match every bucket/);
+    expect(() => schedulerWorkloadSnapshotSchema.parse({
+      ...valid,
       possibleTotalWork: {
         ...valid.possibleTotalWork,
         missingEstimates: 1,
         estimatedWorkMinutes: 1,
       },
     })).toThrow(/estimated total requires complete enumeration and estimates/);
+  });
+
+  it("rejects running/non-running overlap regardless of input representation", () => {
+    expect(() => buildSchedulerWorkloadSnapshot({
+      observedAt,
+      bucketEnumerationComplete: completeBuckets,
+      items: [
+        item(
+          "aaaa",
+          ["runningRemaining", "groupBlocked"],
+          estimate(60),
+          10,
+        ),
+      ],
+    })).toThrow(/runningRemaining must be exclusive/);
+    expect(() => buildSchedulerWorkloadSnapshot({
+      observedAt,
+      bucketEnumerationComplete: completeBuckets,
+      items: [
+        item("aaaa", ["groupBlocked"], estimate(60), 10),
+      ],
+    })).toThrow(/running elapsed requires runningRemaining/);
   });
 });
