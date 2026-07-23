@@ -424,6 +424,73 @@ wait and throughput. A later enforcing policy must define, in a separate PR:
 No ordering policy is promoted as an overload fix. When offered work exceeds
 capacity, Hugin must say so truthfully.
 
+### Executable workload snapshot primitive
+
+`src/scheduler-workload.ts` now defines the strict, behavior-neutral
+`schedulerWorkloadSnapshotSchema` and pure
+`buildSchedulerWorkloadSnapshot(...)` builder. It does not query Munin, write
+evidence, defer a task, reject a task, or influence the claim candidate.
+
+The version-1 snapshot contains only aggregate summaries. This abbreviated
+example omits the other five required bucket members for readability:
+
+```json
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-07-23T08:00:00.000Z",
+  "estimatorVersion": "scheduler-duration-v1",
+  "buckets": {
+    "dispatchable": {
+      "taskCount": 4,
+      "knownWorkMinutes": 18,
+      "estimatedWorkMinutes": null,
+      "missingEstimates": 1,
+      "enumerationComplete": true
+    }
+  },
+  "possibleTotalWork": {
+    "taskCount": 11,
+    "knownWorkMinutes": 67,
+    "estimatedWorkMinutes": null,
+    "missingEstimates": 2,
+    "enumerationComplete": false
+  }
+}
+```
+
+All six bucket keys are always present in a schema-valid record. A bucket's
+`knownWorkMinutes` is the subtotal from available nonnegative estimates.
+`estimatedWorkMinutes` is present only when enumeration is complete and every
+distinct task in that summary has usable evidence. Otherwise it is null; zero
+is never used to disguise missing work. `possibleTotalWork` has the same rule
+and requires every bucket enumeration to be complete.
+
+The builder accepts safe task references only as transient deduplication
+identities; task references and task content are absent from its aggregate
+output. Overlapping diagnostic membership remains visible in each bucket, but
+the possible total counts one contribution per distinct task. Exact duplicate
+evidence is reusable. Conflicting estimates or running clocks for one task
+invalidate that task's contribution everywhere instead of selecting a value.
+An estimate whose history looks ahead past `observedAt` is missing evidence.
+For a running task, the contribution is
+`max(estimate.seconds - runningElapsedSeconds, 0)`; without a valid elapsed
+clock the running contribution is missing.
+
+A later live-shadow wiring slice must prove these inputs rather than infer
+them from mutable previews:
+
+- complete pagination for every included lifecycle bucket;
+- bucket membership from the canonical status/lifecycle contract;
+- one verified estimator version selected for the observation;
+- running elapsed time derived from an authenticated claim boundary;
+- explicit incompleteness when a lifecycle category or classification cannot
+  be enumerated safely.
+
+The aggregate snapshot is not an admission verdict. It intentionally has no
+threshold, capacity horizon, submitter exception, deferral state, rejection
+reason, or override field. Those belong to a separately reviewed enforcing
+policy only after live workload observations are calibrated.
+
 ## Delivery sequence
 
 1. **Duration evidence:** implement the versioned historical estimator and
@@ -434,8 +501,9 @@ capacity, Hugin must say so truthfully.
    delivery step is complete.
 3. **Urgency authority:** add digest-bound authenticated urgency, then shadow
    low-to-normal promotion at half of the declared low-class SLA.
-4. **Work-minute shadow:** publish complete/lower-bound queued work and validate
-   it against realized waits.
+4. **Work-minute shadow:** the strict aggregate primitive is implemented but
+   not live-wired. Next publish complete/known-subtotal queued work from
+   bounded enumerations and validate it against realized waits.
 5. **Promotion gate:** require a predeclared production experiment, complete
    evidence, zero bound violations, acceptable estimate calibration, and an
    explicit human-reviewed policy decision. The cadence may package evidence;
