@@ -167,7 +167,17 @@ import {
   type SchedulerTerminalResultRevision,
 } from "./scheduler-evidence.js";
 import {
+  buildSchedulerClaimAttestation,
+  buildSchedulerOutcomeAttestation,
+  type SchedulerClaimAttestation,
+} from "./scheduler-evidence-attestation.js";
+import {
+  loadVerifiedSchedulerOutcomeHistory,
+} from "./scheduler-evidence-history.js";
+import {
+  persistSchedulerClaimAttestation,
   persistSchedulerOutcome,
+  persistSchedulerOutcomeAttestation,
   persistSchedulerPrediction,
 } from "./scheduler-evidence-store.js";
 import { LearningLoopCollector } from "./learning-loop-collector.js";
@@ -721,9 +731,8 @@ const reaperMunin = createMuninClient();
 // request queue plus fire-and-forget writes ensures Munin latency cannot hold
 // up execution after the claim CAS.
 const schedulerEvidenceMunin = createMuninClient();
-// Only outcomes created successfully by this live process enter estimator
-// memory. Durable rows cannot be trusted after restart until scheduler claim
-// instances have an authenticated binding, so restart intentionally cold-starts.
+// Only outcomes with a fully authenticated, exact evidence chain enter this
+// bounded cache. Startup hydration verifies every durable row before admission.
 const schedulerRuntimeEstimator = new SchedulerRuntimeEstimatorCache({
   minimumSamples: 3,
   windowSize: 24,
@@ -2464,6 +2473,8 @@ function stripLeaseTags(tags: string[]): string[] {
 function releaseCurrentClaimWithSchedulerOutcome(input: {
   taskNamespace: string;
   prediction: SchedulerDecisionPrediction | null;
+  claimAttestation: SchedulerClaimAttestation | null;
+  claimEvidencePersistence: Promise<boolean> | null;
   claimedAt: string | null;
   requestedRuntime: DispatcherRuntime;
   effectiveRuntime: DispatcherRuntime;
@@ -2475,7 +2486,8 @@ function releaseCurrentClaimWithSchedulerOutcome(input: {
   const releasedAt = new Date().toISOString();
   currentTask = null;
   currentTaskConfig = null;
-  if (!input.prediction || !input.terminalResult) return;
+  if (!input.prediction || !input.claimAttestation || !input.claimEvidencePersistence
+    || !input.terminalResult) return;
 
   try {
     const outcome = buildSchedulerDecisionOutcomeFromTerminalResult({
@@ -2489,20 +2501,26 @@ function releaseCurrentClaimWithSchedulerOutcome(input: {
       harness: input.harness,
       model: input.model,
     });
-    void persistSchedulerOutcome(schedulerEvidenceMunin, outcome)
-      .then((result) => {
-        // A `created` acknowledgement proves this live dispatcher authored the
-        // immutable row. Never train from exact-existing/replayed rows until
-        // durable claim-instance authentication is available.
-        if (result.status === "created") {
-          try {
-            schedulerRuntimeEstimator.recordCreated(outcome);
-          } catch (err) {
-            console.warn(
-              `Scheduler estimator admission failed for ${input.taskNamespace} ` +
-                `(${outcome.decisionId}): ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }
+    const outcomeAttestation = buildSchedulerOutcomeAttestation({
+      claimAttestation: input.claimAttestation,
+      outcome,
+    }, config.sensitivityCheckpointSecret);
+    void input.claimEvidencePersistence
+      .then(async (claimEvidencePersisted) => {
+        if (!claimEvidencePersisted) return;
+        await persistSchedulerOutcome(schedulerEvidenceMunin, outcome);
+        await persistSchedulerOutcomeAttestation(
+          schedulerEvidenceMunin,
+          outcomeAttestation,
+          outcome.requestedRuntime,
+        );
+        try {
+          schedulerRuntimeEstimator.recordVerified(outcome);
+        } catch (err) {
+          console.warn(
+            `Scheduler estimator admission failed for ${input.taskNamespace} ` +
+              `(${outcome.decisionId}): ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       })
       .catch((err: unknown) => {
@@ -4800,6 +4818,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         .concat("routing:auto")
     : entry.tags;
   let schedulerPrediction: SchedulerDecisionPrediction | null = null;
+  let schedulerClaimAttestation: SchedulerClaimAttestation | null = null;
+  let schedulerClaimEvidencePersistence: Promise<boolean> | null = null;
   let tagsForClaim = stripSchedulerDecisionPointers(claimInputTags);
   try {
     const compareShadow = config.schedulerShadowEnabled
@@ -4857,6 +4877,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   munin.setSessionId(randomUUID());
   let claimAcceptedAt = entry.updated_at;
   let schedulerClaimedAt: string | null = null;
+  const schedulerPreClaimUpdatedAt = entry.updated_at;
   try {
     const claimResult = await munin.write(
       taskNs,
@@ -4885,18 +4906,61 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     return { hadTask: false, queueDepth };
   }
 
-  // The claim is the scheduling authority. Prediction persistence happens
-  // only after that CAS and is deliberately best-effort: telemetry must never
-  // delay, fail, or reorder a production dispatch.
+  // The claim is the scheduling authority. The prediction and authenticated
+  // claim receipt are persisted sequentially only after that CAS. This chain
+  // stays on the isolated telemetry client and cannot delay dispatch.
   if (schedulerPrediction) {
     const acceptedPrediction = schedulerPrediction;
-    void persistSchedulerPrediction(schedulerEvidenceMunin, acceptedPrediction)
-      .catch((err: unknown) => {
-        console.warn(
-          `Scheduler shadow prediction persistence failed for ${taskNs} (${acceptedPrediction.decisionId}): ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
-      });
+    try {
+      if (!schedulerClaimedAt) {
+        throw new Error("claim acknowledgement omitted updated_at");
+      }
+      schedulerClaimAttestation = buildSchedulerClaimAttestation({
+        decisionId: acceptedPrediction.decisionId,
+        taskRef: acceptedPrediction.champion.taskRef,
+        taskContent: entry.content,
+        preClaimUpdatedAt: schedulerPreClaimUpdatedAt,
+        claimedAt: schedulerClaimedAt,
+        predictionSha256: hashSchedulerPrediction(acceptedPrediction),
+        workerId,
+        processInstanceId,
+      }, config.sensitivityCheckpointSecret);
+      const acceptedClaimAttestation = schedulerClaimAttestation;
+      schedulerClaimEvidencePersistence = persistSchedulerPrediction(
+        schedulerEvidenceMunin,
+        acceptedPrediction,
+      )
+        .then(() => persistSchedulerClaimAttestation(
+          schedulerEvidenceMunin,
+          acceptedClaimAttestation,
+        ))
+        .then(() => true)
+        .catch((err: unknown) => {
+          console.warn(
+            `Scheduler shadow claim evidence persistence failed for ${taskNs} `
+              + `(${acceptedPrediction.decisionId}): `
+              + (err instanceof Error ? err.message : String(err)),
+          );
+          return false;
+        });
+    } catch (err) {
+      schedulerClaimAttestation = null;
+      schedulerClaimEvidencePersistence = null;
+      void persistSchedulerPrediction(schedulerEvidenceMunin, acceptedPrediction).catch(
+        (persistErr: unknown) => {
+          console.warn(
+            `Scheduler shadow prediction persistence failed for ${taskNs} `
+              + `(${acceptedPrediction.decisionId}): `
+              + (persistErr instanceof Error ? persistErr.message : String(persistErr)),
+          );
+        },
+      );
+      console.warn(
+        `Scheduler shadow claim attestation construction failed for ${taskNs} `
+          + `(${acceptedPrediction.decisionId}): `
+          + (err instanceof Error ? err.message : String(err)),
+      );
+    }
   }
 
   // The selected status is now running. Keep /health accurate while the task
@@ -4960,6 +5024,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       releaseCurrentClaimWithSchedulerOutcome({
         taskNamespace: taskNs,
         prediction: schedulerPrediction,
+        claimAttestation: schedulerClaimAttestation,
+        claimEvidencePersistence: schedulerClaimEvidencePersistence,
         claimedAt: schedulerClaimedAt,
         requestedRuntime: "pipeline",
         effectiveRuntime: "pipeline",
@@ -6800,6 +6866,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     releaseCurrentClaimWithSchedulerOutcome({
       taskNamespace: taskNs,
       prediction: schedulerPrediction,
+      claimAttestation: schedulerClaimAttestation,
+      claimEvidencePersistence: schedulerClaimEvidencePersistence,
       claimedAt: schedulerClaimedAt,
       requestedRuntime: declaredRuntime as DispatcherRuntime,
       effectiveRuntime: effectiveSchedulerRuntime,
@@ -6856,6 +6924,27 @@ async function pollLoop(): Promise<void> {
 
   // Recover any tasks left running from a previous crash
   await recoverStaleTasks();
+  if (config.sensitivityCheckpointSecret.length >= 32) {
+    try {
+      const history = await loadVerifiedSchedulerOutcomeHistory(
+        schedulerEvidenceMunin,
+        config.sensitivityCheckpointSecret,
+        { windowSize: 24 },
+      );
+      for (const outcome of history.outcomes) {
+        schedulerRuntimeEstimator.recordVerified(outcome);
+      }
+      console.log(
+        `Scheduler history hydration: verified=${history.outcomes.length} `
+          + `rejected=${history.rejected}`,
+      );
+    } catch (err) {
+      console.warn(
+        "Scheduler history hydration failed; estimator will cold-start: "
+          + (err instanceof Error ? err.message : String(err)),
+      );
+    }
+  }
   await reconcileBlockedTasks();
   await runHomeserverLearningRegistryReconciliation();
   await primeTrackedPipelineSummaries();

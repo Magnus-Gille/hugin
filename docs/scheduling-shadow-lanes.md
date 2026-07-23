@@ -200,15 +200,25 @@ per-group minimum sequences rather than a nested scan. A dedicated Munin client
 and fire-and-forget write ensure evidence latency cannot enter the
 claim-to-execution critical path.
 
-The next live slice admits an outcome to estimator memory only after this
-process receives `status: created` for its create-only outcome write. It never
-trains from `exact-existing` or arbitrary post-restart Munin rows: schema and a
-terminal-result hash prove content consistency, but not that Hugin owned the
-claim instance. A restart therefore cold-starts the three-sample runtime
-window and abstains until enough new exact-bound outcomes have been created.
-The cache retains at most the 24 newest complete outcomes per requested
-runtime. This is intentionally conservative until authenticated
-claim-instance provenance exists.
+An outcome enters estimator memory only after the complete authenticated chain
+has been persisted or re-verified. The live writer serializes prediction,
+claim attestation, outcome, and outcome attestation on the isolated telemetry
+client. A crash between any two writes leaves an incomplete chain; it is never
+reconstructed from later state and is excluded after restart. Every record is
+`create_if_absent`; an exact JCS replay is reusable, while conflicting content
+is rejected.
+
+At startup Hugin reads at most the newest 24 outcome-attestation candidates per
+requested runtime. It admits a candidate only when all four immutable evidence
+rows exist, both domain-separated MACs verify, the prediction and outcome share
+the attested decision/task identity, the outcome claim boundary equals the
+attested successful-CAS timestamp, and the current exact
+`result-structured` revision and raw SHA-256 still match the terminal binding.
+The task status content must also still hash to the content bound by the claim
+attestation. Missing rows, tag/runtime mismatch, malformed schemas, stale
+terminal revisions, and MAC or digest conflicts fail closed for that sample.
+The cache retains at most the 24 newest complete verified outcomes per
+requested runtime and still abstains until three samples exist.
 
 ### Authenticated claim/outcome chain
 
@@ -228,16 +238,16 @@ The versioned claim attestation binds:
 The versioned outcome attestation then binds the exact JCS outcome digest and
 terminal-result revision/hash to the full authenticated claim-attestation
 digest. Both use constant-time MAC comparison, reject weak secrets, and fail
-closed on malformed or changed fields. This chain is sufficient for a later
-history reader to distinguish Hugin-authored samples from arbitrary
-create-only rows.
+closed on malformed or changed fields. This chain lets the bounded history
+reader distinguish Hugin-authored samples from arbitrary create-only rows
+without storing task content in scheduler telemetry.
 
 The primitive alone does **not** prove that a mutable current status row is a
 continuous descendant of an older claim. Recovery therefore continues to
-strip scheduler pointers until persistence, crash-gap handling, and replay
-rules for the full chain are implemented and reviewed. Shipping the schemas
-must not silently enable recovery preservation or post-restart estimator
-hydration.
+strip scheduler pointers. Verified terminal-history hydration does not grant
+recovery authority: it authenticates a completed evidence chain, while pointer
+preservation requires a separate proof that every mutable status transition
+descends continuously from the successful claim.
 
 `HUGIN_SCHEDULER_SHADOW=on` enables challenger computation. It defaults to
 `off`; the disabled state persists a bounded `shadow-disabled` abstention.
@@ -248,9 +258,9 @@ open only to that same candidate with caller scheduler pointers stripped.
 Startup, lease-reaper, and interrupted-delivery recovery continue to strip the
 pointer. Schema and digest validation proves content integrity but not that the
 first writer was Hugin or that the pointer came from the successful claim CAS.
-Recovery preservation therefore requires a future immutable, authenticated
-claim-instance binding; mutable status tags plus create-only evidence are not
-sufficient authority.
+Recovery preservation therefore still requires proof of continuous
+current-status descent; the authenticated terminal history described above is
+not sufficient authority.
 
 For a terminal result written by the live in-process claim owner, Hugin retains
 the exact serialized `result-structured` SHA-256 and Munin revision returned by

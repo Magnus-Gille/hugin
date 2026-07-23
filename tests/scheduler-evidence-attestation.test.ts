@@ -3,6 +3,7 @@ import {
   buildSchedulerClaimAttestation,
   buildSchedulerOutcomeAttestation,
   hashSchedulerClaimAttestation,
+  hashSchedulerOutcomeAttestation,
   verifySchedulerClaimAttestation,
   verifySchedulerOutcomeAttestation,
 } from "../src/scheduler-evidence-attestation.js";
@@ -55,6 +56,7 @@ describe("scheduler evidence attestations", () => {
   it("authenticates the exact successful claim transition without storing task content", () => {
     const attestation = claim();
     const verified = verifySchedulerClaimAttestation(JSON.stringify(attestation), {
+      decisionId,
       taskRef,
       taskContent,
       predictionSha256,
@@ -80,12 +82,14 @@ describe("scheduler evidence attestations", () => {
       { ...attestation, hmacSha256: "d".repeat(64) },
     ]) {
       expect(verifySchedulerClaimAttestation(JSON.stringify(tampered), {
+        decisionId,
         taskRef,
         taskContent,
         predictionSha256,
       }, secret)).toBeUndefined();
     }
     expect(verifySchedulerClaimAttestation(JSON.stringify(attestation), {
+      decisionId,
       taskRef,
       taskContent: `${taskContent}\nchanged`,
       predictionSha256,
@@ -104,6 +108,7 @@ describe("scheduler evidence attestations", () => {
       claimAttestation,
       outcome: terminalOutcome,
     }, secret)).toMatchObject({ decisionId });
+    expect(hashSchedulerOutcomeAttestation(attestation)).toMatch(/^[0-9a-f]{64}$/);
     expect(verifySchedulerOutcomeAttestation(JSON.stringify(attestation), {
       claimAttestation,
       outcome: { ...terminalOutcome, terminalClass: "failed" },
@@ -112,6 +117,16 @@ describe("scheduler evidence attestations", () => {
       claimAttestation: { ...claimAttestation, claimedAt: "2026-07-23T01:00:01.000Z" },
       outcome: terminalOutcome,
     }, secret)).toBeUndefined();
+    expect(() => buildSchedulerOutcomeAttestation({
+      claimAttestation,
+      outcome: {
+        ...terminalOutcome,
+        clock: buildCompleteSchedulerServiceClock(
+          "2026-07-23T01:00:01.000Z",
+          "2026-07-23T01:00:10.000Z",
+        ),
+      },
+    }, secret)).toThrow(/does not bind the attested claim/);
   });
 
   it("rejects weak secrets and cross-protocol MAC reuse", () => {
@@ -135,6 +150,6 @@ describe("scheduler evidence attestations", () => {
     expect(verifySchedulerClaimAttestation(JSON.stringify({
       ...claimAttestation,
       hmacSha256: outcomeAttestation.hmacSha256,
-    }), { taskRef, taskContent, predictionSha256 }, secret)).toBeUndefined();
+    }), { decisionId, taskRef, taskContent, predictionSha256 }, secret)).toBeUndefined();
   });
 });

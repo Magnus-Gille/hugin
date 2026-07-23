@@ -1,13 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { MuninWriteRejectedError, type MuninEntry } from "../src/munin-client.js";
 import {
+  buildSchedulerClaimAttestation,
+  buildSchedulerOutcomeAttestation,
+} from "../src/scheduler-evidence-attestation.js";
+import {
+  hashSchedulerPrediction,
+} from "../src/scheduler-evidence.js";
+import {
+  persistSchedulerClaimAttestation,
   persistSchedulerOutcome,
+  persistSchedulerOutcomeAttestation,
   persistSchedulerPrediction,
   type SchedulerEvidenceStoreClient,
 } from "../src/scheduler-evidence-store.js";
 
 const taskNamespace = "tasks/20260723-001500-abcd";
 const decisionId = "34f2d430-6c31-47de-860a-8b22bc97f4d4";
+const secret = "dispatcher-authority-secret-32-bytes-minimum";
 
 function prediction(overrides: Record<string, unknown> = {}) {
   return {
@@ -37,6 +47,57 @@ function prediction(overrides: Record<string, unknown> = {}) {
     },
     estimatorVersion: "scheduler-duration-v1",
     ...overrides,
+  };
+}
+
+function outcome(overrides: Record<string, unknown> = {}) {
+  return {
+    schemaVersion: 1,
+    decisionId,
+    taskRef: { namespace: taskNamespace, key: "status" },
+    terminalClass: "completed",
+    clock: {
+      serviceClock: "claim-to-release-v1",
+      clockComplete: true,
+      claimedAt: "2026-07-22T22:15:00.000Z",
+      releasedAt: "2026-07-22T22:16:00.000Z",
+      schedulerServiceSeconds: 60,
+    },
+    requestedRuntime: "codex",
+    effectiveRuntime: "codex",
+    championEstimateSeconds: null,
+    absolutePredictionErrorSeconds: null,
+    longJob: false,
+    terminalResult: {
+      namespace: taskNamespace,
+      key: "result-structured",
+      updatedAt: "2026-07-22T22:15:59.000Z",
+      sha256: "a".repeat(64),
+    },
+    ...overrides,
+  };
+}
+
+function attestations() {
+  const predicted = prediction();
+  const claim = buildSchedulerClaimAttestation({
+    decisionId,
+    taskRef: { namespace: taskNamespace, key: "status" },
+    taskContent: "## Task: safe",
+    preClaimUpdatedAt: "2026-07-22T22:14:59.000Z",
+    claimedAt: "2026-07-22T22:15:00.000Z",
+    predictionSha256: hashSchedulerPrediction(predicted),
+    workerId: "hugin-test",
+    processInstanceId: "hugin-test-123",
+  }, secret);
+  const completed = outcome();
+  return {
+    claim,
+    outcome: completed,
+    outcomeAttestation: buildSchedulerOutcomeAttestation({
+      claimAttestation: claim,
+      outcome: completed,
+    }, secret),
   };
 }
 
@@ -108,30 +169,7 @@ describe("scheduler evidence store", () => {
 
   it("creates outcomes separately and refuses a conflicting immutable replay", async () => {
     const munin = new FakeMunin();
-    const value = {
-      schemaVersion: 1,
-      decisionId,
-      taskRef: { namespace: taskNamespace, key: "status" },
-      terminalClass: "completed",
-      clock: {
-        serviceClock: "claim-to-release-v1",
-        clockComplete: true,
-        claimedAt: "2026-07-22T22:15:00.000Z",
-        releasedAt: "2026-07-22T22:16:00.000Z",
-        schedulerServiceSeconds: 60,
-      },
-      requestedRuntime: "codex",
-      effectiveRuntime: "codex",
-      championEstimateSeconds: null,
-      absolutePredictionErrorSeconds: null,
-      longJob: false,
-      terminalResult: {
-        namespace: taskNamespace,
-        key: "result-structured",
-        updatedAt: "2026-07-22T22:15:59.000Z",
-        sha256: "a".repeat(64),
-      },
-    };
+    const value = outcome();
 
     expect(await persistSchedulerOutcome(munin, value)).toEqual({ status: "created" });
     expect(munin.writes[0]).toEqual({
@@ -144,6 +182,60 @@ describe("scheduler evidence store", () => {
       ...value,
       terminalClass: "failed",
     })).rejects.toThrow(/different outcome/);
+  });
+
+  it("creates claim and outcome attestations immutably and tags outcomes by runtime", async () => {
+    const munin = new FakeMunin();
+    const values = attestations();
+
+    expect(await persistSchedulerClaimAttestation(munin, values.claim)).toEqual({
+      status: "created",
+    });
+    expect(await persistSchedulerOutcomeAttestation(
+      munin,
+      values.outcomeAttestation,
+      "codex",
+    )).toEqual({ status: "created" });
+    expect(munin.writes).toEqual([
+      {
+        namespace: `scheduler/decisions/${decisionId}`,
+        key: "claim-attestation",
+        createIfAbsent: true,
+      },
+      {
+        namespace: `scheduler/decisions/${decisionId}`,
+        key: "outcome-attestation",
+        createIfAbsent: true,
+      },
+    ]);
+    expect(munin.rows.get(
+      `scheduler/decisions/${decisionId}/outcome-attestation`,
+    )?.tags).toContain("scheduler-runtime:codex");
+
+    expect(await persistSchedulerClaimAttestation(munin, values.claim)).toEqual({
+      status: "exact-existing",
+    });
+    expect(await persistSchedulerOutcomeAttestation(
+      munin,
+      values.outcomeAttestation,
+      "codex",
+    )).toEqual({ status: "exact-existing" });
+  });
+
+  it("refuses conflicting immutable claim and outcome attestations", async () => {
+    const munin = new FakeMunin();
+    const values = attestations();
+    await persistSchedulerClaimAttestation(munin, values.claim);
+    await persistSchedulerOutcomeAttestation(munin, values.outcomeAttestation, "codex");
+
+    await expect(persistSchedulerClaimAttestation(munin, {
+      ...values.claim,
+      hmacSha256: "b".repeat(64),
+    })).rejects.toThrow(/different claim attestation/);
+    await expect(persistSchedulerOutcomeAttestation(munin, {
+      ...values.outcomeAttestation,
+      hmacSha256: "c".repeat(64),
+    }, "codex")).rejects.toThrow(/different outcome attestation/);
   });
 
 });
