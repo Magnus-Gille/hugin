@@ -6,7 +6,12 @@ import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import express from "express";
-import { HEIMDALL_DESCRIPTOR, registerHeimdallDescriptorRoute } from "./heimdall-descriptor.js";
+import {
+  HEIMDALL_DESCRIPTOR,
+  registerHeimdallDescriptorRoute,
+  buildLearningLoopHealthPanels,
+} from "./heimdall-descriptor.js";
+import { startHeimdallPanelReporter } from "./heimdall-report.js";
 import {
   buildDefaultEgressHosts,
   installFetchEgressPolicy,
@@ -7133,12 +7138,30 @@ app.get("/health", (_req, res) => {
 // Learning-loop health panels (#164). Its own LedgerClient (cached, fail-open)
 // so the dashboard surface does not depend on the verdict layer being enabled.
 // The collector is bounded + TTL-cached and can never break /heimdall.json.
-registerHeimdallDescriptorRoute(
-  app,
-  new LearningLoopCollector({
-    munin,
-    ledgerClient: new LedgerClient({ env: process.env }),
-  })
+// The descriptor route below does NOT use this collector — it deliberately
+// keeps identity/health separate from capability/product evidence (see
+// heimdall-descriptor.ts) — but the periodic panel push does, so the one
+// cached corpus walk backs both instead of doubling collection cost.
+const learningLoopCollector = new LearningLoopCollector({
+  munin,
+  ledgerClient: new LedgerClient({ env: process.env }),
+});
+
+registerHeimdallDescriptorRoute(app, {
+  health: () => ({
+    polling: !shuttingDown,
+    brokerConfigured: brokerEnv.enabled,
+    brokerDegraded: computeBrokerHealthField(brokerEnv.enabled, brokerBindStatus).degraded,
+    blockedTasks: lastBlockedTaskCount,
+  }),
+});
+
+// Pushes the learning-loop typed panels (#164) to Heimdall's panel store on a
+// slow (5 min) cadence instead of embedding them in every /heimdall.json
+// response. No-op until HEIMDALL_HUB_URL + HEIMDALL_FLEET_TOKEN are
+// configured in this service's environment; see src/heimdall-report.ts.
+const stopHeimdallPanelReporter = startHeimdallPanelReporter(() =>
+  buildLearningLoopHealthPanels(learningLoopCollector)
 );
 
 // --- Graceful shutdown ---
@@ -7175,6 +7198,7 @@ async function shutdown(signal: string): Promise<void> {
   stopLeaseReaper();
   stopDeliveryRetryReaper();
   stopAuthAlarmReaper();
+  stopHeimdallPanelReporter?.();
 
   // Mark the current task as failed before killing the process
   if (currentTask) {
