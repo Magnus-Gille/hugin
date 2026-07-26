@@ -1,0 +1,30 @@
+{
+  "kind": "workload-requirement",
+  "schema_version": "v1",
+  "workload_id": "hugin",
+  "supported_architectures": ["arm64", "x86_64"],
+  "persistent_data": "required",
+  "ports": [3032],
+  "units": [
+    "hugin.service",
+    "hugin-daily-exam-factory.service",
+    "hugin-experiment-cadence.service"
+  ],
+  "timers": [
+    "hugin-daily-exam-factory.timer",
+    "hugin-experiment-cadence.timer"
+  ],
+  "secrets_boundary": "owner_overlay",
+  "dependencies": ["munin", "mimir", "m5-gateway"],
+  "backup_restore": "required",
+  "health": "component_hook",
+  "hooks": [
+    {"name": "preflight", "mode": "read_only", "contract_versions": ["v1"], "deadline_seconds": 120, "idempotency_required": true},
+    {"name": "drain", "mode": "mutating", "contract_versions": ["v1"], "deadline_seconds": 300, "idempotency_required": true, "compensation_hook": "compensate"},
+    {"name": "verify", "mode": "read_only", "contract_versions": ["v1"], "deadline_seconds": 120, "idempotency_required": true},
+    {"name": "compensate", "mode": "mutating", "contract_versions": ["v1"], "deadline_seconds": 300, "idempotency_required": true}
+  ],
+  "extensions": [
+    {"id": "hugin-workload-evidence", "version": "v1", "decision_effect": "informational"}
+  ]
+}
