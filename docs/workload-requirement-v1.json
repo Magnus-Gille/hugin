@@ -15,7 +15,7 @@
     "hugin-experiment-cadence.timer"
   ],
   "secrets_boundary": "owner_overlay",
-  "dependencies": ["munin", "mimir", "m5-gateway"],
+  "dependencies": ["workload-munin-memory", "mimir", "m5-gateway"],
   "backup_restore": "required",
   "health": "component_hook",
   "hooks": [

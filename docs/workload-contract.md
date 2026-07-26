@@ -2,13 +2,13 @@
 
 This is Hugin's owner-side requirement declaration for [Hugin #289](https://github.com/Magnus-Gille/hugin/issues/289). It uses the byte-exact shared Grimnir node/substrate v1 artifacts recorded in [workload-requirement-v1.provenance.json](workload-requirement-v1.provenance.json). It is a dry-run planning boundary, not authorization to move production Hugin.
 
-`workload-requirement-v1.json` is the complete v1 record. The contract preserves the shared schema's meaning: Hugin validates the schema and fixtures directly; it does not add a Hugin-only schema, hidden fields, or decision-driving overlay.
+`workload-requirement-v1.json` is the complete v1 record. The contract preserves the shared schema's meaning: Hugin byte-pins and executes Grimnir's normative validator against the full shared fixture set, including its semantic negatives; it does not add a Hugin-only schema, hidden fields, or decision-driving overlay.
 
 ## Genuine Hugin requirements
 
 - Node.js must run the built dispatcher on either declared architecture. The public contract deliberately does not claim a current Node version or package manager as a node capability; the deployment overlay must provide the repository's supported runtime.
 - Hugin requires durable, owner-controlled state: its accepted deployment marker, service-local durable output, and recoverable Munin task/result state. `backup_restore: required` means a move cannot promote without a component-owned restore and verification result.
-- Hugin requires the public health port 3032, the dispatcher service plus its daily-exam and experiment-cadence units/timers, owner-only secrets, and reachable Munin. Mimir/NAS delivery and the M5 gateway are separately named external dependencies because artifact delivery and M5-backed work must not be assumed locally available.
+- Hugin requires the public health port 3032, the dispatcher service plus its daily-exam and experiment-cadence units/timers, owner-only secrets, and reachable Munin. The dependency identifier is `workload-munin-memory`, matching Grimnir's current `services.json` workload identity rather than the convenience name `munin`. Mimir/NAS delivery and the M5 gateway are separately named external dependencies because artifact delivery and M5-backed work must not be assumed locally available.
 - Preflight and verification are read-only. Drain is mutating and must stop new claims, reconcile owned work to a bounded safe state without dropping it, and compensate back to the verified baseline on timeout, failure, or partial completion. Verify covers service health, polling, queue state, Codex sandbox/tool availability, both timers, durable paths, and the accepted deployment marker. Compensation restores that marker and persistent state before any later attempt.
 
 The existing dispatcher/recovery and deployment gates implement parts of these checks today; this document does not claim that a generic Brokkr hook runner or production relocation exists.

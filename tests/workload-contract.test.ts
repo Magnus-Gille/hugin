@@ -1,5 +1,7 @@
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
@@ -22,6 +24,11 @@ const provenance = JSON.parse(
   read("docs/workload-requirement-v1.provenance.json").toString("utf8"),
 );
 const schema = loadNormativeSchema();
+const normativeRoot = resolve(root, "docs/vendor/grimnir");
+const normativeValidator = join(
+  normativeRoot,
+  "tests/scripts/validate-node-substrate-contract.mjs",
+);
 
 function fixture(name: string): { records: JsonValue[] } {
   return JSON.parse(read(`docs/vendor/grimnir/${name}`).toString("utf8"));
@@ -57,6 +64,9 @@ describe("vendored Grimnir node/substrate v1 contract", () => {
     expect(sha256Hex(read("docs/vendor/grimnir/negative.json"))).toBe(
       "e67d9233a556aa6da9728e9c07ae95ac3b1bc9abe9a4ac8ad817158829b8ead5",
     );
+    expect(sha256Hex(read("docs/vendor/grimnir/tests/scripts/validate-node-substrate-contract.mjs"))).toBe(
+      "526df55086a5e2049dd5ad95c556710c01e54d6c22146cb9b9dd1e4f5bd55c9a",
+    );
   });
 
   it("consumes the named shared fixture set without a Hugin overlay", () => {
@@ -70,6 +80,25 @@ describe("vendored Grimnir node/substrate v1 contract", () => {
     });
   });
 
+  it("runs the validator against the same byte-exact schema and fixtures it pins", () => {
+    for (const name of [
+      "node-substrate-contract-v1.schema.json",
+      "consumer-fixture-set.json",
+      "positive.json",
+      "partial-drain.json",
+      "partial-substrate.json",
+      "negative.json",
+    ]) {
+      const flat = name === "node-substrate-contract-v1.schema.json"
+        ? join(normativeRoot, name)
+        : join(normativeRoot, name);
+      const nested = name === "node-substrate-contract-v1.schema.json"
+        ? join(normativeRoot, "docs", name)
+        : join(normativeRoot, "tests/fixtures/node-substrate-contract", name);
+      expect(readFileSync(nested)).toEqual(readFileSync(flat));
+    }
+  });
+
   it("validates every positive shared record directly against the pinned schema", () => {
     expect(() => checkSchemaSupported(schema)).not.toThrow();
     for (const name of ["positive.json", "partial-drain.json", "partial-substrate.json"]) {
@@ -79,11 +108,27 @@ describe("vendored Grimnir node/substrate v1 contract", () => {
     }
   });
 
-  it("does not reinterpret schema-valid shared negatives as a private Hugin contract", () => {
-    const negative = JSON.parse(read("docs/vendor/grimnir/negative.json").toString("utf8"));
-    expect(schemaErrors(schema, schema, negative.schema_unsupported_version)).not.toEqual([]);
-    expect(schemaErrors(schema, schema, negative.duplicate_hook_workload)).toEqual([]);
-    expect(schemaErrors(schema, schema, negative.replayed_lifecycle)).toEqual([]);
+  it("executes the pinned normative validator for every shared semantic scenario", () => {
+    expect(() => execFileSync(process.execPath, [normativeValidator], { encoding: "utf8" })).not.toThrow();
+  });
+
+  it("fails closed when a schema-valid semantic negative drifts", () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "hugin-node-substrate-"));
+    try {
+      cpSync(normativeRoot, tempRoot, { recursive: true });
+      const negativePath = join(tempRoot, "tests/fixtures/node-substrate-contract/negative.json");
+      const negative = JSON.parse(readFileSync(negativePath, "utf8"));
+      negative.duplicate_hook_workload.hooks.splice(1, 1);
+      writeFileSync(negativePath, `${JSON.stringify(negative, null, 2)}\n`);
+      expect(() =>
+        execFileSync(process.execPath, [join(tempRoot, "tests/scripts/validate-node-substrate-contract.mjs")], {
+          encoding: "utf8",
+          stdio: "pipe",
+        }),
+      ).toThrow(/Missing expected exception/);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 
   it("fails closed when a pinned artifact drifts", () => {
@@ -106,6 +151,7 @@ describe("Hugin workload requirement v1", () => {
     expect(workload.secrets_boundary).toBe("owner_overlay");
     expect(workload.persistent_data).toBe("required");
     expect(workload.backup_restore).toBe("required");
+    expect(workload.dependencies).toContain("workload-munin-memory");
     expect(workload.ports).toEqual([3032]);
     expect(workload.timers).toEqual([
       "hugin-daily-exam-factory.timer",
