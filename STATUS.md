@@ -1,5 +1,16 @@
 # Hugin — Status
 
+## 2026-07-26 — #324 legacy daily journal analysis retired (pending merge/deploy)
+
+- Branch `codex/retire-daily-journal-analysis` removes the legacy system timer,
+  service, submission shell script, bounded input builder, and their dedicated
+  tests. A systemd-unit regression test now guards against restoring any of those
+  executable artifacts. The generic dispatcher `Group: daily-analysis` parser is
+  unrelated and intentionally remains.
+- Post-merge host action remains required: disable and stop
+  `hugin-daily-analysis.timer`, then verify both `is-enabled` and `is-active`
+  report inactive/disabled. This branch does not mutate the control host.
+
 **Latest session:** 2026-07-15 (Codex) — **Quality Receipt v1 merged,
 deployed, and live**
 **Production feature tree:** `935a10abb6adc00d1fbf6715569295f335d2245d`
