@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -8,7 +8,13 @@ const USER_UNITS = [
   "systemd/hugin-experiment-cadence.service",
 ];
 
-const SYSTEM_UNITS = ["systemd/hugin-daily-analysis.service"];
+const RETIRED_DAILY_ANALYSIS_ARTIFACTS = [
+  "systemd/hugin-daily-analysis.service",
+  "systemd/hugin-daily-analysis.timer",
+  "scripts/submit-daily-analysis.sh",
+  "scripts/build-daily-analysis-input.mjs",
+  "tests/daily-analysis-input.test.ts",
+];
 
 describe("systemd user services", () => {
   it.each(USER_UNITS)("%s inherits the user manager identity", (unitPath) => {
@@ -19,9 +25,7 @@ describe("systemd user services", () => {
     expect(unit).not.toMatch(/^SupplementaryGroups=/m);
   });
 
-  it.each(SYSTEM_UNITS)("%s declares a non-root runtime identity", (unitPath) => {
-    const unit = readFileSync(resolve(unitPath), "utf8");
-
-    expect(unit).toMatch(/^User=magnus$/m);
+  it.each(RETIRED_DAILY_ANALYSIS_ARTIFACTS)("does not retain %s", (artifactPath) => {
+    expect(existsSync(resolve(artifactPath))).toBe(false);
   });
 });

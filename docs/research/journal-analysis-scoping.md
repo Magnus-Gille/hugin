@@ -1,8 +1,11 @@
 # Journal Analysis — Evaluation Track Scoping
 
-**Status:** Draft scope, awaiting approval
+**Status:** Historical draft — the automated daily journal-analysis invocation was retired in #324.
 **Date:** 2026-04-25
 **Purpose:** Produce evidence to make a falsifiable go/no-go decision on the orchestrator stack (per `debate/orch-stack-summary.md`). Does not prejudge the answer.
+
+> This is retained as historical research context only. It is not an active
+> operational path or a specification to restore the retired daily timer.
 
 ---
 
