@@ -15,27 +15,56 @@ const sha256 = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const opaqueRef = z.string().regex(/^ref:[a-z][a-z0-9-]{2,120}$/);
 const revision = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{2,127}$/);
 const targetId = z.string().regex(/^[a-z][a-z0-9-]{2,80}$/);
-const signerId = z.string().regex(/^[a-z][a-z0-9-]{2,80}$/);
 
 export const AUTONOMY_PROPOSAL_SCHEMA_VERSION = "v1" as const;
 export const AUTONOMY_PROPOSAL_POLICY_EPOCH_ID = "grimnir-adr-008-v1" as const;
 export const AUTONOMY_PROPOSAL_SIGNER_KEY_ID = "hugin-autonomy-proposer" as const;
+export const AUTONOMY_PROPOSAL_REGISTRY_VERSION = "v1" as const;
+
+/** Exact authority adopted by Grimnir ADR-008/W0, never caller-selected. */
+export const autonomyProposalPolicyAuthority = Object.freeze({
+  id: AUTONOMY_PROPOSAL_POLICY_EPOCH_ID,
+  constitutionId: "grimnir-autonomy-v1",
+  constitutionDigest: "sha256:76b0f28adca0046fad9f1d3d4b3a57046f9a1d11ee2ed232bbc495d2ab663bd0",
+});
 
 /** Closed registry: broad learning axes never create an implicit apply right. */
-export const proposalTargetRegistry = [
-  { id: "hugin-orin-macro-routing", axis: "routing", owner: "hugin", huginOwned: true },
-  { id: "hugin-agent-prompt", axis: "agent-prompt", owner: "hugin", huginOwned: true },
-  { id: "hugin-agent-harness", axis: "agent-harness", owner: "hugin", huginOwned: true },
+const proposalTargets = [
+  { id: "hugin-orin-macro-routing", axis: "macro-routing", owner: "hugin", huginOwned: true },
+  { id: "hugin-agent-prompt", axis: "prompt", owner: "hugin", huginOwned: true },
+  { id: "hugin-agent-harness", axis: "harness", owner: "hugin", huginOwned: true },
   { id: "hugin-tool-policy", axis: "tool-policy", owner: "hugin", huginOwned: true },
-  { id: "gille-micro-routing", axis: "routing", owner: "gille-inference", huginOwned: false },
+  { id: "gille-micro-routing", axis: "micro-routing", owner: "gille-inference", huginOwned: false },
   { id: "gille-served-model-roster", axis: "served-model-roster", owner: "gille-inference", huginOwned: false },
   { id: "gille-tool-policy", axis: "tool-policy", owner: "gille-inference", huginOwned: false },
   { id: "brokkr-no-reboot-maintenance", axis: "no-reboot-security-bugfix-maintenance", owner: "brokkr", huginOwned: false },
-  { id: "hugin-logging", axis: "logging", owner: "hugin", huginOwned: false, protected: true },
-  { id: "hugin-test-harness", axis: "test-harness", owner: "hugin", huginOwned: false, protected: true },
-  { id: "gille-model", axis: "model", owner: "gille-inference", huginOwned: false, protected: true },
-  { id: "gille-model-config", axis: "model-config", owner: "gille-inference", huginOwned: false, protected: true },
 ] as const;
+const protectedTargetIds = ["hugin-logging", "hugin-test-harness", "gille-model", "gille-model-config"] as const;
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function sha256Digest(value: string): string {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+const ownershipRegistryUnsigned = {
+  kind: "hugin-autonomy-proposal-ownership-registry",
+  version: AUTONOMY_PROPOSAL_REGISTRY_VERSION,
+  policyAuthority: autonomyProposalPolicyAuthority,
+  targets: proposalTargets,
+  protectedTargetIds,
+};
+export const autonomyProposalOwnershipRegistry = deepFreeze({
+  ...ownershipRegistryUnsigned,
+  digest: sha256Digest(canonicalizeJcs(ownershipRegistryUnsigned)),
+});
+export const proposalTargetRegistry = autonomyProposalOwnershipRegistry.targets;
 
 type ProposalTarget = (typeof proposalTargetRegistry)[number];
 
@@ -49,10 +78,18 @@ const proposalReceiptSchema = z.object({
   owner: z.enum(["hugin", "gille-inference", "brokkr"]),
   /** Receipts are never authority to mutate; this is deliberately constant. */
   disposition: z.literal("proposal-only"),
+  ownershipRegistry: z.object({
+    version: z.literal(AUTONOMY_PROPOSAL_REGISTRY_VERSION),
+    digest: sha256,
+  }).strict(),
   base: z.object({ revision, digest: sha256 }).strict(),
   candidateContentDigest: sha256,
   expiresAt: z.string().datetime({ offset: true }),
-  policyEpoch: z.object({ id: z.literal(AUTONOMY_PROPOSAL_POLICY_EPOCH_ID), digest: sha256 }).strict(),
+  policyEpoch: z.object({
+    id: z.literal(AUTONOMY_PROPOSAL_POLICY_EPOCH_ID),
+    constitutionId: z.literal(autonomyProposalPolicyAuthority.constitutionId),
+    constitutionDigest: z.literal(autonomyProposalPolicyAuthority.constitutionDigest),
+  }).strict(),
   canonicalProposalDigest: sha256,
   signerKeyId: z.literal(AUTONOMY_PROPOSAL_SIGNER_KEY_ID),
   signature: z.string().regex(/^v1:[a-z][a-z0-9-]{2,80}:[a-f0-9]{64}$/),
@@ -67,7 +104,6 @@ const proposalInputSchema = z.object({
   base: z.object({ revision, digest: sha256 }).strict(),
   candidateContentDigest: sha256,
   expiresAt: z.string().datetime({ offset: true }),
-  policyEpoch: z.object({ id: z.literal(AUTONOMY_PROPOSAL_POLICY_EPOCH_ID), digest: sha256 }).strict(),
   signerKeyId: z.literal(AUTONOMY_PROPOSAL_SIGNER_KEY_ID),
 }).strict();
 export type AutonomyProposalInput = z.infer<typeof proposalInputSchema>;
@@ -79,17 +115,12 @@ function targetFor(id: string): TargetLookup {
 
 function requireTarget(id: string): ProposalTarget {
   const target = targetFor(id);
-  if (!target) throw new Error("unknown-target");
-  if ("protected" in target && target.protected) throw new Error("protected-target");
+  if (!target) throw new Error(protectedTargetIds.includes(id as typeof protectedTargetIds[number]) ? "protected-target" : "unknown-target");
   return target;
 }
 
 function signingBody(receipt: Omit<AutonomyProposalReceipt, "signature" | "canonicalProposalDigest">): string {
   return canonicalizeJcs(receipt);
-}
-
-function sha256Digest(value: string): string {
-  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
 export function canonicalAutonomyProposalDigest(
@@ -119,10 +150,14 @@ export function createAutonomyProposalReceipt(input: AutonomyProposalInput, secr
     axis: target.axis,
     owner: target.owner,
     disposition: "proposal-only" as const,
+    ownershipRegistry: {
+      version: autonomyProposalOwnershipRegistry.version,
+      digest: autonomyProposalOwnershipRegistry.digest,
+    },
     base: parsedInput.base,
     candidateContentDigest: parsedInput.candidateContentDigest,
     expiresAt: parsedInput.expiresAt,
-    policyEpoch: parsedInput.policyEpoch,
+    policyEpoch: autonomyProposalPolicyAuthority,
     signerKeyId: parsedInput.signerKeyId,
   };
   const canonicalProposalDigest = canonicalAutonomyProposalDigest(body);
@@ -135,7 +170,6 @@ export function createAutonomyProposalReceipt(input: AutonomyProposalInput, secr
 
 export type ProposalValidationOptions = {
   now: () => Date;
-  policyEpochDigest: string;
   currentBase: { revision: string; digest: string };
 };
 
@@ -150,11 +184,22 @@ export function verifyAutonomyProposalReceipt(
   if (!parsed.success) return { status: "rejected", reason: "invalid-receipt" };
   const receipt = parsed.data;
   const target = targetFor(receipt.targetId);
-  if (!target) return { status: "rejected", reason: "unknown-target" };
-  if (("protected" in target && target.protected)) return { status: "rejected", reason: "protected-target" };
+  if (!target) return { status: "rejected", reason: protectedTargetIds.includes(receipt.targetId as typeof protectedTargetIds[number]) ? "protected-target" : "unknown-target" };
   if (receipt.axis !== target.axis || receipt.owner !== target.owner) return { status: "rejected", reason: "owner-mismatch" };
-  if (Date.parse(receipt.expiresAt) <= options.now().getTime()) return { status: "rejected", reason: "expired" };
-  if (receipt.policyEpoch.digest !== options.policyEpochDigest) return { status: "rejected", reason: "policy-epoch-mismatch" };
+  if (receipt.ownershipRegistry.version !== autonomyProposalOwnershipRegistry.version || receipt.ownershipRegistry.digest !== autonomyProposalOwnershipRegistry.digest) {
+    return { status: "rejected", reason: "ownership-registry-mismatch" };
+  }
+  if (receipt.policyEpoch.id !== autonomyProposalPolicyAuthority.id || receipt.policyEpoch.constitutionId !== autonomyProposalPolicyAuthority.constitutionId || receipt.policyEpoch.constitutionDigest !== autonomyProposalPolicyAuthority.constitutionDigest) {
+    return { status: "rejected", reason: "policy-epoch-mismatch" };
+  }
+  let nowMs: number;
+  try {
+    nowMs = options.now().getTime();
+  } catch {
+    return { status: "rejected", reason: "invalid-verifier-clock" };
+  }
+  if (!Number.isFinite(nowMs)) return { status: "rejected", reason: "invalid-verifier-clock" };
+  if (Date.parse(receipt.expiresAt) <= nowMs) return { status: "rejected", reason: "expired" };
   if (receipt.base.revision !== options.currentBase.revision || receipt.base.digest !== options.currentBase.digest) {
     return { status: "rejected", reason: "stale-or-mismatched-base" };
   }

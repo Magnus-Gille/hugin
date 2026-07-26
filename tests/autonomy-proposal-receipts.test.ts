@@ -4,6 +4,7 @@ import { MuninWriteRejectedError, type MuninClient } from "../src/munin-client.j
 import {
   createAutonomyProposalReceipt,
   proposalTargetRegistry,
+  autonomyProposalOwnershipRegistry,
   signAutonomyProposalReceipt,
   storeAutonomyProposalReceipt,
   verifyAutonomyProposalReceipt,
@@ -44,7 +45,6 @@ function input(): AutonomyProposalInput {
     base: { revision: "b700c05", digest: digest("base-a") },
     candidateContentDigest: digest("candidate-a"),
     expiresAt: "2026-07-26T15:00:00.000Z",
-    policyEpoch: { id: "grimnir-adr-008-v1", digest: digest("adr-008") },
     signerKeyId: "hugin-autonomy-proposer",
   };
 }
@@ -58,7 +58,14 @@ describe("autonomy proposal receipts", () => {
     const receipt = proposal();
     expect(receipt.disposition).toBe("proposal-only");
     expect(receipt.owner).toBe("hugin");
-    expect(verifyAutonomyProposalReceipt(receipt, KEYS, { now, policyEpochDigest: digest("adr-008"), currentBase: receipt.base })).toEqual({ status: "valid" });
+    expect(verifyAutonomyProposalReceipt(receipt, KEYS, { now, currentBase: receipt.base })).toEqual({ status: "valid" });
+    expect(receipt.ownershipRegistry).toEqual({ version: "v1", digest: autonomyProposalOwnershipRegistry.digest });
+    expect(Object.isFrozen(autonomyProposalOwnershipRegistry)).toBe(true);
+    expect(Object.isFrozen(proposalTargetRegistry)).toBe(true);
+    expect([...new Set(proposalTargetRegistry.map((target) => target.axis))].sort()).toEqual([
+      "harness", "macro-routing", "micro-routing", "no-reboot-security-bugfix-maintenance",
+      "prompt", "served-model-roster", "tool-policy",
+    ]);
     expect(JSON.stringify(receipt)).not.toContain("prompt");
     expect(JSON.stringify(receipt)).not.toContain("candidate-a");
   });
@@ -66,10 +73,10 @@ describe("autonomy proposal receipts", () => {
   it("replays byte-identical receipts and rejects divergent identity content", async () => {
     const munin = new MemoryMunin() as unknown as MuninClient;
     const first = proposal();
-    expect(await storeAutonomyProposalReceipt(munin, first, KEYS, { now, policyEpochDigest: digest("adr-008"), currentBase: first.base })).toMatchObject({ status: "stored", replay: false });
-    expect(await storeAutonomyProposalReceipt(munin, first, KEYS, { now, policyEpochDigest: digest("adr-008"), currentBase: first.base })).toMatchObject({ status: "stored", replay: true });
+    expect(await storeAutonomyProposalReceipt(munin, first, KEYS, { now, currentBase: first.base })).toMatchObject({ status: "stored", replay: false });
+    expect(await storeAutonomyProposalReceipt(munin, first, KEYS, { now, currentBase: first.base })).toMatchObject({ status: "stored", replay: true });
     const divergent = proposal({ candidateContentDigest: digest("different") });
-    expect(await storeAutonomyProposalReceipt(munin, divergent, KEYS, { now, policyEpochDigest: digest("adr-008"), currentBase: divergent.base })).toMatchObject({ status: "rejected", reason: "identity-conflict" });
+    expect(await storeAutonomyProposalReceipt(munin, divergent, KEYS, { now, currentBase: divergent.base })).toMatchObject({ status: "rejected", reason: "identity-conflict" });
     expect(munin.writes).toBe(1);
   });
 
@@ -103,15 +110,25 @@ describe("autonomy proposal receipts", () => {
     expect(() => proposal({ signerKeyId: "some-other-signer" as "hugin-autonomy-proposer" })).toThrow();
   });
 
+  it("rejects explicit apply and multi-axis requests before any Munin write", async () => {
+    const munin = new MemoryMunin() as unknown as MuninClient;
+    const receipt = proposal();
+    expect(await storeAutonomyProposalReceipt(munin, { ...receipt, disposition: "apply" }, KEYS, { now, currentBase: receipt.base })).toMatchObject({ status: "rejected" });
+    expect(await storeAutonomyProposalReceipt(munin, { ...receipt, targetIds: ["hugin-orin-macro-routing", "hugin-agent-prompt"] }, KEYS, { now, currentBase: receipt.base })).toMatchObject({ status: "rejected" });
+    expect(munin.writes).toBe(0);
+  });
+
   it("rejects stale evidence, epoch/base/owner mismatch, and invalid signatures before persistence", async () => {
     const munin = new MemoryMunin() as unknown as MuninClient;
     const receipt = proposal();
-    expect(verifyAutonomyProposalReceipt(receipt, KEYS, { now, policyEpochDigest: digest("wrong"), currentBase: receipt.base })).toMatchObject({ reason: "policy-epoch-mismatch" });
-    expect(verifyAutonomyProposalReceipt(receipt, KEYS, { now, policyEpochDigest: digest("adr-008"), currentBase: { ...receipt.base, digest: digest("other") } })).toMatchObject({ reason: "stale-or-mismatched-base" });
-    expect(verifyAutonomyProposalReceipt({ ...receipt, owner: "gille-inference" }, KEYS, { now, policyEpochDigest: digest("adr-008"), currentBase: receipt.base })).toMatchObject({ reason: "owner-mismatch" });
-    expect(verifyAutonomyProposalReceipt({ ...receipt, signature: `v1:hugin-autonomy-proposer:${"0".repeat(64)}` }, KEYS, { now, policyEpochDigest: digest("adr-008"), currentBase: receipt.base })).toMatchObject({ reason: "invalid-signature" });
+    expect(verifyAutonomyProposalReceipt({ ...receipt, policyEpoch: { ...receipt.policyEpoch, constitutionDigest: digest("wrong") } }, KEYS, { now, currentBase: receipt.base })).toMatchObject({ reason: "invalid-receipt" });
+    expect(verifyAutonomyProposalReceipt({ ...receipt, ownershipRegistry: { ...receipt.ownershipRegistry, digest: digest("wrong") } }, KEYS, { now, currentBase: receipt.base })).toMatchObject({ reason: "ownership-registry-mismatch" });
+    expect(verifyAutonomyProposalReceipt(receipt, KEYS, { now, currentBase: { ...receipt.base, digest: digest("other") } })).toMatchObject({ reason: "stale-or-mismatched-base" });
+    expect(verifyAutonomyProposalReceipt({ ...receipt, owner: "gille-inference" }, KEYS, { now, currentBase: receipt.base })).toMatchObject({ reason: "owner-mismatch" });
+    expect(verifyAutonomyProposalReceipt({ ...receipt, signature: `v1:hugin-autonomy-proposer:${"0".repeat(64)}` }, KEYS, { now, currentBase: receipt.base })).toMatchObject({ reason: "invalid-signature" });
+    expect(verifyAutonomyProposalReceipt(receipt, KEYS, { now: () => new Date("not-a-date"), currentBase: receipt.base })).toMatchObject({ reason: "invalid-verifier-clock" });
     const expired = proposal({ expiresAt: "2026-07-26T13:59:59.000Z" });
-    expect(await storeAutonomyProposalReceipt(munin, expired, KEYS, { now, policyEpochDigest: digest("adr-008"), currentBase: expired.base })).toMatchObject({ status: "rejected", reason: "expired" });
+    expect(await storeAutonomyProposalReceipt(munin, expired, KEYS, { now, currentBase: expired.base })).toMatchObject({ status: "rejected", reason: "expired" });
     expect(munin.writes).toBe(0);
   });
 });
