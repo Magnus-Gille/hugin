@@ -1,4 +1,5 @@
 /** Adapter-neutral, owner-authorized R-exact journal/controller (Hugin #330). */
+import { createHash, createPublicKey } from "node:crypto";
 import type { KeyStore } from "../task-signing.js";
 import { canonicalizeJcs } from "../jcs.js";
 import {
@@ -21,8 +22,10 @@ import {
   validateRExactJournal,
 } from "./r-exact-journal.js";
 import {
+  validateHistoricalRoleAuthority,
   validateRoleServices,
   verifyRoleWriteReceipt,
+  verifyStoredRoleWriteReceipt,
   type VerifiedRoleServiceKey,
 } from "./r-exact-role-auth.js";
 import type {
@@ -62,6 +65,16 @@ const idDigest = (prefix: string, value: string): string =>
 
 const targetClaimKey = (target: RExactConfigTarget): string =>
   `${target.domain}:${target.targetScopeDigest}`;
+
+const publicKeyFingerprint = (publicKeyPem: string): string => {
+  const key = createPublicKey(publicKeyPem);
+  if (key.asymmetricKeyType !== "ed25519") {
+    throw new Error("r-exact-owner-key-invalid");
+  }
+  return `sha256:${createHash("sha256")
+    .update(key.export({ type: "spki", format: "der" }))
+    .digest("hex")}`;
+};
 
 function trustedNow(gate: W0RuntimeGate): number {
   const value = gate.protectedNow().getTime();
@@ -193,7 +206,7 @@ function validatePrepared(
       "snapshot_digest",
       "prepared_authority",
       "prepared_authority_digest",
-      "prepared_owner_public_key_pem",
+      "prepared_owner_key_fingerprint",
       "role_service_pins",
       "role_service_pins_digest",
       "admission_digest",
@@ -210,12 +223,23 @@ function validatePrepared(
     || prepared.snapshot_digest !== receipt.base.digest
     || !refPattern.test(prepared.snapshot_ref)
     || prepared.prepared_authority_digest !== w0Digest(prepared.prepared_authority)
-    || !prepared.prepared_owner_public_key_pem.includes("BEGIN PUBLIC KEY")
+    || !digestPattern.test(prepared.prepared_owner_key_fingerprint)
     || prepared.role_service_pins_digest !== w0Digest(prepared.role_service_pins)
     || !digestPattern.test(prepared.admission_digest)
   ) {
     throw new Error("r-exact-prepared-attempt-invalid");
   }
+}
+
+function recoveryDescriptorDigest(prepared: PreparedAttempt): string {
+  return w0Digest({
+    snapshot_ref: prepared.snapshot_ref,
+    snapshot_digest: prepared.snapshot_digest,
+    target_id: prepared.target_id,
+    base_revision: prepared.base_revision,
+    base_digest: prepared.base_digest,
+    prepared_digest: w0Digest(prepared),
+  });
 }
 
 function verifyReceiptIdentityOnly(
@@ -385,6 +409,29 @@ export async function applyRExactProposal(
   ) {
     throw new Error("r-exact-snapshot-base-mismatch");
   }
+  const prepared: PreparedAttempt = {
+    kind: "hugin-r-exact-prepared-attempt",
+    schema_version: "v1",
+    proposal_receipt_digest: w0Digest(receipt),
+    proposal_digest: receipt.canonicalProposalDigest,
+    target_id: target.id,
+    target_scope_digest: target.targetScopeDigest,
+    base_revision: receipt.base.revision,
+    base_digest: receipt.base.digest,
+    candidate_digest: receipt.candidateContentDigest,
+    snapshot_ref: snapshot.ref,
+    snapshot_digest: snapshot.digest,
+    prepared_authority: structuredClone(owner),
+    prepared_authority_digest: w0Digest(owner),
+    prepared_owner_key_fingerprint: publicKeyFingerprint(
+      gate.authority.pinnedOwnerPublicKeyPem,
+    ),
+    role_service_pins: structuredClone(gate.roleServicePins),
+    role_service_pins_digest: w0Digest(gate.roleServicePins),
+    admission_digest: w0Digest(initialAdmission),
+  };
+  validatePrepared(prepared, receipt, target);
+  const preparedDigest = w0Digest(prepared);
   const binding = {
     mutation_id: idDigest("mutation", receipt.canonicalProposalDigest),
     attempt_id: attemptId,
@@ -396,6 +443,7 @@ export async function applyRExactProposal(
     writer_owner: "hugin",
     owner_authority_ref: owner.ownerAuthorityRef,
     owner_authority_digest: owner.ownerAuthorityDigest,
+    owner_authorization_digest: owner.authorizationDigest,
     configuration_owner: "hugin",
     configuration_owner_authority_ref:
       owner.configurationOwnerAuthorityRef,
@@ -425,13 +473,8 @@ export async function applyRExactProposal(
     recovery: {
       class: "R-exact",
       worker_identity: owner.identities.recovery_worker,
-      descriptor_digest: w0Digest({
-        snapshot_ref: snapshot.ref,
-        snapshot_digest: snapshot.digest,
-        target_id: target.id,
-        base_revision: receipt.base.revision,
-        base_digest: receipt.base.digest,
-      }),
+      descriptor_digest: recoveryDescriptorDigest(prepared),
+      prepared_digest: preparedDigest,
       disarms_after_action: true,
     },
   };
@@ -455,26 +498,6 @@ export async function applyRExactProposal(
       owner.identities.controller,
     ),
   );
-  const prepared: PreparedAttempt = {
-    kind: "hugin-r-exact-prepared-attempt",
-    schema_version: "v1",
-    proposal_receipt_digest: w0Digest(receipt),
-    proposal_digest: receipt.canonicalProposalDigest,
-    target_id: target.id,
-    target_scope_digest: target.targetScopeDigest,
-    base_revision: receipt.base.revision,
-    base_digest: receipt.base.digest,
-    candidate_digest: receipt.candidateContentDigest,
-    snapshot_ref: snapshot.ref,
-    snapshot_digest: snapshot.digest,
-    prepared_authority: structuredClone(owner),
-    prepared_authority_digest: w0Digest(owner),
-    prepared_owner_public_key_pem: gate.authority.pinnedOwnerPublicKeyPem,
-    role_service_pins: structuredClone(gate.roleServicePins),
-    role_service_pins_digest: w0Digest(gate.roleServicePins),
-    admission_digest: w0Digest(initialAdmission),
-  };
-  validatePrepared(prepared, receipt, target);
   validateRExactJournal(journal);
   const preparedWrite = await gate.controller.createAndClaim(
     receipt.proposalId,
@@ -639,6 +662,85 @@ async function narrowCurrentAuthority(
   gate.authority = narrowed;
 }
 
+function terminalBlockedReasonDigest(recoveryReasonDigest: string): string {
+  return w0Digest({
+    kind: "r-exact-terminal-blocked",
+    recovery_reason_digest: recoveryReasonDigest,
+  });
+}
+
+async function reconcilePendingNarrowing(
+  receipt: AutonomyProposalReceipt,
+  target: RExactConfigTarget,
+  gate: W0RuntimeGate,
+  journal: RExactJournal,
+  prepared: PreparedAttempt,
+  currentAuthority: VerifiedW0Binding,
+  recoveryRoleKey: VerifiedRoleServiceKey,
+  recoveryReasonDigest: string,
+): Promise<RExactResult | null> {
+  if (currentAuthority.effectiveState !== "shadow") return null;
+  const transition = {
+    from_state: prepared.prepared_authority.state,
+    to_state: "shadow" as const,
+    target_scope_digest: prepared.target_scope_digest,
+    actor_identity: prepared.prepared_authority.identities.recovery_worker,
+  };
+  const candidates: Array<{
+    status: "disarmed" | "terminally-blocked";
+    entry: JournalEntry;
+  }> = [
+    {
+      status: "terminally-blocked",
+      entry: buildJournalEntry(
+        journal,
+        "terminally-blocked",
+        latest(journal).recorded_at,
+        prepared.prepared_authority.identities.recovery_worker,
+        terminalBlockedReasonDigest(recoveryReasonDigest),
+        transition,
+      ),
+    },
+  ];
+  if (latest(journal).phase === "revert") {
+    candidates.unshift({
+      status: "disarmed",
+      entry: buildJournalEntry(
+        journal,
+        "disarm",
+        latest(journal).recorded_at,
+        prepared.prepared_authority.identities.recovery_worker,
+        recoveryReasonDigest,
+        transition,
+      ),
+    });
+  }
+  const narrowedReceipt = gate.authority.runtimeNarrowing.entries.at(-1)
+    ?.journal_receipt_digest;
+  const pending = candidates.find(
+    (candidate) => candidate.entry.receipt_digest === narrowedReceipt,
+  );
+  if (!pending) {
+    throw new Error("r-exact-pending-narrowing-unmatched");
+  }
+  verifyW0NarrowingApplied(
+    gate.authority,
+    currentAuthority,
+    pending.entry.receipt_digest,
+  );
+  const state = await appendThroughRole(
+    gate.recoveryJournal,
+    recoveryRoleKey,
+    receipt.proposalId,
+    journal,
+    pending.entry,
+    prepared,
+  );
+  validateRExactJournal(state.journal, false);
+  await terminalizeClaim(gate, target, state.journal);
+  return { status: pending.status, journal: state.journal };
+}
+
 async function appendTerminalBlocked(
   receipt: AutonomyProposalReceipt,
   target: RExactConfigTarget,
@@ -706,11 +808,52 @@ export async function recoverRExactAttempt(
   const { prepared } = stored;
   validatePrepared(prepared, receipt, target);
   validateRExactJournal(journal);
+  const historical = await gate.resolveHistoricalAuthority(
+    journal.binding.owner_authorization_digest,
+  );
+  if (!historical) {
+    throw new Error("r-exact-historical-authority-missing");
+  }
+  const historicalBinding = verifyW0Authority(
+    historical.authority,
+    target.domain,
+    target.targetScopeDigest,
+    true,
+  );
+  if (
+    historicalBinding.authorizationDigest
+      !== journal.binding.owner_authorization_digest
+    || canonicalizeJcs(prepared.prepared_authority)
+      !== canonicalizeJcs(historicalBinding)
+    || prepared.prepared_owner_key_fingerprint
+      !== publicKeyFingerprint(
+        historical.authority.pinnedOwnerPublicKeyPem,
+      )
+    || canonicalizeJcs(prepared.role_service_pins)
+      !== canonicalizeJcs(historical.roleServicePins)
+  ) {
+    throw new Error("r-exact-historical-authority-mismatch");
+  }
+  const historicalRoleKeys = validateHistoricalRoleAuthority(
+    historical,
+    historicalBinding,
+  );
+  const storedRole = roleForPhase(latest(journal).phase);
+  const storedAction = journal.entries.length === 1 ? "create" : "append";
+  const storedPrevious = journal.entries.length === 1
+    ? null
+    : journal.entries.at(-2)!.receipt_digest;
+  verifyStoredRoleWriteReceipt(
+    stored,
+    historicalRoleKeys[storedRole],
+    storedAction,
+    storedPrevious,
+  );
   const roleKeys = validateRoleServices(
     gate,
-    prepared.prepared_authority,
-    prepared.role_service_pins,
-    prepared.prepared_owner_public_key_pem,
+    historicalBinding,
+    historical.roleServicePins,
+    historical.authority.pinnedOwnerPublicKeyPem,
   );
   const claim = await gate.claims.claim(
     targetClaimKey(target),
@@ -720,18 +863,23 @@ export async function recoverRExactAttempt(
   if (claim === "busy") throw new Error("r-exact-target-busy");
   if (
     journal.binding_digest !== w0Digest(journal.binding)
+    || journal.binding.owner_authorization_digest
+      !== historicalBinding.authorizationDigest
+    || journal.binding.recovery.prepared_digest !== w0Digest(prepared)
+    || journal.binding.recovery.descriptor_digest
+      !== recoveryDescriptorDigest(prepared)
     || journal.binding.target_scope_digest
-      !== prepared.prepared_authority.targetScopeDigest
+      !== historicalBinding.targetScopeDigest
     || journal.binding.admission_coverage_digest
-      !== prepared.prepared_authority.coverageDigest
+      !== historicalBinding.coverageDigest
     || journal.binding.owner_authority_ref
-      !== prepared.prepared_authority.ownerAuthorityRef
+      !== historicalBinding.ownerAuthorityRef
     || journal.binding.owner_authority_digest
-      !== prepared.prepared_authority.ownerAuthorityDigest
+      !== historicalBinding.ownerAuthorityDigest
     || journal.binding.configuration_owner_authority_ref
-      !== prepared.prepared_authority.configurationOwnerAuthorityRef
+      !== historicalBinding.configurationOwnerAuthorityRef
     || journal.binding.configuration_owner_authority_digest
-      !== prepared.prepared_authority.configurationOwnerAuthorityDigest
+      !== historicalBinding.configurationOwnerAuthorityDigest
   ) {
     throw new Error("r-exact-journal-binding-invalid");
   }
@@ -784,6 +932,17 @@ export async function recoverRExactAttempt(
     proposal_digest: prepared.proposal_digest,
     kill_switch_state_digest: protection.killSwitchStateDigest,
   });
+  const reconciledNarrowing = await reconcilePendingNarrowing(
+    receipt,
+    target,
+    gate,
+    journal,
+    prepared,
+    currentAuthority,
+    roleKeys["recovery-worker"],
+    reasonDigest,
+  );
+  if (reconciledNarrowing) return reconciledNarrowing;
   if (latest(journal).phase !== "unknown" && latest(journal).phase !== "revert") {
     const state = await appendThroughRole(
       gate.watchdog,
@@ -897,10 +1056,7 @@ export async function recoverRExactAttempt(
       journal,
       prepared,
       roleKeys["recovery-worker"],
-      w0Digest({
-        kind: "r-exact-terminal",
-        error: error instanceof Error ? error.message : "unknown",
-      }),
+      terminalBlockedReasonDigest(reasonDigest),
       options,
     );
   }

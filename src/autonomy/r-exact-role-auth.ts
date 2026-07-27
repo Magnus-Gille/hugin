@@ -8,6 +8,7 @@ import { canonicalizeJcs } from "../jcs.js";
 import type { VerifiedW0Binding } from "./w0-authority.js";
 import { latestEntry } from "./r-exact-journal.js";
 import type {
+  HistoricalRoleAuthority,
   JournalRole,
   ProtectedRoleServicePins,
   RExactRoleService,
@@ -34,11 +35,11 @@ export type VerifiedRoleServiceKeys = Readonly<
   Record<JournalRole, VerifiedRoleServiceKey>
 >;
 
-function serviceKey(service: RExactRoleService): {
+function keyMaterial(publicKeyPem: string): {
   publicKeyPem: string;
   publicKeyFingerprint: string;
 } {
-  const key = createPublicKey(service.publicKeyPem);
+  const key = createPublicKey(publicKeyPem);
   if (key.asymmetricKeyType !== "ed25519") {
     throw new Error("r-exact-role-service-key");
   }
@@ -50,21 +51,21 @@ function serviceKey(service: RExactRoleService): {
   };
 }
 
-export function validateRoleServices(
-  gate: W0RuntimeGate,
+function validateRoleKeys(
   binding: VerifiedW0Binding,
-  pins: ProtectedRoleServicePins = gate.roleServicePins,
-  ownerPublicKeyPem: string = gate.authority.pinnedOwnerPublicKeyPem,
+  pins: ProtectedRoleServicePins,
+  ownerPublicKeyPem: string,
+  sources: ReadonlyArray<{
+    role: JournalRole;
+    identity: string;
+    publicKeyPem: string;
+  }>,
 ): VerifiedRoleServiceKeys {
-  const expected = [
-    [gate.controller, "controller", binding.identities.controller],
-    [gate.watchdog, "watchdog", binding.identities.watchdog],
-    [
-      gate.recoveryJournal,
-      "recovery-worker",
-      binding.identities.recovery_worker,
-    ],
-  ] as const;
+  const expectedIdentities: Record<JournalRole, string> = {
+    controller: binding.identities.controller,
+    watchdog: binding.identities.watchdog,
+    "recovery-worker": binding.identities.recovery_worker,
+  };
   const fingerprints = new Set<string>();
   const verified = {} as Record<JournalRole, VerifiedRoleServiceKey>;
   if (
@@ -118,11 +119,19 @@ export function validateRoleServices(
   ) {
     throw new Error("r-exact-role-service-pins-signature");
   }
-  for (const [service, role, identity] of expected) {
-    if (service.role !== role || service.identity !== identity) {
+  if (
+    sources.length !== 3
+    || new Set(sources.map((source) => source.role)).size !== 3
+  ) {
+    throw new Error("r-exact-role-service-binding");
+  }
+  for (const source of sources) {
+    const { role } = source;
+    const identity = expectedIdentities[role];
+    if (!identity || source.identity !== identity) {
       throw new Error("r-exact-role-service-binding");
     }
-    const key = serviceKey(service);
+    const key = keyMaterial(source.publicKeyPem);
     if (fingerprints.has(key.publicKeyFingerprint)) {
       throw new Error("r-exact-role-service-key-reuse");
     }
@@ -145,22 +154,38 @@ export function validateRoleServices(
   return Object.freeze(verified);
 }
 
-export function verifyRoleWriteReceipt(
+export function validateRoleServices(
+  gate: W0RuntimeGate,
+  binding: VerifiedW0Binding,
+  pins: ProtectedRoleServicePins = gate.roleServicePins,
+  ownerPublicKeyPem: string = gate.authority.pinnedOwnerPublicKeyPem,
+): VerifiedRoleServiceKeys {
+  return validateRoleKeys(binding, pins, ownerPublicKeyPem, [
+    gate.controller,
+    gate.watchdog,
+    gate.recoveryJournal,
+  ]);
+}
+
+export function validateHistoricalRoleAuthority(
+  historical: HistoricalRoleAuthority,
+  binding: VerifiedW0Binding,
+): VerifiedRoleServiceKeys {
+  return validateRoleKeys(
+    binding,
+    historical.roleServicePins,
+    historical.authority.pinnedOwnerPublicKeyPem,
+    historical.rolePublicKeys,
+  );
+}
+
+function verifyReceiptWithPinnedKey(
   result: RoleWriteResult,
-  service: RExactRoleService,
   pinned: VerifiedRoleServiceKey,
   action: "create" | "append",
   previousReceiptDigest: null | string,
 ): void {
   const receipt = result.receipt;
-  const currentKey = serviceKey(service);
-  if (
-    service.role !== pinned.role
-    || service.identity !== pinned.identity
-    || currentKey.publicKeyFingerprint !== pinned.publicKeyFingerprint
-  ) {
-    throw new Error("r-exact-role-service-binding-changed");
-  }
   if (
     !exactKeys(receipt, [
       "kind",
@@ -170,6 +195,7 @@ export function verifyRoleWriteReceipt(
       "action",
       "journal_id",
       "binding_digest",
+      "prepared_digest",
       "previous_receipt_digest",
       "resulting_receipt_digest",
       "recorded_at",
@@ -183,6 +209,7 @@ export function verifyRoleWriteReceipt(
     || receipt.action !== action
     || receipt.journal_id !== result.journal.journal_id
     || receipt.binding_digest !== result.journal.binding_digest
+    || receipt.prepared_digest !== w0Digest(result.prepared)
     || receipt.previous_receipt_digest !== previousReceiptDigest
     || receipt.resulting_receipt_digest
       !== latestEntry(result.journal).receipt_digest
@@ -203,4 +230,41 @@ export function verifyRoleWriteReceipt(
   ) {
     throw new Error("r-exact-role-receipt-signature");
   }
+}
+
+export function verifyRoleWriteReceipt(
+  result: RoleWriteResult,
+  service: RExactRoleService,
+  pinned: VerifiedRoleServiceKey,
+  action: "create" | "append",
+  previousReceiptDigest: null | string,
+): void {
+  const currentKey = keyMaterial(service.publicKeyPem);
+  if (
+    service.role !== pinned.role
+    || service.identity !== pinned.identity
+    || currentKey.publicKeyFingerprint !== pinned.publicKeyFingerprint
+  ) {
+    throw new Error("r-exact-role-service-binding-changed");
+  }
+  verifyReceiptWithPinnedKey(
+    result,
+    pinned,
+    action,
+    previousReceiptDigest,
+  );
+}
+
+export function verifyStoredRoleWriteReceipt(
+  result: RoleWriteResult,
+  pinned: VerifiedRoleServiceKey,
+  action: "create" | "append",
+  previousReceiptDigest: null | string,
+): void {
+  verifyReceiptWithPinnedKey(
+    result,
+    pinned,
+    action,
+    previousReceiptDigest,
+  );
 }

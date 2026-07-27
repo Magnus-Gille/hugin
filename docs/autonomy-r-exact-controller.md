@@ -47,7 +47,11 @@ or recovery private keys or a generic journal write credential. The
 orchestrator freezes the owner-pinned role, identity, and public key at
 admission, rechecks the live service binding after every asynchronous write,
 and verifies the receipt with the frozen key. An in-flight key or identity
-swap is therefore rejected.
+swap is therefore rejected. Every role receipt also signs the exact prepared
+record digest. On restart, the journal reader's result remains untrusted until
+the tail receipt is verified against the independently retained historical
+role key, including action, previous tail, binding, prepared digest, and new
+tail.
 
 `prepare` is persisted before mutation and can therefore be the one-entry
 durable prefix of an attempt. Completed and recovered W0 journal envelopes have
@@ -75,9 +79,13 @@ performs exact readback. Only the separately bound recovery worker can write:
 
 The durable prepared record explicitly binds the signed proposal receipt,
 target identity/scope, base revision/digest, snapshot ref/digest, prepared
-authority, old owner public key, and owner-signed role pins. Recovery therefore
-uses immutable prepared authority to restore after owner rotation while using
-the current protected authority only for kill-switch observation and narrowing.
+authority, historical owner-key fingerprint, and owner-signed role pins. Its
+digest is bound both into the recovery descriptor and every signed role
+receipt. Recovery resolves the corresponding owner authorization, owner key,
+role pins, and role public keys from a protected historical authority service;
+the stored sidecar cannot nominate its own trust root. Recovery can therefore
+restore after owner rotation while using the current protected authority only
+for kill-switch observation and narrowing.
 
 `revert` is written only after exact baseline revision and digest readback
 succeed. The worker deterministically constructs the terminal `disarm` or
@@ -90,12 +98,13 @@ The worker adapter must make signed narrowing idempotent. The controller
 reconciles both important crash windows:
 
 - restore succeeded but its `revert` receipt was not written;
-- signed narrowing and checkpoint succeeded but the `disarm` receipt was not
-  written.
+- signed narrowing and checkpoint succeeded but the `disarm` or
+  `terminally-blocked` receipt was not written.
 
 In the second window, restart reconstructs and appends the same deterministic
-`disarm` receipt already named by the narrowing checkpoint. It never substitutes
-a differently bound terminal state.
+terminal receipt already named by the narrowing checkpoint before attempting
+another restore or other recovery action. It never substitutes a differently
+bound terminal state.
 
 If restore or exact readback fails, the worker records `terminally-blocked`.
 There is no automatic forward retry from that state.
@@ -108,6 +117,8 @@ An owning adapter must provide:
 - independently deployed controller, watchdog, and recovery role services,
   each holding only its own private key and journal capability;
 - an owner-signed protected pin artifact for those three public keys;
+- a protected historical-authority resolver retaining independently pinned
+  owner and role public keys for every nonterminal prepared attempt;
 - an atomic controller prepare/claim store that creates both or neither, holds
   the claim through terminalization, and permits reuse only after a terminal
   receipt;

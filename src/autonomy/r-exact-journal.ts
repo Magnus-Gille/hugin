@@ -145,6 +145,7 @@ export function validateRExactJournal(
     "writer_owner",
     "owner_authority_ref",
     "owner_authority_digest",
+    "owner_authorization_digest",
     "configuration_owner",
     "configuration_owner_authority_ref",
     "configuration_owner_authority_digest",
@@ -204,6 +205,7 @@ export function validateRExactJournal(
       "class",
       "worker_identity",
       "descriptor_digest",
+      "prepared_digest",
       "disarms_after_action",
     ])
     || journal.binding.canary.scope_digest
@@ -212,6 +214,9 @@ export function validateRExactJournal(
     || journal.binding.recovery.class !== "R-exact"
     || journal.binding.recovery.worker_identity
       !== journal.binding.recovery_worker_identity
+    || !digestPattern.test(journal.binding.owner_authorization_digest)
+    || !digestPattern.test(journal.binding.recovery.prepared_digest)
+    || !digestPattern.test(journal.binding.recovery.descriptor_digest)
     || journal.binding.recovery.disarms_after_action !== true
     || !exactUtc(journal.binding.deadline)
     || !exactUtc(journal.binding.canary.watch_deadline)

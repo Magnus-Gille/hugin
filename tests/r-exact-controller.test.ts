@@ -506,6 +506,7 @@ class JournalBackend implements RExactJournalReader {
       action,
       journal_id: journal.journal_id,
       binding_digest: journal.binding_digest,
+      prepared_digest: w0Digest(prepared),
       previous_receipt_digest: previous,
       resulting_receipt_digest: journal.entries.at(-1)!.receipt_digest,
       recorded_at: journal.entries.at(-1)!.recorded_at,
@@ -586,6 +587,13 @@ function gate(
       public_key_fingerprint: `sha256:${publicKey}`,
     };
   });
+  const historicalRolePublicKeys = Object.values(backend.services).map(
+    (service) => ({
+      role: service.role,
+      identity: service.identity,
+      publicKeyPem: service.publicKeyPem,
+    }),
+  );
   const pinsBase = {
     kind: "hugin-r-exact-role-service-pins" as const,
     schema_version: "v1" as const,
@@ -613,6 +621,14 @@ function gate(
     watchdog: backend.services.watchdog,
     recoveryJournal: backend.services["recovery-worker"],
     claims: backend.claims,
+    resolveHistoricalAuthority: async (authorizationDigest) =>
+      authorizationDigest === w0Digest(bundle.ownerAuthorization)
+        ? {
+            authority: bundle,
+            roleServicePins,
+            rolePublicKeys: historicalRolePublicKeys,
+          }
+        : null,
     protectedNow: () => new Date(fixedNow),
     verifyFresh: async () => proofFor(receipt, override),
     verifyRecovery: async (_prepared, current) => ({
@@ -1124,6 +1140,74 @@ describe("W0.1 R-exact controller", () => {
     );
   });
 
+  it("rejects a store-recomputed journal, prepared sidecar, and receipt", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime, {
+        onPhase: (phase) => {
+          if (phase === "snapshot") throw new Error("pause-after-prepare");
+        },
+      }),
+    ).rejects.toThrow("pause-after-prepare");
+    const tampered = (await backend.read(receipt.proposalId))!;
+    tampered.prepared.snapshot_ref = "ref:tampered-snapshot";
+    tampered.journal.binding.config_digest = h("tampered-config");
+    tampered.journal.binding_digest = w0Digest(tampered.journal.binding);
+    const entry = tampered.journal.entries[0];
+    entry.binding_digest = tampered.journal.binding_digest;
+    const unsignedEntry: any = structuredClone(entry);
+    delete unsignedEntry.receipt_digest;
+    entry.receipt_digest = w0Digest(unsignedEntry);
+    tampered.receipt.binding_digest = tampered.journal.binding_digest;
+    tampered.receipt.prepared_digest = w0Digest(tampered.prepared);
+    tampered.receipt.resulting_receipt_digest = entry.receipt_digest;
+    backend.rows.set(receipt.proposalId, structuredClone(tampered));
+
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("role-receipt-signature");
+    expect(target.digest).toBe(h("base"));
+  });
+
+  it("rejects self-replaced owner fingerprint and role pins", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime, {
+        onPhase: (phase) => {
+          if (phase === "snapshot") throw new Error("pause-after-prepare");
+        },
+      }),
+    ).rejects.toThrow("pause-after-prepare");
+    const tampered = (await backend.read(receipt.proposalId))!;
+    tampered.prepared.prepared_owner_key_fingerprint = h("attacker-owner");
+    tampered.prepared.role_service_pins.entries[0]
+      .public_key_fingerprint = h("attacker-controller");
+    const pinsBase = {
+      kind: tampered.prepared.role_service_pins.kind,
+      schema_version: tampered.prepared.role_service_pins.schema_version,
+      owner_authorization_digest:
+        tampered.prepared.role_service_pins.owner_authorization_digest,
+      entries: tampered.prepared.role_service_pins.entries,
+    };
+    tampered.prepared.role_service_pins.pins_digest = w0Digest(pinsBase);
+    tampered.prepared.role_service_pins_digest = w0Digest(
+      tampered.prepared.role_service_pins,
+    );
+    tampered.receipt.prepared_digest = w0Digest(tampered.prepared);
+    backend.rows.set(receipt.proposalId, structuredClone(tampered));
+
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("historical-authority-mismatch");
+    expect(target.digest).toBe(h("base"));
+  });
+
   it("reconciles the exact precomputed disarm after its append fails", async () => {
     const backend = new JournalBackend();
     const target = new Target();
@@ -1158,6 +1242,55 @@ describe("W0.1 R-exact controller", () => {
     expect(recovered.status).toBe("disarmed");
     expect(recovered.journal.entries.at(-1)?.receipt_digest)
       .toBe(narrowedReceipt);
+    expect(runtime.authority.runtimeNarrowing.entries).toHaveLength(1);
+  });
+
+  it("replays pending terminal-blocked before a later restore can run", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    target.partial = true;
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    const successfulRestore = runtime.recovery.restoreAndVerify;
+    runtime.recovery.restoreAndVerify = async () => {
+      throw new Error("restore-offline");
+    };
+    const originalAppend = runtime.recoveryJournal.append
+      .bind(runtime.recoveryJournal);
+    let failedTerminalAppend = false;
+    runtime.recoveryJournal.append = async (...args) => {
+      if (
+        !failedTerminalAppend
+        && args[2].phase === "terminally-blocked"
+      ) {
+        failedTerminalAppend = true;
+        throw new Error("terminal-journal-offline");
+      }
+      return originalAppend(...args);
+    };
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("terminal-journal-offline");
+    const narrowedReceipt = runtime.authority.runtimeNarrowing.entries.at(-1)
+      ?.journal_receipt_digest;
+    expect((await backend.read(receipt.proposalId))?.journal.entries.at(-1)
+      ?.phase).toBe("unknown");
+
+    let laterRestoreCalls = 0;
+    runtime.recovery.restoreAndVerify = async (input) => {
+      laterRestoreCalls += 1;
+      return successfulRestore(input);
+    };
+    const recovered = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      runtime,
+    );
+    expect(recovered.status).toBe("terminally-blocked");
+    expect(recovered.journal.entries.at(-1)?.receipt_digest)
+      .toBe(narrowedReceipt);
+    expect(laterRestoreCalls).toBe(0);
     expect(runtime.authority.runtimeNarrowing.entries).toHaveLength(1);
   });
 

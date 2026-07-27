@@ -118,7 +118,7 @@ export interface PreparedAttempt {
   snapshot_digest: string;
   prepared_authority: VerifiedW0Binding;
   prepared_authority_digest: string;
-  prepared_owner_public_key_pem: string;
+  prepared_owner_key_fingerprint: string;
   role_service_pins: ProtectedRoleServicePins;
   role_service_pins_digest: string;
   admission_digest: string;
@@ -145,6 +145,7 @@ export interface RoleWriteReceipt {
   action: "create" | "append";
   journal_id: string;
   binding_digest: string;
+  prepared_digest: string;
   previous_receipt_digest: null | string;
   resulting_receipt_digest: string;
   recorded_at: string;
@@ -159,6 +160,16 @@ export interface RoleWriteResult {
 
 export interface RExactJournalReader {
   read(proposalId: string): Promise<RoleWriteResult | null>;
+}
+
+export interface HistoricalRoleAuthority {
+  authority: W0AuthorityBundle;
+  roleServicePins: ProtectedRoleServicePins;
+  rolePublicKeys: Array<{
+    role: JournalRole;
+    identity: string;
+    publicKeyPem: string;
+  }>;
 }
 
 export interface RExactRoleService {
@@ -231,6 +242,9 @@ export interface W0RuntimeGate {
   recoveryJournal: RExactRoleService;
   recovery: RExactRecoveryWorker;
   claims: RExactAttemptClaims;
+  resolveHistoricalAuthority(
+    ownerAuthorizationDigest: string,
+  ): Promise<HistoricalRoleAuthority | null>;
   protectedNow(): Date;
   verifyFresh(
     phase: "apply" | "commit",
