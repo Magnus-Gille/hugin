@@ -65,8 +65,9 @@ leaves neither, and a service crash yields either neither or a durable prepare
 with its claim. A concurrent loser receives `busy` and no journal, so it cannot
 later restore an obsolete baseline over the winner. The claim is held through
 terminalization. Before mutation, the orchestrator independently reads back the
-exact signed prepared record and verifies that it is durable. Commit rechecks
-exact prepared owner authority and immutable
+exact signed prepared record and the independently resolved historical
+authority, pins, keys, and role capabilities, and verifies that both are
+durable. Commit rechecks exact prepared owner authority and immutable
 admission fields. Authority drift, failed commit admission, ambiguous readback,
 or any incomplete non-terminal attempt enters recovery instead of promotion.
 
@@ -87,6 +88,16 @@ the stored sidecar cannot nominate its own trust root. Recovery can therefore
 restore after owner rotation while using the current protected authority only
 for kill-switch observation and narrowing.
 
+Apply snapshots the owner authority, signed pins, public keys, and role-service
+capabilities once before its first asynchronous boundary. Atomic prepare/claim
+retains that exact historical capability set for the lifetime of the attempt.
+Recovery therefore does not depend on today's role-service handles or keys.
+
+Live proposal expiry and the current proposer-key registry are apply-time
+admission concerns. Once `prepare` is durable, restart authenticates the raw
+receipt by its exact digest inside the signed prepared record; expiry or later
+proposer-key retirement cannot strand recovery or terminal replay.
+
 `revert` is written only after exact baseline revision and digest readback
 succeed. The worker deterministically constructs the terminal `disarm` or
 `terminally-blocked` entry, then signs and checkpoints narrowing bound to that
@@ -104,7 +115,15 @@ reconciles both important crash windows:
 In the second window, restart reconstructs and appends the same deterministic
 terminal receipt already named by the narrowing checkpoint before attempting
 another restore or other recovery action. It never substitutes a differently
-bound terminal state.
+bound terminal state. The protected resolver searches authenticated narrowing
+history by exact domain, target, worker, epoch, and terminal receipt; the entry
+need not be the global ledger tail and remains discoverable after later
+unrelated narrowing or owner-epoch rotation.
+
+If current protected coverage is globally disarmed, removed, or already
+shadowed, recovery recognizes that the target is already safe and does not try
+to widen or re-create the old binding. Baseline restoration still uses the
+authenticated historical prepared authority.
 
 If restore or exact readback fails, the worker records `terminally-blocked`.
 There is no automatic forward retry from that state.

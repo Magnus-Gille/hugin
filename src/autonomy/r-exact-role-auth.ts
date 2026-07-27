@@ -179,6 +179,22 @@ export function validateHistoricalRoleAuthority(
   );
 }
 
+export function validateHistoricalRoleServices(
+  historical: HistoricalRoleAuthority,
+  binding: VerifiedW0Binding,
+): VerifiedRoleServiceKeys {
+  return validateRoleKeys(
+    binding,
+    historical.roleServicePins,
+    historical.authority.pinnedOwnerPublicKeyPem,
+    [
+      historical.roleServices.controller,
+      historical.roleServices.watchdog,
+      historical.roleServices["recovery-worker"],
+    ],
+  );
+}
+
 function verifyReceiptWithPinnedKey(
   result: RoleWriteResult,
   pinned: VerifiedRoleServiceKey,

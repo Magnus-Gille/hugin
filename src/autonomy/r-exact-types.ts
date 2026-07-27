@@ -170,6 +170,11 @@ export interface HistoricalRoleAuthority {
     identity: string;
     publicKeyPem: string;
   }>;
+  roleServices: {
+    controller: RExactRoleService;
+    watchdog: RExactRoleService;
+    "recovery-worker": RExactRoleService;
+  };
 }
 
 export interface RExactRoleService {
@@ -195,6 +200,7 @@ export interface RExactControllerService extends RExactRoleService {
     journal: RExactJournal,
     prepared: PreparedAttempt,
     claim: PreparedClaim,
+    historicalAuthority: HistoricalRoleAuthority,
   ): Promise<
     | { status: "prepared"; write: RoleWriteResult }
     | { status: "busy" }
@@ -245,6 +251,21 @@ export interface W0RuntimeGate {
   resolveHistoricalAuthority(
     ownerAuthorizationDigest: string,
   ): Promise<HistoricalRoleAuthority | null>;
+  currentRecoveryPosture(
+    prepared: VerifiedW0Binding,
+  ): Promise<
+    | { state: "broader"; binding: VerifiedW0Binding }
+    | {
+        state: "already-safe";
+        killSwitchIdentity: string;
+        safetyDigest: string;
+      }
+  >;
+  resolveNarrowingAuthority(input: {
+    domain: HuginRExactDomain;
+    targetScopeDigest: string;
+    terminalReceiptDigest: string;
+  }): Promise<W0AuthorityBundle | null>;
   protectedNow(): Date;
   verifyFresh(
     phase: "apply" | "commit",
@@ -252,7 +273,13 @@ export interface W0RuntimeGate {
   ): Promise<FreshAdmission>;
   verifyRecovery(
     prepared: VerifiedW0Binding,
-    current: VerifiedW0Binding,
+    current:
+      | { state: "broader"; binding: VerifiedW0Binding }
+      | {
+          state: "already-safe";
+          killSwitchIdentity: string;
+          safetyDigest: string;
+        },
   ): Promise<RecoveryProtection>;
 }
 
@@ -266,6 +293,7 @@ export type RExactResult = {
 };
 
 export interface RExactOptions {
+  onRecoveryCause?: (error: unknown) => void;
   onPhase?: (
     phase:
       | "snapshot"

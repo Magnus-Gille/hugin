@@ -10,6 +10,7 @@ import {
 import {
   verifyW0Authority,
   verifyW0NarrowingApplied,
+  verifyW0NarrowingReceipt,
   w0Digest,
   W0_CONSTITUTION_DIGEST,
   type VerifiedW0Binding,
@@ -23,7 +24,7 @@ import {
 } from "./r-exact-journal.js";
 import {
   validateHistoricalRoleAuthority,
-  validateRoleServices,
+  validateHistoricalRoleServices,
   verifyRoleWriteReceipt,
   verifyStoredRoleWriteReceipt,
   type VerifiedRoleServiceKey,
@@ -49,6 +50,7 @@ export type * from "./r-exact-types.js";
 
 const digestPattern = /^sha256:[a-f0-9]{64}$/;
 const refPattern = /^ref:[a-z][a-z0-9-]{2,120}$/;
+const proposalIdPattern = /^[a-z][a-z0-9-]{2,120}$/;
 const utcPattern = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
 const exactKeys = (value: unknown, keys: string[]): boolean =>
   !!value
@@ -277,6 +279,7 @@ function verifyOwner(
   receipt: AutonomyProposalReceipt,
   target: RExactConfigTarget,
   gate: W0RuntimeGate,
+  authority = gate.authority,
 ): VerifiedW0Binding {
   const registry = proposalTargetRegistry.find(
     (entry) => entry.id === receipt.targetId,
@@ -290,7 +293,7 @@ function verifyOwner(
     throw new Error("r-exact-cross-owner-refused");
   }
   return verifyW0Authority(
-    gate.authority,
+    authority,
     target.domain,
     target.targetScopeDigest,
   );
@@ -380,19 +383,51 @@ export async function applyRExactProposal(
   gate: W0RuntimeGate,
   options: RExactOptions = {},
 ): Promise<RExactResult> {
+  const authoritySnapshot = structuredClone(gate.authority);
+  const rolePinsSnapshot = structuredClone(gate.roleServicePins);
+  const roleServicesSnapshot = {
+    controller: gate.controller,
+    watchdog: gate.watchdog,
+    "recovery-worker": gate.recoveryJournal,
+  };
+  const rolePublicKeysSnapshot = Object.values(roleServicesSnapshot).map(
+    (service) => ({
+      role: service.role,
+      identity: service.identity,
+      publicKeyPem: service.publicKeyPem,
+    }),
+  );
+  const recoveryProposalId = raw
+    && typeof raw === "object"
+    && !Array.isArray(raw)
+    && typeof (raw as { proposalId?: unknown }).proposalId === "string"
+    && proposalIdPattern.test((raw as { proposalId: string }).proposalId)
+    ? (raw as { proposalId: string }).proposalId
+    : null;
+  if (recoveryProposalId) {
+    const existing = await gate.reader.read(recoveryProposalId);
+    if (existing) {
+      return recoverRExactAttempt(raw, keys, target, gate, options);
+    }
+  }
   const receipt = verifyReceiptIdentityOnly(
     raw,
     keys,
     () => gate.protectedNow(),
   );
-  const existing = await gate.reader.read(receipt.proposalId);
-  if (existing) {
-    return recoverRExactAttempt(receipt, keys, target, gate, options);
-  }
   const current = await target.read();
   verifyReceiptForCurrentBase(receipt, keys, gate, current);
-  const owner = verifyOwner(receipt, target, gate);
-  const roleKeys = validateRoleServices(gate, owner);
+  const owner = verifyOwner(receipt, target, gate, authoritySnapshot);
+  const historicalSnapshot = {
+    authority: authoritySnapshot,
+    roleServicePins: rolePinsSnapshot,
+    rolePublicKeys: rolePublicKeysSnapshot,
+    roleServices: roleServicesSnapshot,
+  };
+  const roleKeys = validateHistoricalRoleAuthority(
+    historicalSnapshot,
+    owner,
+  );
   const initialAdmission = await gate.verifyFresh("apply", owner);
   validateFresh(
     initialAdmission,
@@ -424,10 +459,10 @@ export async function applyRExactProposal(
     prepared_authority: structuredClone(owner),
     prepared_authority_digest: w0Digest(owner),
     prepared_owner_key_fingerprint: publicKeyFingerprint(
-      gate.authority.pinnedOwnerPublicKeyPem,
+      authoritySnapshot.pinnedOwnerPublicKeyPem,
     ),
-    role_service_pins: structuredClone(gate.roleServicePins),
-    role_service_pins_digest: w0Digest(gate.roleServicePins),
+    role_service_pins: structuredClone(rolePinsSnapshot),
+    role_service_pins_digest: w0Digest(rolePinsSnapshot),
     admission_digest: w0Digest(initialAdmission),
   };
   validatePrepared(prepared, receipt, target);
@@ -499,7 +534,7 @@ export async function applyRExactProposal(
     ),
   );
   validateRExactJournal(journal);
-  const preparedWrite = await gate.controller.createAndClaim(
+  const preparedWrite = await roleServicesSnapshot.controller.createAndClaim(
     receipt.proposalId,
     journal,
     prepared,
@@ -508,6 +543,7 @@ export async function applyRExactProposal(
       attemptId,
       proposalReceiptDigest: prepared.proposal_receipt_digest,
     },
+    historicalSnapshot,
   );
   if (preparedWrite.status === "busy") {
     throw new Error("r-exact-target-busy");
@@ -515,7 +551,7 @@ export async function applyRExactProposal(
   const created = preparedWrite.write;
   verifyRoleWriteReceipt(
     created,
-    gate.controller,
+    roleServicesSnapshot.controller,
     roleKeys.controller,
     "create",
     null,
@@ -534,6 +570,21 @@ export async function applyRExactProposal(
   ) {
     throw new Error("r-exact-atomic-prepare-not-durable");
   }
+  const retainedHistorical = await gate.resolveHistoricalAuthority(
+    owner.authorizationDigest,
+  );
+  if (
+    !retainedHistorical
+    || canonicalizeJcs(retainedHistorical.authority)
+      !== canonicalizeJcs(historicalSnapshot.authority)
+    || canonicalizeJcs(retainedHistorical.roleServicePins)
+      !== canonicalizeJcs(historicalSnapshot.roleServicePins)
+    || canonicalizeJcs(retainedHistorical.rolePublicKeys)
+      !== canonicalizeJcs(historicalSnapshot.rolePublicKeys)
+  ) {
+    throw new Error("r-exact-historical-snapshot-not-durable");
+  }
+  validateHistoricalRoleServices(retainedHistorical, owner);
   options.onPhase?.("snapshot");
   try {
     await assertClaim(gate, target, prepared, attemptId);
@@ -553,7 +604,7 @@ export async function applyRExactProposal(
     await target.replaceExact(receipt.base, receipt.candidateContentDigest);
     options.onPhase?.("mutation");
     let state = await appendThroughRole(
-      gate.controller,
+      roleServicesSnapshot.controller,
       roleKeys.controller,
       receipt.proposalId,
       journal,
@@ -572,7 +623,7 @@ export async function applyRExactProposal(
     }
     options.onPhase?.("readback");
     state = await appendThroughRole(
-      gate.controller,
+      roleServicesSnapshot.controller,
       roleKeys.controller,
       receipt.proposalId,
       journal,
@@ -586,7 +637,7 @@ export async function applyRExactProposal(
     );
     journal = state.journal;
     state = await appendThroughRole(
-      gate.controller,
+      roleServicesSnapshot.controller,
       roleKeys.controller,
       receipt.proposalId,
       journal,
@@ -618,7 +669,7 @@ export async function applyRExactProposal(
     }
     options.onPhase?.("terminalization");
     state = await appendThroughRole(
-      gate.controller,
+      roleServicesSnapshot.controller,
       roleKeys.controller,
       receipt.proposalId,
       journal,
@@ -634,31 +685,32 @@ export async function applyRExactProposal(
     validateRExactJournal(journal, false);
     await terminalizeClaim(gate, target, journal);
     return { status: "committed", journal };
-  } catch {
+  } catch (error) {
+    options.onRecoveryCause?.(error);
     return recoverRExactAttempt(receipt, keys, target, gate, options);
   }
 }
 
 async function narrowCurrentAuthority(
   gate: W0RuntimeGate,
-  current: VerifiedW0Binding,
+  current:
+    | { state: "broader"; binding: VerifiedW0Binding }
+    | {
+        state: "already-safe";
+        killSwitchIdentity: string;
+        safetyDigest: string;
+      },
   journalReceiptDigest: string,
   options: RExactOptions,
 ): Promise<void> {
-  if (current.effectiveState === "shadow") {
-    verifyW0NarrowingApplied(
-      gate.authority,
-      current,
-      journalReceiptDigest,
-    );
-    return;
-  }
+  if (current.state === "already-safe") return;
+  const binding = current.binding;
   const narrowed = await gate.recovery.narrowAndVerify({
-    binding: current,
+    binding,
     journalReceiptDigest,
   });
   options.onPhase?.("narrowing");
-  verifyW0NarrowingApplied(narrowed, current, journalReceiptDigest);
+  verifyW0NarrowingApplied(narrowed, binding, journalReceiptDigest);
   gate.authority = narrowed;
 }
 
@@ -675,11 +727,13 @@ async function reconcilePendingNarrowing(
   gate: W0RuntimeGate,
   journal: RExactJournal,
   prepared: PreparedAttempt,
-  currentAuthority: VerifiedW0Binding,
+  recoveryService: RExactRoleService,
   recoveryRoleKey: VerifiedRoleServiceKey,
   recoveryReasonDigest: string,
 ): Promise<RExactResult | null> {
-  if (currentAuthority.effectiveState !== "shadow") return null;
+  if (!["unknown", "revert"].includes(latest(journal).phase)) {
+    return null;
+  }
   const transition = {
     from_state: prepared.prepared_authority.state,
     to_state: "shadow" as const,
@@ -715,21 +769,29 @@ async function reconcilePendingNarrowing(
       ),
     });
   }
-  const narrowedReceipt = gate.authority.runtimeNarrowing.entries.at(-1)
-    ?.journal_receipt_digest;
-  const pending = candidates.find(
-    (candidate) => candidate.entry.receipt_digest === narrowedReceipt,
-  );
-  if (!pending) {
-    throw new Error("r-exact-pending-narrowing-unmatched");
+  let pending: typeof candidates[number] | undefined;
+  for (const candidate of candidates) {
+    const authority = await gate.resolveNarrowingAuthority({
+      domain: target.domain,
+      targetScopeDigest: target.targetScopeDigest,
+      terminalReceiptDigest: candidate.entry.receipt_digest,
+    });
+    if (authority) {
+      verifyW0NarrowingReceipt(
+        authority,
+        target.domain,
+        target.targetScopeDigest,
+        candidate.entry.receipt_digest,
+      );
+      if (pending) throw new Error("r-exact-pending-narrowing-ambiguous");
+      pending = candidate;
+    }
   }
-  verifyW0NarrowingApplied(
-    gate.authority,
-    currentAuthority,
-    pending.entry.receipt_digest,
-  );
+  if (!pending) {
+    return null;
+  }
   const state = await appendThroughRole(
-    gate.recoveryJournal,
+    recoveryService,
     recoveryRoleKey,
     receipt.proposalId,
     journal,
@@ -747,16 +809,18 @@ async function appendTerminalBlocked(
   gate: W0RuntimeGate,
   journal: RExactJournal,
   prepared: PreparedAttempt,
+  currentPosture:
+    | { state: "broader"; binding: VerifiedW0Binding }
+    | {
+        state: "already-safe";
+        killSwitchIdentity: string;
+        safetyDigest: string;
+      },
+  recoveryService: RExactRoleService,
   recoveryRoleKey: VerifiedRoleServiceKey,
   reasonDigest: string,
   options: RExactOptions,
 ): Promise<RExactResult> {
-  const protectedCurrent = verifyW0Authority(
-    gate.authority,
-    target.domain,
-    target.targetScopeDigest,
-    true,
-  );
   const transition = {
     from_state: prepared.prepared_authority.state,
     to_state: "shadow" as const,
@@ -773,12 +837,12 @@ async function appendTerminalBlocked(
   );
   await narrowCurrentAuthority(
     gate,
-    protectedCurrent,
+    currentPosture,
     terminalEntry.receipt_digest,
     options,
   );
   const state = await appendThroughRole(
-    gate.recoveryJournal,
+    recoveryService,
     recoveryRoleKey,
     receipt.proposalId,
     journal,
@@ -797,11 +861,19 @@ export async function recoverRExactAttempt(
   gate: W0RuntimeGate,
   options: RExactOptions = {},
 ): Promise<RExactResult> {
-  const receipt = verifyReceiptIdentityOnly(
-    raw,
-    keys,
-    () => gate.protectedNow(),
-  );
+  void keys;
+  if (
+    !raw
+    || typeof raw !== "object"
+    || Array.isArray(raw)
+    || typeof (raw as { proposalId?: unknown }).proposalId !== "string"
+    || !proposalIdPattern.test(
+      (raw as { proposalId: string }).proposalId,
+    )
+  ) {
+    throw new Error("r-exact-recovery-receipt-shape");
+  }
+  const receipt = raw as AutonomyProposalReceipt;
   const stored = await gate.reader.read(receipt.proposalId);
   if (!stored) throw new Error("r-exact-journal-missing");
   let { journal } = stored;
@@ -849,11 +921,9 @@ export async function recoverRExactAttempt(
     storedAction,
     storedPrevious,
   );
-  const roleKeys = validateRoleServices(
-    gate,
+  const roleKeys = validateHistoricalRoleServices(
+    historical,
     historicalBinding,
-    historical.roleServicePins,
-    historical.authority.pinnedOwnerPublicKeyPem,
   );
   const claim = await gate.claims.claim(
     targetClaimKey(target),
@@ -895,22 +965,26 @@ export async function recoverRExactAttempt(
     await terminalizeClaim(gate, target, journal);
     return { status: "terminally-blocked", journal };
   }
-  const currentAuthority = verifyW0Authority(
-    gate.authority,
-    target.domain,
-    target.targetScopeDigest,
-    true,
+  const currentPosture = await gate.currentRecoveryPosture(
+    historicalBinding,
   );
   const protection = await gate.verifyRecovery(
     prepared.prepared_authority,
-    currentAuthority,
+    currentPosture,
   );
+  const currentKillSwitchIdentity = currentPosture.state === "broader"
+    ? currentPosture.binding.identities.kill_switch
+    : currentPosture.killSwitchIdentity;
   if (
     !exactUtc(protection.checkedAt)
     || !exactUtc(protection.trustedWatchdogTime)
     || protection.killSwitchIdentity
-      !== currentAuthority.identities.kill_switch
+      !== currentKillSwitchIdentity
     || !digestPattern.test(protection.killSwitchStateDigest)
+    || (
+      currentPosture.state === "already-safe"
+      && !digestPattern.test(currentPosture.safetyDigest)
+    )
     || !protection.journalHealthy
     || Math.abs(
       trustedNow(gate) - Date.parse(protection.checkedAt)
@@ -938,14 +1012,14 @@ export async function recoverRExactAttempt(
     gate,
     journal,
     prepared,
-    currentAuthority,
+    historical.roleServices["recovery-worker"],
     roleKeys["recovery-worker"],
     reasonDigest,
   );
   if (reconciledNarrowing) return reconciledNarrowing;
   if (latest(journal).phase !== "unknown" && latest(journal).phase !== "revert") {
     const state = await appendThroughRole(
-      gate.watchdog,
+      historical.roleServices.watchdog,
       roleKeys.watchdog,
       receipt.proposalId,
       journal,
@@ -987,7 +1061,7 @@ export async function recoverRExactAttempt(
     }
     if (latest(journal).phase === "unknown") {
       const state = await appendThroughRole(
-        gate.recoveryJournal,
+        historical.roleServices["recovery-worker"],
         roleKeys["recovery-worker"],
         receipt.proposalId,
         journal,
@@ -1017,13 +1091,13 @@ export async function recoverRExactAttempt(
     );
     await narrowCurrentAuthority(
       gate,
-      currentAuthority,
+      currentPosture,
       disarmEntry.receipt_digest,
       options,
     );
     narrowedDisarmReceipt = disarmEntry.receipt_digest;
     const state = await appendThroughRole(
-      gate.recoveryJournal,
+      historical.roleServices["recovery-worker"],
       roleKeys["recovery-worker"],
       receipt.proposalId,
       journal,
@@ -1042,11 +1116,6 @@ export async function recoverRExactAttempt(
       throw error;
     }
     if (narrowedDisarmReceipt !== null) {
-      verifyW0NarrowingApplied(
-        gate.authority,
-        currentAuthority,
-        narrowedDisarmReceipt,
-      );
       throw new Error("r-exact-disarm-append-pending");
     }
     return appendTerminalBlocked(
@@ -1055,6 +1124,8 @@ export async function recoverRExactAttempt(
       gate,
       journal,
       prepared,
+      currentPosture,
+      historical.roleServices["recovery-worker"],
       roleKeys["recovery-worker"],
       terminalBlockedReasonDigest(reasonDigest),
       options,

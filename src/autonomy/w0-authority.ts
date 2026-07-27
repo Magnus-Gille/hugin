@@ -177,8 +177,15 @@ export function verifyW0Authority(bundle: W0AuthorityBundle, domain: HuginRExact
 export function verifyW0NarrowingApplied(bundle: W0AuthorityBundle, prior: VerifiedW0Binding, journalReceiptDigest: string): void {
   const current = verifyW0Authority(bundle, prior.domain, prior.targetScopeDigest, true);
   if (current.effectiveState !== "shadow" || current.authorizationDigest !== prior.authorizationDigest || current.coverageDigest !== prior.coverageDigest) reject("narrowing-did-not-demote");
-  const entry = bundle.runtimeNarrowing.entries.at(-1);
-  if (!entry || entry.domain !== prior.domain || entry.target_scope_digest !== prior.targetScopeDigest || entry.from_state !== prior.state || entry.to_state !== "shadow" || entry.recovery_worker_identity !== prior.identities.recovery_worker || entry.journal_receipt_digest !== journalReceiptDigest) reject("narrowing-receipt-binding");
+  const entries = bundle.runtimeNarrowing.entries.filter((entry:any) => entry.domain === prior.domain && entry.target_scope_digest === prior.targetScopeDigest && entry.from_state === prior.state && entry.to_state === "shadow" && entry.recovery_worker_identity === prior.identities.recovery_worker && entry.journal_receipt_digest === journalReceiptDigest);
+  if (entries.length !== 1) reject("narrowing-receipt-binding");
+}
+
+/** Locate one exact authenticated narrowing receipt in any protected epoch. */
+export function verifyW0NarrowingReceipt(bundle: W0AuthorityBundle, domain: HuginRExactDomain, targetScopeDigest: string, journalReceiptDigest: string): VerifiedW0Binding {
+  const binding = verifyW0Authority(bundle, domain, targetScopeDigest, true);
+  verifyW0NarrowingApplied(bundle, binding, journalReceiptDigest);
+  return binding;
 }
 
 /** Shared fixtures exported for owning adapters; values are deliberately non-authorizing. */

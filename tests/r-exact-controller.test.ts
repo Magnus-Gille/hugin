@@ -389,6 +389,7 @@ class Claims implements RExactAttemptClaims {
 
 class JournalBackend implements RExactJournalReader {
   rows = new Map<string, RoleWriteResult>();
+  historical = new Map<string, any>();
   claims = new Claims();
   services: Record<JournalRole, RExactRoleService>
     & { controller: RExactControllerService };
@@ -417,6 +418,7 @@ class JournalBackend implements RExactJournalReader {
               attemptId: string;
               proposalReceiptDigest: string;
             },
+            historicalAuthority: any,
           ) => {
             if (role !== "controller") throw new Error("role-create");
             const claimStatus = await this.claims.claim(
@@ -436,6 +438,14 @@ class JournalBackend implements RExactJournalReader {
               null,
             );
             this.rows.set(proposalId, structuredClone(result));
+            this.historical.set(
+              historicalAuthority.authority.ownerAuthorization
+                ? w0Digest(
+                    historicalAuthority.authority.ownerAuthorization,
+                  )
+                : prepared.prepared_authority.authorizationDigest,
+              historicalAuthority,
+            );
             return {
               status: "prepared" as const,
               write: structuredClone(result),
@@ -574,6 +584,8 @@ function gate(
   bundle = authority(),
   override: Partial<FreshAdmission> = {},
 ): W0RuntimeGate {
+  const narrowingHistory: W0AuthorityBundle[] = [];
+  const recoveryPrivateKey = (bundle as any)._recoveryPrivateKey;
   const rolePinEntries = Object.values(backend.services).map((service) => {
     const publicKey = createHash("sha256")
       .update(
@@ -587,13 +599,6 @@ function gate(
       public_key_fingerprint: `sha256:${publicKey}`,
     };
   });
-  const historicalRolePublicKeys = Object.values(backend.services).map(
-    (service) => ({
-      role: service.role,
-      identity: service.identity,
-      publicKeyPem: service.publicKeyPem,
-    }),
-  );
   const pinsBase = {
     kind: "hugin-r-exact-role-service-pins" as const,
     schema_version: "v1" as const,
@@ -622,19 +627,76 @@ function gate(
     recoveryJournal: backend.services["recovery-worker"],
     claims: backend.claims,
     resolveHistoricalAuthority: async (authorizationDigest) =>
-      authorizationDigest === w0Digest(bundle.ownerAuthorization)
-        ? {
-            authority: bundle,
-            roleServicePins,
-            rolePublicKeys: historicalRolePublicKeys,
-          }
-        : null,
+      backend.historical.get(authorizationDigest) ?? null,
+    currentRecoveryPosture: async (prepared) => {
+      const row = runtime.authority.coverageIntent.domains.find(
+        (item: any) => item.domain === prepared.domain,
+      );
+      const binding = row?.bindings?.find(
+        (item: any) =>
+          item.target_scope_digest === prepared.targetScopeDigest,
+      );
+      if (
+        runtime.authority.coverageIntent.global_state !== "armed"
+        || !binding
+        || binding.state === "shadow"
+      ) {
+        return {
+          state: "already-safe" as const,
+          killSwitchIdentity: prepared.identities.kill_switch,
+          safetyDigest: h("protected-already-safe"),
+        };
+      }
+      const verified = verifyW0Authority(
+        runtime.authority,
+        prepared.domain,
+        prepared.targetScopeDigest,
+        true,
+      );
+      if (verified.effectiveState === "shadow") {
+        return {
+          state: "already-safe" as const,
+          killSwitchIdentity: verified.identities.kill_switch,
+          safetyDigest: h("protected-narrowed"),
+        };
+      }
+      return {
+        state: "broader" as const,
+        binding: verified,
+      };
+    },
+    resolveNarrowingAuthority: async (input) => {
+      const matches = [runtime.authority, ...narrowingHistory].filter(
+        (candidate) => candidate.runtimeNarrowing.entries.some(
+          (entry: any) =>
+            entry.domain === input.domain
+            && entry.target_scope_digest === input.targetScopeDigest
+            && entry.journal_receipt_digest
+              === input.terminalReceiptDigest,
+        ),
+      );
+      const matchingEntryDigests = new Set(matches.flatMap(
+        (candidate) => candidate.runtimeNarrowing.entries
+          .filter((entry: any) =>
+            entry.domain === input.domain
+            && entry.target_scope_digest === input.targetScopeDigest
+            && entry.journal_receipt_digest
+              === input.terminalReceiptDigest)
+          .map((entry: any) => entry.entry_digest),
+      ));
+      if (matchingEntryDigests.size > 1) {
+        throw new Error("ambiguous-protected-narrowing");
+      }
+      return matches[0] ?? null;
+    },
     protectedNow: () => new Date(fixedNow),
     verifyFresh: async () => proofFor(receipt, override),
     verifyRecovery: async (_prepared, current) => ({
       checkedAt: fixedNow,
       trustedWatchdogTime: fixedNow,
-      killSwitchIdentity: current.identities.kill_switch,
+      killSwitchIdentity: current.state === "broader"
+        ? current.binding.identities.kill_switch
+        : current.killSwitchIdentity,
       killSwitchStateDigest: h("kill-switch-off"),
       journalHealthy: true,
     }),
@@ -672,12 +734,14 @@ function gate(
         entry.signature.value_base64 = sign(
           null,
           Buffer.from(canonicalizeJcs(unsigned)),
-          (runtime.authority as any)._recoveryPrivateKey,
+          (runtime.authority as any)._recoveryPrivateKey
+            ?? recoveryPrivateKey,
         ).toString("base64");
         next.runtimeNarrowing.entries.push(entry);
         next.narrowingCheckpoint.minimum_entries =
           next.runtimeNarrowing.entries.length;
         next.narrowingCheckpoint.ledger_tail_digest = entry.entry_digest;
+        narrowingHistory.push(next);
         return next;
       },
     },
@@ -789,6 +853,168 @@ describe("W0.1 R-exact controller", () => {
     );
     expect(result.status).toBe("disarmed");
     expect(target.digest).toBe(h("base"));
+  });
+
+  it("recovers after proposal expiry and signer-key retirement", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime, {
+        onPhase: (phase) => {
+          if (phase === "snapshot") throw new Error("pause-after-prepare");
+        },
+      }),
+    ).rejects.toThrow("pause-after-prepare");
+    runtime.protectedNow = () => new Date("2026-07-26T16:00:00Z");
+    runtime.verifyRecovery = async (_prepared, current) => ({
+      checkedAt: "2026-07-26T16:00:00Z",
+      trustedWatchdogTime: "2026-07-26T16:00:00Z",
+      killSwitchIdentity: current.state === "broader"
+        ? current.binding.identities.kill_switch
+        : current.killSwitchIdentity,
+      killSwitchStateDigest: h("kill-switch-off"),
+      journalHealthy: true,
+    });
+    const recovered = await applyRExactProposal(
+      receipt,
+      {},
+      target,
+      runtime,
+    );
+    expect(recovered.status).toBe("disarmed");
+  });
+
+  it("closed-parses the direct recovery proposal identifier", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    await expect(
+      recoverRExactAttempt(
+        { proposalId: "../../unbounded" },
+        {},
+        target,
+        gate(backend, target),
+      ),
+    ).rejects.toThrow("recovery-receipt-shape");
+  });
+
+  it.each(["global-disarm", "binding-removed"] as const)(
+    "recovers against historical authority when current posture is %s",
+    async (mode) => {
+      const backend = new JournalBackend();
+      const target = new Target();
+      target.partial = true;
+      const receipt = proposal();
+      const runtime = gate(backend, target, receipt);
+      await expect(
+        applyRExactProposal(receipt, keys, target, runtime, {
+          onPhase: (phase) => {
+            if (phase === "readback") throw new Error("pause-for-safety");
+          },
+        }),
+      ).resolves.toMatchObject({ status: "disarmed" });
+
+      // Start a fresh nonterminal attempt against a separate backend.
+      const retryBackend = new JournalBackend();
+      const retryTarget = new Target();
+      const retryReceipt = proposal(`proposal-330-${mode}`);
+      const retryRuntime = gate(retryBackend, retryTarget, retryReceipt);
+      await expect(
+        applyRExactProposal(
+          retryReceipt,
+          keys,
+          retryTarget,
+          retryRuntime,
+          {
+            onPhase: (phase) => {
+              if (phase === "snapshot") throw new Error("pause-after-prepare");
+            },
+          },
+        ),
+      ).rejects.toThrow("pause-after-prepare");
+      if (mode === "global-disarm") {
+        retryRuntime.authority.coverageIntent.global_state = "disarmed";
+      } else {
+        const row = retryRuntime.authority.coverageIntent.domains.find(
+          (item: any) => item.domain === "macro-routing",
+        );
+        row.bindings = [];
+      }
+      const recovered = await applyRExactProposal(
+        retryReceipt,
+        keys,
+        retryTarget,
+        retryRuntime,
+      );
+      expect(recovered.status).toBe("disarmed");
+      expect(retryRuntime.authority.runtimeNarrowing.entries)
+        .toHaveLength(0);
+    },
+  );
+
+  it("freezes owner pins and role services before asynchronous admission", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    const rotatedBackend = new JournalBackend();
+    const frozenPins = structuredClone(runtime.roleServicePins);
+    const originalVerify = runtime.verifyFresh;
+    let mutated = false;
+    runtime.verifyFresh = async (...args) => {
+      if (!mutated) {
+        mutated = true;
+        runtime.roleServicePins = structuredClone(frozenPins);
+        runtime.roleServicePins.entries[0].public_key_fingerprint =
+          h("rotated-after-snapshot");
+        runtime.controller = rotatedBackend.services.controller;
+        runtime.watchdog = rotatedBackend.services.watchdog;
+        runtime.recoveryJournal =
+          rotatedBackend.services["recovery-worker"];
+      }
+      return originalVerify(...args);
+    };
+    const result = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      runtime,
+    );
+    expect(result.status).toBe("committed");
+    const stored = (await backend.read(receipt.proposalId))!;
+    expect(stored.prepared.role_service_pins).toEqual(frozenPins);
+    expect(await rotatedBackend.read(receipt.proposalId)).toBeNull();
+  });
+
+  it("recovers through retained historical services after live rotation", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    const rotatedBackend = new JournalBackend();
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime, {
+        onPhase: (phase) => {
+          if (phase === "snapshot") {
+            runtime.controller = rotatedBackend.services.controller;
+            runtime.watchdog = rotatedBackend.services.watchdog;
+            runtime.recoveryJournal =
+              rotatedBackend.services["recovery-worker"];
+            throw new Error("rotate-live-services");
+          }
+        },
+      }),
+    ).rejects.toThrow("rotate-live-services");
+    const recovered = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      runtime,
+    );
+    expect(recovered.status).toBe("disarmed");
+    expect((await backend.read(receipt.proposalId))?.journal.entries.at(-1)
+      ?.phase).toBe("disarm");
   });
 
   it("rejects key reuse across role services", async () => {
@@ -946,6 +1172,24 @@ describe("W0.1 R-exact controller", () => {
     expect(target.digest).toBe(h("base"));
   });
 
+  it("refuses mutation unless the atomic historical snapshot is readable", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    const original = runtime.controller.createAndClaim
+      .bind(runtime.controller);
+    runtime.controller.createAndClaim = async (...args) => {
+      const result = await original(...args);
+      backend.historical.clear();
+      return result;
+    };
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("historical-snapshot-not-durable");
+    expect(target.digest).toBe(h("base"));
+  });
+
   it("atomically excludes a concurrent proposal for the same target", async () => {
     const backend = new JournalBackend();
     const target = new Target();
@@ -1027,6 +1271,7 @@ describe("W0.1 R-exact controller", () => {
       const target = new Target();
       const receipt = proposal();
       const runtime = gate(backend, target, receipt);
+      let recoveryCause: unknown;
       const result = await applyRExactProposal(
         receipt,
         keys,
@@ -1036,9 +1281,14 @@ describe("W0.1 R-exact controller", () => {
           onPhase: (phase) => {
             if (phase === crashPhase) throw new Error(`crash-${phase}`);
           },
+          onRecoveryCause: (error) => {
+            recoveryCause = error;
+          },
         },
       );
       expect(result.status).toBe("disarmed");
+      expect(recoveryCause).toBeInstanceOf(Error);
+      expect((recoveryCause as Error).message).toBe(`crash-${crashPhase}`);
       expect(target.digest).toBe(h("base"));
       expect(result.journal.entries.at(-1)?.coverage_transition?.to_state)
         .toBe("shadow");
@@ -1245,7 +1495,9 @@ describe("W0.1 R-exact controller", () => {
     expect(runtime.authority.runtimeNarrowing.entries).toHaveLength(1);
   });
 
-  it("replays pending terminal-blocked before a later restore can run", async () => {
+  it.each(["later-unrelated-narrowing", "owner-epoch-rotation"] as const)(
+    "replays pending terminal-blocked across %s before restore",
+    async (mode) => {
     const backend = new JournalBackend();
     const target = new Target();
     target.partial = true;
@@ -1275,6 +1527,21 @@ describe("W0.1 R-exact controller", () => {
       ?.journal_receipt_digest;
     expect((await backend.read(receipt.proposalId))?.journal.entries.at(-1)
       ?.phase).toBe("unknown");
+    if (mode === "later-unrelated-narrowing") {
+      runtime.authority = authority();
+      const unrelatedBinding = verifyW0Authority(
+        runtime.authority,
+        "macro-routing",
+        scope,
+        true,
+      );
+      runtime.authority = await runtime.recovery.narrowAndVerify({
+        binding: unrelatedBinding,
+        journalReceiptDigest: h("later-unrelated-terminal"),
+      });
+    } else {
+      runtime.authority = authority();
+    }
 
     let laterRestoreCalls = 0;
     runtime.recovery.restoreAndVerify = async (input) => {
@@ -1291,8 +1558,8 @@ describe("W0.1 R-exact controller", () => {
     expect(recovered.journal.entries.at(-1)?.receipt_digest)
       .toBe(narrowedReceipt);
     expect(laterRestoreCalls).toBe(0);
-    expect(runtime.authority.runtimeNarrowing.entries).toHaveLength(1);
-  });
+    },
+  );
 
   it("rejects an altered receipt retry before recovery", async () => {
     const backend = new JournalBackend();
