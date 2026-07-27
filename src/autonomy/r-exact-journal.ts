@@ -1,4 +1,4 @@
-/** Exact W0.1 journal construction and semantic validation. */
+/** Exact W0.2 journal construction and semantic validation. */
 import { canonicalizeJcs } from "../jcs.js";
 import { canonicalJournalSchemaErrors } from "./grimnir-w0-schemas.js";
 import { W0_CONSTITUTION_DIGEST, w0Digest } from "./w0-authority.js";
@@ -14,18 +14,27 @@ type Outcome = JournalEntry["outcome"];
 const digestPattern = /^sha256:[a-f0-9]{64}$/;
 const idPattern = /^[a-z][a-z0-9-]{2,62}$/;
 const refPattern = /^ref:[a-z][a-z0-9-]{2,120}$/;
-const utcPattern = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
-const CONSTITUTIONAL_WINDOW_MS = 3_600_000;
+const utcPattern = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/;
+const APPLY_VERIFY_BUDGET_MS = 300_000;
+const MINIMUM_WATCH_MS = 3_600_000;
+const COMMIT_GRACE_MS = 300_000;
+const TOTAL_DEADLINE_MS = 4_200_000;
 const exactKeys = (value: unknown, keys: string[]): boolean =>
   !!value
   && typeof value === "object"
   && !Array.isArray(value)
   && Object.keys(value).sort().join(",") === [...keys].sort().join(",");
-const exactUtc = (value: unknown): value is string =>
-  typeof value === "string"
-  && utcPattern.test(value)
-  && !Number.isNaN(Date.parse(value))
-  && new Date(value).toISOString().replace(".000Z", "Z") === value;
+const exactUtc = (value: unknown): value is string => {
+  if (
+    typeof value !== "string"
+    || !utcPattern.test(value)
+    || Number.isNaN(Date.parse(value))
+  ) return false;
+  const canonical = new Date(value).toISOString();
+  return value.includes(".")
+    ? canonical === value
+    : canonical.replace(".000Z", "Z") === value;
+};
 const idDigest = (prefix: string, value: string): string =>
   `${prefix}-${w0Digest({ value }).slice(7, 31)}`;
 
@@ -132,7 +141,7 @@ export function appendJournalEntry(
 }
 
 /**
- * Validate a strict one-entry in-flight prefix or canonical W0.1 journal.
+ * Validate a strict one-entry in-flight prefix or canonical W0.2 journal.
  * Passing `allowInflight=false` additionally requires a terminal export.
  */
 export function validateRExactJournal(
@@ -183,7 +192,7 @@ export function validateRExactJournal(
     ])
     || !exactKeys(journal.binding, bindingKeys)
     || journal.kind !== "autonomous-mutation-journal"
-    || journal.schema_version !== "v1"
+    || journal.schema_version !== "v2"
     || !idPattern.test(journal.journal_id)
     || journal.constitution_digest !== W0_CONSTITUTION_DIGEST
     || journal.extensions.length !== 0
@@ -201,11 +210,7 @@ export function validateRExactJournal(
     throw new Error("r-exact-journal-schema");
   }
   if (
-    !exactKeys(journal.binding.canary, [
-      "scope_digest",
-      "target_count",
-      "watch_deadline",
-    ])
+    !exactKeys(journal.binding.canary, ["scope_digest", "target_count"])
     || !exactKeys(journal.binding.recovery, [
       "class",
       "worker_identity",
@@ -221,9 +226,6 @@ export function validateRExactJournal(
     || !digestPattern.test(journal.binding.recovery.descriptor_digest)
     || journal.binding.recovery.disarms_after_action !== true
     || !exactUtc(journal.binding.deadline)
-    || !exactUtc(journal.binding.canary.watch_deadline)
-    || Date.parse(journal.binding.canary.watch_deadline)
-      > Date.parse(journal.binding.deadline)
   ) {
     throw new Error("r-exact-journal-binding-schema");
   }
@@ -326,20 +328,6 @@ export function validateRExactJournal(
     ) {
       throw new Error("r-exact-journal-deadline");
     }
-    if (
-      entry.phase === "watch"
-      && Date.parse(entry.recorded_at)
-        > Date.parse(journal.binding.canary.watch_deadline)
-    ) {
-      throw new Error("r-exact-journal-watch-late");
-    }
-    if (
-      entry.phase === "commit"
-      && Date.parse(entry.recorded_at)
-        < Date.parse(journal.binding.canary.watch_deadline)
-    ) {
-      throw new Error("r-exact-journal-commit-early");
-    }
     const terminalReasonRequired = [
       "unknown",
       "disarm",
@@ -389,21 +377,32 @@ export function validateRExactJournal(
     }
     previous = entry;
   }
-  if (
-    Date.parse(journal.binding.deadline)
-      - Date.parse(journal.entries[0].recorded_at)
-      > CONSTITUTIONAL_WINDOW_MS
-  ) {
+  const preparedAt = Date.parse(journal.entries[0].recorded_at);
+  const deadlineDelta = Date.parse(journal.binding.deadline) - preparedAt;
+  if (deadlineDelta <= 0 || deadlineDelta > TOTAL_DEADLINE_MS) {
     throw new Error("r-exact-journal-deadline-bound");
   }
   const watchEntry = journal.entries.find((entry) => entry.phase === "watch");
   if (
     watchEntry
-    && Date.parse(journal.binding.canary.watch_deadline)
-      - Date.parse(watchEntry.recorded_at)
-      > CONSTITUTIONAL_WINDOW_MS
+    && Date.parse(watchEntry.recorded_at) - preparedAt
+      > APPLY_VERIFY_BUDGET_MS
   ) {
     throw new Error("r-exact-journal-watch-bound");
+  }
+  const commitEntry = journal.entries.find((entry) => entry.phase === "commit");
+  if (commitEntry && watchEntry) {
+    const elapsedWatch = Date.parse(commitEntry.recorded_at)
+      - Date.parse(watchEntry.recorded_at);
+    if (elapsedWatch < MINIMUM_WATCH_MS) {
+      throw new Error("r-exact-journal-commit-early");
+    }
+    if (elapsedWatch > MINIMUM_WATCH_MS + COMMIT_GRACE_MS) {
+      throw new Error("r-exact-journal-commit-late");
+    }
+    if (Date.parse(commitEntry.recorded_at) - preparedAt > TOTAL_DEADLINE_MS) {
+      throw new Error("r-exact-journal-deadline");
+    }
   }
   if (journal.entries[0]!.phase !== "prepare") {
     throw new Error("r-exact-journal-start");

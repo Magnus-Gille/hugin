@@ -1,4 +1,4 @@
-/** Byte-exact, hash-pinned Grimnir ADR-008/W0.1 schema boundary. */
+/** Byte-exact, hash-pinned Grimnir ADR-008/W0.2 schema boundary. */
 import { fileURLToPath } from "node:url";
 import {
   checkSchemaSupported,
@@ -12,20 +12,20 @@ import type { W0AuthorityBundle } from "./w0-authority.js";
 
 export const GRIMNIR_W0_SOURCE_REPOSITORY = "Magnus-Gille/grimnir";
 export const GRIMNIR_W0_SOURCE_REVISION =
-  "ddf1cfa3d86d1a72e47b7d19fe16aab8d12db528";
+  "16edee0a5a0111f0142569f5b0cf2f90e807060c";
 
 const schemaSpecs = {
   journal: [
-    "autonomous-mutation-journal-v1.schema.json",
-    "237eb4336a84645b88319b4cbd5112b6dd0c3a3a97e7343e0fdc73869b1cac3b",
+    "autonomous-mutation-journal-v2.schema.json",
+    "fc0d87d815c6fda3b14116e0e8840e8ecbe8e3df77bbeaf74b2064184ad036f4",
   ],
   constitution: [
-    "autonomy-constitution-v1.schema.json",
-    "647aacbc963dd5ce620ca6240ce6bd11fd2275e0eb01c861468b10e156d1e707",
+    "autonomy-constitution-v2.schema.json",
+    "0c0d2bbbe9129b9a692220afc6e7ce53f7415e2eb96cfb06aedcda1f77de170b",
   ],
   coverage: [
-    "autonomy-coverage-registry-v1.schema.json",
-    "9c9a7936350b18300e2b488ac525276b8c91fbf3a2d795fb4d842c5ebbd024b7",
+    "autonomy-coverage-registry-v2.schema.json",
+    "fd2eec3b99fcaccceefe7ea4f432b0ce07d36bf1b66763c719cb1c9752fffdc9",
   ],
   attestations: [
     "autonomy-owner-attestation-registry-v1.schema.json",

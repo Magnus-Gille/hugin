@@ -11,6 +11,7 @@ import {
   verifyW0Authority,
   verifyW0NarrowingApplied,
   verifyW0NarrowingReceipt,
+  verifyW0SignedAuthorityEpoch,
   w0Digest,
   W0_CONSTITUTION_DIGEST,
   type VerifiedW0Binding,
@@ -52,19 +53,30 @@ export type * from "./r-exact-types.js";
 const digestPattern = /^sha256:[a-f0-9]{64}$/;
 const refPattern = /^ref:[a-z][a-z0-9-]{2,120}$/;
 const proposalIdPattern = /^[a-z][a-z0-9-]{2,120}$/;
-const utcPattern = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
-const CONSTITUTIONAL_WINDOW_MS = 3_600_000;
+const utcPattern = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/;
+const APPLY_VERIFY_BUDGET_MS = 300_000;
+const MINIMUM_WATCH_MS = 3_600_000;
+const COMMIT_GRACE_MS = 300_000;
+const TOTAL_DEADLINE_MS = 4_200_000;
 const CONSTITUTIONAL_MAX_SILENCE_SECONDS = 900;
 const exactKeys = (value: unknown, keys: string[]): boolean =>
   !!value
   && typeof value === "object"
   && !Array.isArray(value)
   && Object.keys(value).sort().join(",") === [...keys].sort().join(",");
-const exactUtc = (value: unknown): value is string =>
-  typeof value === "string"
-  && utcPattern.test(value)
-  && !Number.isNaN(Date.parse(value))
-  && new Date(value).toISOString().replace(".000Z", "Z") === value;
+const exactUtc = (value: unknown): value is string => {
+  if (
+    typeof value !== "string"
+    || !utcPattern.test(value)
+    || Number.isNaN(Date.parse(value))
+  ) return false;
+  const canonical = new Date(value).toISOString();
+  return value.includes(".")
+    ? canonical === value
+    : canonical.replace(".000Z", "Z") === value;
+};
+const utcFromMs = (value: number): string =>
+  new Date(value).toISOString().replace(".000Z", "Z");
 const idDigest = (prefix: string, value: string): string =>
   `${prefix}-${w0Digest({ value }).slice(7, 31)}`;
 
@@ -122,7 +134,6 @@ type ImmutableAdmission = Pick<
   | "postconditionsDigest"
   | "configDigest"
   | "deadline"
-  | "watchDeadline"
 >;
 
 function validateFresh(
@@ -137,12 +148,10 @@ function validateFresh(
   const checked = Date.parse(proof.checkedAt);
   const watchdog = Date.parse(proof.trustedWatchdogTime);
   const deadline = Date.parse(proof.deadline);
-  const watchDeadline = Date.parse(proof.watchDeadline);
   if (
     !exactUtc(proof.checkedAt)
     || !exactUtc(proof.trustedWatchdogTime)
     || !exactUtc(proof.deadline)
-    || !exactUtc(proof.watchDeadline)
     || Math.abs(actual - checked) > 5_000
     || Math.abs(actual - watchdog) > 5_000
   ) {
@@ -184,20 +193,14 @@ function validateFresh(
   ]) {
     if (!digestPattern.test(digest)) throw new Error("r-exact-admission-digest");
   }
-  if (watchDeadline > deadline || actual > deadline) {
+  if (actual > deadline) {
     throw new Error("r-exact-deadline-expired");
   }
   if (
     !immutable
-    && (
-      deadline - checked !== CONSTITUTIONAL_WINDOW_MS
-      || watchDeadline - checked !== CONSTITUTIONAL_WINDOW_MS
-    )
+    && deadline - checked !== TOTAL_DEADLINE_MS
   ) {
     throw new Error("r-exact-admission-window-bound");
-  }
-  if (phase === "commit" && actual < watchDeadline) {
-    throw new Error("r-exact-watch-incomplete");
   }
   if (immutable) {
     const immutableFields = [
@@ -212,7 +215,6 @@ function validateFresh(
       "postconditionsDigest",
       "configDigest",
       "deadline",
-      "watchDeadline",
     ] as const;
     for (const field of immutableFields) {
       if (proof[field] !== immutable[field]) {
@@ -234,7 +236,6 @@ function immutableAdmissionFromJournal(
     postconditionsDigest: journal.binding.postconditions_digest,
     configDigest: journal.binding.config_digest,
     deadline: journal.binding.deadline,
-    watchDeadline: journal.binding.canary.watch_deadline,
   };
 }
 
@@ -254,8 +255,11 @@ function protectedWatchInput(
     targetId: target.id,
     targetScopeDigest: target.targetScopeDigest,
     candidateDigest: prepared.candidate_digest,
+    watchReceiptDigest: watch.receipt_digest,
     watchStartedAt: watch.recorded_at,
-    watchDeadline: journal.binding.canary.watch_deadline,
+    watchDeadline: utcFromMs(
+      Date.parse(watch.recorded_at) + MINIMUM_WATCH_MS,
+    ),
     watchdogIdentity: journal.binding.watchdog_identity,
   };
 }
@@ -270,6 +274,13 @@ function validateProtectedWatch(
   const started = Date.parse(expected.watchStartedAt);
   if (
     !exactKeys(proof, [
+      "proposalId",
+      "attemptId",
+      "targetId",
+      "targetScopeDigest",
+      "candidateDigest",
+      "watchReceiptDigest",
+      "watchdogIdentity",
       "watchStartedAt",
       "watchDeadline",
       "completedAt",
@@ -282,10 +293,18 @@ function validateProtectedWatch(
     || !exactUtc(proof.watchStartedAt)
     || !exactUtc(proof.watchDeadline)
     || !exactUtc(proof.completedAt)
+    || proof.proposalId !== expected.proposalId
+    || proof.attemptId !== expected.attemptId
+    || proof.targetId !== expected.targetId
+    || proof.targetScopeDigest !== expected.targetScopeDigest
+    || proof.candidateDigest !== expected.candidateDigest
+    || proof.watchReceiptDigest !== expected.watchReceiptDigest
+    || proof.watchdogIdentity !== expected.watchdogIdentity
     || proof.watchStartedAt !== expected.watchStartedAt
     || proof.watchDeadline !== expected.watchDeadline
-    || deadline - started !== CONSTITUTIONAL_WINDOW_MS
+    || deadline - started !== MINIMUM_WATCH_MS
     || completed < deadline
+    || completed > deadline + COMMIT_GRACE_MS
     || Math.abs(trustedNow(gate) - completed) > 5_000
     || !Number.isSafeInteger(proof.maxObservedSilenceSeconds)
     || proof.maxObservedSilenceSeconds < 0
@@ -676,7 +695,6 @@ export async function applyRExactProposal(
     canary: {
       scope_digest: owner.targetScopeDigest,
       target_count: 1,
-      watch_deadline: initialAdmission.watchDeadline,
     },
     recovery: {
       class: "R-exact",
@@ -687,7 +705,7 @@ export async function applyRExactProposal(
   };
   let journal: RExactJournal = {
     kind: "autonomous-mutation-journal",
-    schema_version: "v1",
+    schema_version: "v2",
     journal_id: idDigest("journal", receipt.canonicalProposalDigest),
     domain: target.domain,
     constitution_digest: W0_CONSTITUTION_DIGEST,
@@ -798,6 +816,13 @@ export async function applyRExactProposal(
       throw new Error("r-exact-readback-mismatch");
     }
     options.onPhase?.("readback");
+    const verifiedAt = utcFromMs(trustedNow(gate));
+    if (
+      Date.parse(verifiedAt) - Date.parse(initialAdmission.checkedAt)
+        > APPLY_VERIFY_BUDGET_MS
+    ) {
+      throw new Error("r-exact-apply-verify-budget");
+    }
     state = await appendThroughRole(
       roleServicesSnapshot.controller,
       roleKeys.controller,
@@ -806,7 +831,7 @@ export async function applyRExactProposal(
       buildJournalEntry(
         journal,
         "verify",
-        preApply.checkedAt,
+        verifiedAt,
         owner.identities.controller,
       ),
       prepared,
@@ -820,7 +845,7 @@ export async function applyRExactProposal(
       buildJournalEntry(
         journal,
         "watch",
-        preApply.checkedAt,
+        verifiedAt,
         owner.identities.controller,
       ),
       prepared,
@@ -1171,6 +1196,9 @@ export async function recoverRExactAttempt(
     // Durable historical recovery must remain available after loss of the
     // current live authority reader. The protected posture service remains
     // the authority in that degraded case.
+  }
+  if (protectedRecoveryAuthority) {
+    verifyW0SignedAuthorityEpoch(protectedRecoveryAuthority);
   }
   const currentPosture = await gate.currentRecoveryPosture(
     historicalBinding,

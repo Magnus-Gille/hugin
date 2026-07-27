@@ -51,6 +51,13 @@ const scope = h("hugin-macro-scope");
 const fixedNow = "2026-07-26T14:00:00Z";
 const constitutionFixture = JSON.parse(readFileSync(
   new URL(
+    "./fixtures/autonomy-contract/w0.2-constitution.json",
+    import.meta.url,
+  ),
+  "utf8",
+));
+const legacyConstitutionFixture = JSON.parse(readFileSync(
+  new URL(
     "./fixtures/autonomy-contract/w0.1-constitution.json",
     import.meta.url,
   ),
@@ -58,14 +65,14 @@ const constitutionFixture = JSON.parse(readFileSync(
 ));
 const rolePhaseFixture = JSON.parse(readFileSync(
   new URL(
-    "./fixtures/autonomy-contract/w0.1-role-phase-map.json",
+    "./fixtures/autonomy-contract/w0.2-role-phase-map.json",
     import.meta.url,
   ),
   "utf8",
 ));
 const canonicalJournalSchema = JSON.parse(readFileSync(
   new URL(
-    "../docs/vendor/grimnir/autonomy/autonomous-mutation-journal-v1.schema.json",
+    "../docs/vendor/grimnir/autonomy/autonomous-mutation-journal-v2.schema.json",
     import.meta.url,
   ),
   "utf8",
@@ -225,7 +232,7 @@ function authority(): W0AuthorityBundle {
   }));
   const coverage: any = {
     kind: "autonomy-coverage-registry",
-    schema_version: "v1",
+    schema_version: "v2",
     registry_id: "coverage-registry",
     issued_at: "2026-07-26T00:00:00Z",
     constitution_digest: W0_CONSTITUTION_DIGEST,
@@ -668,8 +675,7 @@ function proofFor(
     policyDigest: h("policy"),
     postconditionsDigest: h("post"),
     configDigest: h("config"),
-    deadline: "2026-07-26T15:00:00Z",
-    watchDeadline: "2026-07-26T15:00:00Z",
+    deadline: "2026-07-26T15:10:00Z",
     ...override,
   };
 }
@@ -805,6 +811,13 @@ function gate(
     awaitProtectedWatch: async (input) => {
       protectedNow = input.watchDeadline;
       return {
+        proposalId: input.proposalId,
+        attemptId: input.attemptId,
+        targetId: input.targetId,
+        targetScopeDigest: input.targetScopeDigest,
+        candidateDigest: input.candidateDigest,
+        watchReceiptDigest: input.watchReceiptDigest,
+        watchdogIdentity: input.watchdogIdentity,
         watchStartedAt: input.watchStartedAt,
         watchDeadline: input.watchDeadline,
         completedAt: protectedNow,
@@ -879,10 +892,12 @@ function gate(
   return runtime;
 }
 
-describe("W0.1 R-exact controller", () => {
+describe("W0.2 R-exact controller", () => {
   it("exports the exact shared phase vocabulary and proposal epoch", () => {
     expect(R_EXACT_CONFORMANCE.phases).toEqual(W0_JOURNAL_PHASES);
     expect(proposal().policyEpoch.constitutionDigest)
+      .toBe(W0_CONSTITUTION_DIGEST);
+    expect(rolePhaseFixture.constitution_digest)
       .toBe(W0_CONSTITUTION_DIGEST);
     for (const [role, phases] of Object.entries(rolePhaseFixture)) {
       if (role === "constitution_digest") continue;
@@ -892,13 +907,15 @@ describe("W0.1 R-exact controller", () => {
     }
   });
 
-  it("rejects an otherwise re-signed legacy constitution epoch", async () => {
+  it("rejects a newly submitted, correctly re-signed v1 proposal epoch", async () => {
     const backend = new JournalBackend();
     const target = new Target();
     const current = proposal();
     const legacy: any = structuredClone(current);
+    legacy.policyEpoch.id = "grimnir-adr-008-v1";
+    legacy.policyEpoch.constitutionId = "grimnir-autonomy-v1";
     legacy.policyEpoch.constitutionDigest =
-      "sha256:76b0f28adca0046fad9f1d3d4b3a57046f9a1d11ee2ed232bbc495d2ab663bd0";
+      "sha256:51efdb78c4524780919649f285862543db8b38a6a3a07894f0fad8bdab40fc6c";
     delete legacy.signature;
     delete legacy.canonicalProposalDigest;
     legacy.canonicalProposalDigest = canonicalAutonomyProposalDigest(legacy);
@@ -906,6 +923,14 @@ describe("W0.1 R-exact controller", () => {
     await expect(
       applyRExactProposal(legacy, keys, target, gate(backend, target)),
     ).rejects.toThrow("proposal-invalid-receipt");
+  });
+
+  it("rejects mixed v1 constitution and v2 coverage authority", () => {
+    const mixed = authority();
+    mixed.constitution = structuredClone(legacyConstitutionFixture);
+    expect(
+      () => verifyW0Authority(mixed, "macro-routing", scope),
+    ).toThrow("w0-authority-rejected:schema");
   });
 
   it("commits through independently authenticated role services", async () => {
@@ -928,6 +953,7 @@ describe("W0.1 R-exact controller", () => {
     ]);
     expect(result.journal.entries.at(-1)?.recorded_at)
       .toBe("2026-07-26T15:00:00Z");
+    expect(result.journal.schema_version).toBe("v2");
     validateRExactJournal(result.journal, false);
   });
 
@@ -938,6 +964,13 @@ describe("W0.1 R-exact controller", () => {
     const runtime = gate(backend, target, receipt);
     let recoveryCause: unknown;
     (runtime as any).awaitProtectedWatch = async (input: any) => ({
+      proposalId: input.proposalId,
+      attemptId: input.attemptId,
+      targetId: input.targetId,
+      targetScopeDigest: input.targetScopeDigest,
+      candidateDigest: input.candidateDigest,
+      watchReceiptDigest: input.watchReceiptDigest,
+      watchdogIdentity: input.watchdogIdentity,
       watchStartedAt: input.watchStartedAt,
       watchDeadline: input.watchDeadline,
       completedAt: fixedNow,
@@ -986,6 +1019,152 @@ describe("W0.1 R-exact controller", () => {
     );
   });
 
+  it.each([
+    ["proposalId", "proposal-attacker"],
+    ["attemptId", "attempt-attacker"],
+    ["targetId", "hugin-agent-prompt"],
+    ["targetScopeDigest", h("other-scope")],
+    ["candidateDigest", h("other-candidate")],
+    ["watchReceiptDigest", h("other-watch-receipt")],
+    ["watchdogIdentity", "attacker-watchdog"],
+  ] as const)(
+    "rejects a protected watch proof replayed across %s",
+    async (field, value) => {
+      const backend = new JournalBackend();
+      const target = new Target();
+      const receipt = proposal();
+      const runtime = gate(backend, target, receipt);
+      const awaitWatch = runtime.awaitProtectedWatch;
+      runtime.awaitProtectedWatch = async (input) => ({
+        ...await awaitWatch(input),
+        [field]: value,
+      });
+      let recoveryCause: unknown;
+      const result = await applyRExactProposal(
+        receipt,
+        keys,
+        target,
+        runtime,
+        { onRecoveryCause: (error) => { recoveryCause = error; } },
+      );
+      expect(result.status).toBe("disarmed");
+      expect(recoveryCause).toEqual(
+        expect.objectContaining({ message: "r-exact-watch-incomplete" }),
+      );
+    },
+  );
+
+  it.each([
+    {
+      elapsed: 300_000,
+      expected: "committed",
+      watchAt: "2026-07-26T14:05:00Z",
+    },
+    {
+      elapsed: 300_001,
+      expected: "disarmed",
+      watchAt: null,
+    },
+  ] as const)(
+    "enforces the apply/readback/verify-to-durable-watch bound at $elapsed ms",
+    async ({ elapsed, expected, watchAt }) => {
+      const backend = new JournalBackend();
+      const target = new Target();
+      const receipt = proposal();
+      const runtime = gate(backend, target, receipt);
+      let now = fixedNow;
+      runtime.protectedNow = () => new Date(now);
+      runtime.verifyFresh = async () => proofFor(receipt, {
+        checkedAt: now,
+        trustedWatchdogTime: now,
+      });
+      runtime.verifyRecovery = async (_prepared, current) => ({
+        checkedAt: now,
+        trustedWatchdogTime: now,
+        killSwitchIdentity: current.state === "broader"
+          ? current.binding.identities.kill_switch
+          : current.killSwitchIdentity,
+        killSwitchStateDigest: h("kill-switch-off"),
+        journalHealthy: true,
+      });
+      target.beforeReplace = async () => {
+        now = new Date(Date.parse(fixedNow) + elapsed).toISOString()
+          .replace(".000Z", "Z");
+      };
+      runtime.awaitProtectedWatch = async (input) => {
+        now = input.watchDeadline;
+        return {
+          ...input,
+          completedAt: now,
+          maxObservedSilenceSeconds: 0,
+          killSwitchStayedOff: true,
+          evidenceStayedFresh: true,
+          journalStayedHealthy: true,
+          livenessStayedHealthy: true,
+        };
+      };
+      const result = await applyRExactProposal(
+        receipt,
+        keys,
+        target,
+        runtime,
+      );
+      expect(result.status).toBe(expected);
+      expect(
+        result.journal.entries.find((entry) => entry.phase === "watch")
+          ?.recorded_at ?? null,
+      ).toBe(watchAt);
+    },
+  );
+
+  it.each([
+    { elapsed: 3_900_000, expected: "committed" },
+    { elapsed: 3_900_001, expected: "disarmed" },
+  ] as const)(
+    "enforces the 300 second commit grace at $elapsed ms after watch receipt",
+    async ({ elapsed, expected }) => {
+      const backend = new JournalBackend();
+      const target = new Target();
+      const receipt = proposal();
+      const runtime = gate(backend, target, receipt);
+      let now = fixedNow;
+      runtime.protectedNow = () => new Date(now);
+      runtime.verifyFresh = async () => proofFor(receipt, {
+        checkedAt: now,
+        trustedWatchdogTime: now,
+      });
+      runtime.verifyRecovery = async (_prepared, current) => ({
+        checkedAt: now,
+        trustedWatchdogTime: now,
+        killSwitchIdentity: current.state === "broader"
+          ? current.binding.identities.kill_switch
+          : current.killSwitchIdentity,
+        killSwitchStateDigest: h("kill-switch-off"),
+        journalHealthy: true,
+      });
+      runtime.awaitProtectedWatch = async (input) => {
+        now = new Date(Date.parse(input.watchStartedAt) + elapsed)
+          .toISOString();
+        return {
+          ...input,
+          completedAt: now,
+          maxObservedSilenceSeconds: 0,
+          killSwitchStayedOff: true,
+          evidenceStayedFresh: true,
+          journalStayedHealthy: true,
+          livenessStayedHealthy: true,
+        };
+      };
+      const result = await applyRExactProposal(
+        receipt,
+        keys,
+        target,
+        runtime,
+      );
+      expect(result.status).toBe(expected);
+    },
+  );
+
   it("resumes a durable watch after process loss instead of reverting it", async () => {
     const backend = new JournalBackend();
     const target = new Target();
@@ -1005,6 +1184,13 @@ describe("W0.1 R-exact controller", () => {
       }
       now = input.watchDeadline;
       return {
+        proposalId: input.proposalId,
+        attemptId: input.attemptId,
+        targetId: input.targetId,
+        targetScopeDigest: input.targetScopeDigest,
+        candidateDigest: input.candidateDigest,
+        watchReceiptDigest: input.watchReceiptDigest,
+        watchdogIdentity: input.watchdogIdentity,
         watchStartedAt: input.watchStartedAt,
         watchDeadline: input.watchDeadline,
         completedAt: now,
@@ -1074,21 +1260,12 @@ describe("W0.1 R-exact controller", () => {
 
   it.each([
     {
-      name: "deadline",
-      override: { deadline: "2026-07-26T15:00:01Z" },
+      name: "deadline above 4200 seconds",
+      override: { deadline: "2026-07-26T15:10:00.001Z" },
     },
     {
-      name: "watch",
-      override: {
-        checkedAt: "2026-07-26T13:59:59Z",
-        trustedWatchdogTime: "2026-07-26T13:59:59Z",
-        deadline: "2026-07-26T15:00:00Z",
-        watchDeadline: "2026-07-26T15:00:00Z",
-      },
-    },
-    {
-      name: "short watch",
-      override: { watchDeadline: fixedNow },
+      name: "deadline below 4200 seconds",
+      override: { deadline: "2026-07-26T15:09:59.999Z" },
     },
   ])("rejects a noncanonical constitutional $name window before mutation", async ({
     override,
@@ -1301,6 +1478,7 @@ describe("W0.1 R-exact controller", () => {
         );
         row.bindings = [];
       }
+      redigestAndResignAuthorityArtifacts(retryRuntime.authority);
       const recovered = await applyRExactProposal(
         retryReceipt,
         keys,
@@ -1328,6 +1506,25 @@ describe("W0.1 R-exact controller", () => {
     await expect(
       applyRExactProposal(receipt, keys, target, runtime),
     ).rejects.toThrow("r-exact-recovery-posture-authority-mismatch");
+  });
+
+  it("cryptographically validates current authority on an already-safe recovery path", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    target.partial = true;
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    runtime.authority.ownerAuthorization.signature.value_base64 =
+      Buffer.alloc(64).toString("base64");
+    runtime.currentRecoveryPosture = async (prepared, currentAuthority) => ({
+      state: "already-safe",
+      killSwitchIdentity: prepared.identities.kill_switch,
+      safetyDigest: h("claimed-safe"),
+      authorityDigest: w0Digest(currentAuthority),
+    });
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("w0-authority-rejected:owner-signature");
   });
 
   it("freezes owner pins and role services before asynchronous admission", async () => {
@@ -1945,12 +2142,17 @@ describe("W0.1 R-exact controller", () => {
     } else if (mode === "owner-epoch-rotation") {
       runtime.authority = authority();
     } else if (mode === "global-disarm") {
+      runtime.authority = authority();
       runtime.authority.coverageIntent.global_state = "disarmed";
     } else {
+      runtime.authority = authority();
       const row = runtime.authority.coverageIntent.domains.find(
         (item: any) => item.domain === "macro-routing",
       );
       row.bindings = [];
+    }
+    if (mode === "global-disarm" || mode === "binding-removed") {
+      redigestAndResignAuthorityArtifacts(runtime.authority);
     }
 
     let laterRestoreCalls = 0;

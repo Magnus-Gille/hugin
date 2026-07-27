@@ -1,9 +1,9 @@
-/** Offline-verifiable Grimnir ADR-008/W0.1 authority contract. */
+/** Offline-verifiable Grimnir ADR-008/W0.2 authority contract. */
 import { createHash, createPublicKey, verify as verifySignature } from "node:crypto";
 import { canonicalizeJcs } from "../jcs.js";
 import { canonicalW0AuthoritySchemaErrors } from "./grimnir-w0-schemas.js";
 
-export const W0_CONSTITUTION_DIGEST = "sha256:51efdb78c4524780919649f285862543db8b38a6a3a07894f0fad8bdab40fc6c" as const;
+export const W0_CONSTITUTION_DIGEST = "sha256:836aba8abbc48e05294dac301354ec6b1aa21307b992db78202342ce29aa8dc1" as const;
 export const W0_JOURNAL_PHASES = ["prepare", "apply", "verify", "watch", "commit", "unknown", "revert", "recover", "quarantine", "disarm", "terminally-blocked"] as const;
 export const HUGIN_R_EXACT_DOMAINS = ["macro-routing", "prompt", "harness", "tool-policy"] as const;
 export type HuginRExactDomain = typeof HUGIN_R_EXACT_DOMAINS[number];
@@ -99,8 +99,8 @@ function validateConstitution(value: any): void {
       "autonomous_classes", "constitution_digest", "extensions",
     ])
     || value.kind !== "autonomy-constitution"
-    || value.schema_version !== "v1"
-    || value.constitution_id !== "grimnir-autonomy-v1"
+    || value.schema_version !== "v2"
+    || value.constitution_id !== "grimnir-autonomy-v2"
     || value.promotion_mode !== "mechanical-for-covered-classes-only"
     || !Number.isFinite(Date.parse(value.issued_at))
     || !Array.isArray(value.extensions)
@@ -143,14 +143,23 @@ function validateConstitution(value: any): void {
       || row.admission !== "mechanical-after-all-predicates"
       || !exactKeys(row.bounds, [
         "max_concurrent_targets", "canary_only_until_armed_fleet",
-        "deadline_seconds", "watch_seconds", "max_attempts",
+        "apply_verify_budget_seconds", "minimum_watch_seconds",
+        "commit_grace_seconds", "deadline_seconds", "max_attempts",
         "min_seconds_between_attempts", "max_attempts_per_window",
         "attempt_window_seconds", "max_silence_seconds",
         "trusted_watchdog_time_required",
       ])
       || row.bounds.max_concurrent_targets !== 1
+      || row.bounds.canary_only_until_armed_fleet !== true
+      || row.bounds.apply_verify_budget_seconds !== 300
+      || row.bounds.minimum_watch_seconds !== 3600
+      || row.bounds.commit_grace_seconds !== 300
+      || row.bounds.deadline_seconds !== 4200
       || row.bounds.max_attempts !== 1
+      || row.bounds.min_seconds_between_attempts !== 3600
       || row.bounds.max_attempts_per_window !== 1
+      || row.bounds.attempt_window_seconds !== 86400
+      || row.bounds.max_silence_seconds !== 900
       || row.bounds.trusted_watchdog_time_required !== true
       || canonicalizeJcs([...row.required_identity_roles].sort())
         !== canonicalizeJcs([
@@ -174,12 +183,24 @@ export interface VerifiedW0Binding {
   ownerAuthorityRef: string; ownerAuthorityDigest: string; configurationOwnerAuthorityRef: string; configurationOwnerAuthorityDigest: string;
 }
 
-/** Verify owner Ed25519 authority, exact artifact bindings and current narrowing. */
-export function verifyW0Authority(bundle: W0AuthorityBundle, domain: HuginRExactDomain, targetScopeDigest: string, allowNarrowed = false): VerifiedW0Binding {
+function verifyW0AuthorityInternal(
+  bundle: W0AuthorityBundle,
+  selection?: {
+    domain: HuginRExactDomain;
+    targetScopeDigest: string;
+    allowNarrowed: boolean;
+  },
+): VerifiedW0Binding | undefined {
   if (canonicalW0AuthoritySchemaErrors(bundle).length) reject("schema");
   const { constitution:c, coverageIntent:cov, ownerAttestations:att, recoveryWorkerRegistry:rr, ownerAuthorization:a, authorizationCheckpoint:cp, runtimeNarrowing:n, narrowingCheckpoint:ncp } = bundle;
   for (const artifact of [c, cov, att, rr, a, cp, n, ncp]) bounded(artifact);
-  if (!HUGIN_R_EXACT_DOMAINS.includes(domain) || !digestPattern.test(targetScopeDigest)) reject("invalid-target");
+  if (
+    selection
+    && (
+      !HUGIN_R_EXACT_DOMAINS.includes(selection.domain)
+      || !digestPattern.test(selection.targetScopeDigest)
+    )
+  ) reject("invalid-target");
   validateConstitution(c);
   for (const [artifact, field] of [[cov,"registry_digest"],[att,"registry_digest"],[rr,"registry_digest"]] as const) if (!artifact || artifact[field] !== w0Digest(artifact,field)) reject(`artifact-digest:${field}`);
   if (!exactKeys(a,["kind","schema_version","authorization_id","authorization_sequence","previous_authorization_digest","issued_at","authority","bindings","signature"]) || !exactKeys(a.authority,["key_id","algorithm","public_key_pem","public_key_fingerprint"]) || !exactKeys(a.bindings,["constitution_digest","coverage_intent_digest","owner_attestation_registry_digest","recovery_worker_registry_digest"]) || !exactKeys(a.signature,["algorithm","value_base64"]) || a.kind!=="autonomy-owner-authorization" || a.schema_version!=="v1") reject("authorization-shape");
@@ -194,7 +215,7 @@ export function verifyW0Authority(bundle: W0AuthorityBundle, domain: HuginRExact
   if (!exactKeys(cp,["kind","schema_version","authorization_digest","minimum_sequence"]) || cp.kind!=="autonomy-owner-authorization-checkpoint"||cp.schema_version!=="v1"||!Number.isSafeInteger(cp.minimum_sequence)||cp.authorization_digest!==authDigest || a.authorization_sequence<cp.minimum_sequence) reject("authorization-checkpoint");
   const bindings={constitution_digest:W0_CONSTITUTION_DIGEST,coverage_intent_digest:w0Digest(cov,"registry_digest"),owner_attestation_registry_digest:w0Digest(att,"registry_digest"),recovery_worker_registry_digest:w0Digest(rr,"registry_digest")};
   if (canonicalizeJcs(a.bindings)!==canonicalizeJcs(bindings)) reject("authorization-bindings");
-  if (!exactKeys(cov,["kind","schema_version","registry_id","issued_at","constitution_digest","mutation_policy","global_state","domains","registry_digest","extensions"])||cov.kind!=="autonomy-coverage-registry"||cov.schema_version!=="v1"||cov.constitution_digest!==W0_CONSTITUTION_DIGEST||cov.mutation_policy!=="owner-widen-recovery-worker-narrow"||!Array.isArray(cov.domains)||cov.domains.length!==17||new Set(cov.domains.map((x:any)=>x.domain)).size!==17||canonicalizeJcs(cov.domains.map((x:any)=>x.domain).sort())!==canonicalizeJcs([...allDomains].sort())||!Array.isArray(cov.extensions)||cov.extensions.length||!Number.isFinite(Date.parse(cov.issued_at))) reject("coverage-shape");
+  if (!exactKeys(cov,["kind","schema_version","registry_id","issued_at","constitution_digest","mutation_policy","global_state","domains","registry_digest","extensions"])||cov.kind!=="autonomy-coverage-registry"||cov.schema_version!=="v2"||cov.constitution_digest!==W0_CONSTITUTION_DIGEST||cov.mutation_policy!=="owner-widen-recovery-worker-narrow"||!Array.isArray(cov.domains)||cov.domains.length!==17||new Set(cov.domains.map((x:any)=>x.domain)).size!==17||canonicalizeJcs(cov.domains.map((x:any)=>x.domain).sort())!==canonicalizeJcs([...allDomains].sort())||!Array.isArray(cov.extensions)||cov.extensions.length||!Number.isFinite(Date.parse(cov.issued_at))) reject("coverage-shape");
   const fleetIdentities = new Set<string>();
   for (const domainRow of cov.domains) {
     if (
@@ -310,16 +331,23 @@ export function verifyW0Authority(bundle: W0AuthorityBundle, domain: HuginRExact
       }
     }
   }
-  if (cov.global_state!=="armed") reject("global-disarmed");
-  const matchingRows=cov.domains.filter((x:any)=>x.domain===domain); const row=matchingRows[0]; const matchingBindings=row?.bindings?.filter((x:any)=>x.target_scope_digest===targetScopeDigest)??[]; const binding=matchingBindings[0];
-  if (matchingRows.length!==1 || matchingBindings.length!==1 || !exactKeys(row,["domain","required_for_levels","owner_scope","owner","recovery_class","coverage","target_state","bindings"]) || !exactKeys(binding,["writer_owner","owner_authority_ref","owner_authority_digest","configuration_owner","configuration_owner_authority_ref","configuration_owner_authority_digest","target_scope_digest","state","identities"]) || !["armed-canary","armed-fleet"].includes(row.coverage) || binding.state!==row.coverage || binding.writer_owner!=="hugin" || binding.configuration_owner!=="hugin") reject("coverage-binding");
-  const ids=binding.identities; if (!exactKeys(ids,["owner","controller","watchdog","kill_switch","recovery_worker"]) || new Set(Object.values(ids)).size!==5 || !Object.values(ids).every((x)=>typeof x==="string"&&idPattern.test(x))) reject("five-identities");
-  const matchingAttestations=att.attestations.filter((x:any)=>x.attestation_id===binding.configuration_owner_authority_ref?.slice(4)); const ownerAtt=matchingAttestations[0];
-  if (matchingAttestations.length!==1 || !exactKeys(ownerAtt,["attestation_id","domain","target_scope_digest","configuration_owner","issued_at","attestation_digest"]) || ownerAtt.domain!==domain || ownerAtt.target_scope_digest!==targetScopeDigest || ownerAtt.configuration_owner!=="hugin" || ownerAtt.attestation_digest!==binding.configuration_owner_authority_digest || !Number.isFinite(Date.parse(ownerAtt.issued_at))) reject("owner-attestation");
+  let binding: any;
+  let ids: any;
+  let effective: "armed-canary" | "armed-fleet" | "shadow" = "shadow";
+  if (selection) {
+    const { domain, targetScopeDigest } = selection;
+    if (cov.global_state!=="armed") reject("global-disarmed");
+    const matchingRows=cov.domains.filter((x:any)=>x.domain===domain); const row=matchingRows[0]; const matchingBindings=row?.bindings?.filter((x:any)=>x.target_scope_digest===targetScopeDigest)??[]; binding=matchingBindings[0];
+    if (matchingRows.length!==1 || matchingBindings.length!==1 || !exactKeys(row,["domain","required_for_levels","owner_scope","owner","recovery_class","coverage","target_state","bindings"]) || !exactKeys(binding,["writer_owner","owner_authority_ref","owner_authority_digest","configuration_owner","configuration_owner_authority_ref","configuration_owner_authority_digest","target_scope_digest","state","identities"]) || !["armed-canary","armed-fleet"].includes(row.coverage) || binding.state!==row.coverage || binding.writer_owner!=="hugin" || binding.configuration_owner!=="hugin") reject("coverage-binding");
+    ids=binding.identities; if (!exactKeys(ids,["owner","controller","watchdog","kill_switch","recovery_worker"]) || new Set(Object.values(ids)).size!==5 || !Object.values(ids).every((x)=>typeof x==="string"&&idPattern.test(x))) reject("five-identities");
+    const matchingAttestations=att.attestations.filter((x:any)=>x.attestation_id===binding.configuration_owner_authority_ref?.slice(4)); const ownerAtt=matchingAttestations[0];
+    if (matchingAttestations.length!==1 || !exactKeys(ownerAtt,["attestation_id","domain","target_scope_digest","configuration_owner","issued_at","attestation_digest"]) || ownerAtt.domain!==domain || ownerAtt.target_scope_digest!==targetScopeDigest || ownerAtt.configuration_owner!=="hugin" || ownerAtt.attestation_digest!==binding.configuration_owner_authority_digest || !Number.isFinite(Date.parse(ownerAtt.issued_at))) reject("owner-attestation");
+    effective = binding.state;
+  }
   if(!exactKeys(rr,["kind","schema_version","registry_id","entries","registry_digest","extensions"])||rr.kind!=="autonomy-recovery-worker-registry"||rr.schema_version!=="v1"||!idPattern.test(rr.registry_id)||!Array.isArray(rr.entries)||rr.entries.length>256||!Array.isArray(rr.extensions)||rr.extensions.length)reject("recovery-registry-shape");
   const recoveryBindings=new Map<string,any>(), recoveryFingerprints=new Set<string>();for(const x of rr.entries){if(!exactKeys(x,["domain","target_scope_digest","recovery_worker_identity","public_key_pem","public_key_fingerprint"])||!idPattern.test(x.recovery_worker_identity)||!digestPattern.test(x.target_scope_digest))reject("recovery-binding-shape");const k=createPublicKey(x.public_key_pem);const fp=`sha256:${createHash("sha256").update(k.export({type:"spki",format:"der"})).digest("hex")}`;if(k.asymmetricKeyType!=="ed25519"||fp!==x.public_key_fingerprint||recoveryFingerprints.has(fp))reject("recovery-key");const identity=`${x.domain}:${x.target_scope_digest}:${x.recovery_worker_identity}`;if(recoveryBindings.has(identity))reject("ambiguous-recovery-binding");recoveryBindings.set(identity,{...x,key:k});recoveryFingerprints.add(fp);}
   if (!exactKeys(n,["kind","schema_version","ledger_id","owner_authorization_digest","entries","extensions"])||n.kind!=="autonomy-runtime-narrowing"||n.schema_version!=="v1"||!idPattern.test(n.ledger_id)||!Array.isArray(n.entries)||n.entries.length>4096||!Array.isArray(n.extensions)||n.extensions.length||n.owner_authorization_digest!==authDigest || !exactKeys(ncp,["kind","schema_version","owner_authorization_digest","ledger_tail_digest","minimum_entries"])||ncp.kind!=="autonomy-runtime-narrowing-checkpoint"||ncp.schema_version!=="v1"||ncp.owner_authorization_digest!==authDigest) reject("narrowing-authorization");
-  let previous:null|string=null, effective:"armed-canary"|"armed-fleet"|"shadow"=binding.state;
+  let previous:null|string=null;
   const usedNarrowingBindings = new Set<string>();
   for (const [index, e] of n.entries.entries()) {
     if (
@@ -380,17 +408,34 @@ export function verifyW0Authority(bundle: W0AuthorityBundle, domain: HuginRExact
     ) reject("narrowing-signature");
     previous = e.entry_digest;
     if (
-      e.domain === domain
-      && e.target_scope_digest === targetScopeDigest
+      selection
+      && e.domain === selection.domain
+      && e.target_scope_digest === selection.targetScopeDigest
     ) {
       if (e.from_state !== effective) reject("narrowing-transition");
       effective = "shadow";
     }
   }
   if (!Number.isSafeInteger(ncp.minimum_entries) || ncp.minimum_entries < 0 || ncp.minimum_entries>n.entries.length || ncp.ledger_tail_digest!==previous) reject("narrowing-checkpoint");
-  if (effective==="shadow" && !allowNarrowed) reject("binding-narrowed");
+  if (!selection) return undefined;
+  if (effective==="shadow" && !selection.allowNarrowed) reject("binding-narrowed");
+  const { domain, targetScopeDigest } = selection;
   const recovery=recoveryBindings.get(`${domain}:${targetScopeDigest}:${ids.recovery_worker}`); if(!recovery)reject("recovery-worker-binding");
   return { authorizationDigest:authDigest,coverageDigest:bindings.coverage_intent_digest,domain,targetScopeDigest,state:binding.state,effectiveState:effective,identities:ids,ownerAuthorityRef:binding.owner_authority_ref,ownerAuthorityDigest:binding.owner_authority_digest,configurationOwnerAuthorityRef:binding.configuration_owner_authority_ref,configurationOwnerAuthorityDigest:binding.configuration_owner_authority_digest };
+}
+
+/** Verify the complete signed epoch even when its current posture is disarmed. */
+export function verifyW0SignedAuthorityEpoch(bundle: W0AuthorityBundle): void {
+  verifyW0AuthorityInternal(bundle);
+}
+
+/** Verify owner Ed25519 authority, exact artifact bindings and current narrowing. */
+export function verifyW0Authority(bundle: W0AuthorityBundle, domain: HuginRExactDomain, targetScopeDigest: string, allowNarrowed = false): VerifiedW0Binding {
+  return verifyW0AuthorityInternal(bundle, {
+    domain,
+    targetScopeDigest,
+    allowNarrowed,
+  })!;
 }
 
 /** Prove that a separately signed recovery append narrowed this exact journal/target. */

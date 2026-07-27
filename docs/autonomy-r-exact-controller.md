@@ -2,21 +2,29 @@
 
 Hugin owns the adapter-neutral controller for its ADR-008 `R-exact` domains:
 `macro-routing`, `prompt`, `harness`, and `tool-policy`. The controller consumes
-the exact Grimnir W0.1 authority vocabulary pinned by constitution digest
-`sha256:51efdb78c4524780919649f285862543db8b38a6a3a07894f0fad8bdab40fc6c`.
+the exact Grimnir W0.2 authority vocabulary pinned by constitution digest
+`sha256:836aba8abbc48e05294dac301354ec6b1aa21307b992db78202342ce29aa8dc1`.
 
 This module does **not** arm production. It contains no production credentials,
 artifact loader, target adapter, watchdog, or recovery worker. An owning
-deployment must provide those capabilities separately, and W0 remains disarmed
+deployment must provide those capabilities separately, and W0.2 remains disarmed
 until the owner completes a separate arming action.
 
 ## Authority and admission
 
-The seven canonical Grimnir W0.1 JSON Schemas are vendored byte-exact and
+The seven canonical Grimnir W0.2 authority schemas are vendored byte-exact and
 SHA-256 pinned to the source revision recorded in
 `docs/autonomy-r-exact-controller.provenance.json`. Hugin applies those closed
 schemas before its cryptographic and cross-artifact semantic checks; it has no
 schema overlay.
+
+The prior v1 constitution, coverage, journal schemas, and fixtures remain
+vendored as historical provenance. Hugin never shipped this controller:
+PR #335 remained draft, neither its v1 code nor its policy epoch reached
+`main` or deployment, and W0/W0.1 armed nothing. There are therefore no
+legitimate Hugin v1 attempts to migrate or recover. New proposals and
+authorities must be a complete v2 epoch; v1 admission and mixed v1/v2 bundles
+fail closed, and no in-place journal migration is attempted.
 
 Before mutation, immediately before the owner-owned replace call, and again
 before commit, the controller asynchronously reads the protected authority
@@ -39,10 +47,12 @@ checkpoint and verifies:
   of every runtime narrowing entry across all seven ADR-008 domains; unrelated
   valid non-Hugin entries do not change the selected Hugin target state;
 - fresh kill-switch, evidence, journal, rate-window, liveness, deadline, and
-  watch-window facts against a protected clock;
-- the exact canonical one-hour attempt and watch duration, separate protected
-  attempt-interval/window predicates, and the 900-second maximum watchdog
-  silence;
+  timing facts against a protected clock;
+- the exact 300-second apply/readback/verify-to-durable-watch budget, a watch
+  of at least 3600 seconds derived from the durable authenticated watch
+  receipt, at most 300 seconds of commit grace, a 4200-second total attempt
+  deadline, separate protected attempt-interval/window predicates, and the
+  900-second maximum watchdog silence;
 - exact admission subject fields matching the signed proposal digest, base
   revision/digest, candidate digest, target scope, and evidence fingerprints.
 
@@ -55,7 +65,7 @@ The success path is:
 
 `prepare → apply → verify → watch → commit`
 
-Matching the upstream W0.1 semantics, the controller service writes `prepare`,
+Matching the upstream W0.2 semantics, the controller service writes `prepare`,
 `apply`, `verify`, `watch`, and `commit`; the watchdog service may write
 `unknown`; and the recovery service writes `revert`, `disarm`, and
 `terminally-blocked`. Each service returns a signed write receipt. The
@@ -80,13 +90,16 @@ owner-authorization and prepared-record correlation remain in the separately
 authenticated prepared record, historical resolver, recovery descriptor, and
 signed role receipt.
 
-The `watch` entry is also durable before elapsed observation begins. A
+The authenticated `watch` write receipt is the sole time anchor from which the
+minimum watch and commit-grace bounds are derived; no watch deadline is
+prebound at prepare time. A
 deployment must provide an idempotent protected-watch service that owns the
 one-hour wait outside the controller process and returns an exact,
-target-bound proof of continuous kill-switch, evidence, journal, liveness, and
-maximum-silence health. A restarted controller rejoins that same protected
-watch and may commit only after its proof and a new protected admission pass;
-an early, stale, silent, or unhealthy proof enters R-exact recovery. No
+attempt-, target-, candidate-, watch-receipt-, and watchdog-bound proof of
+continuous kill-switch, evidence, journal, liveness, and maximum-silence
+health. A restarted controller rejoins that same protected watch and may
+commit only after its proof and a new protected admission pass; an early,
+late, stale, replayed, silent, or unhealthy proof enters R-exact recovery. No
 in-process sleep or assumption that one controller process survives for an
 hour is part of this seam.
 
@@ -162,7 +175,14 @@ global disarm, or binding removal.
 If current protected coverage is globally disarmed, removed, or already
 shadowed, recovery recognizes that the target is already safe and does not try
 to widen or re-create the old binding. Baseline restoration still uses the
-authenticated historical prepared authority.
+authenticated historical prepared authority. When a current authority bundle
+is readable, Hugin first validates its canonical schemas, artifact digests,
+pinned owner key, owner signature, checkpoint, cross-artifact bindings,
+recovery registry, and complete narrowing chain even on this already-safe
+path; matching a posture-reported raw digest alone is insufficient. If the
+live authority reader itself is unavailable, the protected posture service and
+the retained historical authority preserve the deliberately degraded recovery
+path.
 
 If restore or exact readback fails, the worker records `terminally-blocked`.
 There is no automatic forward retry from that state.

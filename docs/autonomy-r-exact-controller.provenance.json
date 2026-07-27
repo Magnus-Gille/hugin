@@ -1,15 +1,18 @@
 {
   "source_repository": "Magnus-Gille/grimnir",
-  "source_revision": "ddf1cfa3d86d1a72e47b7d19fe16aab8d12db528",
+  "source_revision": "16edee0a5a0111f0142569f5b0cf2f90e807060c",
   "source_paths": [
-    "docs/autonomous-mutation-journal-v1.schema.json",
-    "docs/autonomy-constitution-v1.schema.json",
-    "docs/autonomy-coverage-registry-v1.schema.json",
+    "docs/autonomous-mutation-journal-v2.schema.json",
+    "docs/autonomy-constitution-v2.schema.json",
+    "docs/autonomy-coverage-registry-v2.schema.json",
     "docs/autonomy-owner-attestation-registry-v1.schema.json",
     "docs/autonomy-owner-authorization-v1.schema.json",
     "docs/autonomy-recovery-worker-registry-v1.schema.json",
-    "docs/autonomy-runtime-narrowing-v1.schema.json"
+    "docs/autonomy-runtime-narrowing-v1.schema.json",
+    "docs/autonomous-mutation-journal-v1.schema.json",
+    "docs/autonomy-constitution-v1.schema.json",
+    "docs/autonomy-coverage-registry-v1.schema.json"
   ],
   "vendored_path": "docs/vendor/grimnir/autonomy",
-  "interpretation": "Byte-exact canonical ADR-008/W0.1 schemas; no Hugin-specific schema overlay."
+  "interpretation": "Byte-exact canonical ADR-008/W0.2 journal, constitution, and coverage schemas plus the unchanged v1 owner-attestation, authorization, recovery-worker, and runtime-narrowing schemas; historical W0.1 journal/constitution/coverage schemas are retained as provenance only because the draft v1 Hugin controller never merged, deployed, or armed and therefore has no legitimate durable v1 attempts; no Hugin-specific schema overlay or in-place epoch migration."
 }

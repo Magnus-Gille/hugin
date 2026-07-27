@@ -72,9 +72,10 @@ export function loadConsumerFixtureSet(): Record<string, JsonValue> {
 // Normative JSON Schema subset evaluator (mirrors Grimnir's validator).
 // ---------------------------------------------------------------------------
 
-const EXACT_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+const EXACT_UTC =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 
-/** Exact second-resolution UTC timestamp on a real calendar date. */
+/** Exact UTC timestamp on a real date, with optional millisecond precision. */
 export function isExactUtc(value: string): boolean {
   const match = EXACT_UTC.exec(value);
   if (!match) return false;
@@ -82,7 +83,7 @@ export function isExactUtc(value: string): boolean {
   if (Number.isNaN(instant.getTime())) return false;
   const [year, month, day] = value.slice(0, 10).split("-").map(Number);
   const [hour, minute, second] = value.slice(11, 19).split(":").map(Number);
-  return (
+  const calendarMatches = (
     instant.getUTCFullYear() === year &&
     instant.getUTCMonth() + 1 === month &&
     instant.getUTCDate() === day &&
@@ -90,6 +91,11 @@ export function isExactUtc(value: string): boolean {
     instant.getUTCMinutes() === minute &&
     instant.getUTCSeconds() === second
   );
+  if (!calendarMatches) return false;
+  const canonical = instant.toISOString();
+  return value.includes(".")
+    ? canonical === value
+    : canonical.replace(".000Z", "Z") === value;
 }
 
 export function isPlainObject(value: unknown): value is Record<string, JsonValue> {

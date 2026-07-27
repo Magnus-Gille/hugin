@@ -1,4 +1,4 @@
-/** Public adapter boundaries for Hugin's W0.1 R-exact orchestration. */
+/** Public adapter boundaries for Hugin's W0.2 R-exact orchestration. */
 import {
   W0_CONSTITUTION_DIGEST,
   type HuginRExactDomain,
@@ -41,10 +41,16 @@ export interface FreshAdmission {
   postconditionsDigest: string;
   configDigest: string;
   deadline: string;
-  watchDeadline: string;
 }
 
 export interface ProtectedWatchProof {
+  proposalId: string;
+  attemptId: string;
+  targetId: string;
+  targetScopeDigest: string;
+  candidateDigest: string;
+  watchReceiptDigest: string;
+  watchdogIdentity: string;
   watchStartedAt: string;
   watchDeadline: string;
   completedAt: string;
@@ -108,7 +114,7 @@ export interface JournalEntry {
 
 export interface RExactJournal {
   kind: "autonomous-mutation-journal";
-  schema_version: "v1";
+  schema_version: "v2";
   journal_id: string;
   domain: HuginRExactDomain;
   constitution_digest: typeof W0_CONSTITUTION_DIGEST;
@@ -298,6 +304,7 @@ export interface W0RuntimeGate {
     targetId: string;
     targetScopeDigest: string;
     candidateDigest: string;
+    watchReceiptDigest: string;
     watchStartedAt: string;
     watchDeadline: string;
     watchdogIdentity: string;
