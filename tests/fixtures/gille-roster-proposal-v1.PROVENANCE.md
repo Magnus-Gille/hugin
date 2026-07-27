@@ -4,7 +4,7 @@ Producer revision: this repository's `hugin-roster-proposal-v1` serializer in
 `src/autonomy/gille-roster-proposal-producer.ts` (introduced for Hugin #336).
 The positive file is the exact JCS byte output of the real serializer for the
 deterministic public test input; its byte SHA-256 is
-`da6c86260246755688dcc0a409fa2678b869ce4a05cecd7f62fec2018651a96e`.
+`834b3f77fecd0a6d7ed969a2d5fd0f7bade7e9dffdeb472d93286c76c49388cb`.
 
 The adversarial manifest mechanically derives each negative case from those
 exact bytes using a strict JSON Patch subset: concrete `add` and `replace`
@@ -20,7 +20,8 @@ and the `alias` sequence for canonical lexical order. Hugin therefore rejects a
 desired roster unless the supplied entry order satisfies both sequences; it does
 not silently reorder aliases or change roster semantics.
 
-The serializer runtime parses the W4 proposal receipt as a closed object and
+The serializer cryptographically verifies the W4 proposal receipt against the supplied
+trusted key store, protected clock, and current base, then
 rechecks the exact canonical ownership registry, full policy authority, signer
 identity, self-digest, target, candidate, and lifetime bindings. Cryptographic
 signature verification remains the upstream W4 seam's precondition: callers

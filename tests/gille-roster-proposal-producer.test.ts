@@ -86,6 +86,7 @@ describe("gille roster proposal producer", () => {
     expect(first.proposal.proposal_digest).toMatch(/^sha256:/);
     expect(first.binding.source_receipt_digest).toMatch(/^sha256:/);
     expect(first.binding.baseline_identity_digest).toMatch(/^sha256:/);
+    expect(first.binding.constitution_digest).toBeDefined();
   });
 
   it("rejects a delta whose candidate presence contradicts its operation", () => {

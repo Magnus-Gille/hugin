@@ -68,12 +68,14 @@ export type GilleRosterProposal = {
   expected_transport_principal_id: typeof GILLE_ROSTER_PROPOSAL_PRINCIPAL;
   axis: typeof GILLE_ROSTER_PROPOSAL_AXIS;
   baseline: { catalogue_digest: Digest; roster_digest: Digest };
-  candidate: { entries: Array<Record<string, unknown>>; roster_digest: Digest };
+  candidate: { entries: GilleRosterWireEntry[]; roster_digest: Digest };
   delta: { operation: Operation; model_id: string; backend: Backend; backend_capability_digest: Digest };
   evidence: { schema_epoch: typeof GILLE_ROSTER_PROPOSAL_SCHEMA_EPOCH; policy_epoch: typeof GILLE_ROSTER_PROPOSAL_POLICY_EPOCH; freshness_seconds: number };
-  canary: Record<string, unknown>; requested_bounds: { max_changed_entries: 1 };
+  canary: GilleRosterWireCanary; requested_bounds: { max_changed_entries: 1 };
   requested_operations: ["admit", "arm"]; created_at: string; expires_at: string; proposal_digest: Digest;
 };
+export type GilleRosterWireEntry = { model_id: string; alias: string; artifact_digest: Digest; quantization: string; template_digest: Digest; context_length: number; serving_config_digest: Digest; evidence_identity_hash: Digest; restore_descriptor_ref: Digest; restore_descriptor_digest: Digest };
+export type GilleRosterWireCanary = { operation: Operation; model_id: string; expected_state: "served" | "absent"; fallback_model_id: string | null; registry_id: string; registry_version: string; registry_digest: Digest; max_requests: number; duration_seconds: number; max_concurrency: 1 };
 
 function rosterDigest(value: unknown): Digest {
   return `sha256:${createHash("sha256").update(canonicalizeJcs(value), "utf8").digest("hex")}`;
@@ -105,6 +107,7 @@ export type GilleRosterProposalBinding = {
   experiment_ref: string;
   evidence_fingerprints_digest: Digest;
   policy_epoch_digest: Digest;
+  constitution_digest: Digest;
 };
 export function serializeGilleRosterProposal(input: GilleRosterProposalInput): { proposal: GilleRosterProposal; bytes: string; binding: GilleRosterProposalBinding } {
   for (const [field, value] of [["proposal_id", input.proposalId], ["idempotency_key", input.idempotencyKey], ["producer.instance_id", input.producerInstanceId], ["delta.model_id", input.delta.modelId], ["canary.model_id", input.canary.modelId], ["canary.registry_id", input.canary.registryId], ["canary.registry_version", input.canary.registryVersion]] as const) assertId(value, field);
@@ -116,7 +119,7 @@ export function serializeGilleRosterProposal(input: GilleRosterProposalInput): {
   if (!Number.isInteger(input.canary.maxRequests) || input.canary.maxRequests < 1 || input.canary.maxRequests > 10 || !Number.isInteger(input.canary.durationSeconds) || input.canary.durationSeconds < 1 || input.canary.durationSeconds > 3600 || input.canary.maxConcurrency !== 1) throw new Error("invalid canary bounds");
   if (input.canary.operation !== input.delta.operation || input.canary.modelId !== input.delta.modelId || (input.delta.operation === "unload" ? input.canary.expectedState !== "absent" || input.canary.fallbackModelId === null : input.canary.expectedState !== "served" || input.canary.fallbackModelId !== null)) throw new Error("incoherent canary");
   assertInteropOrder(input.candidateEntries);
-  const entries = input.candidateEntries.map((entry) => {
+  const entries: GilleRosterWireEntry[] = input.candidateEntries.map((entry) => {
     for (const [field, value] of [["model_id", entry.modelId], ["alias", entry.alias], ["quantization", entry.quantization]] as const) assertId(value, field);
     for (const [field, value] of [["artifact_digest", entry.artifactDigest], ["template_digest", entry.templateDigest], ["serving_config_digest", entry.servingConfigDigest], ["evidence_identity_hash", entry.evidenceIdentityHash], ["restore_descriptor_ref", entry.restoreDescriptorRef], ["restore_descriptor_digest", entry.restoreDescriptorDigest]] as const) assertDigest(value, field);
     if (!Number.isInteger(entry.contextLength) || entry.contextLength < 1 || entry.contextLength > 1_048_576) throw new Error("invalid context_length");
@@ -175,7 +178,8 @@ export function serializeGilleRosterProposal(input: GilleRosterProposalInput): {
     experiment_ref: source.experimentRef,
     evidence_fingerprints_digest: rosterDigest(source.evidenceFingerprints),
     policy_epoch_digest: rosterDigest(source.policyEpoch),
+    constitution_digest: autonomyProposalPolicyAuthority.constitutionDigest as Digest,
   };
-  const proposal = { ...unsigned, proposal_digest: rosterDigest(unsigned) } as GilleRosterProposal;
+  const proposal: GilleRosterProposal = { ...unsigned, proposal_digest: rosterDigest(unsigned) };
   return { proposal, bytes: canonicalizeJcs(proposal), binding };
 }
