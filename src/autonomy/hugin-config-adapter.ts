@@ -6,6 +6,8 @@
  * provide a generic config writer or any Gille/deployment/auth surface.
  */
 import { createHash } from "node:crypto";
+import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import { canonicalizeJcs } from "../jcs.js";
 import type { RExactConfigTarget } from "./r-exact-types.js";
@@ -18,7 +20,7 @@ export type HuginConfigTargetId = z.infer<typeof targetId>;
 
 const route = z.object({ workerProvider: z.literal("homeserver"), taskType: z.enum(["classify", "extract"]), sensitivity: z.enum(["public", "internal"]), nodeId: z.literal("orin"), modelId: z.literal("qwen2.5-coder:3b") }).strict();
 const macroPayload = z.object({ routes: z.array(route).length(4) }).strict();
-const promptPayload = z.object({ systemPrompt: z.string().min(1).max(4_096) }).strict();
+const promptPayload = z.object({ templateRef: z.string().regex(/^ref:[a-z][a-z0-9-]{2,120}$/), templateDigest: sha256 }).strict();
 const harnessPayload = z.object({ allowedHarnesses: z.array(z.enum(["pi", "opencode"])).min(1).max(2) }).strict();
 const toolPolicyPayload = z.object({ allowedTools: z.array(z.enum(["read", "write", "shell"])).min(1).max(3) }).strict();
 
@@ -61,10 +63,10 @@ const defaults: Record<HuginConfigTargetId, { revision: string; payload: ConfigP
     { workerProvider: "homeserver", taskType: "extract", sensitivity: "internal", nodeId: "orin", modelId: "qwen2.5-coder:3b" },
     { workerProvider: "homeserver", taskType: "extract", sensitivity: "public", nodeId: "orin", modelId: "qwen2.5-coder:3b" },
   ] } },
-  // These source-owned defaults are safe local config payloads, never receipt/journal content.
-  "hugin-agent-prompt": { revision: "agent-prompt-v1", payload: { systemPrompt: "Complete the bounded Hugin task using only its granted context." } },
-  "hugin-agent-harness": { revision: "agent-harness-v1", payload: { allowedHarnesses: ["pi", "opencode"] } },
-  "hugin-tool-policy": { revision: "tool-policy-v1", payload: { allowedTools: ["read", "write", "shell"] } },
+  // Deliberately unconfigured: W4.4 must supply owner-approved manifests.
+  "hugin-agent-prompt": { revision: "agent-prompt-unconfigured", payload: { templateRef: "ref:unconfigured-prompt", templateDigest: digest({ unconfigured: "prompt" }) } },
+  "hugin-agent-harness": { revision: "agent-harness-unconfigured", payload: { allowedHarnesses: ["pi"] } },
+  "hugin-tool-policy": { revision: "tool-policy-unconfigured", payload: { allowedTools: ["read"] } },
 };
 
 function initialDocument(value: { revision: string; payload: ConfigPayload }): StoredDocument {
@@ -80,27 +82,36 @@ const domains = {
 
 /** Owner-local canonical store; mutations are only CAS through a target. */
 export class HuginConfigStore {
-  #current = new Map<HuginConfigTargetId, StoredDocument>();
-  #documents = new Map<string, HuginConfigCandidate>();
-  #snapshots = new Map<string, StoredDocument>();
-  constructor() { for (const id of targetId.options) this.#current.set(id, initialDocument(defaults[id])); }
-  read(id: HuginConfigTargetId): StoredDocument { return clone(this.#current.get(id)!); }
-  readPayload(id: HuginConfigTargetId): ConfigPayload { return clone(this.#current.get(id)!.payload); }
-  stage(raw: unknown): HuginConfigCandidate { const candidate = validateHuginConfigCandidate(raw); this.#documents.set(candidate.candidateDigest, candidate); return clone(candidate); }
-  snapshot(id: HuginConfigTargetId): { ref: string; digest: string } { const doc = this.read(id); const ref = `ref:snapshot-${doc.digest.slice(7, 31)}`; this.#snapshots.set(ref, doc); return { ref, digest: doc.digest }; }
+  #path: string;
+  constructor(root: string) {
+    if (!isAbsolute(root)) throw new Error("hugin-config-root-not-absolute");
+    this.#path = join(resolve(root), "hugin-r-exact-config.json"); mkdirSync(root, { recursive: true, mode: 0o700 });
+    const stat = lstatSync(root); if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error("hugin-config-root-unsafe");
+    if (!this.exists()) this.write({ current: Object.fromEntries(targetId.options.map((id) => [id, initialDocument(defaults[id])])), documents: {}, snapshots: {} });
+  }
+  private exists() { try { lstatSync(this.#path); return true; } catch { return false; } }
+  private load(): { current: Record<HuginConfigTargetId, StoredDocument>; documents: Record<string, HuginConfigCandidate>; snapshots: Record<string, { target: HuginConfigTargetId; document: StoredDocument }> } {
+    const stat = lstatSync(this.#path); if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error("hugin-config-store-unsafe");
+    try { return JSON.parse(readFileSync(this.#path, "utf8")); } catch { throw new Error("hugin-config-store-corrupt"); }
+  }
+  private write(state: unknown) { const temp = `${this.#path}.tmp`; const fd = openSync(temp, "w", 0o600); try { writeFileSync(fd, canonicalizeJcs(state)); fsyncSync(fd); } finally { closeSync(fd); } renameSync(temp, this.#path); const dir = openSync(resolve(this.#path, ".."), "r"); try { fsyncSync(dir); } finally { closeSync(dir); } }
+  read(id: HuginConfigTargetId): StoredDocument { return clone(this.load().current[id]); }
+  readPayload(id: HuginConfigTargetId): ConfigPayload { return clone(this.load().current[id].payload); }
+  stage(raw: unknown): HuginConfigCandidate { const candidate = validateHuginConfigCandidate(raw); const state = this.load(); state.documents[candidate.candidateDigest] = candidate; this.write(state); return clone(candidate); }
+  snapshot(id: HuginConfigTargetId): { ref: string; digest: string } { const state = this.load(); const doc = state.current[id]; const ref = `ref:snapshot-${id}-${doc.digest.slice(7, 31)}`; state.snapshots[ref] = { target: id, document: doc }; this.write(state); return { ref, digest: doc.digest }; }
   /** Called only by the separately authorized R-exact recovery adapter. */
   restoreSnapshot(id: HuginConfigTargetId, ref: string, expectedDigest: string): { revision: string; digest: string } {
-    const snapshot = this.#snapshots.get(ref);
-    if (!snapshot || snapshot.digest !== expectedDigest) throw new Error("hugin-config-snapshot-unavailable");
-    this.#current.set(id, clone(snapshot));
-    return { revision: snapshot.revision, digest: snapshot.digest };
+    const state = this.load(); const snapshot = state.snapshots[ref];
+    if (!snapshot || snapshot.target !== id || snapshot.document.digest !== expectedDigest) throw new Error("hugin-config-snapshot-unavailable");
+    const current = state.current[id]; if (current.digest === expectedDigest) return { revision: current.revision, digest: current.digest };
+    state.current[id] = clone(snapshot.document); this.write(state); return { revision: snapshot.document.revision, digest: snapshot.document.digest };
   }
   replace(id: HuginConfigTargetId, expected: { revision: string; digest: string }, candidateDigest: string): void {
-    const current = this.#current.get(id)!;
+    const state = this.load(); const current = state.current[id];
     if (current.revision !== expected.revision || current.digest !== expected.digest) throw new Error("hugin-config-stale-base");
-    const candidate = this.#documents.get(candidateDigest);
+    const candidate = state.documents[candidateDigest];
     if (!candidate || candidate.targetId !== id || candidate.base.revision !== expected.revision || candidate.base.digest !== expected.digest) throw new Error("hugin-config-candidate-not-bound-to-base");
-    this.#current.set(id, { revision: candidate.revision, payload: clone(candidate.config), digest: candidate.candidateDigest });
+    state.current[id] = { revision: candidate.revision, payload: clone(candidate.config), digest: candidate.candidateDigest }; this.write(state);
   }
 }
 
@@ -117,7 +128,7 @@ class HuginTarget implements RExactConfigTarget {
   async replaceExact(expected: { revision: string; digest: string }, candidateDigest: string) { this.store.replace(this.id, expected, candidateDigest); }
 }
 
-export function createHuginConfigTargets(store = new HuginConfigStore()): Record<HuginConfigTargetId, RExactConfigTarget> {
+export function createHuginConfigTargets(store: HuginConfigStore): Record<HuginConfigTargetId, RExactConfigTarget> {
   return {
     "hugin-orin-macro-routing": new HuginTarget("hugin-orin-macro-routing", store),
     "hugin-agent-prompt": new HuginTarget("hugin-agent-prompt", store),
@@ -126,17 +137,12 @@ export function createHuginConfigTargets(store = new HuginConfigStore()): Record
   };
 }
 
-const productionStore = new HuginConfigStore();
-export const huginConfigTargets = createHuginConfigTargets(productionStore);
-export function stageHuginConfigCandidate(raw: unknown): HuginConfigCandidate { return productionStore.stage(raw); }
-/** Recovery-only composition seam; journals retain only the snapshot ref/digest. */
-export function restoreHuginConfigSnapshot(target: HuginConfigTargetId, ref: string, digest: string) { return productionStore.restoreSnapshot(target, ref, digest); }
+// Deployment supplies its private durable root; no live directory is created by this module.
 
 /** Read-only route selection uses a cloned canonical source, never a mutable exported map. */
 export function selectHuginMacroRoute(input: { workerProvider: string; taskType: string; sensitivity: "public" | "internal" | "private" }): { nodeId: "orin"; modelId: "qwen2.5-coder:3b" } | null {
   if (input.sensitivity === "private") return null;
-  const payload = productionStore.readPayload("hugin-orin-macro-routing");
-  const routes = macroPayload.parse(payload).routes;
+  const routes = macroPayload.parse(defaults["hugin-orin-macro-routing"].payload).routes;
   const matched = routes.find((entry) => entry.workerProvider === input.workerProvider && entry.taskType === input.taskType && entry.sensitivity === input.sensitivity);
   return matched ? { nodeId: matched.nodeId, modelId: matched.modelId } : null;
 }
