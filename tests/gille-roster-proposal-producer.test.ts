@@ -84,6 +84,13 @@ describe("gille roster proposal producer", () => {
     expect(first.proposal.expected_transport_principal_id).toBe(GILLE_ROSTER_PROPOSAL_PRINCIPAL);
     expect(first.proposal.candidate.roster_digest).toMatch(/^sha256:/);
     expect(first.proposal.proposal_digest).toMatch(/^sha256:/);
+    expect(first.binding.source_receipt_digest).toMatch(/^sha256:/);
+    expect(first.binding.baseline_identity_digest).toMatch(/^sha256:/);
+  });
+
+  it("rejects a delta whose candidate presence contradicts its operation", () => {
+    const bad = input(); bad.delta = { ...bad.delta, operation: "unload" }; bad.canary = { ...bad.canary, operation: "unload", expectedState: "absent", fallbackModelId: "fallback" };
+    expect(() => serializeGilleRosterProposal(bad)).toThrow(/delta operation/i);
   });
 
   it("rejects a desired roster whose aliases cannot satisfy the consumer's dual ordering rule", () => {
@@ -127,14 +134,14 @@ describe("gille roster proposal producer", () => {
 
   it("pins the positive cross-repository fixture to real serializer bytes", () => {
     const bytes = serializeGilleRosterProposal(input()).bytes;
-    const fixture = readFileSync(new URL("./fixtures/gille-roster-proposal-v1-positive.json", import.meta.url), "utf8").trimEnd();
-    expect(fixture).toBe(bytes);
+    const fixture = readFileSync(new URL("./fixtures/gille-roster-proposal-v1-positive.json", import.meta.url), "utf8");
+    expect(fixture).toBe(`${bytes}\n`);
     expect(createHash("sha256").update(fixture, "utf8").digest("hex"))
-      .toBe("da6c86260246755688dcc0a409fa2678b869ce4a05cecd7f62fec2018651a96e");
+      .toBe("834b3f77fecd0a6d7ed969a2d5fd0f7bade7e9dffdeb472d93286c76c49388cb");
   });
 
   it("loads, byte-verifies, and mechanically applies every adversarial case", () => {
-    const sourceBytes = readFileSync(new URL("./fixtures/gille-roster-proposal-v1-positive.json", import.meta.url), "utf8").trimEnd();
+    const sourceBytes = readFileSync(new URL("./fixtures/gille-roster-proposal-v1-positive.json", import.meta.url), "utf8");
     const manifest = parseRosterAdversarialManifest(JSON.parse(readFileSync(
       new URL("./fixtures/gille-roster-proposal-v1-adversarial.json", import.meta.url), "utf8",
     )));

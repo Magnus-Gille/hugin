@@ -1,7 +1,7 @@
 {
   "fixture_version": "hugin-gille-roster-proposal-adversarial-v1",
   "source": "gille-roster-proposal-v1-positive.json",
-  "source_bytes_sha256": "da6c86260246755688dcc0a409fa2678b869ce4a05cecd7f62fec2018651a96e",
+  "source_bytes_sha256": "834b3f77fecd0a6d7ed969a2d5fd0f7bade7e9dffdeb472d93286c76c49388cb",
   "cases": [
     {
       "name": "malformed-dual-ordering",

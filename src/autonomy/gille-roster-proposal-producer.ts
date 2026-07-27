@@ -98,7 +98,15 @@ function assertInteropOrder(entries: readonly GilleRosterEntryInput[]): void {
   }
 }
 
-export function serializeGilleRosterProposal(input: GilleRosterProposalInput): { proposal: GilleRosterProposal; bytes: string } {
+export type GilleRosterProposalBinding = {
+  source_receipt_digest: Digest;
+  source_base: { revision: string; digest: Digest };
+  baseline_identity_digest: Digest;
+  experiment_ref: string;
+  evidence_fingerprints_digest: Digest;
+  policy_epoch_digest: Digest;
+};
+export function serializeGilleRosterProposal(input: GilleRosterProposalInput): { proposal: GilleRosterProposal; bytes: string; binding: GilleRosterProposalBinding } {
   for (const [field, value] of [["proposal_id", input.proposalId], ["idempotency_key", input.idempotencyKey], ["producer.instance_id", input.producerInstanceId], ["delta.model_id", input.delta.modelId], ["canary.model_id", input.canary.modelId], ["canary.registry_id", input.canary.registryId], ["canary.registry_version", input.canary.registryVersion]] as const) assertId(value, field);
   for (const [field, value] of [["baseline.catalogue_digest", input.baseline.catalogueDigest], ["baseline.roster_digest", input.baseline.rosterDigest], ["delta.backend_capability_digest", input.delta.backendCapabilityDigest], ["canary.registry_digest", input.canary.registryDigest]] as const) assertDigest(value, field);
   assertUtc(input.createdAt, "created_at"); assertUtc(input.expiresAt, "expires_at");
@@ -156,6 +164,18 @@ export function serializeGilleRosterProposal(input: GilleRosterProposalInput): {
   if (source.candidateContentDigest !== unsigned.candidate.roster_digest) {
     throw new Error("source R-exact proposal candidate digest does not bind the desired roster");
   }
+  const candidateIds = new Set(entries.map((entry) => entry.model_id));
+  if ((input.delta.operation === "load" && !candidateIds.has(input.delta.modelId)) || (input.delta.operation === "unload" && candidateIds.has(input.delta.modelId)) || (input.delta.operation === "reload-config" && !candidateIds.has(input.delta.modelId)) ) {
+    throw new Error("delta operation is inconsistent with candidate roster");
+  }
+  const binding: GilleRosterProposalBinding = {
+    source_receipt_digest: rosterDigest(source),
+    source_base: { revision: source.base.revision, digest: source.base.digest as Digest },
+    baseline_identity_digest: rosterDigest({ source_base: source.base, baseline: input.baseline }),
+    experiment_ref: source.experimentRef,
+    evidence_fingerprints_digest: rosterDigest(source.evidenceFingerprints),
+    policy_epoch_digest: rosterDigest(source.policyEpoch),
+  };
   const proposal = { ...unsigned, proposal_digest: rosterDigest(unsigned) } as GilleRosterProposal;
-  return { proposal, bytes: canonicalizeJcs(proposal) };
+  return { proposal, bytes: canonicalizeJcs(proposal), binding };
 }
