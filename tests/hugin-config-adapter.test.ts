@@ -26,9 +26,18 @@ describe("Hugin strict autonomous config adapters", () => {
     const snap = await target.snapshot(); await target.replaceExact(base, doc.candidateDigest);
     expect(await target.read()).toEqual({ revision: "orin-macro-route-v2", digest: doc.candidateDigest }); expect(snap.digest).toBe(base.digest);
     await expect(target.replaceExact(base, doc.candidateDigest)).rejects.toThrow("stale-base");
-    expect(store.restoreSnapshot("hugin-orin-macro-routing", snap.ref, snap.digest)).toEqual(base);
+    expect(store.restoreSnapshot("hugin-orin-macro-routing", snap.ref, snap.digest, { revision: "orin-macro-route-v2", digest: doc.candidateDigest }, "hugin-recovery-worker")).toEqual(base);
     expect(await target.read()).toEqual(base);
     expect(await createHuginConfigTargets(new HuginConfigStore(root))["hugin-orin-macro-routing"].read()).toEqual(base);
+  });
+
+  it("fences target-bound recovery so an old snapshot cannot overwrite later state", async () => {
+    const store = new HuginConfigStore(mkdtempSync(join(tmpdir(), "hugin-config-"))); const targets = createHuginConfigTargets(store);
+    const first = targets["hugin-orin-macro-routing"]; const other = targets["hugin-agent-harness"]; const base = await first.read(); const otherCurrent = await other.read(); const snap = await first.snapshot(); const doc = store.stage(candidate("hugin-orin-macro-routing", base)); await first.replaceExact(base, doc.candidateDigest);
+    expect(() => store.restoreSnapshot("hugin-agent-harness", snap.ref, snap.digest, otherCurrent, "hugin-recovery-worker")).toThrow("snapshot-unavailable");
+    expect(() => store.restoreSnapshot("hugin-orin-macro-routing", snap.ref, snap.digest, { revision: "later", digest: digest("later") }, "hugin-recovery-worker")).toThrow("stale-recovery-fence");
+    const current = await first.read(); expect(() => store.restoreSnapshot("hugin-orin-macro-routing", snap.ref, snap.digest, current, "wrong-worker")).toThrow("recovery-fence");
+    expect(await first.read()).toEqual({ revision: "orin-macro-route-v2", digest: doc.candidateDigest });
   });
 
   it("rejects malformed, duplicate/noncanonical, cross-owner, protected and unbound candidates before mutation", async () => {

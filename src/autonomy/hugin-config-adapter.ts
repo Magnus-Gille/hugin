@@ -100,10 +100,18 @@ export class HuginConfigStore {
   stage(raw: unknown): HuginConfigCandidate { const candidate = validateHuginConfigCandidate(raw); const state = this.load(); state.documents[candidate.candidateDigest] = candidate; this.write(state); return clone(candidate); }
   snapshot(id: HuginConfigTargetId): { ref: string; digest: string } { const state = this.load(); const doc = state.current[id]; const ref = `ref:snapshot-${id}-${doc.digest.slice(7, 31)}`; state.snapshots[ref] = { target: id, document: doc }; this.write(state); return { ref, digest: doc.digest }; }
   /** Called only by the separately authorized R-exact recovery adapter. */
-  restoreSnapshot(id: HuginConfigTargetId, ref: string, expectedDigest: string): { revision: string; digest: string } {
+  restoreSnapshot(
+    id: HuginConfigTargetId,
+    ref: string,
+    expectedDigest: string,
+    expectedCurrent: { revision: string; digest: string },
+    recoveryIdentity: string,
+  ): { revision: string; digest: string } {
+    if (recoveryIdentity !== "hugin-recovery-worker") throw new Error("hugin-config-recovery-fence-refused");
     const state = this.load(); const snapshot = state.snapshots[ref];
     if (!snapshot || snapshot.target !== id || snapshot.document.digest !== expectedDigest) throw new Error("hugin-config-snapshot-unavailable");
     const current = state.current[id]; if (current.digest === expectedDigest) return { revision: current.revision, digest: current.digest };
+    if (current.revision !== expectedCurrent.revision || current.digest !== expectedCurrent.digest) throw new Error("hugin-config-stale-recovery-fence");
     state.current[id] = clone(snapshot.document); this.write(state); return { revision: snapshot.document.revision, digest: snapshot.document.digest };
   }
   replace(id: HuginConfigTargetId, expected: { revision: string; digest: string }, candidateDigest: string): void {
