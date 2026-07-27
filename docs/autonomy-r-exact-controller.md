@@ -21,9 +21,13 @@ controller verifies:
 - the Hugin-owned domain and exact target scope;
 - five distinct identities: owner, controller, watchdog, kill switch, and
   recovery worker;
+- an owner-signed protected role-service pin set binding each writer identity
+  to one independently pinned Ed25519 public-key fingerprint;
 - that no signed recovery narrowing already reduced the binding to `shadow`;
 - fresh kill-switch, evidence, journal, rate-window, liveness, deadline, and
-  watch-window facts against a protected clock.
+  watch-window facts against a protected clock;
+- exact admission subject fields matching the signed proposal digest, base
+  revision/digest, candidate digest, target scope, and evidence fingerprints.
 
 Cross-owner targets are proposal-only. Hugin receives no credential or adapter
 that can apply them.
@@ -34,18 +38,33 @@ The success path is:
 
 `prepare → apply → verify → watch → commit`
 
-The controller writes `prepare`, `apply`, `verify`, and `commit`. The watchdog
-writes `watch`. These are distinct journal capabilities, not identity labels on
-one writer.
+Matching the upstream W0.1 semantics, the controller service writes `prepare`,
+`apply`, `verify`, `watch`, and `commit`; the watchdog service may write
+`unknown`; and the recovery service writes `revert`, `disarm`, and
+`terminally-blocked`. Each service returns a signed write receipt. The
+orchestrator has only RPC-shaped service handles and public pins—not watchdog
+or recovery private keys or a generic journal write credential. The
+orchestrator freezes the owner-pinned role, identity, and public key at
+admission, rechecks the live service binding after every asynchronous write,
+and verifies the receipt with the frozen key. An in-flight key or identity
+swap is therefore rejected.
 
 `prepare` is persisted before mutation and can therefore be the one-entry
 durable prefix of an attempt. Completed and recovered W0 journal envelopes have
 at least two entries. Every entry is content-blind and contains only digests,
 bounded references, phase facts, identities, and exact binding metadata.
 
-Commit rechecks current owner authority and all dynamic gates. Authority drift,
-failed commit admission, ambiguous readback, or any incomplete non-terminal
-attempt enters recovery instead of promotion.
+The controller service persists `prepare` and acquires the atomic
+`domain + target-scope` claim in one operation; mutation cannot begin until
+both exist. This removes every half-state at that boundary: snapshot failure
+leaves neither, and a service crash yields either neither or a durable prepare
+with its claim. A concurrent loser receives `busy` and no journal, so it cannot
+later restore an obsolete baseline over the winner. The claim is held through
+terminalization. Before mutation, the orchestrator independently reads back the
+exact signed prepared record and verifies that it is durable. Commit rechecks
+exact prepared owner authority and immutable
+admission fields. Authority drift, failed commit admission, ambiguous readback,
+or any incomplete non-terminal attempt enters recovery instead of promotion.
 
 ## Recovery and crash reconciliation
 
@@ -54,10 +73,18 @@ performs exact readback. Only the separately bound recovery worker can write:
 
 `revert → disarm`
 
-`revert` is written only after exact baseline readback succeeds. The worker then
-signs and checkpoints the exact runtime-narrowing record that binds the domain,
-target, prior armed state, recovery identity, and revert receipt digest.
-`disarm` is written only after that signature and checkpoint verify.
+The durable prepared record explicitly binds the signed proposal receipt,
+target identity/scope, base revision/digest, snapshot ref/digest, prepared
+authority, old owner public key, and owner-signed role pins. Recovery therefore
+uses immutable prepared authority to restore after owner rotation while using
+the current protected authority only for kill-switch observation and narrowing.
+
+`revert` is written only after exact baseline revision and digest readback
+succeed. The worker deterministically constructs the terminal `disarm` or
+`terminally-blocked` entry, then signs and checkpoints narrowing bound to that
+exact terminal receipt digest, domain, target, prior armed state, and recovery
+identity. Only after the signed narrowing verifies may the same terminal entry
+be appended. A wrong-target or prior-receipt narrowing cannot terminalize.
 
 The worker adapter must make signed narrowing idempotent. The controller
 reconciles both important crash windows:
@@ -65,6 +92,10 @@ reconciles both important crash windows:
 - restore succeeded but its `revert` receipt was not written;
 - signed narrowing and checkpoint succeeded but the `disarm` receipt was not
   written.
+
+In the second window, restart reconstructs and appends the same deterministic
+`disarm` receipt already named by the narrowing checkpoint. It never substitutes
+a differently bound terminal state.
 
 If restore or exact readback fails, the worker records `terminally-blocked`.
 There is no automatic forward retry from that state.
@@ -74,12 +105,22 @@ There is no automatic forward retry from that state.
 An owning adapter must provide:
 
 - an exact compare-and-replace target plus snapshot/readback support;
-- three non-aliased Munin capabilities for controller, watchdog, and recovery;
+- independently deployed controller, watchdog, and recovery role services,
+  each holding only its own private key and journal capability;
+- an owner-signed protected pin artifact for those three public keys;
+- an atomic controller prepare/claim store that creates both or neither, holds
+  the claim through terminalization, and permits reuse only after a terminal
+  receipt;
 - a protected-clock admission verifier;
 - a recovery worker whose Ed25519 key and identity match the owner-signed
   recovery registry;
 - atomic, monotonic persistence for owner authorization and runtime-narrowing
   checkpoints.
+
+The deployment composition root must inject RPC clients only. Recovery private
+keys, owner private keys, raw journal credentials, and protected checkpoint
+write credentials must remain inside their owning services and must never be
+materialized in the controller process.
 
 The exported conformance constants and tests are the compatibility surface for
 other owning adapters. They are deliberately non-authorizing.

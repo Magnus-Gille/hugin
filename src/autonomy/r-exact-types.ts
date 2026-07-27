@@ -1,0 +1,264 @@
+/** Public adapter boundaries for Hugin's W0.1 R-exact orchestration. */
+import {
+  W0_CONSTITUTION_DIGEST,
+  type HuginRExactDomain,
+  type VerifiedW0Binding,
+  type W0AuthorityBundle,
+} from "./w0-authority.js";
+
+export interface RExactConfigTarget {
+  id: string;
+  owner: "hugin";
+  domain: HuginRExactDomain;
+  targetScopeDigest: string;
+  read(): Promise<{ revision: string; digest: string }>;
+  snapshot(): Promise<{ ref: string; digest: string }>;
+  replaceExact(
+    expected: { revision: string; digest: string },
+    candidateDigest: string,
+  ): Promise<void>;
+}
+
+export interface FreshAdmission {
+  checkedAt: string;
+  trustedWatchdogTime: string;
+  killSwitchOff: boolean;
+  evidenceFresh: boolean;
+  journalHealthy: boolean;
+  rateWindowEligible: boolean;
+  livenessHealthy: boolean;
+  proposalDigest: string;
+  targetScopeDigest: string;
+  baseRevision: string;
+  baseDigest: string;
+  candidateDigest: string;
+  evidenceFingerprintsDigest: string;
+  evidenceDigest: string;
+  policyDigest: string;
+  postconditionsDigest: string;
+  configDigest: string;
+  deadline: string;
+  watchDeadline: string;
+}
+
+export interface RecoveryProtection {
+  checkedAt: string;
+  trustedWatchdogTime: string;
+  killSwitchIdentity: string;
+  killSwitchStateDigest: string;
+  journalHealthy: boolean;
+}
+
+export type JournalRole = "controller" | "watchdog" | "recovery-worker";
+export type JournalPhase =
+  | "prepare"
+  | "apply"
+  | "verify"
+  | "watch"
+  | "commit"
+  | "unknown"
+  | "revert"
+  | "disarm"
+  | "terminally-blocked";
+export type JournalOutcome =
+  | "prepared"
+  | "applied"
+  | "verified"
+  | "watching"
+  | "committed"
+  | "unknown"
+  | "reverted"
+  | "disarmed"
+  | "terminally-blocked";
+
+export interface JournalEntry {
+  entry_id: string;
+  sequence: number;
+  recorded_at: string;
+  phase: JournalPhase;
+  outcome: JournalOutcome;
+  executor_identity: string;
+  binding_digest: string;
+  quarantine: { state: "not-applicable" | "active"; reason_digest: string };
+  coverage_transition: null | {
+    from_state: "armed-canary" | "armed-fleet";
+    to_state: "shadow";
+    target_scope_digest: string;
+    actor_identity: string;
+  };
+  terminal_reason_digest: null | string;
+  previous_receipt_digest: null | string;
+  receipt_digest: string;
+  content_refs: string[];
+}
+
+export interface RExactJournal {
+  kind: "autonomous-mutation-journal";
+  schema_version: "v1";
+  journal_id: string;
+  domain: HuginRExactDomain;
+  constitution_digest: typeof W0_CONSTITUTION_DIGEST;
+  binding: Record<string, any>;
+  binding_digest: string;
+  entries: JournalEntry[];
+  extensions: [];
+}
+
+export interface PreparedAttempt {
+  kind: "hugin-r-exact-prepared-attempt";
+  schema_version: "v1";
+  proposal_receipt_digest: string;
+  proposal_digest: string;
+  target_id: string;
+  target_scope_digest: string;
+  base_revision: string;
+  base_digest: string;
+  candidate_digest: string;
+  snapshot_ref: string;
+  snapshot_digest: string;
+  prepared_authority: VerifiedW0Binding;
+  prepared_authority_digest: string;
+  prepared_owner_public_key_pem: string;
+  role_service_pins: ProtectedRoleServicePins;
+  role_service_pins_digest: string;
+  admission_digest: string;
+}
+
+export interface ProtectedRoleServicePins {
+  kind: "hugin-r-exact-role-service-pins";
+  schema_version: "v1";
+  owner_authorization_digest: string;
+  entries: Array<{
+    role: JournalRole;
+    identity: string;
+    public_key_fingerprint: string;
+  }>;
+  pins_digest: string;
+  signature: { algorithm: "Ed25519"; value_base64: string };
+}
+
+export interface RoleWriteReceipt {
+  kind: "hugin-r-exact-role-write-receipt";
+  schema_version: "v1";
+  role: JournalRole;
+  identity: string;
+  action: "create" | "append";
+  journal_id: string;
+  binding_digest: string;
+  previous_receipt_digest: null | string;
+  resulting_receipt_digest: string;
+  recorded_at: string;
+  signature: { algorithm: "Ed25519"; value_base64: string };
+}
+
+export interface RoleWriteResult {
+  journal: RExactJournal;
+  prepared: PreparedAttempt;
+  receipt: RoleWriteReceipt;
+}
+
+export interface RExactJournalReader {
+  read(proposalId: string): Promise<RoleWriteResult | null>;
+}
+
+export interface RExactRoleService {
+  role: JournalRole;
+  identity: string;
+  publicKeyPem: string;
+  append(
+    proposalId: string,
+    expectedReceiptDigest: string,
+    entry: JournalEntry,
+  ): Promise<RoleWriteResult>;
+}
+
+export interface PreparedClaim {
+  targetKey: string;
+  attemptId: string;
+  proposalReceiptDigest: string;
+}
+
+export interface RExactControllerService extends RExactRoleService {
+  createAndClaim(
+    proposalId: string,
+    journal: RExactJournal,
+    prepared: PreparedAttempt,
+    claim: PreparedClaim,
+  ): Promise<
+    | { status: "prepared"; write: RoleWriteResult }
+    | { status: "busy" }
+  >;
+}
+
+export interface RExactAttemptClaims {
+  claim(
+    targetKey: string,
+    attemptId: string,
+    proposalReceiptDigest: string,
+  ): Promise<"acquired" | "same" | "busy">;
+  assertHeld(
+    targetKey: string,
+    attemptId: string,
+    proposalReceiptDigest: string,
+  ): Promise<boolean>;
+  terminalize(
+    targetKey: string,
+    attemptId: string,
+    terminalReceiptDigest: string,
+  ): Promise<void>;
+}
+
+export interface RExactRecoveryWorker {
+  restoreAndVerify(input: {
+    snapshotRef: string;
+    snapshotDigest: string;
+    targetId: string;
+    baseRevision: string;
+    baseDigest: string;
+  }): Promise<{ restoredRevision: string; restoredDigest: string }>;
+  narrowAndVerify(input: {
+    binding: VerifiedW0Binding;
+    journalReceiptDigest: string;
+  }): Promise<W0AuthorityBundle>;
+}
+
+export interface W0RuntimeGate {
+  authority: W0AuthorityBundle;
+  roleServicePins: ProtectedRoleServicePins;
+  reader: RExactJournalReader;
+  controller: RExactControllerService;
+  watchdog: RExactRoleService;
+  recoveryJournal: RExactRoleService;
+  recovery: RExactRecoveryWorker;
+  claims: RExactAttemptClaims;
+  protectedNow(): Date;
+  verifyFresh(
+    phase: "apply" | "commit",
+    binding: VerifiedW0Binding,
+  ): Promise<FreshAdmission>;
+  verifyRecovery(
+    prepared: VerifiedW0Binding,
+    current: VerifiedW0Binding,
+  ): Promise<RecoveryProtection>;
+}
+
+export type RExactResult = {
+  status:
+    | "committed"
+    | "disarmed"
+    | "terminally-blocked"
+    | "already-committed";
+  journal: RExactJournal;
+};
+
+export interface RExactOptions {
+  onPhase?: (
+    phase:
+      | "snapshot"
+      | "mutation"
+      | "readback"
+      | "terminalization"
+      | "restore"
+      | "narrowing",
+  ) => void;
+}

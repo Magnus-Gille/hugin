@@ -1,227 +1,907 @@
 /** Adapter-neutral, owner-authorized R-exact journal/controller (Hugin #330). */
-import type { MuninClient } from "../munin-client.js";
 import type { KeyStore } from "../task-signing.js";
 import { canonicalizeJcs } from "../jcs.js";
-import { proposalTargetRegistry, verifyAutonomyProposalReceipt, type AutonomyProposalReceipt } from "./proposal-receipts.js";
-import { verifyW0Authority, verifyW0NarrowingApplied, w0Digest, W0_CONSTITUTION_DIGEST, type HuginRExactDomain, type VerifiedW0Binding, type W0AuthorityBundle } from "./w0-authority.js";
+import {
+  proposalTargetRegistry,
+  verifyAutonomyProposalReceipt,
+  type AutonomyProposalReceipt,
+} from "./proposal-receipts.js";
+import {
+  verifyW0Authority,
+  verifyW0NarrowingApplied,
+  w0Digest,
+  W0_CONSTITUTION_DIGEST,
+  type VerifiedW0Binding,
+} from "./w0-authority.js";
+import {
+  appendJournalEntry,
+  buildJournalEntry,
+  latestEntry as latest,
+  roleForPhase,
+  validateRExactJournal,
+} from "./r-exact-journal.js";
+import {
+  validateRoleServices,
+  verifyRoleWriteReceipt,
+  type VerifiedRoleServiceKey,
+} from "./r-exact-role-auth.js";
+import type {
+  FreshAdmission,
+  JournalEntry,
+  PreparedAttempt,
+  RExactConfigTarget,
+  RExactJournal,
+  RExactOptions,
+  RExactResult,
+  RExactRoleService,
+  RoleWriteResult,
+  W0RuntimeGate,
+} from "./r-exact-types.js";
 
-export interface RExactConfigTarget {
-  id: string; owner: "hugin"; domain: HuginRExactDomain; targetScopeDigest: string;
-  read(): Promise<{ revision: string; digest: string }>;
-  snapshot(): Promise<{ ref: string; digest: string }>;
-  replaceExact(expected: { revision: string; digest: string }, candidateDigest: string): Promise<void>;
-}
-export interface FreshAdmission {
-  checkedAt: string; trustedWatchdogTime: string; killSwitchOff: boolean; evidenceFresh: boolean;
-  journalHealthy: boolean; rateWindowEligible: boolean; livenessHealthy: boolean;
-  evidenceDigest: string; policyDigest: string; postconditionsDigest: string; configDigest: string;
-  deadline: string; watchDeadline: string;
-}
-export interface RExactRecoveryWorker {
-  identity: string;
-  journal: MuninClient;
-  restoreAndVerify(snapshot: { ref: string; digest: string }): Promise<{ restoredDigest: string }>;
-  narrowAndVerify(input: { binding: VerifiedW0Binding; journalReceiptDigest: string }): Promise<W0AuthorityBundle>;
-}
-export interface W0RuntimeGate {
-  authority: W0AuthorityBundle;
-  watchdogJournal: MuninClient;
-  recovery: RExactRecoveryWorker;
-  protectedNow(): Date;
-  verifyFresh(phase: "apply" | "commit", binding: VerifiedW0Binding): Promise<FreshAdmission>;
-}
-type Phase = "prepare" | "apply" | "verify" | "watch" | "commit" | "unknown" | "revert" | "disarm" | "terminally-blocked";
-type Outcome = "prepared" | "applied" | "verified" | "watching" | "committed" | "unknown" | "reverted" | "disarmed" | "terminally-blocked";
-export interface JournalEntry {
-  entry_id: string; sequence: number; recorded_at: string; phase: Phase; outcome: Outcome;
-  executor_identity: string; binding_digest: string;
-  quarantine: { state: "not-applicable"; reason_digest: string };
-  coverage_transition: null | { from_state: "armed-canary" | "armed-fleet"; to_state: "shadow"; target_scope_digest: string; actor_identity: string };
-  terminal_reason_digest: null | string; previous_receipt_digest: null | string; receipt_digest: string; content_refs: string[];
-}
-export interface RExactJournal {
-  kind: "autonomous-mutation-journal"; schema_version: "v1"; journal_id: string;
-  domain: HuginRExactDomain; constitution_digest: typeof W0_CONSTITUTION_DIGEST;
-  binding: any; binding_digest: string; entries: JournalEntry[]; extensions: [];
-}
-export type RExactResult = { status: "committed" | "disarmed" | "terminally-blocked" | "already-committed"; journal: RExactJournal };
-export interface RExactOptions { onPhase?: (phase: "snapshot" | "mutation" | "readback" | "terminalization" | "restore") => void; }
+export {
+  buildJournalEntry,
+  validateRExactJournal,
+} from "./r-exact-journal.js";
+export type * from "./r-exact-types.js";
 
-const namespace = (id: string) => `autonomy/hugin/r-exact/${id}`;
-const latest = (journal: RExactJournal) => journal.entries.at(-1)!;
-const idDigest = (prefix: string, value: string) => `${prefix}-${w0Digest({ value }).slice(7, 31)}`;
 const digestPattern = /^sha256:[a-f0-9]{64}$/;
-const transition: Record<Phase, readonly Phase[]> = {
-  prepare: ["apply", "unknown"], apply: ["verify", "unknown"], verify: ["watch", "unknown"],
-  watch: ["commit", "unknown"], commit: [], unknown: ["revert", "terminally-blocked"],
-  revert: ["disarm", "terminally-blocked"], disarm: [], "terminally-blocked": [],
-};
-const phaseOutcome: Record<Phase, Outcome> = {
-  prepare: "prepared", apply: "applied", verify: "verified", watch: "watching", commit: "committed",
-  unknown: "unknown", revert: "reverted", disarm: "disarmed", "terminally-blocked": "terminally-blocked",
-};
+const refPattern = /^ref:[a-z][a-z0-9-]{2,120}$/;
+const utcPattern = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
+const exactKeys = (value: unknown, keys: string[]): boolean =>
+  !!value
+  && typeof value === "object"
+  && !Array.isArray(value)
+  && Object.keys(value).sort().join(",") === [...keys].sort().join(",");
+const exactUtc = (value: unknown): value is string =>
+  typeof value === "string"
+  && utcPattern.test(value)
+  && !Number.isNaN(Date.parse(value))
+  && new Date(value).toISOString().replace(".000Z", "Z") === value;
+const idDigest = (prefix: string, value: string): string =>
+  `${prefix}-${w0Digest({ value }).slice(7, 31)}`;
+
+const targetClaimKey = (target: RExactConfigTarget): string =>
+  `${target.domain}:${target.targetScopeDigest}`;
 
 function trustedNow(gate: W0RuntimeGate): number {
   const value = gate.protectedNow().getTime();
   if (!Number.isFinite(value)) throw new Error("r-exact-protected-clock-invalid");
   return value;
 }
-function validateFresh(snapshot: FreshAdmission, gate: W0RuntimeGate, phase: "apply" | "commit"): void {
+
+function expectedAdmission(
+  receipt: AutonomyProposalReceipt,
+  binding: VerifiedW0Binding,
+): Pick<
+  FreshAdmission,
+  | "proposalDigest"
+  | "targetScopeDigest"
+  | "baseRevision"
+  | "baseDigest"
+  | "candidateDigest"
+  | "evidenceFingerprintsDigest"
+> {
+  return {
+    proposalDigest: receipt.canonicalProposalDigest,
+    targetScopeDigest: binding.targetScopeDigest,
+    baseRevision: receipt.base.revision,
+    baseDigest: receipt.base.digest,
+    candidateDigest: receipt.candidateContentDigest,
+    evidenceFingerprintsDigest: w0Digest(receipt.evidenceFingerprints),
+  };
+}
+
+function validateFresh(
+  proof: FreshAdmission,
+  gate: W0RuntimeGate,
+  phase: "apply" | "commit",
+  receipt: AutonomyProposalReceipt,
+  binding: VerifiedW0Binding,
+  immutable?: FreshAdmission,
+): void {
   const actual = trustedNow(gate);
-  const checked = Date.parse(snapshot.checkedAt), watchdog = Date.parse(snapshot.trustedWatchdogTime);
-  const deadline = Date.parse(snapshot.deadline), watchDeadline = Date.parse(snapshot.watchDeadline);
-  if (![checked, watchdog, deadline, watchDeadline].every(Number.isFinite) || Math.abs(actual - checked) > 5_000 || Math.abs(actual - watchdog) > 5_000) throw new Error("r-exact-stale-protected-clock");
-  if (!snapshot.killSwitchOff || !snapshot.evidenceFresh || !snapshot.journalHealthy || !snapshot.rateWindowEligible || !snapshot.livenessHealthy) throw new Error(`r-exact-${phase}-gate-refused`);
-  if (actual > deadline) throw new Error("r-exact-deadline-expired");
-  if (phase === "commit" && actual < watchDeadline) throw new Error("r-exact-watch-incomplete");
-}
-function assertContentBlind(value: unknown): void {
-  if (/(raw.prompt|payload|secret|command|private.locator|candidate.content)/i.test(canonicalizeJcs(value))) throw new Error("r-exact-journal-not-content-blind");
-}
-const exactKeys = (value: object, keys: string[]) => Object.keys(value).sort().join(",") === [...keys].sort().join(",");
-export function validateRExactJournal(journal: RExactJournal): void {
-  const bindingKeys = ["mutation_id","attempt_id","recovery_disarm_id","idempotency_key","writer_owner","owner_authority_ref","owner_authority_digest","configuration_owner","configuration_owner_authority_ref","configuration_owner_authority_digest","target_scope_digest","admission_coverage_digest","admission_binding_state","owner_identity","controller_identity","watchdog_identity","kill_switch_identity","recovery_worker_identity","risk_scope","candidate_digest","config_digest","evidence_digest","policy_digest","baseline_digest","postconditions_digest","deadline","canary","recovery"];
-  if (!exactKeys(journal, ["kind","schema_version","journal_id","domain","constitution_digest","binding","binding_digest","entries","extensions"]) || !exactKeys(journal.binding, bindingKeys) || journal.kind !== "autonomous-mutation-journal" || journal.schema_version !== "v1" || journal.constitution_digest !== W0_CONSTITUTION_DIGEST || journal.extensions.length !== 0 || journal.domain !== journal.binding.risk_scope || journal.binding.writer_owner !== "hugin" || journal.binding.configuration_owner !== "hugin" || journal.binding_digest !== w0Digest(journal.binding) || !digestPattern.test(journal.binding_digest) || !Array.isArray(journal.entries) || journal.entries.length === 0) throw new Error("r-exact-journal-schema");
-  if (!exactKeys(journal.binding.canary, ["scope_digest","target_count","watch_deadline"]) || !exactKeys(journal.binding.recovery, ["class","worker_identity","descriptor_digest","disarms_after_action"]) || journal.binding.canary.scope_digest !== journal.binding.target_scope_digest || journal.binding.canary.target_count !== 1 || journal.binding.recovery.class !== "R-exact" || journal.binding.recovery.worker_identity !== journal.binding.recovery_worker_identity || journal.binding.recovery.disarms_after_action !== true) throw new Error("r-exact-journal-binding-schema");
-  if (new Set([journal.binding.owner_identity, journal.binding.controller_identity, journal.binding.watchdog_identity, journal.binding.kill_switch_identity, journal.binding.recovery_worker_identity]).size !== 5) throw new Error("r-exact-journal-identities");
-  const requiredDigests = ["owner_authority_digest","configuration_owner_authority_digest","target_scope_digest","admission_coverage_digest","candidate_digest","config_digest","evidence_digest","policy_digest","baseline_digest","postconditions_digest"] as const;
-  if (!requiredDigests.every((field) => digestPattern.test(journal.binding[field])) || !digestPattern.test(journal.binding.recovery.descriptor_digest)) throw new Error("r-exact-journal-binding-digest");
-  const executorFor = (phase: Phase): string => phase === "watch" ? journal.binding.watchdog_identity : ["revert","disarm","terminally-blocked"].includes(phase) ? journal.binding.recovery_worker_identity : journal.binding.controller_identity;
-  let prior: JournalEntry | undefined;
-  for (const entry of journal.entries) {
-    if (!exactKeys(entry,["entry_id","sequence","recorded_at","phase","outcome","executor_identity","binding_digest","quarantine","coverage_transition","terminal_reason_digest","previous_receipt_digest","receipt_digest","content_refs"]) || !exactKeys(entry.quarantine, ["state","reason_digest"]) || entry.quarantine.state !== "not-applicable" || !digestPattern.test(entry.quarantine.reason_digest) || !Number.isFinite(Date.parse(entry.recorded_at)) || entry.outcome !== phaseOutcome[entry.phase] || entry.executor_identity !== executorFor(entry.phase) || entry.sequence !== (prior?.sequence ?? 0)+1 || entry.previous_receipt_digest !== (prior?.receipt_digest ?? null) || entry.binding_digest !== journal.binding_digest || !Array.isArray(entry.content_refs) || !entry.content_refs.every((ref) => typeof ref === "string" && ref.startsWith("ref:"))) throw new Error("r-exact-journal-entry-schema");
-    const unsigned:any=structuredClone(entry);delete unsigned.receipt_digest;if(entry.receipt_digest!==w0Digest(unsigned))throw new Error("r-exact-journal-receipt-digest");
-    if (prior && !transition[prior.phase].includes(entry.phase)) throw new Error("r-exact-journal-transition");
-    if ((entry.phase === "disarm") !== (entry.coverage_transition !== null)) throw new Error("r-exact-journal-coverage");
-    if (entry.coverage_transition && (!exactKeys(entry.coverage_transition, ["from_state","to_state","target_scope_digest","actor_identity"]) || entry.coverage_transition.from_state !== journal.binding.admission_binding_state || entry.coverage_transition.to_state !== "shadow" || entry.coverage_transition.target_scope_digest !== journal.binding.target_scope_digest || entry.coverage_transition.actor_identity !== journal.binding.recovery_worker_identity)) throw new Error("r-exact-journal-coverage");
-    if ((entry.phase === "terminally-blocked") !== (entry.terminal_reason_digest !== null) || (entry.terminal_reason_digest !== null && !digestPattern.test(entry.terminal_reason_digest))) throw new Error("r-exact-journal-terminal");
-    prior=entry;
+  const checked = Date.parse(proof.checkedAt);
+  const watchdog = Date.parse(proof.trustedWatchdogTime);
+  const deadline = Date.parse(proof.deadline);
+  const watchDeadline = Date.parse(proof.watchDeadline);
+  if (
+    !exactUtc(proof.checkedAt)
+    || !exactUtc(proof.trustedWatchdogTime)
+    || !exactUtc(proof.deadline)
+    || !exactUtc(proof.watchDeadline)
+    || Math.abs(actual - checked) > 5_000
+    || Math.abs(actual - watchdog) > 5_000
+  ) {
+    throw new Error("r-exact-stale-protected-clock");
   }
-}
-async function readJournal(client: MuninClient, id: string): Promise<{ journal: RExactJournal; version: string } | null> {
-  const entry = await client.read(namespace(id), "journal");
-  return entry ? { journal: JSON.parse(entry.content) as RExactJournal, version: entry.updated_at } : null;
-}
-async function writeJournal(client: MuninClient, id: string, journal: RExactJournal, version?: string): Promise<void> {
-  assertContentBlind(journal); validateRExactJournal(journal);
-  await client.write(namespace(id), "journal", canonicalizeJcs(journal), ["autonomy:r-exact", `phase:${latest(journal).phase}`], version, "internal", version === undefined);
-}
-function append(journal: RExactJournal, phase: Phase, at: string, executor: string, coverage: JournalEntry["coverage_transition"] = null): RExactJournal {
-  const prior = journal.entries.at(-1);
-  if (prior && !transition[prior.phase].includes(phase)) throw new Error(`r-exact-invalid-transition:${prior.phase}:${phase}`);
-  if ((phase === "disarm") !== (coverage !== null)) throw new Error("r-exact-invalid-coverage-transition");
-  const unsigned = {
-    entry_id: `${journal.journal_id}-${phase}-${journal.entries.length + 1}`,
-    sequence: journal.entries.length + 1, recorded_at: at, phase, outcome: phaseOutcome[phase],
-    executor_identity: executor, binding_digest: journal.binding_digest, coverage_transition: coverage,
-    quarantine: { state: "not-applicable" as const, reason_digest: w0Digest({ state: "not-applicable" }) },
-    terminal_reason_digest: phase === "terminally-blocked" ? w0Digest({ reason: "recovery-readback-failed" }) : null,
-    previous_receipt_digest: prior?.receipt_digest ?? null,
-    content_refs: prior?.content_refs ?? [`ref:${journal.binding.mutation_id}-candidate`],
-  };
-  return { ...journal, entries: [...journal.entries, { ...unsigned, receipt_digest: w0Digest(unsigned) }] };
-}
-async function appendCAS(client: MuninClient, id: string, journal: RExactJournal, phase: Phase, at: string, executor: string, coverage: JournalEntry["coverage_transition"] = null): Promise<RExactJournal> {
-  const stored = await readJournal(client, id);
-  if (!stored || latest(stored.journal).receipt_digest !== latest(journal).receipt_digest) throw new Error("r-exact-concurrent-journal");
-  const next = append(journal, phase, at, executor, coverage);
-  await writeJournal(client, id, next, stored.version);
-  return next;
-}
-function verifyOwner(receipt: AutonomyProposalReceipt, keys: KeyStore, target: RExactConfigTarget, gate: W0RuntimeGate, current: { revision: string; digest: string }): VerifiedW0Binding {
-  const proposal = verifyAutonomyProposalReceipt(receipt, keys, { now: () => gate.protectedNow(), currentBase: current });
-  if (proposal.status !== "valid") throw new Error(`proposal-${proposal.reason}`);
-  const registry = proposalTargetRegistry.find((entry) => entry.id === receipt.targetId);
-  if (!registry?.huginOwned || target.owner !== "hugin" || receipt.targetId !== target.id || receipt.axis !== target.domain) throw new Error("r-exact-cross-owner-refused");
-  const binding = verifyW0Authority(gate.authority, target.domain, target.targetScopeDigest);
-  if (gate.recovery.identity !== binding.identities.recovery_worker) throw new Error("r-exact-recovery-worker-identity");
-  if (gate.recovery.journal === gate.watchdogJournal) throw new Error("r-exact-writer-separation");
-  return binding;
-}
-
-export async function applyRExactProposal(controllerJournal: MuninClient, raw: unknown, keys: KeyStore, target: RExactConfigTarget, gate: W0RuntimeGate, options: RExactOptions = {}): Promise<RExactResult> {
-  const receipt = raw as AutonomyProposalReceipt;
-  if (controllerJournal === gate.watchdogJournal || controllerJournal === gate.recovery.journal) throw new Error("r-exact-writer-separation");
-  // Recovery is keyed by the already-bound durable journal. Do not require the
-  // target to still match the proposal base after an interrupted mutation.
-  const existing = await readJournal(controllerJournal, receipt.proposalId);
-  if (existing) return recoverRExactAttempt(controllerJournal, receipt.proposalId, target, gate, options);
-  const owner = verifyOwner(receipt, keys, target, gate, await target.read());
-  const first = await gate.verifyFresh("apply", owner); validateFresh(first, gate, "apply");
-  const snapshot = await target.snapshot();
-  const binding = {
-    mutation_id: idDigest("mutation", receipt.proposalId), attempt_id: idDigest("attempt", receipt.proposalId), recovery_disarm_id: idDigest("disarm", receipt.proposalId), idempotency_key: idDigest("idem", receipt.proposalId),
-    writer_owner: "hugin", owner_authority_ref: owner.ownerAuthorityRef, owner_authority_digest: owner.ownerAuthorityDigest,
-    configuration_owner: "hugin", configuration_owner_authority_ref: owner.configurationOwnerAuthorityRef, configuration_owner_authority_digest: owner.configurationOwnerAuthorityDigest,
-    target_scope_digest: owner.targetScopeDigest, admission_coverage_digest: owner.coverageDigest, admission_binding_state: owner.state,
-    owner_identity: owner.identities.owner, controller_identity: owner.identities.controller, watchdog_identity: owner.identities.watchdog, kill_switch_identity: owner.identities.kill_switch, recovery_worker_identity: owner.identities.recovery_worker,
-    risk_scope: target.domain, candidate_digest: receipt.candidateContentDigest, config_digest: first.configDigest, evidence_digest: first.evidenceDigest, policy_digest: first.policyDigest,
-    baseline_digest: snapshot.digest, postconditions_digest: first.postconditionsDigest, deadline: first.deadline,
-    canary: { scope_digest: owner.targetScopeDigest, target_count: 1, watch_deadline: first.watchDeadline },
-    recovery: { class: "R-exact", worker_identity: owner.identities.recovery_worker, descriptor_digest: w0Digest({ snapshot: snapshot.ref, digest: snapshot.digest, proposal_digest: receipt.canonicalProposalDigest, signature_digest: w0Digest({ signature: receipt.signature }) }), disarms_after_action: true },
-  };
-  let journal: RExactJournal = { kind: "autonomous-mutation-journal", schema_version: "v1", journal_id: idDigest("journal", receipt.proposalId), domain: target.domain, constitution_digest: W0_CONSTITUTION_DIGEST, binding, binding_digest: w0Digest(binding), entries: [], extensions: [] };
-  journal = append(journal, "prepare", first.checkedAt, owner.identities.controller);
-  journal.entries[0]!.content_refs.push(snapshot.ref, `ref:${idDigest("proposal", receipt.canonicalProposalDigest)}`);
-  const firstEntry:any=journal.entries[0];const firstUnsigned=structuredClone(firstEntry);delete firstUnsigned.receipt_digest;firstEntry.receipt_digest=w0Digest(firstUnsigned);
-  await writeJournal(controllerJournal, receipt.proposalId, journal); options.onPhase?.("snapshot");
-  try {
-    const before = verifyOwner(receipt, keys, target, gate, await target.read());
-    const fresh = await gate.verifyFresh("apply", before); validateFresh(fresh, gate, "apply");
-    await target.replaceExact(receipt.base, receipt.candidateContentDigest); options.onPhase?.("mutation");
-    journal = await appendCAS(controllerJournal, receipt.proposalId, journal, "apply", fresh.checkedAt, owner.identities.controller);
-    if ((await target.read()).digest !== receipt.candidateContentDigest) throw new Error("r-exact-readback-mismatch"); options.onPhase?.("readback");
-    journal = await appendCAS(controllerJournal, receipt.proposalId, journal, "verify", fresh.checkedAt, owner.identities.controller);
-    journal = await appendCAS(gate.watchdogJournal, receipt.proposalId, journal, "watch", fresh.checkedAt, owner.identities.watchdog);
-    return await finishCommit(controllerJournal, receipt, target, gate, owner, journal, options);
-  } catch {
-    return recoverRExactAttempt(controllerJournal, receipt.proposalId, target, gate, options);
+  if (
+    !proof.killSwitchOff
+    || !proof.evidenceFresh
+    || !proof.journalHealthy
+    || !proof.rateWindowEligible
+    || !proof.livenessHealthy
+  ) {
+    throw new Error(`r-exact-${phase}-gate-refused`);
   }
-}
-
-async function finishCommit(controllerJournal: MuninClient, receipt: AutonomyProposalReceipt, target: RExactConfigTarget, gate: W0RuntimeGate, owner: VerifiedW0Binding, journal: RExactJournal, options: RExactOptions): Promise<RExactResult> {
-  try {
-    const currentOwner = verifyW0Authority(gate.authority, target.domain, target.targetScopeDigest);
-    if (canonicalizeJcs(currentOwner) !== canonicalizeJcs(owner)) throw new Error("r-exact-authority-drift");
-    const fresh = await gate.verifyFresh("commit", currentOwner); validateFresh(fresh, gate, "commit");
-    if ((await target.read()).digest !== receipt.candidateContentDigest) throw new Error("r-exact-commit-readback");
-    options.onPhase?.("terminalization");
-    journal = await appendCAS(controllerJournal, receipt.proposalId, journal, "commit", fresh.checkedAt, owner.identities.controller);
-    return { status: "committed", journal };
-  } catch {
-    return recoverRExactAttempt(controllerJournal, receipt.proposalId, target, gate, options);
+  if (
+    canonicalizeJcs(expectedAdmission(receipt, binding))
+    !== canonicalizeJcs({
+      proposalDigest: proof.proposalDigest,
+      targetScopeDigest: proof.targetScopeDigest,
+      baseRevision: proof.baseRevision,
+      baseDigest: proof.baseDigest,
+      candidateDigest: proof.candidateDigest,
+      evidenceFingerprintsDigest: proof.evidenceFingerprintsDigest,
+    })
+  ) {
+    throw new Error("r-exact-admission-subject-mismatch");
   }
-}
-
-export async function recoverRExactAttempt(controllerJournal: MuninClient, id: string, target: RExactConfigTarget, gate: W0RuntimeGate, options: RExactOptions = {}): Promise<RExactResult> {
-  if (controllerJournal === gate.watchdogJournal || controllerJournal === gate.recovery.journal || gate.watchdogJournal === gate.recovery.journal) throw new Error("r-exact-writer-separation");
-  const stored = await readJournal(controllerJournal, id); if (!stored) throw new Error("r-exact-journal-missing");
-  let journal = stored.journal; const owner = verifyW0Authority(gate.authority, target.domain, target.targetScopeDigest, true);
-  validateRExactJournal(journal);
-  if (journal.binding_digest !== w0Digest(journal.binding) || journal.binding.target_scope_digest !== owner.targetScopeDigest || journal.binding.owner_authority_ref !== owner.ownerAuthorityRef || journal.binding.owner_authority_digest !== owner.ownerAuthorityDigest || journal.binding.configuration_owner_authority_ref !== owner.configurationOwnerAuthorityRef || journal.binding.configuration_owner_authority_digest !== owner.configurationOwnerAuthorityDigest || journal.binding.owner_identity !== owner.identities.owner || journal.binding.controller_identity !== owner.identities.controller || journal.binding.watchdog_identity !== owner.identities.watchdog || journal.binding.kill_switch_identity !== owner.identities.kill_switch || journal.binding.recovery_worker_identity !== owner.identities.recovery_worker) throw new Error("r-exact-journal-binding-invalid");
-  if (latest(journal).phase === "commit") return { status: "already-committed", journal };
-  if (latest(journal).phase === "disarm") return { status: "disarmed", journal };
-  if (latest(journal).phase === "terminally-blocked") return { status: "terminally-blocked", journal };
-  const at = gate.protectedNow().toISOString();
-  if (latest(journal).phase !== "unknown" && latest(journal).phase !== "revert") journal = await appendCAS(controllerJournal, id, journal, "unknown", at, owner.identities.controller);
-  const current = await target.read();
-  if (current.digest !== journal.binding.baseline_digest) {
-    const snapshotRef = journal.entries[0]?.content_refs.find((entry) => entry !== `ref:${journal.binding.mutation_id}-candidate` && !entry.includes("proposal"));
-    if (!snapshotRef) throw new Error("r-exact-snapshot-ref-missing");
-    const restored = await gate.recovery.restoreAndVerify({ ref: snapshotRef, digest: journal.binding.baseline_digest }); options.onPhase?.("restore");
-    if (restored.restoredDigest !== journal.binding.baseline_digest || (await target.read()).digest !== journal.binding.baseline_digest) {
-      journal = await appendCAS(gate.recovery.journal, id, journal, "terminally-blocked", at, owner.identities.recovery_worker);
-      return { status: "terminally-blocked", journal };
+  for (const digest of [
+    proof.evidenceDigest,
+    proof.policyDigest,
+    proof.postconditionsDigest,
+    proof.configDigest,
+  ]) {
+    if (!digestPattern.test(digest)) throw new Error("r-exact-admission-digest");
+  }
+  if (watchDeadline > deadline || actual > deadline) {
+    throw new Error("r-exact-deadline-expired");
+  }
+  if (phase === "commit" && actual < watchDeadline) {
+    throw new Error("r-exact-watch-incomplete");
+  }
+  if (immutable) {
+    const immutableFields = [
+      "proposalDigest",
+      "targetScopeDigest",
+      "baseRevision",
+      "baseDigest",
+      "candidateDigest",
+      "evidenceFingerprintsDigest",
+      "evidenceDigest",
+      "policyDigest",
+      "postconditionsDigest",
+      "configDigest",
+      "deadline",
+      "watchDeadline",
+    ] as const;
+    for (const field of immutableFields) {
+      if (proof[field] !== immutable[field]) {
+        throw new Error(`r-exact-admission-drift:${field}`);
+      }
     }
   }
-  // Restore may have succeeded before a crash; exact readback lets the worker append the missing receipt without restoring again.
-  if (latest(journal).phase === "unknown") journal = await appendCAS(gate.recovery.journal, id, journal, "revert", at, owner.identities.recovery_worker);
-  if (owner.effectiveState === "shadow") {
-    verifyW0NarrowingApplied(gate.authority, owner, latest(journal).receipt_digest);
-  } else {
-    const narrowedAuthority = await gate.recovery.narrowAndVerify({ binding: owner, journalReceiptDigest: latest(journal).receipt_digest });
-    verifyW0NarrowingApplied(narrowedAuthority, owner, latest(journal).receipt_digest);
+}
+
+function validatePrepared(
+  prepared: PreparedAttempt,
+  receipt: AutonomyProposalReceipt,
+  target: RExactConfigTarget,
+): void {
+  if (
+    !exactKeys(prepared, [
+      "kind",
+      "schema_version",
+      "proposal_receipt_digest",
+      "proposal_digest",
+      "target_id",
+      "target_scope_digest",
+      "base_revision",
+      "base_digest",
+      "candidate_digest",
+      "snapshot_ref",
+      "snapshot_digest",
+      "prepared_authority",
+      "prepared_authority_digest",
+      "prepared_owner_public_key_pem",
+      "role_service_pins",
+      "role_service_pins_digest",
+      "admission_digest",
+    ])
+    || prepared.kind !== "hugin-r-exact-prepared-attempt"
+    || prepared.schema_version !== "v1"
+    || prepared.proposal_receipt_digest !== w0Digest(receipt)
+    || prepared.proposal_digest !== receipt.canonicalProposalDigest
+    || prepared.target_id !== target.id
+    || prepared.target_scope_digest !== target.targetScopeDigest
+    || prepared.base_revision !== receipt.base.revision
+    || prepared.base_digest !== receipt.base.digest
+    || prepared.candidate_digest !== receipt.candidateContentDigest
+    || prepared.snapshot_digest !== receipt.base.digest
+    || !refPattern.test(prepared.snapshot_ref)
+    || prepared.prepared_authority_digest !== w0Digest(prepared.prepared_authority)
+    || !prepared.prepared_owner_public_key_pem.includes("BEGIN PUBLIC KEY")
+    || prepared.role_service_pins_digest !== w0Digest(prepared.role_service_pins)
+    || !digestPattern.test(prepared.admission_digest)
+  ) {
+    throw new Error("r-exact-prepared-attempt-invalid");
   }
-  journal = await appendCAS(gate.recovery.journal, id, journal, "disarm", at, owner.identities.recovery_worker, { from_state: owner.state, to_state: "shadow", target_scope_digest: owner.targetScopeDigest, actor_identity: owner.identities.recovery_worker });
-  return { status: "disarmed", journal };
+}
+
+function verifyReceiptIdentityOnly(
+  raw: unknown,
+  keys: KeyStore,
+  now: () => Date,
+): AutonomyProposalReceipt {
+  const receipt = raw as AutonomyProposalReceipt;
+  const verified = verifyAutonomyProposalReceipt(receipt, keys, {
+    now,
+    currentBase: receipt?.base,
+  });
+  if (verified.status !== "valid") {
+    throw new Error(`proposal-${verified.reason}`);
+  }
+  return receipt;
+}
+
+function verifyReceiptForCurrentBase(
+  receipt: AutonomyProposalReceipt,
+  keys: KeyStore,
+  gate: W0RuntimeGate,
+  current: { revision: string; digest: string },
+): void {
+  const verified = verifyAutonomyProposalReceipt(receipt, keys, {
+    now: () => gate.protectedNow(),
+    currentBase: current,
+  });
+  if (verified.status !== "valid") {
+    throw new Error(`proposal-${verified.reason}`);
+  }
+}
+
+function verifyOwner(
+  receipt: AutonomyProposalReceipt,
+  target: RExactConfigTarget,
+  gate: W0RuntimeGate,
+): VerifiedW0Binding {
+  const registry = proposalTargetRegistry.find(
+    (entry) => entry.id === receipt.targetId,
+  );
+  if (
+    !registry?.huginOwned
+    || target.owner !== "hugin"
+    || receipt.targetId !== target.id
+    || receipt.axis !== target.domain
+  ) {
+    throw new Error("r-exact-cross-owner-refused");
+  }
+  return verifyW0Authority(
+    gate.authority,
+    target.domain,
+    target.targetScopeDigest,
+  );
+}
+
+async function appendThroughRole(
+  service: RExactRoleService,
+  pinned: VerifiedRoleServiceKey,
+  proposalId: string,
+  journal: RExactJournal,
+  entry: JournalEntry,
+  prepared: PreparedAttempt,
+): Promise<RoleWriteResult> {
+  const expectedRole = roleForPhase(entry.phase);
+  if (
+    service.role !== expectedRole
+    || service.identity !== entry.executor_identity
+  ) {
+    throw new Error("r-exact-role-service-refused");
+  }
+  const result = await service.append(
+    proposalId,
+    latest(journal).receipt_digest,
+    entry,
+  );
+  if (
+    canonicalizeJcs(result.prepared) !== canonicalizeJcs(prepared)
+    || result.journal.entries.length !== journal.entries.length + 1
+    || canonicalizeJcs(result.journal.entries.slice(0, -1))
+      !== canonicalizeJcs(journal.entries)
+    || canonicalizeJcs(latest(result.journal))
+      !== canonicalizeJcs(entry)
+  ) {
+    throw new Error("r-exact-role-service-result");
+  }
+  verifyRoleWriteReceipt(
+    result,
+    service,
+    pinned,
+    "append",
+    latest(journal).receipt_digest,
+  );
+  validateRExactJournal(result.journal);
+  return result;
+}
+
+function sameAuthority(
+  left: VerifiedW0Binding,
+  right: VerifiedW0Binding,
+): boolean {
+  return canonicalizeJcs(left) === canonicalizeJcs(right);
+}
+
+async function assertClaim(
+  gate: W0RuntimeGate,
+  target: RExactConfigTarget,
+  prepared: PreparedAttempt,
+  attemptId: string,
+): Promise<void> {
+  if (
+    !await gate.claims.assertHeld(
+      targetClaimKey(target),
+      attemptId,
+      prepared.proposal_receipt_digest,
+    )
+  ) {
+    throw new Error("r-exact-attempt-claim-lost");
+  }
+}
+
+async function terminalizeClaim(
+  gate: W0RuntimeGate,
+  target: RExactConfigTarget,
+  journal: RExactJournal,
+): Promise<void> {
+  await gate.claims.terminalize(
+    targetClaimKey(target),
+    journal.binding.attempt_id,
+    latest(journal).receipt_digest,
+  );
+}
+
+export async function applyRExactProposal(
+  raw: unknown,
+  keys: KeyStore,
+  target: RExactConfigTarget,
+  gate: W0RuntimeGate,
+  options: RExactOptions = {},
+): Promise<RExactResult> {
+  const receipt = verifyReceiptIdentityOnly(
+    raw,
+    keys,
+    () => gate.protectedNow(),
+  );
+  const existing = await gate.reader.read(receipt.proposalId);
+  if (existing) {
+    return recoverRExactAttempt(receipt, keys, target, gate, options);
+  }
+  const current = await target.read();
+  verifyReceiptForCurrentBase(receipt, keys, gate, current);
+  const owner = verifyOwner(receipt, target, gate);
+  const roleKeys = validateRoleServices(gate, owner);
+  const initialAdmission = await gate.verifyFresh("apply", owner);
+  validateFresh(
+    initialAdmission,
+    gate,
+    "apply",
+    receipt,
+    owner,
+  );
+  const attemptId = idDigest("attempt", receipt.canonicalProposalDigest);
+  const snapshot = await target.snapshot();
+  if (
+    snapshot.digest !== receipt.base.digest
+    || !refPattern.test(snapshot.ref)
+  ) {
+    throw new Error("r-exact-snapshot-base-mismatch");
+  }
+  const binding = {
+    mutation_id: idDigest("mutation", receipt.canonicalProposalDigest),
+    attempt_id: attemptId,
+    recovery_disarm_id: idDigest(
+      "disarm",
+      receipt.canonicalProposalDigest,
+    ),
+    idempotency_key: idDigest("idem", receipt.canonicalProposalDigest),
+    writer_owner: "hugin",
+    owner_authority_ref: owner.ownerAuthorityRef,
+    owner_authority_digest: owner.ownerAuthorityDigest,
+    configuration_owner: "hugin",
+    configuration_owner_authority_ref:
+      owner.configurationOwnerAuthorityRef,
+    configuration_owner_authority_digest:
+      owner.configurationOwnerAuthorityDigest,
+    target_scope_digest: owner.targetScopeDigest,
+    admission_coverage_digest: owner.coverageDigest,
+    admission_binding_state: owner.state,
+    owner_identity: owner.identities.owner,
+    controller_identity: owner.identities.controller,
+    watchdog_identity: owner.identities.watchdog,
+    kill_switch_identity: owner.identities.kill_switch,
+    recovery_worker_identity: owner.identities.recovery_worker,
+    risk_scope: target.domain,
+    candidate_digest: receipt.candidateContentDigest,
+    config_digest: initialAdmission.configDigest,
+    evidence_digest: initialAdmission.evidenceDigest,
+    policy_digest: initialAdmission.policyDigest,
+    baseline_digest: snapshot.digest,
+    postconditions_digest: initialAdmission.postconditionsDigest,
+    deadline: initialAdmission.deadline,
+    canary: {
+      scope_digest: owner.targetScopeDigest,
+      target_count: 1,
+      watch_deadline: initialAdmission.watchDeadline,
+    },
+    recovery: {
+      class: "R-exact",
+      worker_identity: owner.identities.recovery_worker,
+      descriptor_digest: w0Digest({
+        snapshot_ref: snapshot.ref,
+        snapshot_digest: snapshot.digest,
+        target_id: target.id,
+        base_revision: receipt.base.revision,
+        base_digest: receipt.base.digest,
+      }),
+      disarms_after_action: true,
+    },
+  };
+  let journal: RExactJournal = {
+    kind: "autonomous-mutation-journal",
+    schema_version: "v1",
+    journal_id: idDigest("journal", receipt.canonicalProposalDigest),
+    domain: target.domain,
+    constitution_digest: W0_CONSTITUTION_DIGEST,
+    binding,
+    binding_digest: w0Digest(binding),
+    entries: [],
+    extensions: [],
+  };
+  journal = appendJournalEntry(
+    journal,
+    buildJournalEntry(
+      journal,
+      "prepare",
+      initialAdmission.checkedAt,
+      owner.identities.controller,
+    ),
+  );
+  const prepared: PreparedAttempt = {
+    kind: "hugin-r-exact-prepared-attempt",
+    schema_version: "v1",
+    proposal_receipt_digest: w0Digest(receipt),
+    proposal_digest: receipt.canonicalProposalDigest,
+    target_id: target.id,
+    target_scope_digest: target.targetScopeDigest,
+    base_revision: receipt.base.revision,
+    base_digest: receipt.base.digest,
+    candidate_digest: receipt.candidateContentDigest,
+    snapshot_ref: snapshot.ref,
+    snapshot_digest: snapshot.digest,
+    prepared_authority: structuredClone(owner),
+    prepared_authority_digest: w0Digest(owner),
+    prepared_owner_public_key_pem: gate.authority.pinnedOwnerPublicKeyPem,
+    role_service_pins: structuredClone(gate.roleServicePins),
+    role_service_pins_digest: w0Digest(gate.roleServicePins),
+    admission_digest: w0Digest(initialAdmission),
+  };
+  validatePrepared(prepared, receipt, target);
+  validateRExactJournal(journal);
+  const preparedWrite = await gate.controller.createAndClaim(
+    receipt.proposalId,
+    journal,
+    prepared,
+    {
+      targetKey: targetClaimKey(target),
+      attemptId,
+      proposalReceiptDigest: prepared.proposal_receipt_digest,
+    },
+  );
+  if (preparedWrite.status === "busy") {
+    throw new Error("r-exact-target-busy");
+  }
+  const created = preparedWrite.write;
+  verifyRoleWriteReceipt(
+    created,
+    gate.controller,
+    roleKeys.controller,
+    "create",
+    null,
+  );
+  if (
+    canonicalizeJcs(created.journal) !== canonicalizeJcs(journal)
+    || canonicalizeJcs(created.prepared) !== canonicalizeJcs(prepared)
+  ) {
+    throw new Error("r-exact-role-service-result");
+  }
+  const durablePrepared = await gate.reader.read(receipt.proposalId);
+  if (
+    !durablePrepared
+    || canonicalizeJcs(durablePrepared)
+      !== canonicalizeJcs(created)
+  ) {
+    throw new Error("r-exact-atomic-prepare-not-durable");
+  }
+  options.onPhase?.("snapshot");
+  try {
+    await assertClaim(gate, target, prepared, attemptId);
+    const preApplyOwner = verifyOwner(receipt, target, gate);
+    if (!sameAuthority(owner, preApplyOwner)) {
+      throw new Error("r-exact-authority-drift");
+    }
+    const preApply = await gate.verifyFresh("apply", preApplyOwner);
+    validateFresh(
+      preApply,
+      gate,
+      "apply",
+      receipt,
+      preApplyOwner,
+      initialAdmission,
+    );
+    await target.replaceExact(receipt.base, receipt.candidateContentDigest);
+    options.onPhase?.("mutation");
+    let state = await appendThroughRole(
+      gate.controller,
+      roleKeys.controller,
+      receipt.proposalId,
+      journal,
+      buildJournalEntry(
+        journal,
+        "apply",
+        preApply.checkedAt,
+        owner.identities.controller,
+      ),
+      prepared,
+    );
+    journal = state.journal;
+    const readback = await target.read();
+    if (readback.digest !== receipt.candidateContentDigest) {
+      throw new Error("r-exact-readback-mismatch");
+    }
+    options.onPhase?.("readback");
+    state = await appendThroughRole(
+      gate.controller,
+      roleKeys.controller,
+      receipt.proposalId,
+      journal,
+      buildJournalEntry(
+        journal,
+        "verify",
+        preApply.checkedAt,
+        owner.identities.controller,
+      ),
+      prepared,
+    );
+    journal = state.journal;
+    state = await appendThroughRole(
+      gate.controller,
+      roleKeys.controller,
+      receipt.proposalId,
+      journal,
+      buildJournalEntry(
+        journal,
+        "watch",
+        preApply.checkedAt,
+        owner.identities.controller,
+      ),
+      prepared,
+    );
+    journal = state.journal;
+    const commitOwner = verifyOwner(receipt, target, gate);
+    if (!sameAuthority(owner, commitOwner)) {
+      throw new Error("r-exact-authority-drift");
+    }
+    const commitAdmission = await gate.verifyFresh("commit", commitOwner);
+    validateFresh(
+      commitAdmission,
+      gate,
+      "commit",
+      receipt,
+      commitOwner,
+      initialAdmission,
+    );
+    await assertClaim(gate, target, prepared, attemptId);
+    if ((await target.read()).digest !== receipt.candidateContentDigest) {
+      throw new Error("r-exact-commit-readback");
+    }
+    options.onPhase?.("terminalization");
+    state = await appendThroughRole(
+      gate.controller,
+      roleKeys.controller,
+      receipt.proposalId,
+      journal,
+      buildJournalEntry(
+        journal,
+        "commit",
+        commitAdmission.checkedAt,
+        owner.identities.controller,
+      ),
+      prepared,
+    );
+    journal = state.journal;
+    validateRExactJournal(journal, false);
+    await terminalizeClaim(gate, target, journal);
+    return { status: "committed", journal };
+  } catch {
+    return recoverRExactAttempt(receipt, keys, target, gate, options);
+  }
+}
+
+async function narrowCurrentAuthority(
+  gate: W0RuntimeGate,
+  current: VerifiedW0Binding,
+  journalReceiptDigest: string,
+  options: RExactOptions,
+): Promise<void> {
+  if (current.effectiveState === "shadow") {
+    verifyW0NarrowingApplied(
+      gate.authority,
+      current,
+      journalReceiptDigest,
+    );
+    return;
+  }
+  const narrowed = await gate.recovery.narrowAndVerify({
+    binding: current,
+    journalReceiptDigest,
+  });
+  options.onPhase?.("narrowing");
+  verifyW0NarrowingApplied(narrowed, current, journalReceiptDigest);
+  gate.authority = narrowed;
+}
+
+async function appendTerminalBlocked(
+  receipt: AutonomyProposalReceipt,
+  target: RExactConfigTarget,
+  gate: W0RuntimeGate,
+  journal: RExactJournal,
+  prepared: PreparedAttempt,
+  recoveryRoleKey: VerifiedRoleServiceKey,
+  reasonDigest: string,
+  options: RExactOptions,
+): Promise<RExactResult> {
+  const protectedCurrent = verifyW0Authority(
+    gate.authority,
+    target.domain,
+    target.targetScopeDigest,
+    true,
+  );
+  const transition = {
+    from_state: prepared.prepared_authority.state,
+    to_state: "shadow" as const,
+    target_scope_digest: prepared.target_scope_digest,
+    actor_identity: prepared.prepared_authority.identities.recovery_worker,
+  };
+  const terminalEntry = buildJournalEntry(
+    journal,
+    "terminally-blocked",
+    latest(journal).recorded_at,
+    prepared.prepared_authority.identities.recovery_worker,
+    reasonDigest,
+    transition,
+  );
+  await narrowCurrentAuthority(
+    gate,
+    protectedCurrent,
+    terminalEntry.receipt_digest,
+    options,
+  );
+  const state = await appendThroughRole(
+    gate.recoveryJournal,
+    recoveryRoleKey,
+    receipt.proposalId,
+    journal,
+    terminalEntry,
+    prepared,
+  );
+  validateRExactJournal(state.journal, false);
+  await terminalizeClaim(gate, target, state.journal);
+  return { status: "terminally-blocked", journal: state.journal };
+}
+
+export async function recoverRExactAttempt(
+  raw: unknown,
+  keys: KeyStore,
+  target: RExactConfigTarget,
+  gate: W0RuntimeGate,
+  options: RExactOptions = {},
+): Promise<RExactResult> {
+  const receipt = verifyReceiptIdentityOnly(
+    raw,
+    keys,
+    () => gate.protectedNow(),
+  );
+  const stored = await gate.reader.read(receipt.proposalId);
+  if (!stored) throw new Error("r-exact-journal-missing");
+  let { journal } = stored;
+  const { prepared } = stored;
+  validatePrepared(prepared, receipt, target);
+  validateRExactJournal(journal);
+  const roleKeys = validateRoleServices(
+    gate,
+    prepared.prepared_authority,
+    prepared.role_service_pins,
+    prepared.prepared_owner_public_key_pem,
+  );
+  const claim = await gate.claims.claim(
+    targetClaimKey(target),
+    journal.binding.attempt_id,
+    prepared.proposal_receipt_digest,
+  );
+  if (claim === "busy") throw new Error("r-exact-target-busy");
+  if (
+    journal.binding_digest !== w0Digest(journal.binding)
+    || journal.binding.target_scope_digest
+      !== prepared.prepared_authority.targetScopeDigest
+    || journal.binding.admission_coverage_digest
+      !== prepared.prepared_authority.coverageDigest
+    || journal.binding.owner_authority_ref
+      !== prepared.prepared_authority.ownerAuthorityRef
+    || journal.binding.owner_authority_digest
+      !== prepared.prepared_authority.ownerAuthorityDigest
+    || journal.binding.configuration_owner_authority_ref
+      !== prepared.prepared_authority.configurationOwnerAuthorityRef
+    || journal.binding.configuration_owner_authority_digest
+      !== prepared.prepared_authority.configurationOwnerAuthorityDigest
+  ) {
+    throw new Error("r-exact-journal-binding-invalid");
+  }
+  if (latest(journal).phase === "commit") {
+    await terminalizeClaim(gate, target, journal);
+    return { status: "already-committed", journal };
+  }
+  if (latest(journal).phase === "disarm") {
+    await terminalizeClaim(gate, target, journal);
+    return { status: "disarmed", journal };
+  }
+  if (latest(journal).phase === "terminally-blocked") {
+    await terminalizeClaim(gate, target, journal);
+    return { status: "terminally-blocked", journal };
+  }
+  const currentAuthority = verifyW0Authority(
+    gate.authority,
+    target.domain,
+    target.targetScopeDigest,
+    true,
+  );
+  const protection = await gate.verifyRecovery(
+    prepared.prepared_authority,
+    currentAuthority,
+  );
+  if (
+    !exactUtc(protection.checkedAt)
+    || !exactUtc(protection.trustedWatchdogTime)
+    || protection.killSwitchIdentity
+      !== currentAuthority.identities.kill_switch
+    || !digestPattern.test(protection.killSwitchStateDigest)
+    || !protection.journalHealthy
+    || Math.abs(
+      trustedNow(gate) - Date.parse(protection.checkedAt)
+    ) > 5_000
+    || Math.abs(
+      trustedNow(gate) - Date.parse(protection.trustedWatchdogTime)
+    ) > 5_000
+  ) {
+    throw new Error("r-exact-recovery-protection-invalid");
+  }
+  await assertClaim(
+    gate,
+    target,
+    prepared,
+    journal.binding.attempt_id,
+  );
+  const reasonDigest = w0Digest({
+    kind: "r-exact-recovery",
+    proposal_digest: prepared.proposal_digest,
+    kill_switch_state_digest: protection.killSwitchStateDigest,
+  });
+  if (latest(journal).phase !== "unknown" && latest(journal).phase !== "revert") {
+    const state = await appendThroughRole(
+      gate.watchdog,
+      roleKeys.watchdog,
+      receipt.proposalId,
+      journal,
+      buildJournalEntry(
+        journal,
+        "unknown",
+        protection.checkedAt,
+        prepared.prepared_authority.identities.watchdog,
+        reasonDigest,
+      ),
+      prepared,
+    );
+    journal = state.journal;
+  }
+  let narrowedDisarmReceipt: string | null = null;
+  try {
+    const currentTarget = await target.read();
+    if (
+      currentTarget.digest !== prepared.snapshot_digest
+      || currentTarget.revision !== prepared.base_revision
+    ) {
+      const restored = await gate.recovery.restoreAndVerify({
+        snapshotRef: prepared.snapshot_ref,
+        snapshotDigest: prepared.snapshot_digest,
+        targetId: prepared.target_id,
+        baseRevision: prepared.base_revision,
+        baseDigest: prepared.base_digest,
+      });
+      options.onPhase?.("restore");
+      const readback = await target.read();
+      if (
+        restored.restoredDigest !== prepared.snapshot_digest
+        || restored.restoredRevision !== prepared.base_revision
+        || readback.digest !== prepared.snapshot_digest
+        || readback.revision !== prepared.base_revision
+      ) {
+        throw new Error("r-exact-restore-readback");
+      }
+    }
+    if (latest(journal).phase === "unknown") {
+      const state = await appendThroughRole(
+        gate.recoveryJournal,
+        roleKeys["recovery-worker"],
+        receipt.proposalId,
+        journal,
+        buildJournalEntry(
+          journal,
+          "revert",
+          protection.checkedAt,
+          prepared.prepared_authority.identities.recovery_worker,
+        ),
+        prepared,
+      );
+      journal = state.journal;
+    }
+    const transition = {
+      from_state: prepared.prepared_authority.state,
+      to_state: "shadow" as const,
+      target_scope_digest: prepared.target_scope_digest,
+      actor_identity: prepared.prepared_authority.identities.recovery_worker,
+    };
+    const disarmEntry = buildJournalEntry(
+      journal,
+      "disarm",
+      latest(journal).recorded_at,
+      prepared.prepared_authority.identities.recovery_worker,
+      reasonDigest,
+      transition,
+    );
+    await narrowCurrentAuthority(
+      gate,
+      currentAuthority,
+      disarmEntry.receipt_digest,
+      options,
+    );
+    narrowedDisarmReceipt = disarmEntry.receipt_digest;
+    const state = await appendThroughRole(
+      gate.recoveryJournal,
+      roleKeys["recovery-worker"],
+      receipt.proposalId,
+      journal,
+      disarmEntry,
+      prepared,
+    );
+    journal = state.journal;
+    validateRExactJournal(journal, false);
+    await terminalizeClaim(gate, target, journal);
+    return { status: "disarmed", journal };
+  } catch (error) {
+    if (
+      error instanceof Error
+      && error.message.startsWith("r-exact-role-")
+    ) {
+      throw error;
+    }
+    if (narrowedDisarmReceipt !== null) {
+      verifyW0NarrowingApplied(
+        gate.authority,
+        currentAuthority,
+        narrowedDisarmReceipt,
+      );
+      throw new Error("r-exact-disarm-append-pending");
+    }
+    return appendTerminalBlocked(
+      receipt,
+      target,
+      gate,
+      journal,
+      prepared,
+      roleKeys["recovery-worker"],
+      w0Digest({
+        kind: "r-exact-terminal",
+        error: error instanceof Error ? error.message : "unknown",
+      }),
+      options,
+    );
+  }
 }

@@ -25,7 +25,7 @@ export const AUTONOMY_PROPOSAL_REGISTRY_VERSION = "v1" as const;
 export const autonomyProposalPolicyAuthority = Object.freeze({
   id: AUTONOMY_PROPOSAL_POLICY_EPOCH_ID,
   constitutionId: "grimnir-autonomy-v1",
-  constitutionDigest: "sha256:76b0f28adca0046fad9f1d3d4b3a57046f9a1d11ee2ed232bbc495d2ab663bd0",
+  constitutionDigest: "sha256:51efdb78c4524780919649f285862543db8b38a6a3a07894f0fad8bdab40fc6c",
 });
 
 /** Closed registry: broad learning axes never create an implicit apply right. */

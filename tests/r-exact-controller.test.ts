@@ -1,31 +1,1290 @@
-import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import {
+  createHash,
+  createPublicKey,
+  generateKeyPairSync,
+  sign,
+  type KeyObject,
+} from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { MuninWriteRejectedError, type MuninClient } from "../src/munin-client.js";
-import { createAutonomyProposalReceipt } from "../src/autonomy/proposal-receipts.js";
 import { canonicalizeJcs } from "../src/jcs.js";
-import { applyRExactProposal, recoverRExactAttempt, type FreshAdmission, type RExactConfigTarget, type W0RuntimeGate } from "../src/autonomy/r-exact-controller.js";
-import { verifyW0Authority, w0Digest, W0_CONSTITUTION_DIGEST, W0_JOURNAL_PHASES, R_EXACT_CONFORMANCE, type W0AuthorityBundle } from "../src/autonomy/w0-authority.js";
-const h=(s:string)=>`sha256:${createHash("sha256").update(s).digest("hex")}`; const secret="d".repeat(64);const keys={"hugin-autonomy-proposer":secret};
-class Mem{rows=new Map<string,{content:string;updated_at:string}>();n=0;async read(ns:string,k:string){const x=this.rows.get(`${ns}/${k}`);return x?{...x,namespace:ns,key:k,found:true}:null;}async write(ns:string,k:string,c:string,_t?:string[],expected?:string,_cl?:string,create?:boolean){const id=`${ns}/${k}`,old=this.rows.get(id);if(create&&old)throw new MuninWriteRejectedError(ns,k,{error:"conflict",conflict_reason:"already_exists"});if(expected&&old?.updated_at!==expected)throw new MuninWriteRejectedError(ns,k,{error:"conflict",conflict_reason:"version_mismatch"});this.rows.set(id,{content:c,updated_at:`v${++this.n}`});}view(){return{read:this.read.bind(this),write:this.write.bind(this)} as unknown as MuninClient;}}
-const scope=h("hugin-macro-scope");
-function authority():W0AuthorityBundle{const {publicKey,privateKey}=generateKeyPairSync("ed25519");const recoveryKeys=generateKeyPairSync("ed25519");const pem=publicKey.export({type:"spki",format:"pem"}).toString();const fp=`sha256:${createHash("sha256").update(publicKey.export({type:"spki",format:"der"})).digest("hex")}`;const recoveryPem=recoveryKeys.publicKey.export({type:"spki",format:"pem"}).toString();const recoveryFp=`sha256:${createHash("sha256").update(recoveryKeys.publicKey.export({type:"spki",format:"der"})).digest("hex")}`;const att:any={kind:"autonomy-owner-attestation-registry",schema_version:"v1",registry_id:"owner-attestations",issued_at:"2026-07-26T00:00:00Z",issuer_identity:"hugin-owner",mutation_policy:"owner-controlled-protected-lane",attestations:[{attestation_id:"hugin-macro-att",domain:"macro-routing",target_scope_digest:scope,configuration_owner:"hugin",issued_at:"2026-07-26T00:00:00Z",attestation_digest:h("att")}],extensions:[]};att.registry_digest=w0Digest(att,"registry_digest");const rr:any={kind:"autonomy-recovery-worker-registry",schema_version:"v1",registry_id:"recovery-registry",entries:[{domain:"macro-routing",target_scope_digest:scope,recovery_worker_identity:"hugin-recovery",public_key_pem:recoveryPem,public_key_fingerprint:recoveryFp}],extensions:[]};rr.registry_digest=w0Digest(rr,"registry_digest");const cov:any={kind:"autonomy-coverage-registry",schema_version:"v1",registry_id:"coverage-registry",issued_at:"2026-07-26T00:00:00Z",constitution_digest:W0_CONSTITUTION_DIGEST,mutation_policy:"owner-widen-recovery-worker-narrow",global_state:"armed",domains:[{domain:"macro-routing",required_for_levels:["L5"],owner_scope:"fixed-component",owner:"hugin",recovery_class:"R-exact",coverage:"armed-canary",target_state:"armed-canary",bindings:[{writer_owner:"hugin",configuration_owner:"hugin",owner_authority_ref:"ref:hugin-owner-authority",owner_authority_digest:h("owner-auth"),configuration_owner_authority_ref:"ref:hugin-macro-att",configuration_owner_authority_digest:h("att"),target_scope_digest:scope,state:"armed-canary",identities:{owner:"hugin-owner",controller:"hugin-controller",watchdog:"hugin-watchdog",kill_switch:"hugin-kill-switch",recovery_worker:"hugin-recovery"}}]}],extensions:[]};cov.registry_digest=w0Digest(cov,"registry_digest");const constitution={kind:"autonomy-constitution",schema_version:"v1",constitution_digest:W0_CONSTITUTION_DIGEST};const auth:any={kind:"autonomy-owner-authorization",schema_version:"v1",authorization_id:"owner-authorization",authorization_sequence:1,previous_authorization_digest:null,issued_at:"2026-07-26T00:00:00Z",authority:{key_id:"owner-key",algorithm:"Ed25519",public_key_pem:pem,public_key_fingerprint:fp},bindings:{constitution_digest:W0_CONSTITUTION_DIGEST,coverage_intent_digest:w0Digest(cov,"registry_digest"),owner_attestation_registry_digest:w0Digest(att,"registry_digest"),recovery_worker_registry_digest:w0Digest(rr,"registry_digest")},signature:{algorithm:"Ed25519",value_base64:""}};const unsigned=structuredClone(auth);delete unsigned.signature;auth.signature.value_base64=sign(null,Buffer.from(canonicalizeJcs(unsigned)),privateKey).toString("base64");const ad=w0Digest(auth);const bundle:any={constitution,coverageIntent:cov,ownerAttestations:att,recoveryWorkerRegistry:rr,ownerAuthorization:auth,pinnedOwnerPublicKeyPem:pem,authorizationCheckpoint:{kind:"autonomy-owner-authorization-checkpoint",schema_version:"v1",authorization_digest:ad,minimum_sequence:1},runtimeNarrowing:{kind:"autonomy-runtime-narrowing",schema_version:"v1",ledger_id:"runtime-narrowing",owner_authorization_digest:ad,entries:[],extensions:[]},narrowingCheckpoint:{kind:"autonomy-runtime-narrowing-checkpoint",schema_version:"v1",owner_authorization_digest:ad,ledger_tail_digest:null,minimum_entries:0}};Object.defineProperty(bundle,"_recoveryPrivateKey",{value:recoveryKeys.privateKey});return bundle;}
-class Target implements RExactConfigTarget{id="hugin-orin-macro-routing";owner="hugin" as const;domain="macro-routing" as const;targetScopeDigest=scope;revision="base-1";digest=h("base");partial=false;async read(){return{revision:this.revision,digest:this.digest};}async snapshot(){return{ref:"ref:snapshot-330",digest:h("base")};}async replaceExact(b:{revision:string;digest:string},candidate:string){if(b.digest!==this.digest)throw new Error("cas");this.digest=this.partial?h("partial"):candidate;this.revision="candidate-1";}async restoreExact(s:{ref:string;digest:string}){this.digest=s.digest;this.revision="base-1";}}
-const fresh:FreshAdmission={checkedAt:"2026-07-26T14:00:00Z",trustedWatchdogTime:"2026-07-26T14:00:00Z",killSwitchOff:true,evidenceFresh:true,journalHealthy:true,rateWindowEligible:true,livenessHealthy:true,evidenceDigest:h("evidence"),policyDigest:h("policy"),postconditionsDigest:h("post"),configDigest:h("config"),deadline:"2026-07-26T15:00:00Z",watchDeadline:"2026-07-26T14:00:00Z"};
-function gate(m:Mem,t:Target,a=authority(),override:Partial<FreshAdmission>={}):W0RuntimeGate{return{authority:a,watchdogJournal:m.view(),protectedNow:()=>new Date("2026-07-26T14:00:00Z"),verifyFresh:async()=>({...fresh,...override}),recovery:{identity:"hugin-recovery",journal:m.view(),restoreAndVerify:async(s)=>{t.digest=s.digest;t.revision="base-1";return{restoredDigest:t.digest};},narrowAndVerify:async({binding,journalReceiptDigest})=>{const next=structuredClone(a);const previous=next.runtimeNarrowing.entries.at(-1)?.entry_digest??null;const digestInput:any={sequence:next.runtimeNarrowing.entries.length+1,recorded_at:"2026-07-26T14:00:00Z",domain:binding.domain,target_scope_digest:binding.targetScopeDigest,from_state:binding.state,to_state:"shadow",recovery_worker_identity:binding.identities.recovery_worker,journal_receipt_digest:journalReceiptDigest,previous_entry_digest:previous};const entry:any={...digestInput,entry_digest:w0Digest(digestInput),signature:{algorithm:"Ed25519",value_base64:""}};const unsigned=structuredClone(entry);delete unsigned.signature;entry.signature.value_base64=sign(null,Buffer.from(canonicalizeJcs(unsigned)),(a as any)._recoveryPrivateKey).toString("base64");next.runtimeNarrowing.entries.push(entry);next.narrowingCheckpoint.minimum_entries=next.runtimeNarrowing.entries.length;next.narrowingCheckpoint.ledger_tail_digest=entry.entry_digest;return next;}}};}
-function receipt(targetId="hugin-orin-macro-routing"){return createAutonomyProposalReceipt({proposalId:"proposal-330-a",experimentRef:"ref:experiment-330",evidenceFingerprints:[h("e")],targetId,base:{revision:"base-1",digest:h("base")},candidateContentDigest:h("candidate"),expiresAt:"2026-07-26T15:00:00Z",signerKeyId:"hugin-autonomy-proposer"},secret);}
-const now=()=>new Date("2026-07-26T14:00:00Z");
-describe("W0.1 R-exact controller",()=>{
- it("exports the exact shared phase vocabulary",()=>{expect(R_EXACT_CONFORMANCE.phases).toEqual(W0_JOURNAL_PHASES);});
- it("runs prepare/apply/verify/watch/commit with five owner-bound identities",async()=>{const m=new Mem(),t=new Target();const result=await applyRExactProposal(m.view(),receipt(),keys,t,gate(m,t));expect(result.status).toBe("committed");expect(result.journal.entries.map(e=>e.phase)).toEqual(["prepare","apply","verify","watch","commit"]);expect(new Set([result.journal.binding.owner_identity,result.journal.binding.controller_identity,result.journal.binding.watchdog_identity,result.journal.binding.kill_switch_identity,result.journal.binding.recovery_worker_identity]).size).toBe(5);expect(JSON.stringify(result.journal)).not.toContain("candidateContent");});
- it("reverts a partial write and durably narrows the exact binding",async()=>{const m=new Mem(),t=new Target();t.partial=true;const result=await applyRExactProposal(m.view(),receipt(),keys,t,gate(m,t));expect(result.status).toBe("disarmed");expect(result.journal.entries.slice(-3).map(e=>e.phase)).toEqual(["unknown","revert","disarm"]);expect(result.journal.entries.at(-1)?.coverage_transition).toMatchObject({to_state:"shadow",target_scope_digest:scope,actor_identity:"hugin-recovery"});expect(t.digest).toBe(h("base"));});
- it("rejects adversarial re-digested coverage because owner signature binds the original digest",()=>{const a=authority();a.coverageIntent.domains[0].bindings[0].writer_owner="gille-inference";a.coverageIntent.registry_digest=w0Digest(a.coverageIntent,"registry_digest");expect(()=>verifyW0Authority(a,"macro-routing",scope)).toThrow("authorization-bindings");});
- it("rejects a controller-forged runtime narrowing entry",()=>{const a=authority();const unsigned:any={sequence:1,recorded_at:"2026-07-26T14:00:00Z",domain:"macro-routing",target_scope_digest:scope,from_state:"armed-canary",to_state:"shadow",recovery_worker_identity:"hugin-recovery",journal_receipt_digest:h("journal"),previous_entry_digest:null};const entry:any={...unsigned,entry_digest:w0Digest(unsigned),signature:{algorithm:"Ed25519",value_base64:"AA=="}};a.runtimeNarrowing.entries=[entry];a.narrowingCheckpoint.minimum_entries=1;a.narrowingCheckpoint.ledger_tail_digest=entry.entry_digest;expect(()=>verifyW0Authority(a,"macro-routing",scope)).toThrow("narrowing-signature");});
- it("rejects invalid owner signature, dynamic gate failure, and cross-owner target before mutation",async()=>{const bad=authority();bad.ownerAuthorization.signature.value_base64=Buffer.from("bad").toString("base64");expect(()=>verifyW0Authority(bad,"macro-routing",scope)).toThrow("owner-signature");const m=new Mem(),t=new Target();await expect(applyRExactProposal(m.view(),receipt(),keys,t,gate(m,t,authority(),{killSwitchOff:false}))).rejects.toThrow("gate-refused");await expect(applyRExactProposal(m.view(),receipt("gille-micro-routing"),keys,t,gate(m,t))).rejects.toThrow();expect(t.digest).toBe(h("base"));});
- it("refuses controller impersonation and a backdated trusted clock",async()=>{const m=new Mem(),t=new Target(),g=gate(m,t);g.recovery.identity="hugin-controller";await expect(applyRExactProposal(m.view(),receipt(),keys,t,g)).rejects.toThrow("recovery-worker-identity");const stale=gate(m,t,authority(),{checkedAt:"2026-07-26T13:00:00Z",trustedWatchdogTime:"2026-07-26T13:00:00Z"});await expect(applyRExactProposal(m.view(),receipt(),keys,t,stale)).rejects.toThrow("stale-protected-clock");});
- it("recovers and disarms when the kill switch changes before commit",async()=>{const m=new Mem(),t=new Target(),g=gate(m,t);let calls=0;g.verifyFresh=async(phase)=>({...fresh,killSwitchOff:phase==="commit"?false:++calls>0});const result=await applyRExactProposal(m.view(),receipt(),keys,t,g);expect(result.status).toBe("disarmed");expect(result.journal.entries.slice(-3).map(e=>e.phase)).toEqual(["unknown","revert","disarm"]);expect(t.digest).toBe(h("base"));});
- it("keeps controller, watchdog, and recovery journal capabilities separate",async()=>{const m=new Mem(),t=new Target(),g=gate(m,t),shared=m.view();g.watchdogJournal=shared;g.recovery.journal=shared;await expect(applyRExactProposal(shared,receipt(),keys,t,g)).rejects.toThrow("writer-separation");expect(t.digest).toBe(h("base"));});
- it("resumes safely from a durable prepare record before mutation",async()=>{const m=new Mem(),t=new Target(),g=gate(m,t);await expect(applyRExactProposal(m.view(),receipt(),keys,t,g,{onPhase:(phase)=>{if(phase==="snapshot")throw new Error("crash-after-prepare");}})).rejects.toThrow("crash-after-prepare");expect(t.digest).toBe(h("base"));const resumed=await recoverRExactAttempt(m.view(),"proposal-330-a",t,g);expect(resumed.status).toBe("disarmed");expect(resumed.journal.entries.map(e=>e.phase)).toEqual(["prepare","unknown","revert","disarm"]);});
- it("reconciles restore-before-receipt after a recovery-worker crash",async()=>{const m=new Mem(),t=new Target();t.partial=true;const g=gate(m,t);const original=g.recovery.restoreAndVerify;g.recovery.restoreAndVerify=async(s)=>{await original(s);throw new Error("worker-crash-after-restore");};await expect(applyRExactProposal(m.view(),receipt(),keys,t,g)).rejects.toThrow("worker-crash");expect(t.digest).toBe(h("base"));const resumed=await recoverRExactAttempt(m.view(),"proposal-330-a",t,gate(m,t));expect(resumed.status).toBe("disarmed");expect(resumed.journal.entries.slice(-2).map(e=>e.phase)).toEqual(["revert","disarm"]);});
- it("routes a repeated apply call into recovery when the target no longer matches the proposal base",async()=>{const m=new Mem(),t=new Target();t.partial=true;const g=gate(m,t);g.recovery.restoreAndVerify=async()=>{throw new Error("worker-offline");};await expect(applyRExactProposal(m.view(),receipt(),keys,t,g)).rejects.toThrow("worker-offline");expect(t.digest).toBe(h("partial"));const resumed=await applyRExactProposal(m.view(),receipt(),keys,t,gate(m,t));expect(resumed.status).toBe("disarmed");expect(t.digest).toBe(h("base"));});
- it("reconciles a signed narrowing append that crashed before the disarm receipt",async()=>{const m=new Mem(),t=new Target();t.partial=true;const g=gate(m,t);const original=g.recovery.narrowAndVerify;g.recovery.narrowAndVerify=async(input)=>{const narrowed=await original(input);Object.assign(g.authority,narrowed);throw new Error("worker-crash-after-narrowing");};await expect(applyRExactProposal(m.view(),receipt(),keys,t,g)).rejects.toThrow("worker-crash-after-narrowing");g.recovery.narrowAndVerify=async()=>{throw new Error("must-not-narrow-twice");};const resumed=await recoverRExactAttempt(m.view(),"proposal-330-a",t,g);expect(resumed.status).toBe("disarmed");expect(resumed.journal.entries.slice(-2).map(e=>e.phase)).toEqual(["revert","disarm"]);});
+import {
+  canonicalAutonomyProposalDigest,
+  createAutonomyProposalReceipt,
+  signAutonomyProposalReceipt,
+  type AutonomyProposalReceipt,
+} from "../src/autonomy/proposal-receipts.js";
+import {
+  applyRExactProposal,
+  buildJournalEntry,
+  recoverRExactAttempt,
+  validateRExactJournal,
+  type FreshAdmission,
+  type JournalRole,
+  type PreparedAttempt,
+  type RExactAttemptClaims,
+  type RExactConfigTarget,
+  type RExactControllerService,
+  type RExactJournal,
+  type RExactJournalReader,
+  type RExactRoleService,
+  type RoleWriteReceipt,
+  type RoleWriteResult,
+  type W0RuntimeGate,
+} from "../src/autonomy/r-exact-controller.js";
+import { roleForPhase } from "../src/autonomy/r-exact-journal.js";
+import {
+  R_EXACT_CONFORMANCE,
+  verifyW0Authority,
+  W0_CONSTITUTION_DIGEST,
+  W0_JOURNAL_PHASES,
+  w0Digest,
+  type W0AuthorityBundle,
+} from "../src/autonomy/w0-authority.js";
+
+const h = (value: string): string =>
+  `sha256:${createHash("sha256").update(value).digest("hex")}`;
+const secret = "d".repeat(64);
+const keys = { "hugin-autonomy-proposer": secret };
+const scope = h("hugin-macro-scope");
+const fixedNow = "2026-07-26T14:00:00Z";
+const constitutionFixture = JSON.parse(readFileSync(
+  new URL(
+    "./fixtures/autonomy-contract/w0.1-constitution.json",
+    import.meta.url,
+  ),
+  "utf8",
+));
+const rolePhaseFixture = JSON.parse(readFileSync(
+  new URL(
+    "./fixtures/autonomy-contract/w0.1-role-phase-map.json",
+    import.meta.url,
+  ),
+  "utf8",
+));
+
+function authority(): W0AuthorityBundle {
+  const ownerKeys = generateKeyPairSync("ed25519");
+  const recoveryKeys = generateKeyPairSync("ed25519");
+  const ownerPem = ownerKeys.publicKey
+    .export({ type: "spki", format: "pem" })
+    .toString();
+  const recoveryPem = recoveryKeys.publicKey
+    .export({ type: "spki", format: "pem" })
+    .toString();
+  const fingerprint = (key: KeyObject): string =>
+    `sha256:${createHash("sha256")
+      .update(key.export({ type: "spki", format: "der" }))
+      .digest("hex")}`;
+  const fixedTargets = [
+    ["micro-routing", "gille", "gille-inference", h("micro-scope")],
+    ["macro-routing", "hugin-macro", "hugin", scope],
+    ["served-model-roster", "roster", "gille-inference", h("roster-scope")],
+    [
+      "no-reboot-security-bugfix-maintenance",
+      "maintenance",
+      "brokkr",
+      h("maintenance-scope"),
+    ],
+  ] as const;
+  const attestationRows = fixedTargets.map(
+    ([domain, prefix, configurationOwner, targetScope]) => {
+      const row: any = {
+        attestation_id: `${prefix}-attestation`,
+        domain,
+        target_scope_digest: targetScope,
+        configuration_owner: configurationOwner,
+        issued_at: "2026-07-26T00:00:00Z",
+        attestation_digest: h("placeholder"),
+      };
+      row.attestation_digest = w0Digest(row, "attestation_digest");
+      return row;
+    },
+  );
+  const attestations: any = {
+    kind: "autonomy-owner-attestation-registry",
+    schema_version: "v1",
+    registry_id: "owner-attestations",
+    issued_at: "2026-07-26T00:00:00Z",
+    issuer_identity: "grimnir-owner",
+    mutation_policy: "owner-controlled-protected-lane",
+    attestations: attestationRows,
+    extensions: [],
+  };
+  attestations.registry_digest = w0Digest(
+    attestations,
+    "registry_digest",
+  );
+  const recoveryRegistry: any = {
+    kind: "autonomy-recovery-worker-registry",
+    schema_version: "v1",
+    registry_id: "recovery-registry",
+    entries: [
+      {
+        domain: "macro-routing",
+        target_scope_digest: scope,
+        recovery_worker_identity: "hugin-recovery",
+        public_key_pem: recoveryPem,
+        public_key_fingerprint: fingerprint(recoveryKeys.publicKey),
+      },
+    ],
+    extensions: [],
+  };
+  recoveryRegistry.registry_digest = w0Digest(
+    recoveryRegistry,
+    "registry_digest",
+  );
+  const fixedRows = fixedTargets.map(
+    ([domain, prefix, owner, targetScope]) => {
+      const attestation = attestationRows.find(
+        (row: any) => row.domain === domain,
+      );
+      const identities = domain === "macro-routing"
+        ? {
+          owner: "hugin-owner",
+          controller: "hugin-controller",
+          watchdog: "hugin-watchdog",
+          kill_switch: "hugin-kill-switch",
+          recovery_worker: "hugin-recovery",
+        }
+        : {
+          owner: `${prefix}-owner`,
+          controller: `${prefix}-controller`,
+          watchdog: `${prefix}-watchdog`,
+          kill_switch: `${prefix}-kill-switch`,
+          recovery_worker: `${prefix}-recovery`,
+        };
+      return {
+        domain,
+        required_for_levels: domain === "micro-routing"
+          ? ["L4", "L5"]
+          : domain === "no-reboot-security-bugfix-maintenance"
+            ? ["L4"]
+            : ["L5"],
+        owner_scope: "fixed-component",
+        owner,
+        recovery_class: domain === "no-reboot-security-bugfix-maintenance"
+          ? "R-forward"
+          : "R-exact",
+        coverage: domain === "macro-routing" ? "armed-canary" : "shadow",
+        target_state: "armed-canary",
+        bindings: [{
+          writer_owner: owner,
+          owner_authority_ref: `ref:${prefix}-owner-authority`,
+          owner_authority_digest: h(`${prefix}-owner-authority`),
+          configuration_owner: owner,
+          configuration_owner_authority_ref:
+            `ref:${attestation.attestation_id}`,
+          configuration_owner_authority_digest:
+            attestation.attestation_digest,
+          target_scope_digest: targetScope,
+          state: domain === "macro-routing" ? "armed-canary" : "shadow",
+          identities,
+        }],
+      };
+    },
+  );
+  const owningRows = ["prompt", "harness", "tool-policy"].map((domain) => ({
+    domain,
+    required_for_levels: ["L5"],
+    owner_scope: "owning-component",
+    owner: "owning-component",
+    recovery_class: "R-exact",
+    coverage: "shadow",
+    target_state: "armed-canary",
+    bindings: [],
+  }));
+  const protectedRows = [
+    "credentials-and-auth",
+    "owner-policy",
+    "constitution-and-safety-gates",
+    "deployments-and-code",
+    "privacy-retention-and-erasure",
+    "firmware",
+    "remote-recovery",
+    "model-weight-training",
+    "irreversible-external-actions",
+    "package-downgrade",
+  ].map((domain) => ({
+    domain,
+    required_for_levels: ["permanent"],
+    owner_scope: "owner-only",
+    owner: "owner",
+    recovery_class: "none",
+    coverage: "protected",
+    target_state: "never-mechanical",
+    bindings: [],
+  }));
+  const coverage: any = {
+    kind: "autonomy-coverage-registry",
+    schema_version: "v1",
+    registry_id: "coverage-registry",
+    issued_at: "2026-07-26T00:00:00Z",
+    constitution_digest: W0_CONSTITUTION_DIGEST,
+    mutation_policy: "owner-widen-recovery-worker-narrow",
+    global_state: "armed",
+    domains: [...fixedRows, ...owningRows, ...protectedRows],
+    extensions: [],
+  };
+  coverage.registry_digest = w0Digest(coverage, "registry_digest");
+  const constitution = structuredClone(constitutionFixture);
+  const authorization: any = {
+    kind: "autonomy-owner-authorization",
+    schema_version: "v1",
+    authorization_id: "owner-authorization",
+    authorization_sequence: 1,
+    previous_authorization_digest: null,
+    issued_at: "2026-07-26T00:00:00Z",
+    authority: {
+      key_id: "owner-key",
+      algorithm: "Ed25519",
+      public_key_pem: ownerPem,
+      public_key_fingerprint: fingerprint(ownerKeys.publicKey),
+    },
+    bindings: {
+      constitution_digest: W0_CONSTITUTION_DIGEST,
+      coverage_intent_digest: coverage.registry_digest,
+      owner_attestation_registry_digest: attestations.registry_digest,
+      recovery_worker_registry_digest: recoveryRegistry.registry_digest,
+    },
+    signature: { algorithm: "Ed25519", value_base64: "" },
+  };
+  const unsigned = structuredClone(authorization);
+  delete unsigned.signature;
+  authorization.signature.value_base64 = sign(
+    null,
+    Buffer.from(canonicalizeJcs(unsigned)),
+    ownerKeys.privateKey,
+  ).toString("base64");
+  const authorizationDigest = w0Digest(authorization);
+  const bundle: any = {
+    constitution,
+    coverageIntent: coverage,
+    ownerAttestations: attestations,
+    recoveryWorkerRegistry: recoveryRegistry,
+    ownerAuthorization: authorization,
+    pinnedOwnerPublicKeyPem: ownerPem,
+    authorizationCheckpoint: {
+      kind: "autonomy-owner-authorization-checkpoint",
+      schema_version: "v1",
+      authorization_digest: authorizationDigest,
+      minimum_sequence: 1,
+    },
+    runtimeNarrowing: {
+      kind: "autonomy-runtime-narrowing",
+      schema_version: "v1",
+      ledger_id: "runtime-narrowing",
+      owner_authorization_digest: authorizationDigest,
+      entries: [],
+      extensions: [],
+    },
+    narrowingCheckpoint: {
+      kind: "autonomy-runtime-narrowing-checkpoint",
+      schema_version: "v1",
+      owner_authorization_digest: authorizationDigest,
+      ledger_tail_digest: null,
+      minimum_entries: 0,
+    },
+  };
+  Object.defineProperty(bundle, "_recoveryPrivateKey", {
+    value: recoveryKeys.privateKey,
+  });
+  Object.defineProperty(bundle, "_ownerPrivateKey", {
+    value: ownerKeys.privateKey,
+  });
+  return bundle;
+}
+
+function resignOwnerBundle(bundle: W0AuthorityBundle): void {
+  const authorization = bundle.ownerAuthorization;
+  const unsigned = structuredClone(authorization);
+  delete unsigned.signature;
+  authorization.signature.value_base64 = sign(
+    null,
+    Buffer.from(canonicalizeJcs(unsigned)),
+    (bundle as any)._ownerPrivateKey,
+  ).toString("base64");
+  const authorizationDigest = w0Digest(authorization);
+  bundle.authorizationCheckpoint.authorization_digest = authorizationDigest;
+  bundle.runtimeNarrowing.owner_authorization_digest = authorizationDigest;
+  bundle.narrowingCheckpoint.owner_authorization_digest =
+    authorizationDigest;
+}
+
+class Target implements RExactConfigTarget {
+  id = "hugin-orin-macro-routing";
+  owner = "hugin" as const;
+  domain = "macro-routing" as const;
+  targetScopeDigest = scope;
+  revision = "base-1";
+  digest = h("base");
+  partial = false;
+  beforeReplace?: () => Promise<void>;
+
+  async read() {
+    return { revision: this.revision, digest: this.digest };
+  }
+
+  async snapshot() {
+    return { ref: "ref:snapshot-330", digest: h("base") };
+  }
+
+  async replaceExact(
+    expected: { revision: string; digest: string },
+    candidate: string,
+  ) {
+    await this.beforeReplace?.();
+    if (
+      expected.revision !== this.revision
+      || expected.digest !== this.digest
+    ) {
+      throw new Error("cas");
+    }
+    this.digest = this.partial ? h("partial") : candidate;
+    this.revision = "candidate-1";
+  }
+}
+
+class Claims implements RExactAttemptClaims {
+  claimCalls = 0;
+  rows = new Map<string, {
+    attemptId: string;
+    proposalDigest: string;
+    terminal?: string;
+  }>();
+
+  async claim(key: string, attemptId: string, proposalDigest: string) {
+    this.claimCalls += 1;
+    const row = this.rows.get(key);
+    if (!row || row.terminal) {
+      this.rows.set(key, { attemptId, proposalDigest });
+      return "acquired" as const;
+    }
+    return row.attemptId === attemptId
+      && row.proposalDigest === proposalDigest
+      ? "same" as const
+      : "busy" as const;
+  }
+
+  async assertHeld(
+    key: string,
+    attemptId: string,
+    proposalDigest: string,
+  ) {
+    const row = this.rows.get(key);
+    return row?.attemptId === attemptId
+      && row.proposalDigest === proposalDigest;
+  }
+
+  async terminalize(
+    key: string,
+    attemptId: string,
+    terminalReceiptDigest: string,
+  ) {
+    const row = this.rows.get(key);
+    if (!row || row.attemptId !== attemptId) throw new Error("claim-lost");
+    row.terminal = terminalReceiptDigest;
+  }
+}
+
+class JournalBackend implements RExactJournalReader {
+  rows = new Map<string, RoleWriteResult>();
+  claims = new Claims();
+  services: Record<JournalRole, RExactRoleService>
+    & { controller: RExactControllerService };
+
+  constructor() {
+    this.services = Object.fromEntries(
+      ([
+        ["controller", "hugin-controller"],
+        ["watchdog", "hugin-watchdog"],
+        ["recovery-worker", "hugin-recovery"],
+      ] as const).map(([role, identity]) => {
+        const pair = generateKeyPairSync("ed25519");
+        const publicKeyPem = pair.publicKey
+          .export({ type: "spki", format: "pem" })
+          .toString();
+        const service: any = {
+          role,
+          identity,
+          publicKeyPem,
+          createAndClaim: async (
+            proposalId: string,
+            journal: RExactJournal,
+            prepared: PreparedAttempt,
+            claim: {
+              targetKey: string;
+              attemptId: string;
+              proposalReceiptDigest: string;
+            },
+          ) => {
+            if (role !== "controller") throw new Error("role-create");
+            const claimStatus = await this.claims.claim(
+              claim.targetKey,
+              claim.attemptId,
+              claim.proposalReceiptDigest,
+            );
+            if (claimStatus === "busy") return { status: "busy" as const };
+            if (this.rows.has(proposalId)) throw new Error("create-conflict");
+            const result = this.result(
+              role,
+              identity,
+              pair.privateKey,
+              "create",
+              journal,
+              prepared,
+              null,
+            );
+            this.rows.set(proposalId, structuredClone(result));
+            return {
+              status: "prepared" as const,
+              write: structuredClone(result),
+            };
+          },
+          append: async (proposalId, expected, entry) => {
+            const stored = this.rows.get(proposalId);
+            if (!stored) throw new Error("missing");
+            if (
+              stored.journal.entries.at(-1)?.receipt_digest !== expected
+            ) {
+              throw new Error("cas-conflict");
+            }
+            const expectedRole = entry.phase === "unknown"
+              ? "watchdog"
+              : ["revert", "disarm", "terminally-blocked"].includes(entry.phase)
+                ? "recovery-worker"
+                : "controller";
+            if (
+              role !== expectedRole
+              || identity !== entry.executor_identity
+            ) {
+              throw new Error("role-refused");
+            }
+            const journal = {
+              ...stored.journal,
+              entries: [...stored.journal.entries, entry],
+            };
+            validateRExactJournal(journal);
+            const result = this.result(
+              role,
+              identity,
+              pair.privateKey,
+              "append",
+              journal,
+              stored.prepared,
+              expected,
+            );
+            this.rows.set(proposalId, structuredClone(result));
+            return structuredClone(result);
+          },
+        };
+        return [role, service];
+      }),
+    ) as Record<JournalRole, RExactRoleService>
+      & { controller: RExactControllerService };
+  }
+
+  async read(proposalId: string) {
+    const row = this.rows.get(proposalId);
+    return row ? structuredClone(row) : null;
+  }
+
+  private result(
+    role: JournalRole,
+    identity: string,
+    privateKey: KeyObject,
+    action: "create" | "append",
+    journal: RExactJournal,
+    prepared: PreparedAttempt,
+    previous: string | null,
+  ): RoleWriteResult {
+    const unsigned = {
+      kind: "hugin-r-exact-role-write-receipt" as const,
+      schema_version: "v1" as const,
+      role,
+      identity,
+      action,
+      journal_id: journal.journal_id,
+      binding_digest: journal.binding_digest,
+      previous_receipt_digest: previous,
+      resulting_receipt_digest: journal.entries.at(-1)!.receipt_digest,
+      recorded_at: journal.entries.at(-1)!.recorded_at,
+    };
+    const receipt: RoleWriteReceipt = {
+      ...unsigned,
+      signature: {
+        algorithm: "Ed25519",
+        value_base64: sign(
+          null,
+          Buffer.from(canonicalizeJcs(unsigned)),
+          privateKey,
+        ).toString("base64"),
+      },
+    };
+    return { journal, prepared, receipt };
+  }
+}
+
+function proposal(proposalId = "proposal-330-a") {
+  return createAutonomyProposalReceipt({
+    proposalId,
+    experimentRef: "ref:experiment-330",
+    evidenceFingerprints: [h("e")],
+    targetId: "hugin-orin-macro-routing",
+    base: { revision: "base-1", digest: h("base") },
+    candidateContentDigest: h("candidate"),
+    expiresAt: "2026-07-26T15:00:00Z",
+    signerKeyId: "hugin-autonomy-proposer",
+  }, secret);
+}
+
+function proofFor(
+  receipt: AutonomyProposalReceipt,
+  override: Partial<FreshAdmission> = {},
+): FreshAdmission {
+  return {
+    checkedAt: fixedNow,
+    trustedWatchdogTime: fixedNow,
+    killSwitchOff: true,
+    evidenceFresh: true,
+    journalHealthy: true,
+    rateWindowEligible: true,
+    livenessHealthy: true,
+    proposalDigest: receipt.canonicalProposalDigest,
+    targetScopeDigest: scope,
+    baseRevision: receipt.base.revision,
+    baseDigest: receipt.base.digest,
+    candidateDigest: receipt.candidateContentDigest,
+    evidenceFingerprintsDigest: w0Digest(receipt.evidenceFingerprints),
+    evidenceDigest: h("evidence"),
+    policyDigest: h("policy"),
+    postconditionsDigest: h("post"),
+    configDigest: h("config"),
+    deadline: "2026-07-26T15:00:00Z",
+    watchDeadline: fixedNow,
+    ...override,
+  };
+}
+
+function gate(
+  backend: JournalBackend,
+  target: Target,
+  receipt = proposal(),
+  bundle = authority(),
+  override: Partial<FreshAdmission> = {},
+): W0RuntimeGate {
+  const rolePinEntries = Object.values(backend.services).map((service) => {
+    const publicKey = createHash("sha256")
+      .update(
+        createPublicKey(service.publicKeyPem)
+          .export({ type: "spki", format: "der" }),
+      )
+      .digest("hex");
+    return {
+      role: service.role,
+      identity: service.identity,
+      public_key_fingerprint: `sha256:${publicKey}`,
+    };
+  });
+  const pinsBase = {
+    kind: "hugin-r-exact-role-service-pins" as const,
+    schema_version: "v1" as const,
+    owner_authorization_digest: w0Digest(bundle.ownerAuthorization),
+    entries: rolePinEntries,
+  };
+  const roleServicePins: any = {
+    ...pinsBase,
+    pins_digest: w0Digest(pinsBase),
+    signature: { algorithm: "Ed25519", value_base64: "" },
+  };
+  roleServicePins.signature.value_base64 = sign(
+    null,
+    Buffer.from(canonicalizeJcs({
+      ...pinsBase,
+      pins_digest: roleServicePins.pins_digest,
+    })),
+    (bundle as any)._ownerPrivateKey,
+  ).toString("base64");
+  const runtime: W0RuntimeGate = {
+    authority: bundle,
+    roleServicePins,
+    reader: backend,
+    controller: backend.services.controller,
+    watchdog: backend.services.watchdog,
+    recoveryJournal: backend.services["recovery-worker"],
+    claims: backend.claims,
+    protectedNow: () => new Date(fixedNow),
+    verifyFresh: async () => proofFor(receipt, override),
+    verifyRecovery: async (_prepared, current) => ({
+      checkedAt: fixedNow,
+      trustedWatchdogTime: fixedNow,
+      killSwitchIdentity: current.identities.kill_switch,
+      killSwitchStateDigest: h("kill-switch-off"),
+      journalHealthy: true,
+    }),
+    recovery: {
+      restoreAndVerify: async (input) => {
+        target.digest = input.snapshotDigest;
+        target.revision = input.baseRevision;
+        return {
+          restoredRevision: target.revision,
+          restoredDigest: target.digest,
+        };
+      },
+      narrowAndVerify: async ({ binding, journalReceiptDigest }) => {
+        const next = structuredClone(runtime.authority);
+        const previous =
+          next.runtimeNarrowing.entries.at(-1)?.entry_digest ?? null;
+        const digestInput: any = {
+          sequence: next.runtimeNarrowing.entries.length + 1,
+          recorded_at: fixedNow,
+          domain: binding.domain,
+          target_scope_digest: binding.targetScopeDigest,
+          from_state: binding.state,
+          to_state: "shadow",
+          recovery_worker_identity: binding.identities.recovery_worker,
+          journal_receipt_digest: journalReceiptDigest,
+          previous_entry_digest: previous,
+        };
+        const entry: any = {
+          ...digestInput,
+          entry_digest: w0Digest(digestInput),
+          signature: { algorithm: "Ed25519", value_base64: "" },
+        };
+        const unsigned = structuredClone(entry);
+        delete unsigned.signature;
+        entry.signature.value_base64 = sign(
+          null,
+          Buffer.from(canonicalizeJcs(unsigned)),
+          (runtime.authority as any)._recoveryPrivateKey,
+        ).toString("base64");
+        next.runtimeNarrowing.entries.push(entry);
+        next.narrowingCheckpoint.minimum_entries =
+          next.runtimeNarrowing.entries.length;
+        next.narrowingCheckpoint.ledger_tail_digest = entry.entry_digest;
+        return next;
+      },
+    },
+  };
+  return runtime;
+}
+
+describe("W0.1 R-exact controller", () => {
+  it("exports the exact shared phase vocabulary and proposal epoch", () => {
+    expect(R_EXACT_CONFORMANCE.phases).toEqual(W0_JOURNAL_PHASES);
+    expect(proposal().policyEpoch.constitutionDigest)
+      .toBe(W0_CONSTITUTION_DIGEST);
+    for (const [role, phases] of Object.entries(rolePhaseFixture)) {
+      if (role === "constitution_digest") continue;
+      for (const phase of phases as any[]) {
+        expect(roleForPhase(phase)).toBe(role);
+      }
+    }
+  });
+
+  it("rejects an otherwise re-signed legacy constitution epoch", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const current = proposal();
+    const legacy: any = structuredClone(current);
+    legacy.policyEpoch.constitutionDigest =
+      "sha256:76b0f28adca0046fad9f1d3d4b3a57046f9a1d11ee2ed232bbc495d2ab663bd0";
+    delete legacy.signature;
+    delete legacy.canonicalProposalDigest;
+    legacy.canonicalProposalDigest = canonicalAutonomyProposalDigest(legacy);
+    legacy.signature = signAutonomyProposalReceipt(legacy, secret);
+    await expect(
+      applyRExactProposal(legacy, keys, target, gate(backend, target)),
+    ).rejects.toThrow("proposal-invalid-receipt");
+  });
+
+  it("commits through independently authenticated role services", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const result = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      gate(backend, target, receipt),
+    );
+    expect(result.status).toBe("committed");
+    expect(result.journal.entries.map((entry) => entry.phase)).toEqual([
+      "prepare",
+      "apply",
+      "verify",
+      "watch",
+      "commit",
+    ]);
+    validateRExactJournal(result.journal, false);
+  });
+
+  it("binds fresh admission exactly to proposal, base, candidate, and evidence", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    await expect(
+      applyRExactProposal(
+        receipt,
+        keys,
+        target,
+        gate(backend, target, receipt, authority(), {
+          candidateDigest: h("other"),
+        }),
+      ),
+    ).rejects.toThrow("admission-subject-mismatch");
+    expect(target.digest).toBe(h("base"));
+  });
+
+  it("rejects later admission drift before apply", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    let calls = 0;
+    runtime.verifyFresh = async () =>
+      proofFor(receipt, calls++ ? { policyDigest: h("changed") } : {});
+    const result = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      runtime,
+    );
+    expect(result.status).toBe("disarmed");
+    expect(target.digest).toBe(h("base"));
+  });
+
+  it("restores from immutable prepared authority after owner rotation", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    const rotated = authority();
+    const result = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      runtime,
+      {
+        onPhase: (phase) => {
+          if (phase === "snapshot") runtime.authority = rotated;
+        },
+      },
+    );
+    expect(result.status).toBe("disarmed");
+    expect(target.digest).toBe(h("base"));
+  });
+
+  it("rejects key reuse across role services", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    runtime.watchdog.publicKeyPem = runtime.controller.publicKeyPem;
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("role-service-key-reuse");
+  });
+
+  it("rejects controller-side substitution of owner-pinned role keys", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    runtime.roleServicePins.entries[0].public_key_fingerprint = h("forged");
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("role-service-pins-signature");
+    expect(Object.keys(runtime.recovery)).not.toContain("privateKey");
+    expect(Object.keys(runtime.recoveryJournal)).not.toContain("privateKey");
+  });
+
+  it("rejects a role key swapped while an authenticated write is in flight", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    const attacker = generateKeyPairSync("ed25519");
+    const originalCreate = runtime.controller.createAndClaim
+      .bind(runtime.controller);
+    runtime.controller.createAndClaim = async (...args) => {
+      const result = await originalCreate(...args);
+      if (result.status === "busy") return result;
+      runtime.controller.publicKeyPem = attacker.publicKey
+        .export({ type: "spki", format: "pem" })
+        .toString();
+      const unsigned = structuredClone(result.write.receipt);
+      delete (unsigned as Partial<RoleWriteReceipt>).signature;
+      result.write.receipt.signature.value_base64 = sign(
+        null,
+        Buffer.from(canonicalizeJcs(unsigned)),
+        attacker.privateKey,
+      ).toString("base64");
+      return result;
+    };
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("role-service");
+    expect(target.digest).toBe(h("base"));
+  });
+
+  it("rejects a role identity swapped while an authenticated write is in flight", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    const originalCreate = runtime.controller.createAndClaim
+      .bind(runtime.controller);
+    runtime.controller.createAndClaim = async (...args) => {
+      const result = await originalCreate(...args);
+      if (result.status === "busy") return result;
+      runtime.controller.identity = "substituted-controller";
+      return result;
+    };
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("role-service");
+    expect(target.digest).toBe(h("base"));
+  });
+
+  it("leaves no claim or journal on snapshot or atomic prepare failure", async () => {
+    const snapshotBackend = new JournalBackend();
+    const snapshotTarget = new Target();
+    const snapshotReceipt = proposal();
+    const snapshotRuntime = gate(
+      snapshotBackend,
+      snapshotTarget,
+      snapshotReceipt,
+    );
+    const snapshotClaims = snapshotRuntime.claims as Claims;
+    snapshotTarget.snapshot = async () => {
+      throw new Error("snapshot-offline");
+    };
+    await expect(
+      applyRExactProposal(
+        snapshotReceipt,
+        keys,
+        snapshotTarget,
+        snapshotRuntime,
+      ),
+    ).rejects.toThrow("snapshot-offline");
+    expect(snapshotClaims.claimCalls).toBe(0);
+    expect(await snapshotBackend.read(snapshotReceipt.proposalId)).toBeNull();
+
+    const createBackend = new JournalBackend();
+    const createTarget = new Target();
+    const createReceipt = proposal();
+    const createRuntime = gate(createBackend, createTarget, createReceipt);
+    const createClaims = createRuntime.claims as Claims;
+    createRuntime.controller.createAndClaim = async () => {
+      throw new Error("prepare-create-offline");
+    };
+    await expect(
+      applyRExactProposal(createReceipt, keys, createTarget, createRuntime),
+    ).rejects.toThrow("prepare-create-offline");
+    expect(createClaims.claimCalls).toBe(0);
+    expect(await createBackend.read(createReceipt.proposalId)).toBeNull();
+  });
+
+  it("leaves neither claim nor prepare when atomic acquisition crashes", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    runtime.claims.claim = async () => {
+      throw new Error("claim-service-crash");
+    };
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("claim-service-crash");
+    expect(await backend.read(receipt.proposalId)).toBeNull();
+    expect(target.digest).toBe(h("base"));
+
+    backend.claims = new Claims();
+    runtime.claims = backend.claims;
+    const recovered = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      runtime,
+    );
+    expect(recovered.status).toBe("committed");
+    expect(recovered.journal.entries.at(-1)?.phase).toBe("commit");
+  });
+
+  it("refuses mutation unless atomic prepare is durably readable", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    const original = runtime.controller.createAndClaim
+      .bind(runtime.controller);
+    runtime.controller.createAndClaim = async (...args) => {
+      const result = await original(...args);
+      backend.rows.delete(receipt.proposalId);
+      return result;
+    };
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("atomic-prepare-not-durable");
+    expect(target.digest).toBe(h("base"));
+  });
+
+  it("atomically excludes a concurrent proposal for the same target", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const firstReceipt = proposal("proposal-330-a");
+    const secondReceipt = proposal("proposal-330-b");
+    const claims = new Claims();
+    backend.claims = claims;
+    let release!: () => void;
+    let entered!: () => void;
+    const enteredPromise = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const releasePromise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    target.beforeReplace = async () => {
+      entered();
+      await releasePromise;
+    };
+    const firstGate = gate(backend, target, firstReceipt);
+    firstGate.claims = claims;
+    const first = applyRExactProposal(
+      firstReceipt,
+      keys,
+      target,
+      firstGate,
+    );
+    await enteredPromise;
+    const secondGate = gate(backend, target, secondReceipt);
+    secondGate.claims = claims;
+    await expect(
+      applyRExactProposal(secondReceipt, keys, target, secondGate),
+    ).rejects.toThrow("target-busy");
+    expect(await backend.read(secondReceipt.proposalId)).toBeNull();
+    expect(target.digest).toBe(h("base"));
+    release();
+    expect((await first).status).toBe("committed");
+    expect(target.digest).toBe(h("candidate"));
+  });
+
+  it("rejects a stale role-service CAS append", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime, {
+        onPhase: (phase) => {
+          if (phase === "snapshot") throw new Error("pause-after-create");
+        },
+      }),
+    ).rejects.toThrow("pause-after-create");
+    const stored = (await backend.read(receipt.proposalId))!;
+    const prepareDigest = stored.journal.entries[0].receipt_digest;
+    const entry = buildJournalEntry(
+      stored.journal,
+      "apply",
+      fixedNow,
+      "hugin-controller",
+    );
+    await backend.services.controller.append(
+      receipt.proposalId,
+      prepareDigest,
+      entry,
+    );
+    await expect(
+      backend.services.controller.append(
+        receipt.proposalId,
+        prepareDigest,
+        entry,
+      ),
+    ).rejects.toThrow("cas-conflict");
+  });
+
+  it.each(["mutation", "readback", "terminalization"] as const)(
+    "recovers and demotes after a crash at %s",
+    async (crashPhase) => {
+      const backend = new JournalBackend();
+      const target = new Target();
+      const receipt = proposal();
+      const runtime = gate(backend, target, receipt);
+      const result = await applyRExactProposal(
+        receipt,
+        keys,
+        target,
+        runtime,
+        {
+          onPhase: (phase) => {
+            if (phase === crashPhase) throw new Error(`crash-${phase}`);
+          },
+        },
+      );
+      expect(result.status).toBe("disarmed");
+      expect(target.digest).toBe(h("base"));
+      expect(result.journal.entries.at(-1)?.coverage_transition?.to_state)
+        .toBe("shadow");
+      expect(
+        runtime.authority.runtimeNarrowing.entries[0].journal_receipt_digest,
+      ).toBe(result.journal.entries.at(-1)?.receipt_digest);
+    },
+  );
+
+  it("demotes before terminally-blocked when recovery throws", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    target.partial = true;
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    runtime.recovery.restoreAndVerify = async () => {
+      throw new Error("restore-offline");
+    };
+    const result = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      runtime,
+    );
+    expect(result.status).toBe("terminally-blocked");
+    expect(result.journal.entries.at(-1)?.phase)
+      .toBe("terminally-blocked");
+    expect(result.journal.entries.at(-1)?.coverage_transition?.to_state)
+      .toBe("shadow");
+    expect(runtime.authority.runtimeNarrowing.entries).toHaveLength(1);
+    expect(
+      runtime.authority.runtimeNarrowing.entries[0].journal_receipt_digest,
+    ).toBe(result.journal.entries.at(-1)?.receipt_digest);
+  });
+
+  it("never terminalizes a recovery worker's wrong target/receipt narrowing", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    target.partial = true;
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    const original = runtime.recovery.narrowAndVerify;
+    runtime.recovery.narrowAndVerify = async (input) => {
+      const next = await original(input);
+      const entry = next.runtimeNarrowing.entries.at(-1);
+      entry.journal_receipt_digest = h("wrong-terminal");
+      const digestInput = structuredClone(entry);
+      delete digestInput.entry_digest;
+      delete digestInput.signature;
+      entry.entry_digest = w0Digest(digestInput);
+      const unsigned = structuredClone(entry);
+      delete unsigned.signature;
+      entry.signature.value_base64 = sign(
+        null,
+        Buffer.from(canonicalizeJcs(unsigned)),
+        (runtime.authority as any)._recoveryPrivateKey,
+      ).toString("base64");
+      next.narrowingCheckpoint.ledger_tail_digest = entry.entry_digest;
+      return next;
+    };
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("narrowing-receipt-binding");
+    const stored = (await backend.read(receipt.proposalId))!;
+    expect(["disarm", "terminally-blocked"]).not.toContain(
+      stored.journal.entries.at(-1)?.phase,
+    );
+  });
+
+  it("uses prepared pins to reject a recovery key swap during append", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    target.partial = true;
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    const attacker = generateKeyPairSync("ed25519");
+    const originalAppend = runtime.recoveryJournal.append
+      .bind(runtime.recoveryJournal);
+    runtime.recoveryJournal.append = async (...args) => {
+      const result = await originalAppend(...args);
+      runtime.recoveryJournal.publicKeyPem = attacker.publicKey
+        .export({ type: "spki", format: "pem" })
+        .toString();
+      const unsigned = structuredClone(result.receipt);
+      delete (unsigned as Partial<RoleWriteReceipt>).signature;
+      result.receipt.signature.value_base64 = sign(
+        null,
+        Buffer.from(canonicalizeJcs(unsigned)),
+        attacker.privateKey,
+      ).toString("base64");
+      return result;
+    };
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("role-service");
+    const stored = (await backend.read(receipt.proposalId))!;
+    expect(["disarm", "terminally-blocked"]).not.toContain(
+      stored.journal.entries.at(-1)?.phase,
+    );
+  });
+
+  it("reconciles the exact precomputed disarm after its append fails", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    target.partial = true;
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    const originalAppend = runtime.recoveryJournal.append
+      .bind(runtime.recoveryJournal);
+    let failed = false;
+    runtime.recoveryJournal.append = async (...args) => {
+      if (!failed && args[2].phase === "disarm") {
+        failed = true;
+        throw new Error("disarm-journal-offline");
+      }
+      return originalAppend(...args);
+    };
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("disarm-append-pending");
+    const pending = (await backend.read(receipt.proposalId))!;
+    expect(pending.journal.entries.at(-1)?.phase).toBe("revert");
+    const narrowedReceipt = runtime.authority.runtimeNarrowing.entries.at(-1)
+      ?.journal_receipt_digest;
+    expect(narrowedReceipt).toMatch(/^sha256:/);
+
+    const recovered = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      runtime,
+    );
+    expect(recovered.status).toBe("disarmed");
+    expect(recovered.journal.entries.at(-1)?.receipt_digest)
+      .toBe(narrowedReceipt);
+    expect(runtime.authority.runtimeNarrowing.entries).toHaveLength(1);
+  });
+
+  it("rejects an altered receipt retry before recovery", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime, {
+        onPhase: (phase) => {
+          if (phase === "snapshot") throw new Error("crash-after-prepare");
+        },
+      }),
+    ).rejects.toThrow("crash-after-prepare");
+    const altered: any = structuredClone(receipt);
+    altered.candidateContentDigest = h("altered");
+    delete altered.signature;
+    delete altered.canonicalProposalDigest;
+    altered.canonicalProposalDigest = canonicalAutonomyProposalDigest(altered);
+    altered.signature = signAutonomyProposalReceipt(altered, secret);
+    await expect(
+      applyRExactProposal(altered, keys, target, runtime),
+    ).rejects.toThrow("prepared-attempt-invalid");
+    expect(target.digest).toBe(h("base"));
+  });
+
+  it("returns exact idempotent status for an identical committed retry", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    expect(
+      (await applyRExactProposal(receipt, keys, target, runtime)).status,
+    ).toBe("committed");
+    expect(
+      (await applyRExactProposal(receipt, keys, target, runtime)).status,
+    ).toBe("already-committed");
+    expect(target.digest).toBe(h("candidate"));
+  });
+
+  it("rejects stale base, bad signature, and partial writes", async () => {
+    const staleBackend = new JournalBackend();
+    const staleTarget = new Target();
+    staleTarget.revision = "base-2";
+    await expect(
+      applyRExactProposal(
+        proposal(),
+        keys,
+        staleTarget,
+        gate(staleBackend, staleTarget),
+      ),
+    ).rejects.toThrow("stale-or-mismatched-base");
+
+    const bad = proposal() as any;
+    bad.signature = `${bad.signature.slice(0, -1)}${
+      bad.signature.endsWith("0") ? "1" : "0"
+    }`;
+    const badBackend = new JournalBackend();
+    const badTarget = new Target();
+    await expect(
+      applyRExactProposal(bad, keys, badTarget, gate(badBackend, badTarget)),
+    ).rejects.toThrow("invalid-signature");
+
+    const partialBackend = new JournalBackend();
+    const partialTarget = new Target();
+    partialTarget.partial = true;
+    const partialReceipt = proposal();
+    const partial = await applyRExactProposal(
+      partialReceipt,
+      keys,
+      partialTarget,
+      gate(partialBackend, partialTarget, partialReceipt),
+    );
+    expect(partial.status).toBe("disarmed");
+    expect(partialTarget.digest).toBe(h("base"));
+  });
+
+  it("rejects re-digested coverage and forged narrowing", () => {
+    const altered = authority();
+    altered.coverageIntent.domains[0].bindings[0].writer_owner = "hugin";
+    altered.coverageIntent.registry_digest = w0Digest(
+      altered.coverageIntent,
+      "registry_digest",
+    );
+    altered.ownerAuthorization.bindings.coverage_intent_digest =
+      altered.coverageIntent.registry_digest;
+    resignOwnerBundle(altered);
+    expect(
+      () => verifyW0Authority(altered, "macro-routing", scope),
+    ).toThrow("coverage");
+
+    const truncated = authority();
+    truncated.coverageIntent.domains.pop();
+    truncated.coverageIntent.registry_digest = w0Digest(
+      truncated.coverageIntent,
+      "registry_digest",
+    );
+    truncated.ownerAuthorization.bindings.coverage_intent_digest =
+      truncated.coverageIntent.registry_digest;
+    resignOwnerBundle(truncated);
+    expect(
+      () => verifyW0Authority(truncated, "macro-routing", scope),
+    ).toThrow("coverage-shape");
+
+    const forged = authority();
+    const unsigned: any = {
+      sequence: 1,
+      recorded_at: fixedNow,
+      domain: "macro-routing",
+      target_scope_digest: scope,
+      from_state: "armed-canary",
+      to_state: "shadow",
+      recovery_worker_identity: "hugin-recovery",
+      journal_receipt_digest: h("journal"),
+      previous_entry_digest: null,
+    };
+    forged.runtimeNarrowing.entries = [{
+      ...unsigned,
+      entry_digest: w0Digest(unsigned),
+      signature: { algorithm: "Ed25519", value_base64: "AA==" },
+    }];
+    forged.narrowingCheckpoint.minimum_entries = 1;
+    forged.narrowingCheckpoint.ledger_tail_digest =
+      forged.runtimeNarrowing.entries[0].entry_digest;
+    expect(
+      () => verifyW0Authority(forged, "macro-routing", scope),
+    ).toThrow("narrowing-signature");
+  });
 });
