@@ -319,6 +319,24 @@ function resignOwnerBundle(bundle: W0AuthorityBundle): void {
     authorizationDigest;
 }
 
+function redigestAndResignAuthorityArtifacts(
+  bundle: W0AuthorityBundle,
+): void {
+  bundle.coverageIntent.registry_digest = w0Digest(
+    bundle.coverageIntent,
+    "registry_digest",
+  );
+  bundle.ownerAttestations.registry_digest = w0Digest(
+    bundle.ownerAttestations,
+    "registry_digest",
+  );
+  bundle.ownerAuthorization.bindings.coverage_intent_digest =
+    bundle.coverageIntent.registry_digest;
+  bundle.ownerAuthorization.bindings.owner_attestation_registry_digest =
+    bundle.ownerAttestations.registry_digest;
+  resignOwnerBundle(bundle);
+}
+
 class Target implements RExactConfigTarget {
   id = "hugin-orin-macro-routing";
   owner = "hugin" as const;
@@ -1890,6 +1908,123 @@ describe("W0.1 R-exact controller", () => {
     expect(
       () => verifyW0Authority(forged, "macro-routing", scope),
     ).toThrow("narrowing-signature");
+  });
+
+  it("rejects re-signed cross-row coverage semantic substitution", () => {
+    const substitutedClassPolicy = authority();
+    const macroRow = substitutedClassPolicy.coverageIntent.domains.find(
+      (row: any) => row.domain === "macro-routing",
+    );
+    macroRow.required_for_levels = ["permanent"];
+    macroRow.owner_scope = "owning-component";
+    redigestAndResignAuthorityArtifacts(substitutedClassPolicy);
+
+    const substitutedRecoveryClass = authority();
+    substitutedRecoveryClass.coverageIntent.domains.find(
+      (row: any) => row.domain === "macro-routing",
+    ).recovery_class = "R-forward";
+    redigestAndResignAuthorityArtifacts(substitutedRecoveryClass);
+
+    const substitutedTargetState = authority();
+    substitutedTargetState.coverageIntent.domains.find(
+      (row: any) => row.domain === "macro-routing",
+    ).target_state = "armed-fleet";
+    redigestAndResignAuthorityArtifacts(substitutedTargetState);
+
+    const substitutedFixedOwner = authority();
+    const microRow = substitutedFixedOwner.coverageIntent.domains.find(
+      (row: any) => row.domain === "micro-routing",
+    );
+    const microAttestation =
+      substitutedFixedOwner.ownerAttestations.attestations.find(
+        (row: any) => row.domain === "micro-routing",
+      );
+    microRow.bindings[0].writer_owner = "hugin";
+    microRow.bindings[0].configuration_owner = "hugin";
+    microAttestation.configuration_owner = "hugin";
+    microAttestation.attestation_digest = w0Digest(
+      microAttestation,
+      "attestation_digest",
+    );
+    microRow.bindings[0].configuration_owner_authority_digest =
+      microAttestation.attestation_digest;
+    redigestAndResignAuthorityArtifacts(substitutedFixedOwner);
+
+    const implicitOwningWriter = authority();
+    const promptRow = implicitOwningWriter.coverageIntent.domains.find(
+      (row: any) => row.domain === "prompt",
+    );
+    const promptTarget = h("prompt-scope");
+    const promptAttestation: any = {
+      attestation_id: "prompt-attestation",
+      domain: "prompt",
+      target_scope_digest: promptTarget,
+      configuration_owner: "owning-component",
+      issued_at: fixedNow,
+      attestation_digest: h("placeholder"),
+    };
+    promptAttestation.attestation_digest = w0Digest(
+      promptAttestation,
+      "attestation_digest",
+    );
+    implicitOwningWriter.ownerAttestations.attestations.push(
+      promptAttestation,
+    );
+    promptRow.bindings.push({
+      writer_owner: "owning-component",
+      owner_authority_ref: "ref:prompt-owner-authority",
+      owner_authority_digest: h("prompt-owner-authority"),
+      configuration_owner: "owning-component",
+      configuration_owner_authority_ref: "ref:prompt-attestation",
+      configuration_owner_authority_digest:
+        promptAttestation.attestation_digest,
+      target_scope_digest: promptTarget,
+      state: "shadow",
+      identities: {
+        owner: "prompt-owner",
+        controller: "prompt-controller",
+        watchdog: "prompt-watchdog",
+        kill_switch: "prompt-kill-switch",
+        recovery_worker: "prompt-recovery",
+      },
+    });
+    redigestAndResignAuthorityArtifacts(implicitOwningWriter);
+
+    const misalignedState = authority();
+    misalignedState.coverageIntent.domains.find(
+      (row: any) => row.domain === "micro-routing",
+    ).bindings[0].state = "armed-canary";
+    redigestAndResignAuthorityArtifacts(misalignedState);
+
+    const reusedFleetIdentity = authority();
+    reusedFleetIdentity.coverageIntent.domains.find(
+      (row: any) => row.domain === "micro-routing",
+    ).bindings[0].identities.owner = "hugin-owner";
+    redigestAndResignAuthorityArtifacts(reusedFleetIdentity);
+
+    const unboundAttestation = authority();
+    unboundAttestation.coverageIntent.domains.find(
+      (row: any) => row.domain === "micro-routing",
+    ).bindings[0].configuration_owner_authority_digest = h(
+      "not-the-attestation",
+    );
+    redigestAndResignAuthorityArtifacts(unboundAttestation);
+
+    for (const [name, bundle] of [
+      ["class policy", substitutedClassPolicy],
+      ["recovery class", substitutedRecoveryClass],
+      ["target state", substitutedTargetState],
+      ["fixed owner", substitutedFixedOwner],
+      ["concrete owning-component writer", implicitOwningWriter],
+      ["binding state", misalignedState],
+      ["fleet identity", reusedFleetIdentity],
+      ["owner attestation", unboundAttestation],
+    ] as const) {
+      expect(
+        () => verifyW0Authority(bundle, "macro-routing", scope),
+        name,
+      ).toThrow("w0-authority-rejected:coverage");
+    }
   });
 
   it("rejects schema-invalid W0 artifacts even after valid re-digesting", () => {

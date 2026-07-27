@@ -41,14 +41,52 @@ const allDomains = [
   "package-downgrade",
 ] as const;
 const protectedDomains = allDomains.slice(7);
-const classPolicy: Record<string, { owner: string; recovery: string }> = {
-  "micro-routing": { owner: "gille-inference", recovery: "R-exact" },
-  "macro-routing": { owner: "hugin", recovery: "R-exact" },
-  prompt: { owner: "owning-component", recovery: "R-exact" },
-  harness: { owner: "owning-component", recovery: "R-exact" },
-  "tool-policy": { owner: "owning-component", recovery: "R-exact" },
-  "served-model-roster": { owner: "gille-inference", recovery: "R-exact" },
+interface ClassPolicy {
+  levels: readonly string[];
+  ownerScope: "fixed-component" | "owning-component";
+  owner: string;
+  recovery: "R-exact" | "R-forward";
+}
+const classPolicy: Record<string, ClassPolicy> = {
+  "micro-routing": {
+    levels: ["L4", "L5"],
+    ownerScope: "fixed-component",
+    owner: "gille-inference",
+    recovery: "R-exact",
+  },
+  "macro-routing": {
+    levels: ["L5"],
+    ownerScope: "fixed-component",
+    owner: "hugin",
+    recovery: "R-exact",
+  },
+  prompt: {
+    levels: ["L5"],
+    ownerScope: "owning-component",
+    owner: "owning-component",
+    recovery: "R-exact",
+  },
+  harness: {
+    levels: ["L5"],
+    ownerScope: "owning-component",
+    owner: "owning-component",
+    recovery: "R-exact",
+  },
+  "tool-policy": {
+    levels: ["L5"],
+    ownerScope: "owning-component",
+    owner: "owning-component",
+    recovery: "R-exact",
+  },
+  "served-model-roster": {
+    levels: ["L5"],
+    ownerScope: "fixed-component",
+    owner: "gille-inference",
+    recovery: "R-exact",
+  },
   "no-reboot-security-bugfix-maintenance": {
+    levels: ["L4"],
+    ownerScope: "fixed-component",
     owner: "brokkr",
     recovery: "R-forward",
   },
@@ -96,6 +134,9 @@ function validateConstitution(value: any): void {
       ])
       || !classPolicy[row.class]
       || seen.has(row.class)
+      || canonicalizeJcs(row.required_for_levels)
+        !== canonicalizeJcs(classPolicy[row.class].levels)
+      || row.owner_scope !== classPolicy[row.class].ownerScope
       || row.owner !== classPolicy[row.class].owner
       || row.recovery_class !== classPolicy[row.class].recovery
       || row.owner_binding_source !== "owner-controlled-coverage-registry"
@@ -154,9 +195,121 @@ export function verifyW0Authority(bundle: W0AuthorityBundle, domain: HuginRExact
   const bindings={constitution_digest:W0_CONSTITUTION_DIGEST,coverage_intent_digest:w0Digest(cov,"registry_digest"),owner_attestation_registry_digest:w0Digest(att,"registry_digest"),recovery_worker_registry_digest:w0Digest(rr,"registry_digest")};
   if (canonicalizeJcs(a.bindings)!==canonicalizeJcs(bindings)) reject("authorization-bindings");
   if (!exactKeys(cov,["kind","schema_version","registry_id","issued_at","constitution_digest","mutation_policy","global_state","domains","registry_digest","extensions"])||cov.kind!=="autonomy-coverage-registry"||cov.schema_version!=="v1"||cov.constitution_digest!==W0_CONSTITUTION_DIGEST||cov.mutation_policy!=="owner-widen-recovery-worker-narrow"||!Array.isArray(cov.domains)||cov.domains.length!==17||new Set(cov.domains.map((x:any)=>x.domain)).size!==17||canonicalizeJcs(cov.domains.map((x:any)=>x.domain).sort())!==canonicalizeJcs([...allDomains].sort())||!Array.isArray(cov.extensions)||cov.extensions.length||!Number.isFinite(Date.parse(cov.issued_at))) reject("coverage-shape");
-  for(const domainRow of cov.domains){if(!exactKeys(domainRow,["domain","required_for_levels","owner_scope","owner","recovery_class","coverage","target_state","bindings"])||!Array.isArray(domainRow.required_for_levels)||!Array.isArray(domainRow.bindings)||domainRow.bindings.length>32)reject("coverage-domain-shape");const policy=classPolicy[domainRow.domain];if(policy){if(domainRow.owner!==policy.owner||domainRow.recovery_class!==policy.recovery||domainRow.target_state!=="armed-canary")reject("coverage-domain-semantics");}else if(!protectedDomains.includes(domainRow.domain)){reject("coverage-domain-semantics");}else if(canonicalizeJcs([domainRow.required_for_levels,domainRow.owner_scope,domainRow.owner,domainRow.recovery_class,domainRow.coverage,domainRow.target_state,domainRow.bindings])!==canonicalizeJcs([["permanent"],"owner-only","owner","none","protected","never-mechanical",[]]))reject("protected-domain-semantics");const targetDigests=new Set<string>();for(const coverageBinding of domainRow.bindings){if(!exactKeys(coverageBinding,["writer_owner","owner_authority_ref","owner_authority_digest","configuration_owner","configuration_owner_authority_ref","configuration_owner_authority_digest","target_scope_digest","state","identities"])||!digestPattern.test(coverageBinding.owner_authority_digest)||!digestPattern.test(coverageBinding.configuration_owner_authority_digest)||!digestPattern.test(coverageBinding.target_scope_digest)||coverageBinding.writer_owner!==coverageBinding.configuration_owner||targetDigests.has(coverageBinding.target_scope_digest))reject("coverage-binding-shape");targetDigests.add(coverageBinding.target_scope_digest);}}
+  const fleetIdentities = new Set<string>();
+  for (const domainRow of cov.domains) {
+    if (
+      !exactKeys(domainRow, [
+        "domain", "required_for_levels", "owner_scope", "owner",
+        "recovery_class", "coverage", "target_state", "bindings",
+      ])
+      || !Array.isArray(domainRow.required_for_levels)
+      || !Array.isArray(domainRow.bindings)
+      || domainRow.bindings.length > 32
+    ) reject("coverage-domain-shape");
+    const policy = classPolicy[domainRow.domain];
+    if (policy) {
+      if (
+        canonicalizeJcs(domainRow.required_for_levels)
+          !== canonicalizeJcs(policy.levels)
+        || domainRow.owner_scope !== policy.ownerScope
+        || domainRow.owner !== policy.owner
+        || domainRow.recovery_class !== policy.recovery
+        || !["shadow", "armed-canary", "armed-fleet"].includes(
+          domainRow.coverage,
+        )
+        || domainRow.target_state !== "armed-canary"
+      ) reject("coverage-domain-semantics");
+    } else if (!protectedDomains.includes(domainRow.domain)) {
+      reject("coverage-domain-semantics");
+    } else if (
+      canonicalizeJcs([
+        domainRow.required_for_levels,
+        domainRow.owner_scope,
+        domainRow.owner,
+        domainRow.recovery_class,
+        domainRow.coverage,
+        domainRow.target_state,
+        domainRow.bindings,
+      ]) !== canonicalizeJcs([
+        ["permanent"],
+        "owner-only",
+        "owner",
+        "none",
+        "protected",
+        "never-mechanical",
+        [],
+      ])
+    ) reject("protected-domain-semantics");
+    const targetDigests = new Set<string>();
+    for (const coverageBinding of domainRow.bindings) {
+      if (
+        !exactKeys(coverageBinding, [
+          "writer_owner", "owner_authority_ref", "owner_authority_digest",
+          "configuration_owner", "configuration_owner_authority_ref",
+          "configuration_owner_authority_digest", "target_scope_digest",
+          "state", "identities",
+        ])
+        || !digestPattern.test(coverageBinding.owner_authority_digest)
+        || !digestPattern.test(
+          coverageBinding.configuration_owner_authority_digest,
+        )
+        || !digestPattern.test(coverageBinding.target_scope_digest)
+        || coverageBinding.writer_owner !== coverageBinding.configuration_owner
+        || coverageBinding.writer_owner === "owning-component"
+        || coverageBinding.state !== domainRow.coverage
+        || targetDigests.has(coverageBinding.target_scope_digest)
+      ) reject("coverage-binding-shape");
+      if (
+        policy?.ownerScope === "fixed-component"
+        && (
+          coverageBinding.writer_owner !== policy.owner
+          || coverageBinding.configuration_owner !== policy.owner
+        )
+      ) reject("coverage-binding-owner");
+      const identities = coverageBinding.identities;
+      const identityValues = exactKeys(identities, [
+        "owner", "controller", "watchdog", "kill_switch", "recovery_worker",
+      ])
+        ? Object.values(identities)
+        : [];
+      const validIdentityValues = identityValues.filter(
+        (identity): identity is string =>
+          typeof identity === "string" && idPattern.test(identity),
+      );
+      if (
+        identityValues.length !== 5
+        || validIdentityValues.length !== 5
+        || new Set(validIdentityValues).size !== 5
+        || validIdentityValues.some((identity) =>
+          fleetIdentities.has(identity)
+        )
+      ) reject("coverage-binding-identities");
+      targetDigests.add(coverageBinding.target_scope_digest);
+      for (const identity of validIdentityValues) {
+        fleetIdentities.add(identity);
+      }
+    }
+  }
   if (!exactKeys(att,["kind","schema_version","registry_id","issued_at","issuer_identity","mutation_policy","attestations","registry_digest","extensions"])||att.kind!=="autonomy-owner-attestation-registry"||att.schema_version!=="v1"||att.issuer_identity!=="grimnir-owner"||att.mutation_policy!=="owner-controlled-protected-lane"||!Array.isArray(att.attestations)||att.attestations.length<4||att.attestations.length>64||!Array.isArray(att.extensions)||att.extensions.length||!Number.isFinite(Date.parse(att.issued_at))) reject("attestation-shape");
   const attestationIds=new Set<string>(),attestationTargets=new Set<string>();for(const item of att.attestations){if(!exactKeys(item,["attestation_id","domain","target_scope_digest","configuration_owner","issued_at","attestation_digest"])||!idPattern.test(item.attestation_id)||!HUGIN_R_EXACT_DOMAINS.concat(["micro-routing","served-model-roster","no-reboot-security-bugfix-maintenance"] as any).includes(item.domain)||!digestPattern.test(item.target_scope_digest)||item.attestation_digest!==w0Digest(item,"attestation_digest")||!Number.isFinite(Date.parse(item.issued_at))||attestationIds.has(item.attestation_id)||attestationTargets.has(`${item.domain}:${item.target_scope_digest}`))reject("attestation-entry");attestationIds.add(item.attestation_id);attestationTargets.add(`${item.domain}:${item.target_scope_digest}`);}
+  for (const domainRow of cov.domains) {
+    if (!classPolicy[domainRow.domain]) continue;
+    for (const coverageBinding of domainRow.bindings) {
+      const matchingAttestations = att.attestations.filter(
+        (item: any) =>
+          `ref:${item.attestation_id}`
+            === coverageBinding.configuration_owner_authority_ref
+          && item.attestation_digest
+            === coverageBinding.configuration_owner_authority_digest
+          && item.domain === domainRow.domain
+          && item.target_scope_digest === coverageBinding.target_scope_digest
+          && item.configuration_owner === coverageBinding.configuration_owner,
+      );
+      if (matchingAttestations.length !== 1) {
+        reject("coverage-binding-attestation");
+      }
+    }
+  }
   if (cov.global_state!=="armed") reject("global-disarmed");
   const matchingRows=cov.domains.filter((x:any)=>x.domain===domain); const row=matchingRows[0]; const matchingBindings=row?.bindings?.filter((x:any)=>x.target_scope_digest===targetScopeDigest)??[]; const binding=matchingBindings[0];
   if (matchingRows.length!==1 || matchingBindings.length!==1 || !exactKeys(row,["domain","required_for_levels","owner_scope","owner","recovery_class","coverage","target_state","bindings"]) || !exactKeys(binding,["writer_owner","owner_authority_ref","owner_authority_digest","configuration_owner","configuration_owner_authority_ref","configuration_owner_authority_digest","target_scope_digest","state","identities"]) || !["armed-canary","armed-fleet"].includes(row.coverage) || binding.state!==row.coverage || binding.writer_owner!=="hugin" || binding.configuration_owner!=="hugin") reject("coverage-binding");

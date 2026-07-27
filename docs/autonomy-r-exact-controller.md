@@ -25,6 +25,10 @@ checkpoint and verifies:
 - the pinned owner Ed25519 key and owner-signed authorization;
 - exact constitution, coverage, owner-attestation, recovery-registry, and
   checkpoint bindings;
+- every coverage row's constitutional levels, owner scope, owner, recovery
+  class, target state, binding state, independently attested configuration
+  owner, and fleet-wide non-aliasing authority identities—not only the selected
+  Hugin target;
 - the Hugin-owned domain and exact target scope;
 - five distinct identities: owner, controller, watchdog, kill switch, and
   recovery worker;
