@@ -3,7 +3,7 @@
 `gille-roster-proposal-v2-positive.json` is a byte-pinned output of the real
 `hugin-roster-proposal-v1` serializer after its Hugin-owned Ed25519 provenance
 issuer signs the closed envelope. Its committed SHA-256 is
-`949662966436bc2d4322d147b6b3f6541ee67a53b97f0007310dd18fa84fb9da`.
+`d03d263b5f9cf6606d98fe9f1cfd85ec390eec0706dffffd80675538150dc963`.
 
 `hugin-roster-provenance-v1-test-public.pem` is the public half of the
 fixture-only issuer. No private key is stored in this repository. Hugin tests

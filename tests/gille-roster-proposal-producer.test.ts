@@ -37,13 +37,16 @@ function expectSelfBound(payload: Record<string, unknown>): void {
 }
 
 function input(): GilleRosterProposalInput {
-  const baseline = { catalogueDigest: digest("1"), rosterDigest: digest("2") };
+  const baseline = {
+    catalogueDigest: "sha256:1ff21fa3c402abeacab4171f2097b83eeb4b13825f4726acaafe555da85979a5",
+    rosterDigest: "sha256:9ca3c71e2c9318be86a3892ae9322b3f1465a0799fd57971f06ec71cc7861b2d",
+  } as const;
   const sourceBase = { revision: "epoch-gille-fixture", digest: combinedGilleRosterBaselineDigest(baseline) };
   const sourceProposal = createAutonomyProposalReceipt({
     proposalId: "proposal-w5-hugin-fixture", experimentRef: "ref:w5-roster-fixture",
-    evidenceFingerprints: [digest("d")], targetId: "gille-served-model-roster",
+    evidenceFingerprints: ["sha256:cf684b8cf8dd4610970bafc6eaf3bdf1bf87c94b381bdde4a196b7d944114f02"], targetId: "gille-served-model-roster",
     base: sourceBase,
-    candidateContentDigest: "sha256:b6dec2e4284218939a3398ae48ae7b8fd5fedcdec9fea5a38d7caf68c2792314",
+    candidateContentDigest: "sha256:1ad6724393504a0ddf6ab7ccf597131b128e9346cbeb2bfb07e9ac39dbf71590",
     expiresAt: "2026-07-27T16:00:00Z",
     signerKeyId: "hugin-autonomy-proposer",
   }, SECRET);
@@ -55,16 +58,16 @@ function input(): GilleRosterProposalInput {
     sourceCurrentBase: sourceBase,
     baseline,
     candidateEntries: [{
-      modelId: "qwen-main", alias: "qwen-main", artifactDigest: digest("a"),
-      quantization: "q4-k-m", templateDigest: digest("b"), contextLength: 8192,
-      servingConfigDigest: digest("c"), evidenceIdentityHash: digest("d"),
-      restoreDescriptorRef: digest("e"), restoreDescriptorDigest: digest("f"),
+      modelId: "qwen-main", alias: "qwen-main", artifactDigest: "sha256:c7c5c1d70c5dec4416ab6158afd0b223ef40c29b1dc1f97ed9428b94d4cadb1c",
+      quantization: "q4-k-m", templateDigest: "sha256:5cde0f1298f41f7d1c8b907a36992a7a513225a2615bd6e307bf1a9149b06b40", contextLength: 16384,
+      servingConfigDigest: "sha256:9343a6dbeba1ae1c25c3723e534d3c0ca288efc9dc0ac20d09ea825c09b688cf", evidenceIdentityHash: "sha256:cf684b8cf8dd4610970bafc6eaf3bdf1bf87c94b381bdde4a196b7d944114f02",
+      restoreDescriptorRef: "sha256:b3307805314132f07f6dfcb09e4c7ae14933a1fda71f4afdec6840b2bf74c4c9", restoreDescriptorDigest: "sha256:5d1c5ec3982c057d81e58436258049a8857f59ae17dd85c567e02f26898a5586",
     }],
-    delta: { operation: "load", modelId: "qwen-main", backend: "llamaswap", backendCapabilityDigest: digest("7") },
+    delta: { operation: "reload-config", modelId: "qwen-main", backend: "lmstudio", backendCapabilityDigest: "sha256:e00c58b2d358957a37579e58443aa3c0dfff48f7d38c124fc91188ae18f41e27" },
     evidenceFreshnessSeconds: 3600,
     canary: {
-      operation: "load", modelId: "qwen-main", expectedState: "served", fallbackModelId: null,
-      registryId: "canary:load:qwen-main", registryVersion: "version:v1", registryDigest: digest("3"),
+      operation: "reload-config", modelId: "qwen-main", expectedState: "served", fallbackModelId: null,
+      registryId: "canary:reload-config:qwen-main", registryVersion: "version:v1", registryDigest: "sha256:2718367094fd0787fbe86d901e108ba37132602ee5105167ebbc4fe6db9a51c4",
       maxRequests: 5, durationSeconds: 600, maxConcurrency: 1,
     },
     createdAt: "2026-07-27T14:58:00Z", expiresAt: "2026-07-27T16:00:00Z",
@@ -172,7 +175,7 @@ describe("gille roster proposal producer", () => {
     expect(staticProposal.provenance.source_receipt_digest).toBe(dynamic.provenance.source_receipt_digest);
     expectSelfBound(staticProposal as unknown as Record<string, unknown>);
     expect(createHash("sha256").update(fixture, "utf8").digest("hex"))
-      .toBe("949662966436bc2d4322d147b6b3f6541ee67a53b97f0007310dd18fa84fb9da");
+      .toBe("d03d263b5f9cf6606d98fe9f1cfd85ec390eec0706dffffd80675538150dc963");
   });
 
   it("loads, byte-verifies, and mechanically applies every adversarial case", () => {
