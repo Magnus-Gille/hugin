@@ -1,11 +1,11 @@
 /**
- * Deterministic, proposal-only producer for gille-roster-proposal-v1 (Hugin #336).
+ * Deterministic, proposal-only producer for gille-roster-proposal-v2 (Hugin #337).
  *
  * This module has no transport, credential, apply, arming, or configuration-write
- * capability.  The caller supplies only content-addressed identities; the emitted
- * payload is intended for the route-scoped `service:hugin` admission endpoint.
+ * capability. The Hugin-owned composition supplies the outer Ed25519 issuer;
+ * callers never provide a trust root or an actuator capability.
  */
-import { createHash } from "node:crypto";
+import { createHash, createPrivateKey, sign } from "node:crypto";
 import { canonicalizeJcs } from "../jcs.js";
 import {
   AUTONOMY_PROPOSAL_POLICY_EPOCH_ID,
@@ -14,11 +14,10 @@ import {
   autonomyProposalPolicyAuthority,
   canonicalAutonomyProposalDigest,
   parseAutonomyProposalReceipt,
-  verifyAutonomyProposalReceipt,
 } from "./proposal-receipts.js";
-import type { KeyStore } from "../task-signing.js";
 
-export const GILLE_ROSTER_PROPOSAL_CONTRACT_VERSION = "gille-roster-proposal-v1" as const;
+export const GILLE_ROSTER_PROPOSAL_CONTRACT_VERSION = "gille-roster-proposal-v2" as const;
+export const HUGIN_ROSTER_PROVENANCE_VERSION = "hugin-roster-provenance-v1" as const;
 export const GILLE_ROSTER_PROPOSAL_SERIALIZER_VERSION = "hugin-roster-proposal-v1" as const;
 export const GILLE_ROSTER_PROPOSAL_PRINCIPAL = "service:hugin" as const;
 export const GILLE_ROSTER_PROPOSAL_AXIS = "served-model-roster" as const;
@@ -39,16 +38,10 @@ export interface GilleRosterEntryInput {
 }
 export interface GilleRosterProposalInput {
   proposalId: string; idempotencyKey: string; producerInstanceId: string;
-  /**
-   * A cryptographically verified receipt from the adapter-neutral W4 seam.
-   * This serializer has no key store: it runtime-parses and cross-binds the
-   * receipt, while verifyAutonomyProposalReceipt remains an upstream precondition.
-   */
+  /** Exact closed W4 receipt emitted by Hugin's internal proposal boundary. */
   sourceProposal: unknown;
-  /** Verification material is mandatory; an unverified JSON receipt is never admitted. */
-  sourceReceiptKeys: KeyStore;
+  /** Current observed Gille base; Gille independently anchors it at admission. */
   sourceCurrentBase: { revision: string; digest: Digest };
-  sourceNow: () => Date;
   baseline: { catalogueDigest: Digest; rosterDigest: Digest };
   candidateEntries: readonly GilleRosterEntryInput[];
   delta: { operation: Operation; modelId: string; backend: Backend; backendCapabilityDigest: Digest };
@@ -68,12 +61,37 @@ export type GilleRosterProposal = {
   expected_transport_principal_id: typeof GILLE_ROSTER_PROPOSAL_PRINCIPAL;
   axis: typeof GILLE_ROSTER_PROPOSAL_AXIS;
   baseline: { catalogue_digest: Digest; roster_digest: Digest };
+  provenance: HuginRosterProvenance;
   candidate: { entries: GilleRosterWireEntry[]; roster_digest: Digest };
   delta: { operation: Operation; model_id: string; backend: Backend; backend_capability_digest: Digest };
   evidence: { schema_epoch: typeof GILLE_ROSTER_PROPOSAL_SCHEMA_EPOCH; policy_epoch: typeof GILLE_ROSTER_PROPOSAL_POLICY_EPOCH; freshness_seconds: number };
   canary: GilleRosterWireCanary; requested_bounds: { max_changed_entries: 1 };
   requested_operations: ["admit", "arm"]; created_at: string; expires_at: string; proposal_digest: Digest;
 };
+export type HuginRosterProvenance = {
+  schema_version: typeof HUGIN_ROSTER_PROVENANCE_VERSION;
+  source_receipt: Record<string, unknown>;
+  source_receipt_digest: Digest;
+  source_base: { revision: string; digest: Digest };
+  proposal_content_digest: Digest;
+  candidate_digest: Digest;
+  experiment_ref: string;
+  evidence_fingerprints: Digest[];
+  policy_epoch: { id: "grimnir-adr-008-v2"; constitution_id: "grimnir-autonomy-v2"; constitution_digest: Digest };
+  constitution_digest: Digest;
+  principal_id: typeof GILLE_ROSTER_PROPOSAL_PRINCIPAL;
+  issuer: { key_id: "hugin-roster-provenance"; algorithm: "Ed25519" };
+  signature: { algorithm: "Ed25519"; value_base64: string };
+};
+export interface GilleRosterProvenanceIssuer {
+  keyId: "hugin-roster-provenance";
+  /** Deployment-only PKCS#8 PEM; never a request field or repository artifact. */
+  privateKeyPem: string;
+}
+export interface GilleRosterProposalProducerDependencies {
+  provenanceIssuer: GilleRosterProvenanceIssuer | null;
+}
+const defaultDependencies: GilleRosterProposalProducerDependencies = { provenanceIssuer: null };
 export type GilleRosterWireEntry = { model_id: string; alias: string; artifact_digest: Digest; quantization: string; template_digest: Digest; context_length: number; serving_config_digest: Digest; evidence_identity_hash: Digest; restore_descriptor_ref: Digest; restore_descriptor_digest: Digest };
 export type GilleRosterWireCanary = { operation: Operation; model_id: string; expected_state: "served" | "absent"; fallback_model_id: string | null; registry_id: string; registry_version: string; registry_digest: Digest; max_requests: number; duration_seconds: number; max_concurrency: 1 };
 
@@ -108,8 +126,18 @@ export type GilleRosterProposalBinding = {
   evidence_fingerprints_digest: Digest;
   policy_epoch_digest: Digest;
   constitution_digest: Digest;
+  provenance_digest: Digest;
 };
-export function serializeGilleRosterProposal(input: GilleRosterProposalInput): { proposal: GilleRosterProposal; bytes: string; binding: GilleRosterProposalBinding } {
+export function combinedGilleRosterBaselineDigest(baseline: { catalogueDigest: Digest; rosterDigest: Digest }): Digest {
+  return rosterDigest({ schema_version: "gille-roster-combined-baseline-v1", catalogue_digest: baseline.catalogueDigest, roster_digest: baseline.rosterDigest });
+}
+export function serializeGilleRosterProposal(
+  input: GilleRosterProposalInput,
+  dependencies: GilleRosterProposalProducerDependencies = defaultDependencies,
+): { proposal: GilleRosterProposal; bytes: string; binding: GilleRosterProposalBinding } {
+  if (!dependencies.provenanceIssuer || dependencies.provenanceIssuer.keyId !== "hugin-roster-provenance") {
+    throw new Error("Hugin roster provenance issuer is unconfigured");
+  }
   for (const [field, value] of [["proposal_id", input.proposalId], ["idempotency_key", input.idempotencyKey], ["producer.instance_id", input.producerInstanceId], ["delta.model_id", input.delta.modelId], ["canary.model_id", input.canary.modelId], ["canary.registry_id", input.canary.registryId], ["canary.registry_version", input.canary.registryVersion]] as const) assertId(value, field);
   for (const [field, value] of [["baseline.catalogue_digest", input.baseline.catalogueDigest], ["baseline.roster_digest", input.baseline.rosterDigest], ["delta.backend_capability_digest", input.delta.backendCapabilityDigest], ["canary.registry_digest", input.canary.registryDigest]] as const) assertDigest(value, field);
   assertUtc(input.createdAt, "created_at"); assertUtc(input.expiresAt, "expires_at");
@@ -136,11 +164,6 @@ export function serializeGilleRosterProposal(input: GilleRosterProposalInput): {
     canary: { operation: input.canary.operation, model_id: input.canary.modelId, expected_state: input.canary.expectedState, fallback_model_id: input.canary.fallbackModelId, registry_id: input.canary.registryId, registry_version: input.canary.registryVersion, registry_digest: input.canary.registryDigest, max_requests: input.canary.maxRequests, duration_seconds: input.canary.durationSeconds, max_concurrency: 1 as const },
     requested_bounds: { max_changed_entries: 1 as const }, requested_operations: ["admit", "arm"] as ["admit", "arm"], created_at: input.createdAt, expires_at: input.expiresAt,
   };
-  const verified = verifyAutonomyProposalReceipt(input.sourceProposal, input.sourceReceiptKeys, {
-    now: input.sourceNow,
-    currentBase: input.sourceCurrentBase,
-  });
-  if (verified.status !== "valid") throw new Error(`source R-exact proposal receipt is not authenticated: ${verified.reason}`);
   let source;
   try {
     source = parseAutonomyProposalReceipt(input.sourceProposal);
@@ -162,24 +185,65 @@ export function serializeGilleRosterProposal(input: GilleRosterProposalInput): {
     })
     || source.signerKeyId !== AUTONOMY_PROPOSAL_SIGNER_KEY_ID
     || source.expiresAt !== input.expiresAt
+    || source.base.revision !== input.sourceCurrentBase.revision
+    || source.base.digest !== input.sourceCurrentBase.digest
+    || source.base.digest !== combinedGilleRosterBaselineDigest(input.baseline)
     || source.canonicalProposalDigest !== canonicalAutonomyProposalDigest(sourceUnsigned)
   ) throw new Error("source R-exact proposal receipt is not an exact gille roster binding");
   if (source.candidateContentDigest !== unsigned.candidate.roster_digest) {
     throw new Error("source R-exact proposal candidate digest does not bind the desired roster");
   }
+  const candidateEvidence = [...new Set(entries.map((entry) => entry.evidence_identity_hash))].sort();
+  if (
+    canonicalizeJcs(source.evidenceFingerprints) !== canonicalizeJcs(candidateEvidence)
+    || canonicalizeJcs(source.evidenceFingerprints) !== canonicalizeJcs([...source.evidenceFingerprints].sort())
+  ) throw new Error("source R-exact proposal receipt evidence does not exactly bind the desired roster");
   const candidateIds = new Set(entries.map((entry) => entry.model_id));
   if ((input.delta.operation === "load" && !candidateIds.has(input.delta.modelId)) || (input.delta.operation === "unload" && candidateIds.has(input.delta.modelId)) || (input.delta.operation === "reload-config" && !candidateIds.has(input.delta.modelId)) ) {
     throw new Error("delta operation is inconsistent with candidate roster");
   }
+  const sourceReceiptDigest = rosterDigest(source);
+  const unsignedProvenance = {
+    schema_version: HUGIN_ROSTER_PROVENANCE_VERSION,
+    source_receipt: source,
+    source_receipt_digest: sourceReceiptDigest,
+    source_base: { revision: source.base.revision, digest: source.base.digest as Digest },
+    proposal_content_digest: rosterDigest(unsigned),
+    candidate_digest: unsigned.candidate.roster_digest,
+    experiment_ref: source.experimentRef,
+    evidence_fingerprints: candidateEvidence,
+    policy_epoch: {
+      id: source.policyEpoch.id,
+      constitution_id: source.policyEpoch.constitutionId,
+      constitution_digest: source.policyEpoch.constitutionDigest as Digest,
+    },
+    constitution_digest: source.policyEpoch.constitutionDigest as Digest,
+    principal_id: GILLE_ROSTER_PROPOSAL_PRINCIPAL,
+    issuer: { key_id: dependencies.provenanceIssuer.keyId, algorithm: "Ed25519" as const },
+  };
+  let privateKey;
+  try { privateKey = createPrivateKey(dependencies.provenanceIssuer.privateKeyPem); }
+  catch { throw new Error("Hugin roster provenance issuer is invalid"); }
+  if (privateKey.asymmetricKeyType !== "ed25519") {
+    throw new Error("Hugin roster provenance issuer must be Ed25519");
+  }
+  const provenance: HuginRosterProvenance = {
+    ...unsignedProvenance,
+    signature: {
+      algorithm: "Ed25519",
+      value_base64: sign(null, Buffer.from(canonicalizeJcs(unsignedProvenance)), privateKey).toString("base64"),
+    },
+  };
   const binding: GilleRosterProposalBinding = {
-    source_receipt_digest: rosterDigest(source),
+    source_receipt_digest: sourceReceiptDigest,
     source_base: { revision: source.base.revision, digest: source.base.digest as Digest },
     baseline_identity_digest: rosterDigest({ source_base: source.base, baseline: input.baseline }),
     experiment_ref: source.experimentRef,
     evidence_fingerprints_digest: rosterDigest(source.evidenceFingerprints),
     policy_epoch_digest: rosterDigest(source.policyEpoch),
     constitution_digest: autonomyProposalPolicyAuthority.constitutionDigest as Digest,
+    provenance_digest: rosterDigest(provenance),
   };
-  const proposal: GilleRosterProposal = { ...unsigned, proposal_digest: rosterDigest(unsigned) };
+  const proposal: GilleRosterProposal = { ...unsigned, provenance, proposal_digest: rosterDigest({ ...unsigned, provenance }) };
   return { proposal, bytes: canonicalizeJcs(proposal), binding };
 }

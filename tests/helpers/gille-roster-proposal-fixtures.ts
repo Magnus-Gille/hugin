@@ -7,8 +7,8 @@ export type RosterFixtureMutation = {
 };
 
 export type RosterAdversarialManifest = {
-  fixture_version: "hugin-gille-roster-proposal-adversarial-v1";
-  source: "gille-roster-proposal-v1-positive.json";
+  fixture_version: "hugin-gille-roster-proposal-adversarial-v2";
+  source: "gille-roster-proposal-v2-positive.json";
   source_bytes_sha256: string;
   cases: Array<{ name: string; mutations: RosterFixtureMutation[] }>;
 };
@@ -23,8 +23,8 @@ export function parseRosterAdversarialManifest(raw: unknown): RosterAdversarialM
     throw new Error("invalid roster fixture manifest shape");
   }
   if (
-    raw.fixture_version !== "hugin-gille-roster-proposal-adversarial-v1"
-    || raw.source !== "gille-roster-proposal-v1-positive.json"
+    raw.fixture_version !== "hugin-gille-roster-proposal-adversarial-v2"
+    || raw.source !== "gille-roster-proposal-v2-positive.json"
     || typeof raw.source_bytes_sha256 !== "string"
     || !/^[a-f0-9]{64}$/.test(raw.source_bytes_sha256)
     || !Array.isArray(raw.cases)
