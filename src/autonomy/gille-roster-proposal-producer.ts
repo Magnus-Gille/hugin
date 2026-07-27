@@ -14,7 +14,9 @@ import {
   autonomyProposalPolicyAuthority,
   canonicalAutonomyProposalDigest,
   parseAutonomyProposalReceipt,
+  verifyAutonomyProposalReceipt,
 } from "./proposal-receipts.js";
+import type { KeyStore } from "../task-signing.js";
 
 export const GILLE_ROSTER_PROPOSAL_CONTRACT_VERSION = "gille-roster-proposal-v2" as const;
 export const HUGIN_ROSTER_PROVENANCE_VERSION = "hugin-roster-provenance-v1" as const;
@@ -40,8 +42,6 @@ export interface GilleRosterProposalInput {
   proposalId: string; idempotencyKey: string; producerInstanceId: string;
   /** Exact closed W4 receipt emitted by Hugin's internal proposal boundary. */
   sourceProposal: unknown;
-  /** Current observed Gille base; Gille independently anchors it at admission. */
-  sourceCurrentBase: { revision: string; digest: Digest };
   baseline: { catalogueDigest: Digest; rosterDigest: Digest };
   candidateEntries: readonly GilleRosterEntryInput[];
   delta: { operation: Operation; modelId: string; backend: Backend; backendCapabilityDigest: Digest };
@@ -90,8 +90,19 @@ export interface GilleRosterProvenanceIssuer {
 }
 export interface GilleRosterProposalProducerDependencies {
   provenanceIssuer: GilleRosterProvenanceIssuer | null;
+  /** Hugin composition's trusted W4 HMAC verification keys; never request-provided. */
+  trustedW4KeyStore: KeyStore | null;
+  /** Hugin composition's protected observation of Gille's current combined base. */
+  currentBaseProvider: (() => { revision: string; digest: string } | null) | null;
+  /** Hugin composition's protected verifier clock; never request-provided. */
+  clock: (() => Date) | null;
 }
-const defaultDependencies: GilleRosterProposalProducerDependencies = { provenanceIssuer: null };
+const defaultDependencies: GilleRosterProposalProducerDependencies = {
+  provenanceIssuer: null,
+  trustedW4KeyStore: null,
+  currentBaseProvider: null,
+  clock: null,
+};
 export type GilleRosterWireEntry = { model_id: string; alias: string; artifact_digest: Digest; quantization: string; template_digest: Digest; context_length: number; serving_config_digest: Digest; evidence_identity_hash: Digest; restore_descriptor_ref: Digest; restore_descriptor_digest: Digest };
 export type GilleRosterWireCanary = { operation: Operation; model_id: string; expected_state: "served" | "absent"; fallback_model_id: string | null; registry_id: string; registry_version: string; registry_digest: Digest; max_requests: number; duration_seconds: number; max_concurrency: 1 };
 
@@ -131,6 +142,43 @@ export type GilleRosterProposalBinding = {
 export function combinedGilleRosterBaselineDigest(baseline: { catalogueDigest: Digest; rosterDigest: Digest }): Digest {
   return rosterDigest({ schema_version: "gille-roster-combined-baseline-v1", catalogue_digest: baseline.catalogueDigest, roster_digest: baseline.rosterDigest });
 }
+
+function resolveProtectedCurrentBase(
+  provider: GilleRosterProposalProducerDependencies["currentBaseProvider"],
+): { revision: string; digest: Digest } {
+  if (!provider) throw new Error("Hugin roster proposal verifier dependency is unconfigured");
+  let currentBase: { revision: string; digest: string } | null;
+  try { currentBase = provider(); }
+  catch { throw new Error("Hugin roster proposal verifier dependency is invalid"); }
+  if (!currentBase || typeof currentBase.revision !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$/.test(currentBase.revision) || typeof currentBase.digest !== "string" || !digest.test(currentBase.digest)) {
+    throw new Error("Hugin roster proposal verifier dependency is invalid");
+  }
+  return currentBase as { revision: string; digest: Digest };
+}
+
+function verifySourceReceipt(
+  sourceProposal: unknown,
+  dependencies: GilleRosterProposalProducerDependencies,
+): { source: ReturnType<typeof parseAutonomyProposalReceipt>; currentBase: { revision: string; digest: Digest } } {
+  if (!dependencies.trustedW4KeyStore || !dependencies.clock) {
+    throw new Error("Hugin roster proposal verifier dependency is unconfigured");
+  }
+  const currentBase = resolveProtectedCurrentBase(dependencies.currentBaseProvider);
+  let verified;
+  try {
+    verified = verifyAutonomyProposalReceipt(sourceProposal, dependencies.trustedW4KeyStore, {
+      currentBase,
+      now: dependencies.clock,
+    });
+  } catch {
+    throw new Error("source R-exact proposal receipt verification failed: invalid-verifier-dependency");
+  }
+  if (verified.status !== "valid") {
+    throw new Error(`source R-exact proposal receipt verification failed: ${verified.reason}`);
+  }
+  return { source: parseAutonomyProposalReceipt(sourceProposal), currentBase };
+}
+
 export function serializeGilleRosterProposal(
   input: GilleRosterProposalInput,
   dependencies: GilleRosterProposalProducerDependencies = defaultDependencies,
@@ -164,12 +212,7 @@ export function serializeGilleRosterProposal(
     canary: { operation: input.canary.operation, model_id: input.canary.modelId, expected_state: input.canary.expectedState, fallback_model_id: input.canary.fallbackModelId, registry_id: input.canary.registryId, registry_version: input.canary.registryVersion, registry_digest: input.canary.registryDigest, max_requests: input.canary.maxRequests, duration_seconds: input.canary.durationSeconds, max_concurrency: 1 as const },
     requested_bounds: { max_changed_entries: 1 as const }, requested_operations: ["admit", "arm"] as ["admit", "arm"], created_at: input.createdAt, expires_at: input.expiresAt,
   };
-  let source;
-  try {
-    source = parseAutonomyProposalReceipt(input.sourceProposal);
-  } catch {
-    throw new Error("source R-exact proposal receipt has invalid closed shape");
-  }
+  const { source, currentBase } = verifySourceReceipt(input.sourceProposal, dependencies);
   const { signature: _signature, canonicalProposalDigest: _sourceDigest, ...sourceUnsigned } = source;
   if (
     source.proposalId !== input.proposalId
@@ -185,8 +228,8 @@ export function serializeGilleRosterProposal(
     })
     || source.signerKeyId !== AUTONOMY_PROPOSAL_SIGNER_KEY_ID
     || source.expiresAt !== input.expiresAt
-    || source.base.revision !== input.sourceCurrentBase.revision
-    || source.base.digest !== input.sourceCurrentBase.digest
+    || source.base.revision !== currentBase.revision
+    || source.base.digest !== currentBase.digest
     || source.base.digest !== combinedGilleRosterBaselineDigest(input.baseline)
     || source.canonicalProposalDigest !== canonicalAutonomyProposalDigest(sourceUnsigned)
   ) throw new Error("source R-exact proposal receipt is not an exact gille roster binding");
@@ -207,7 +250,7 @@ export function serializeGilleRosterProposal(
     schema_version: HUGIN_ROSTER_PROVENANCE_VERSION,
     source_receipt: source,
     source_receipt_digest: sourceReceiptDigest,
-    source_base: { revision: source.base.revision, digest: source.base.digest as Digest },
+    source_base: currentBase,
     proposal_content_digest: rosterDigest(unsigned),
     candidate_digest: unsigned.candidate.roster_digest,
     experiment_ref: source.experimentRef,
@@ -236,8 +279,8 @@ export function serializeGilleRosterProposal(
   };
   const binding: GilleRosterProposalBinding = {
     source_receipt_digest: sourceReceiptDigest,
-    source_base: { revision: source.base.revision, digest: source.base.digest as Digest },
-    baseline_identity_digest: rosterDigest({ source_base: source.base, baseline: input.baseline }),
+    source_base: currentBase,
+    baseline_identity_digest: rosterDigest({ source_base: currentBase, baseline: input.baseline }),
     experiment_ref: source.experimentRef,
     evidence_fingerprints_digest: rosterDigest(source.evidenceFingerprints),
     policy_epoch_digest: rosterDigest(source.policyEpoch),

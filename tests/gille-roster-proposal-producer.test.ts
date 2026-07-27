@@ -11,7 +11,9 @@ import {
 import {
   autonomyProposalOwnershipRegistry,
   createAutonomyProposalReceipt,
+  verifyAutonomyProposalReceipt,
 } from "../src/autonomy/proposal-receipts.js";
+import type { GilleRosterProposalProducerDependencies } from "../src/autonomy/gille-roster-proposal-producer.js";
 import {
   applyRosterFixtureMutations,
   parseRosterAdversarialManifest,
@@ -21,13 +23,23 @@ const digest = (character: string) => `sha256:${character.repeat(64)}`;
 const SECRET = "d".repeat(64);
 const canonicalDigest = (value: unknown) => `sha256:${createHash("sha256").update(canonicalizeJcs(value)).digest("hex")}`;
 const issuerKeys = generateKeyPairSync("ed25519");
-const testDependencies = {
+const sourceBase = {
+  revision: "epoch-gille-fixture",
+  digest: combinedGilleRosterBaselineDigest({
+    catalogueDigest: "sha256:1ff21fa3c402abeacab4171f2097b83eeb4b13825f4726acaafe555da85979a5",
+    rosterDigest: "sha256:9ca3c71e2c9318be86a3892ae9322b3f1465a0799fd57971f06ec71cc7861b2d",
+  }),
+};
+const testDependencies: GilleRosterProposalProducerDependencies = {
   provenanceIssuer: {
     keyId: "hugin-roster-provenance" as const,
     privateKeyPem: issuerKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
   },
+  trustedW4KeyStore: { "hugin-autonomy-proposer": SECRET },
+  currentBaseProvider: () => sourceBase,
+  clock: () => new Date("2026-07-27T15:00:00Z"),
 };
-const serialize = (value: GilleRosterProposalInput) => serializeGilleRosterProposal(value, testDependencies);
+const serialize = (value: GilleRosterProposalInput, dependencies = testDependencies) => serializeGilleRosterProposal(value, dependencies);
 
 function expectSelfBound(payload: Record<string, unknown>): void {
   const candidate = payload.candidate as { entries: unknown[]; roster_digest: string };
@@ -41,7 +53,6 @@ function input(): GilleRosterProposalInput {
     catalogueDigest: "sha256:1ff21fa3c402abeacab4171f2097b83eeb4b13825f4726acaafe555da85979a5",
     rosterDigest: "sha256:9ca3c71e2c9318be86a3892ae9322b3f1465a0799fd57971f06ec71cc7861b2d",
   } as const;
-  const sourceBase = { revision: "epoch-gille-fixture", digest: combinedGilleRosterBaselineDigest(baseline) };
   const sourceProposal = createAutonomyProposalReceipt({
     proposalId: "proposal-w5-hugin-fixture", experimentRef: "ref:w5-roster-fixture",
     evidenceFingerprints: ["sha256:cf684b8cf8dd4610970bafc6eaf3bdf1bf87c94b381bdde4a196b7d944114f02"], targetId: "gille-served-model-roster",
@@ -55,7 +66,6 @@ function input(): GilleRosterProposalInput {
     idempotencyKey: "idem:w5:hugin-fixture",
     producerInstanceId: "hugin:test-fixture",
     sourceProposal,
-    sourceCurrentBase: sourceBase,
     baseline,
     candidateEntries: [{
       modelId: "qwen-main", alias: "qwen-main", artifactDigest: "sha256:c7c5c1d70c5dec4416ab6158afd0b223ef40c29b1dc1f97ed9428b94d4cadb1c",
@@ -86,7 +96,93 @@ describe("gille roster proposal producer", () => {
         keyId: "hugin-roster-provenance",
         privateKeyPem: nonEd25519.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
       },
+      trustedW4KeyStore: testDependencies.trustedW4KeyStore,
+      currentBaseProvider: testDependencies.currentBaseProvider,
+      clock: testDependencies.clock,
     })).toThrow(/must be Ed25519/);
+  });
+
+  it.each([
+    ["trusted W4 key store", { ...testDependencies, trustedW4KeyStore: null }],
+    ["current-base provider", { ...testDependencies, currentBaseProvider: null }],
+    ["protected clock", { ...testDependencies, clock: null }],
+  ] as const)("fails closed without the composition-owned %s", (_name, dependencies) => {
+    expect(() => serialize(input(), dependencies)).toThrow(/verifier dependency is unconfigured/);
+  });
+
+  it("fails closed when the protected current-base provider returns an invalid base", () => {
+    expect(() => serialize(input(), {
+      ...testDependencies,
+      currentBaseProvider: () => ({ revision: "bad", digest: "not-a-digest" }),
+    })).toThrow(/verifier dependency is invalid/);
+  });
+
+  it("fails closed when the trusted W4 key store lacks the fixed W4 signer", () => {
+    expect(() => serialize(input(), {
+      ...testDependencies,
+      trustedW4KeyStore: {},
+    })).toThrow(/source R-exact proposal receipt verification failed: invalid-signature/);
+  });
+
+  it("never outer-signs a parsed but fake-HMAC W4 receipt", () => {
+    const value = input();
+    value.sourceProposal = {
+      ...(value.sourceProposal as Record<string, unknown>),
+      signature: `v1:hugin-autonomy-proposer:${"0".repeat(64)}`,
+    };
+    expect(() => serialize(value)).toThrow(/source R-exact proposal receipt verification failed: invalid-signature/);
+  });
+
+  it("rejects an expired W4 receipt before outer signing", () => {
+    expect(() => serialize(input(), {
+      ...testDependencies,
+      clock: () => new Date("2026-07-27T16:00:00Z"),
+    })).toThrow(/source R-exact proposal receipt verification failed: expired/);
+  });
+
+  it("rejects an invalid composition-owned verifier clock", () => {
+    expect(() => serialize(input(), {
+      ...testDependencies,
+      clock: () => new Date("invalid"),
+    })).toThrow(/source R-exact proposal receipt verification failed: invalid-verifier-clock/);
+  });
+
+  it("rejects a valid receipt whose base is stale against the protected provider", () => {
+    const value = input();
+    value.sourceProposal = createAutonomyProposalReceipt({
+      proposalId: value.proposalId,
+      experimentRef: "ref:w5-roster-fixture",
+      evidenceFingerprints: [value.candidateEntries[0]!.evidenceIdentityHash],
+      targetId: "gille-served-model-roster",
+      base: { revision: "epoch-gille-stale", digest: digest("0") },
+      candidateContentDigest: "sha256:1ad6724393504a0ddf6ab7ccf597131b128e9346cbeb2bfb07e9ac39dbf71590",
+      expiresAt: value.expiresAt,
+      signerKeyId: "hugin-autonomy-proposer",
+    }, SECRET);
+    expect(() => serialize(value)).toThrow(/source R-exact proposal receipt verification failed: stale-or-mismatched-base/);
+  });
+
+  it("ignores a legacy caller-supplied base rather than letting it redefine provenance", () => {
+    const value = input() as GilleRosterProposalInput & { sourceCurrentBase: { revision: string; digest: string } };
+    value.sourceCurrentBase = { revision: "caller-substituted", digest: digest("0") };
+    const { binding, proposal } = serialize(value);
+    expect(binding.source_base).toEqual(sourceBase);
+    expect(proposal.provenance.source_base).toEqual(sourceBase);
+  });
+
+  it("rejects a valid receipt whose evidence is not the requested roster evidence", () => {
+    const value = input();
+    value.sourceProposal = createAutonomyProposalReceipt({
+      proposalId: value.proposalId,
+      experimentRef: "ref:w5-roster-fixture",
+      evidenceFingerprints: [digest("0")],
+      targetId: "gille-served-model-roster",
+      base: sourceBase,
+      candidateContentDigest: "sha256:1ad6724393504a0ddf6ab7ccf597131b128e9346cbeb2bfb07e9ac39dbf71590",
+      expiresAt: value.expiresAt,
+      signerKeyId: "hugin-autonomy-proposer",
+    }, SECRET);
+    expect(() => serialize(value)).toThrow(/source R-exact proposal receipt evidence/);
   });
 
   it("emits byte-identical canonical payloads bound to the Hugin principal", () => {
@@ -114,7 +210,6 @@ describe("gille roster proposal producer", () => {
   });
 
   it.each([
-    ["stale base", (value: GilleRosterProposalInput) => { value.sourceCurrentBase = { revision: "other", digest: digest("0") as `sha256:${string}` }; }],
     ["candidate digest", (value: GilleRosterProposalInput) => { value.sourceProposal = { ...(value.sourceProposal as Record<string, unknown>), candidateContentDigest: digest("0") }; }],
     ["canary", (value: GilleRosterProposalInput) => { value.canary = { ...value.canary, modelId: "other-model" }; }],
     ["lifetime", (value: GilleRosterProposalInput) => { value.expiresAt = "2026-07-29T14:58:00Z"; }],
@@ -156,7 +251,7 @@ describe("gille roster proposal producer", () => {
       ...(openShape.sourceProposal as Record<string, unknown>),
       unexpected: true,
     };
-    expect(() => serialize(openShape)).toThrow(/invalid closed shape/i);
+    expect(() => serialize(openShape)).toThrow(/source R-exact proposal receipt verification failed: invalid-receipt/);
   });
 
   it("pins the positive cross-repository fixture to real serializer bytes", () => {
@@ -171,11 +266,16 @@ describe("gille roster proposal producer", () => {
       publicKeyPem,
       Buffer.from(signature.value_base64, "base64"),
     )).toBe(true);
+    expect(verifyAutonomyProposalReceipt(
+      staticProposal.provenance.source_receipt,
+      testDependencies.trustedW4KeyStore!,
+      { currentBase: sourceBase, now: testDependencies.clock! },
+    )).toEqual({ status: "valid" });
     expect(staticProposal.provenance.proposal_content_digest).toBe(dynamic.provenance.proposal_content_digest);
     expect(staticProposal.provenance.source_receipt_digest).toBe(dynamic.provenance.source_receipt_digest);
     expectSelfBound(staticProposal as unknown as Record<string, unknown>);
     expect(createHash("sha256").update(fixture, "utf8").digest("hex"))
-      .toBe("d03d263b5f9cf6606d98fe9f1cfd85ec390eec0706dffffd80675538150dc963");
+      .toBe("f92f9226f6cc85c905b90d4cce4fa8dd4f150c0a534242aa5e6bdb4b96501d62");
   });
 
   it("loads, byte-verifies, and mechanically applies every adversarial case", () => {
@@ -190,11 +290,12 @@ describe("gille roster proposal producer", () => {
       applyRosterFixtureMutations(source, fixtureCase.mutations),
     ]));
     expect([...outputs.keys()]).toEqual([
-      "source-receipt-digest-tamper", "source-base-tamper", "candidate-digest-tamper",
+      "source-receipt-digest-tamper", "source-receipt-signature-tamper", "source-base-tamper", "candidate-digest-tamper",
       "evidence-set-tamper", "policy-tamper", "principal-tamper",
       "proposal-content-digest-tamper", "envelope-signature-tamper",
     ]);
     expect((outputs.get("source-receipt-digest-tamper")!.provenance as { source_receipt_digest: string }).source_receipt_digest).toBe(digest("0"));
+    expect((((outputs.get("source-receipt-signature-tamper")!.provenance as { source_receipt: { signature: string } }).source_receipt).signature)).toBe(`v1:hugin-autonomy-proposer:${"0".repeat(64)}`);
     expect((outputs.get("source-base-tamper")!.provenance as { source_base: { digest: string } }).source_base.digest).toBe(digest("0"));
     expect((outputs.get("candidate-digest-tamper")!.provenance as { candidate_digest: string }).candidate_digest).toBe(digest("0"));
     expect((outputs.get("evidence-set-tamper")!.provenance as { evidence_fingerprints: string[] }).evidence_fingerprints).toEqual([digest("0")]);
