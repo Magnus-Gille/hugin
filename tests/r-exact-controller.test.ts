@@ -5,7 +5,9 @@ import {
   sign,
   type KeyObject,
 } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { canonicalizeJcs } from "../src/jcs.js";
 import {
@@ -47,6 +49,12 @@ import {
   w0Digest,
   type W0AuthorityBundle,
 } from "../src/autonomy/w0-authority.js";
+import {
+  HUGIN_CONFIG_ADAPTER_VERSION,
+  HuginConfigStore,
+  createHuginConfigRecoveryWorker,
+  createHuginConfigTargets,
+} from "../src/autonomy/hugin-config-adapter.js";
 
 const h = (value: string): string =>
   `sha256:${createHash("sha256").update(value).digest("hex")}`;
@@ -83,7 +91,7 @@ const canonicalJournalSchema = JSON.parse(readFileSync(
   "utf8",
 ));
 
-function authority(): W0AuthorityBundle {
+function authority(macroTargetScope = scope): W0AuthorityBundle {
   const ownerKeys = generateKeyPairSync("ed25519");
   const recoveryKeys = generateKeyPairSync("ed25519");
   const ownerPem = ownerKeys.publicKey
@@ -98,7 +106,7 @@ function authority(): W0AuthorityBundle {
       .digest("hex")}`;
   const fixedTargets = [
     ["micro-routing", "gille", "gille-inference", h("micro-scope")],
-    ["macro-routing", "hugin-macro", "hugin", scope],
+    ["macro-routing", "hugin-macro", "hugin", macroTargetScope],
     ["served-model-roster", "roster", "gille-inference", h("roster-scope")],
     [
       "no-reboot-security-bugfix-maintenance",
@@ -142,7 +150,7 @@ function authority(): W0AuthorityBundle {
     entries: [
       {
         domain: "macro-routing",
-        target_scope_digest: scope,
+        target_scope_digest: macroTargetScope,
         recovery_worker_identity: "hugin-recovery",
         public_key_pem: recoveryPem,
         public_key_fingerprint: fingerprint(recoveryKeys.publicKey),
@@ -701,14 +709,18 @@ class JournalBackend implements RExactJournalReader {
   }
 }
 
-function proposal(proposalId = "proposal-330-a") {
+function proposal(
+  proposalId = "proposal-330-a",
+  base = { revision: "base-1", digest: h("base") },
+  candidateDigest = h("candidate"),
+) {
   return createAutonomyProposalReceipt({
     proposalId,
     experimentRef: "ref:experiment-330",
     evidenceFingerprints: [h("e")],
     targetId: "hugin-orin-macro-routing",
-    base: { revision: "base-1", digest: h("base") },
-    candidateContentDigest: h("candidate"),
+    base,
+    candidateContentDigest: candidateDigest,
     expiresAt: "2026-07-26T15:00:00Z",
     signerKeyId: "hugin-autonomy-proposer",
   }, secret);
@@ -717,6 +729,7 @@ function proposal(proposalId = "proposal-330-a") {
 function proofFor(
   receipt: AutonomyProposalReceipt,
   override: Partial<FreshAdmission> = {},
+  targetScopeDigest = scope,
 ): FreshAdmission {
   return {
     checkedAt: fixedNow,
@@ -730,7 +743,7 @@ function proofFor(
     livenessHealthy: true,
     watchdogSilenceSeconds: 0,
     proposalDigest: receipt.canonicalProposalDigest,
-    targetScopeDigest: scope,
+    targetScopeDigest,
     baseRevision: receipt.base.revision,
     baseDigest: receipt.base.digest,
     candidateDigest: receipt.candidateContentDigest,
@@ -746,10 +759,11 @@ function proofFor(
 
 function gate(
   backend: JournalBackend,
-  target: Target,
+  target: RExactConfigTarget,
   receipt = proposal(),
   bundle = authority(),
   override: Partial<FreshAdmission> = {},
+  restoreAndVerify?: W0RuntimeGate["recovery"]["restoreAndVerify"],
 ): W0RuntimeGate {
   const narrowingHistory: W0AuthorityBundle[] = [];
   let protectedNow = fixedNow;
@@ -897,7 +911,7 @@ function gate(
       checkedAt: protectedNow,
       trustedWatchdogTime: protectedNow,
       ...override,
-    }),
+    }, target.targetScopeDigest),
     verifyRecovery: async (_prepared, current) => ({
       checkedAt: protectedNow,
       trustedWatchdogTime: protectedNow,
@@ -908,14 +922,14 @@ function gate(
       journalHealthy: true,
     }),
     recovery: {
-      restoreAndVerify: async (input) => {
+      restoreAndVerify: restoreAndVerify ?? (async (input) => {
         target.digest = input.snapshotDigest;
         target.revision = input.baseRevision;
         return {
           restoredRevision: target.revision,
           restoredDigest: target.digest,
         };
-      },
+      }),
       narrowAndVerify: async ({ binding, journalReceiptDigest }) => {
         const next = structuredClone(runtime.authority);
         const previous =
@@ -957,6 +971,24 @@ function gate(
   backend.roleNow = () =>
     runtime.protectedNow().toISOString().replace(".000Z", "Z");
   return runtime;
+}
+
+function strictMacroCandidate(base: { revision: string; digest: string }) {
+  const body = {
+    schemaVersion: HUGIN_CONFIG_ADAPTER_VERSION,
+    targetId: "hugin-orin-macro-routing" as const,
+    revision: "orin-macro-route-v2",
+    base,
+    config: {
+      routes: [
+        { workerProvider: "homeserver", taskType: "classify", sensitivity: "internal", nodeId: "orin", modelId: "qwen2.5-coder:3b" },
+        { workerProvider: "homeserver", taskType: "classify", sensitivity: "public", nodeId: "orin", modelId: "qwen2.5-coder:3b" },
+        { workerProvider: "homeserver", taskType: "extract", sensitivity: "internal", nodeId: "orin", modelId: "qwen2.5-coder:3b" },
+        { workerProvider: "homeserver", taskType: "extract", sensitivity: "public", nodeId: "orin", modelId: "qwen2.5-coder:3b" },
+      ],
+    },
+  };
+  return { ...body, candidateDigest: h(canonicalizeJcs(body)) };
 }
 
 describe("W0.2 R-exact controller", () => {
@@ -1023,6 +1055,77 @@ describe("W0.2 R-exact controller", () => {
     expect(result.journal.schema_version).toBe("v2");
     validateRExactJournal(result.journal, false);
   });
+
+  it("recovers a real durable strict-config attempt across restart", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hugin-r-exact-composition-"));
+    const store = new HuginConfigStore(root);
+    const target = createHuginConfigTargets(store)["hugin-orin-macro-routing"];
+    const base = await target.read();
+    const candidate = store.stage(strictMacroCandidate(base));
+    const receipt = proposal("proposal-338-strict-config", base, candidate.candidateDigest);
+    const backend = new JournalBackend();
+    const bundle = authority(target.targetScopeDigest);
+    const recovery = createHuginConfigRecoveryWorker(store);
+    let unknownWasDurableBeforeRestore = false;
+    const runtime = gate(
+      backend,
+      target,
+      receipt,
+      bundle,
+      {},
+      async (input) => {
+        unknownWasDurableBeforeRestore = (await backend.read(receipt.proposalId))
+          ?.journal.entries.at(-1)?.phase === "unknown";
+        return recovery.restoreAndVerify(input);
+      },
+    );
+
+    await expect(applyRExactProposal(receipt, keys, target, runtime, {
+      onPhase: (phase) => {
+        if (phase === "readback") throw new Error("simulated-process-crash");
+      },
+      onRecoveryCause: () => { throw new Error("simulated-process-crash"); },
+    })).rejects.toThrow("simulated-process-crash");
+    expect(await target.read()).toEqual({
+      revision: candidate.revision,
+      digest: candidate.candidateDigest,
+    });
+    expect((await backend.read(receipt.proposalId))?.journal.entries.at(-1)?.phase)
+      .toBe("apply");
+
+    const restartedStore = new HuginConfigStore(root);
+    const restartedTarget = createHuginConfigTargets(restartedStore)["hugin-orin-macro-routing"];
+    const restartedRecovery = createHuginConfigRecoveryWorker(restartedStore);
+    const restartedRuntime = gate(
+      backend,
+      restartedTarget,
+      receipt,
+      bundle,
+      {},
+      async (input) => {
+        unknownWasDurableBeforeRestore = (await backend.read(receipt.proposalId))
+          ?.journal.entries.at(-1)?.phase === "unknown";
+        return restartedRecovery.restoreAndVerify(input);
+      },
+    );
+    const result = await applyRExactProposal(
+      receipt,
+      keys,
+      restartedTarget,
+      restartedRuntime,
+    );
+
+    expect(result.status).toBe("disarmed");
+    expect(unknownWasDurableBeforeRestore).toBe(true);
+    expect(result.journal.entries.map((entry) => entry.phase)).toEqual([
+      "prepare", "apply", "unknown", "revert", "disarm",
+    ]);
+    expect(await restartedTarget.read()).toEqual(base);
+    expect(await createHuginConfigTargets(new HuginConfigStore(root))[
+      "hugin-orin-macro-routing"
+    ].read()).toEqual(base);
+  });
+
 
   it("starts the full watch at the service-authored durable append time", async () => {
     const backend = new JournalBackend();

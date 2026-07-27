@@ -10,9 +10,14 @@ import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, ren
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import { canonicalizeJcs } from "../jcs.js";
-import type { RExactConfigTarget } from "./r-exact-types.js";
+import type {
+  RExactConfigTarget,
+  RExactRecoveryWorker,
+} from "./r-exact-types.js";
 
 export const HUGIN_CONFIG_ADAPTER_VERSION = "hugin-config-adapter-v1" as const;
+/** Fixed W0.2 recovery identity for Hugin's owner-local strict config store. */
+export const HUGIN_CONFIG_RECOVERY_WORKER_ID = "hugin-recovery" as const;
 const sha256 = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const revision = z.string().regex(/^[a-z][a-z0-9-]{2,80}$/);
 const targetId = z.enum(["hugin-orin-macro-routing", "hugin-agent-prompt", "hugin-agent-harness", "hugin-tool-policy"]);
@@ -107,7 +112,7 @@ export class HuginConfigStore {
     expectedCurrent: { revision: string; digest: string },
     recoveryIdentity: string,
   ): { revision: string; digest: string } {
-    if (recoveryIdentity !== "hugin-recovery-worker") throw new Error("hugin-config-recovery-fence-refused");
+    if (recoveryIdentity !== HUGIN_CONFIG_RECOVERY_WORKER_ID) throw new Error("hugin-config-recovery-fence-refused");
     const state = this.load(); const snapshot = state.snapshots[ref];
     if (!snapshot || snapshot.target !== id || snapshot.document.digest !== expectedDigest) throw new Error("hugin-config-snapshot-unavailable");
     const current = state.current[id]; if (current.digest === expectedDigest) return { revision: current.revision, digest: current.digest };
@@ -143,6 +148,46 @@ export function createHuginConfigTargets(store: HuginConfigStore): Record<HuginC
     "hugin-agent-harness": new HuginTarget("hugin-agent-harness", store),
     "hugin-tool-policy": new HuginTarget("hugin-tool-policy", store),
   };
+}
+
+/**
+ * Concrete recovery adapter for the strict Hugin config store.
+ * It accepts only Hugin-owned target IDs and the W0.2 recovery identity, then
+ * delegates the compare-and-swap restore to the durable store.
+ */
+export class HuginConfigRecoveryWorker {
+  constructor(private readonly store: HuginConfigStore) {}
+
+  async restoreAndVerify(input: Parameters<RExactRecoveryWorker["restoreAndVerify"]>[0]) {
+    if (input.recoveryWorkerIdentity !== HUGIN_CONFIG_RECOVERY_WORKER_ID) {
+      throw new Error("hugin-config-recovery-fence-refused");
+    }
+    const id = targetId.parse(input.targetId);
+    if (input.snapshotDigest !== input.baseDigest) {
+      throw new Error("hugin-config-recovery-base-mismatch");
+    }
+    const restored = this.store.restoreSnapshot(
+      id,
+      input.snapshotRef,
+      input.snapshotDigest,
+      input.expectedCurrent,
+      HUGIN_CONFIG_RECOVERY_WORKER_ID,
+    );
+    if (
+      restored.revision !== input.baseRevision
+      || restored.digest !== input.baseDigest
+    ) {
+      throw new Error("hugin-config-restore-readback-mismatch");
+    }
+    return { restoredRevision: restored.revision, restoredDigest: restored.digest };
+  }
+}
+
+export function createHuginConfigRecoveryWorker(
+  store: HuginConfigStore,
+): Pick<RExactRecoveryWorker, "restoreAndVerify"> {
+  const worker = new HuginConfigRecoveryWorker(store);
+  return { restoreAndVerify: worker.restoreAndVerify.bind(worker) };
 }
 
 // Deployment supplies its private durable root; no live directory is created by this module.

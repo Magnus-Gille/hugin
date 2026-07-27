@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalizeJcs } from "../src/jcs.js";
-import { HUGIN_CONFIG_ADAPTER_VERSION, HuginConfigStore, createHuginConfigTargets, selectHuginMacroRoute, validateHuginConfigCandidate } from "../src/autonomy/hugin-config-adapter.js";
+import { HUGIN_CONFIG_ADAPTER_VERSION, HUGIN_CONFIG_RECOVERY_WORKER_ID, HuginConfigStore, createHuginConfigRecoveryWorker, createHuginConfigTargets, selectHuginMacroRoute, validateHuginConfigCandidate } from "../src/autonomy/hugin-config-adapter.js";
 
 const digest = (value: unknown) => `sha256:${createHash("sha256").update(canonicalizeJcs(value)).digest("hex")}`;
 function candidate(targetId: "hugin-orin-macro-routing" = "hugin-orin-macro-routing", base = { revision: "orin-macro-route-v1", digest: "" }) {
@@ -26,7 +26,7 @@ describe("Hugin strict autonomous config adapters", () => {
     const snap = await target.snapshot(); await target.replaceExact(base, doc.candidateDigest);
     expect(await target.read()).toEqual({ revision: "orin-macro-route-v2", digest: doc.candidateDigest }); expect(snap.digest).toBe(base.digest);
     await expect(target.replaceExact(base, doc.candidateDigest)).rejects.toThrow("stale-base");
-    expect(store.restoreSnapshot("hugin-orin-macro-routing", snap.ref, snap.digest, { revision: "orin-macro-route-v2", digest: doc.candidateDigest }, "hugin-recovery-worker")).toEqual(base);
+    expect(store.restoreSnapshot("hugin-orin-macro-routing", snap.ref, snap.digest, { revision: "orin-macro-route-v2", digest: doc.candidateDigest }, HUGIN_CONFIG_RECOVERY_WORKER_ID)).toEqual(base);
     expect(await target.read()).toEqual(base);
     expect(await createHuginConfigTargets(new HuginConfigStore(root))["hugin-orin-macro-routing"].read()).toEqual(base);
   });
@@ -34,10 +34,41 @@ describe("Hugin strict autonomous config adapters", () => {
   it("fences target-bound recovery so an old snapshot cannot overwrite later state", async () => {
     const store = new HuginConfigStore(mkdtempSync(join(tmpdir(), "hugin-config-"))); const targets = createHuginConfigTargets(store);
     const first = targets["hugin-orin-macro-routing"]; const other = targets["hugin-agent-harness"]; const base = await first.read(); const otherCurrent = await other.read(); const snap = await first.snapshot(); const doc = store.stage(candidate("hugin-orin-macro-routing", base)); await first.replaceExact(base, doc.candidateDigest);
-    expect(() => store.restoreSnapshot("hugin-agent-harness", snap.ref, snap.digest, otherCurrent, "hugin-recovery-worker")).toThrow("snapshot-unavailable");
-    expect(() => store.restoreSnapshot("hugin-orin-macro-routing", snap.ref, snap.digest, { revision: "later", digest: digest("later") }, "hugin-recovery-worker")).toThrow("stale-recovery-fence");
+    expect(() => store.restoreSnapshot("hugin-agent-harness", snap.ref, snap.digest, otherCurrent, HUGIN_CONFIG_RECOVERY_WORKER_ID)).toThrow("snapshot-unavailable");
+    expect(() => store.restoreSnapshot("hugin-orin-macro-routing", snap.ref, snap.digest, { revision: "later", digest: digest("later") }, HUGIN_CONFIG_RECOVERY_WORKER_ID)).toThrow("stale-recovery-fence");
     const current = await first.read(); expect(() => store.restoreSnapshot("hugin-orin-macro-routing", snap.ref, snap.digest, current, "wrong-worker")).toThrow("recovery-fence");
     expect(await first.read()).toEqual({ revision: "orin-macro-route-v2", digest: doc.candidateDigest });
+  });
+
+  it("binds recovery to the strict store's exact owner, current state, and target", async () => {
+    const store = new HuginConfigStore(mkdtempSync(join(tmpdir(), "hugin-config-")));
+    const targets = createHuginConfigTargets(store);
+    const target = targets["hugin-orin-macro-routing"];
+    const base = await target.read();
+    const snapshot = await target.snapshot();
+    const doc = store.stage(candidate("hugin-orin-macro-routing", base));
+    await target.replaceExact(base, doc.candidateDigest);
+    const recovery = createHuginConfigRecoveryWorker(store);
+    const input = {
+      snapshotRef: snapshot.ref,
+      snapshotDigest: snapshot.digest,
+      targetId: "hugin-orin-macro-routing",
+      baseRevision: base.revision,
+      baseDigest: base.digest,
+      expectedCurrent: { revision: doc.revision, digest: doc.candidateDigest },
+      recoveryWorkerIdentity: HUGIN_CONFIG_RECOVERY_WORKER_ID,
+    };
+    await expect(recovery.restoreAndVerify({ ...input, targetId: "gille-model" }))
+      .rejects.toThrow();
+    await expect(recovery.restoreAndVerify({ ...input, expectedCurrent: base }))
+      .rejects.toThrow("stale-recovery-fence");
+    await expect(recovery.restoreAndVerify({ ...input, recoveryWorkerIdentity: "other-worker" }))
+      .rejects.toThrow("recovery-fence");
+    await expect(recovery.restoreAndVerify(input)).resolves.toEqual({
+      restoredRevision: base.revision,
+      restoredDigest: base.digest,
+    });
+    expect(await target.read()).toEqual(base);
   });
 
   it("rejects malformed, duplicate/noncanonical, cross-owner, protected and unbound candidates before mutation", async () => {
