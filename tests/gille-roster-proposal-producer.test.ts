@@ -47,6 +47,9 @@ function input(): GilleRosterProposalInput {
     idempotencyKey: "idem:w5:hugin-fixture",
     producerInstanceId: "hugin:test-fixture",
     sourceProposal,
+    sourceReceiptKeys: KEYS,
+    sourceCurrentBase: sourceProposal.base,
+    sourceNow: () => new Date("2026-07-27T15:00:00Z"),
     baseline: { catalogueDigest: digest("1"), rosterDigest: digest("2") },
     candidateEntries: [{
       modelId: "qwen-main", alias: "qwen-main", artifactDigest: digest("a"),
@@ -116,7 +119,10 @@ describe("gille roster proposal producer", () => {
       ...(openShape.sourceProposal as Record<string, unknown>),
       unexpected: true,
     };
-    expect(() => serializeGilleRosterProposal(openShape)).toThrow(/invalid closed shape/i);
+    expect(() => serializeGilleRosterProposal(openShape)).toThrow(/not authenticated/i);
+    const wrongKey = input();
+    wrongKey.sourceReceiptKeys = { "hugin-autonomy-proposer": "e".repeat(64) };
+    expect(() => serializeGilleRosterProposal(wrongKey)).toThrow(/not authenticated: invalid-signature/i);
   });
 
   it("pins the positive cross-repository fixture to real serializer bytes", () => {

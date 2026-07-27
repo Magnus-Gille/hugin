@@ -14,7 +14,9 @@ import {
   autonomyProposalPolicyAuthority,
   canonicalAutonomyProposalDigest,
   parseAutonomyProposalReceipt,
+  verifyAutonomyProposalReceipt,
 } from "./proposal-receipts.js";
+import type { KeyStore } from "../task-signing.js";
 
 export const GILLE_ROSTER_PROPOSAL_CONTRACT_VERSION = "gille-roster-proposal-v1" as const;
 export const GILLE_ROSTER_PROPOSAL_SERIALIZER_VERSION = "hugin-roster-proposal-v1" as const;
@@ -43,6 +45,10 @@ export interface GilleRosterProposalInput {
    * receipt, while verifyAutonomyProposalReceipt remains an upstream precondition.
    */
   sourceProposal: unknown;
+  /** Verification material is mandatory; an unverified JSON receipt is never admitted. */
+  sourceReceiptKeys: KeyStore;
+  sourceCurrentBase: { revision: string; digest: Digest };
+  sourceNow: () => Date;
   baseline: { catalogueDigest: Digest; rosterDigest: Digest };
   candidateEntries: readonly GilleRosterEntryInput[];
   delta: { operation: Operation; modelId: string; backend: Backend; backendCapabilityDigest: Digest };
@@ -119,6 +125,11 @@ export function serializeGilleRosterProposal(input: GilleRosterProposalInput): {
     canary: { operation: input.canary.operation, model_id: input.canary.modelId, expected_state: input.canary.expectedState, fallback_model_id: input.canary.fallbackModelId, registry_id: input.canary.registryId, registry_version: input.canary.registryVersion, registry_digest: input.canary.registryDigest, max_requests: input.canary.maxRequests, duration_seconds: input.canary.durationSeconds, max_concurrency: 1 as const },
     requested_bounds: { max_changed_entries: 1 as const }, requested_operations: ["admit", "arm"] as ["admit", "arm"], created_at: input.createdAt, expires_at: input.expiresAt,
   };
+  const verified = verifyAutonomyProposalReceipt(input.sourceProposal, input.sourceReceiptKeys, {
+    now: input.sourceNow,
+    currentBase: input.sourceCurrentBase,
+  });
+  if (verified.status !== "valid") throw new Error(`source R-exact proposal receipt is not authenticated: ${verified.reason}`);
   let source;
   try {
     source = parseAutonomyProposalReceipt(input.sourceProposal);
