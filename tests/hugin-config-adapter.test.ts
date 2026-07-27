@@ -1,39 +1,37 @@
 import { describe, expect, it } from "vitest";
-import {
-  HUGIN_CONFIG_ADAPTER_VERSION,
-  readHuginConfigBase,
-  selectHuginMacroRoute,
-  validateHuginConfig,
-} from "../src/autonomy/hugin-config-adapter.js";
+import { createHash } from "node:crypto";
+import { canonicalizeJcs } from "../src/jcs.js";
+import { HUGIN_CONFIG_ADAPTER_VERSION, HuginConfigStore, createHuginConfigTargets, selectHuginMacroRoute, validateHuginConfigCandidate } from "../src/autonomy/hugin-config-adapter.js";
 
-describe("Hugin strict autonomous config adapter (W4.3)", () => {
-  it.each([
-    ["homeserver", "classify", "public", true],
-    ["homeserver", "extract", "internal", true],
-    ["homeserver", "classify", "private", false],
-    ["homeserver", "summarize", "public", false],
-    ["openrouter", "classify", "public", false],
-  ])("preserves the Orin macro-route matrix", (workerProvider, taskType, sensitivity, allowed) => {
-    expect(selectHuginMacroRoute({ workerProvider, taskType, sensitivity: sensitivity as "public" | "internal" | "private" }) !== null).toBe(allowed);
+const digest = (value: unknown) => `sha256:${createHash("sha256").update(canonicalizeJcs(value)).digest("hex")}`;
+function candidate(targetId: "hugin-orin-macro-routing" = "hugin-orin-macro-routing", base = { revision: "orin-macro-route-v1", digest: "" }) {
+  const body = { schemaVersion: HUGIN_CONFIG_ADAPTER_VERSION, targetId, revision: "orin-macro-route-v2", base, config: { routes: [
+    { workerProvider: "homeserver", taskType: "classify", sensitivity: "internal", nodeId: "orin", modelId: "qwen2.5-coder:3b" },
+    { workerProvider: "homeserver", taskType: "classify", sensitivity: "public", nodeId: "orin", modelId: "qwen2.5-coder:3b" },
+    { workerProvider: "homeserver", taskType: "extract", sensitivity: "internal", nodeId: "orin", modelId: "qwen2.5-coder:3b" },
+    { workerProvider: "homeserver", taskType: "extract", sensitivity: "public", nodeId: "orin", modelId: "qwen2.5-coder:3b" },
+  ] } } as const;
+  return { ...body, candidateDigest: digest(body) };
+}
+
+describe("Hugin strict autonomous config adapters", () => {
+  it.each([["homeserver", "classify", "public", true], ["homeserver", "extract", "internal", true], ["homeserver", "classify", "private", false], ["homeserver", "summarize", "public", false], ["openrouter", "classify", "public", false]])("preserves the Orin route matrix", (workerProvider, taskType, sensitivity, allowed) => expect(selectHuginMacroRoute({ workerProvider, taskType, sensitivity: sensitivity as "public" | "internal" | "private" }) !== null).toBe(allowed));
+
+  it("performs an exact staged CAS with snapshot/readback and refuses stale state", async () => {
+    const store = new HuginConfigStore(); const target = createHuginConfigTargets(store)["hugin-orin-macro-routing"];
+    const base = await target.read(); const doc = store.stage(candidate("hugin-orin-macro-routing", base));
+    const snap = await target.snapshot(); await target.replaceExact(base, doc.candidateDigest);
+    expect(await target.read()).toEqual({ revision: "orin-macro-route-v2", digest: doc.candidateDigest }); expect(snap.digest).toBe(base.digest);
+    await expect(target.replaceExact(base, doc.candidateDigest)).rejects.toThrow("stale-base");
+    expect(store.restoreSnapshot("hugin-orin-macro-routing", snap.ref, snap.digest)).toEqual(base);
+    expect(await target.read()).toEqual(base);
   });
 
-  it("has versioned, digest-bound bases without content storage", () => {
-    expect(readHuginConfigBase("hugin-orin-macro-routing")).toMatchObject({ revision: "orin-macro-route-v1", digest: expect.stringMatching(/^sha256:/) });
-  });
-
-  it.each([
-    { targetId: "gille-model", model: "x" },
-    { targetId: "gille-model-config", modelConfig: "x" },
-    { targetId: "hugin-logging", logging: "on" },
-    { targetId: "hugin-test-harness", testHarness: "on" },
-    { targetId: "gille-tool-policy", toolPolicyDigest: "sha256:" + "0".repeat(64) },
-    { targetId: "hugin-deploy", deploy: true },
-    { targetId: "hugin-auth", auth: "x" },
-    { targetId: "hugin-key", key: "x" },
-    { targetId: "hugin-safety-gate", safety: "x" },
-    { targetId: "hugin-risk-budget", risk: 1 },
-    { targetId: "hugin-retention", retention: 1 },
-  ])("rejects protected or cross-owner target %#", (input) => {
-    expect(() => validateHuginConfig({ schemaVersion: HUGIN_CONFIG_ADAPTER_VERSION, revision: "candidate-v1", ...input })).toThrow();
+  it("rejects malformed, duplicate/noncanonical, cross-owner, protected and unbound candidates before mutation", async () => {
+    const store = new HuginConfigStore(); const target = createHuginConfigTargets(store)["hugin-orin-macro-routing"]; const before = await target.read();
+    const bad = candidate("hugin-orin-macro-routing", before); bad.config.routes.reverse();
+    expect(() => validateHuginConfigCandidate(bad)).toThrow("noncanonical");
+    for (const id of ["gille-model", "gille-model-config", "hugin-logging", "hugin-test-harness", "gille-tool-policy", "hugin-deploy", "hugin-auth", "hugin-key", "hugin-safety-gate", "hugin-risk-budget", "hugin-retention", "unknown-target"]) expect(() => validateHuginConfigCandidate({ ...bad, targetId: id })).toThrow();
+    await expect(target.replaceExact(before, digest("not-staged"))).rejects.toThrow("not-bound"); expect(await target.read()).toEqual(before);
   });
 });
