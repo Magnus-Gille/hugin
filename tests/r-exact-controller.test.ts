@@ -439,6 +439,11 @@ class Target implements RExactConfigTarget {
     return { revision: this.revision, digest: this.digest };
   }
 
+  async candidateRevision(candidateDigest: string) {
+    if (candidateDigest !== h("candidate")) throw new Error("unknown candidate");
+    return "candidate-1";
+  }
+
   async snapshot() {
     return { ref: "ref:snapshot-330", digest: h("base") };
   }
