@@ -1449,6 +1449,8 @@ export async function recoverRExactAttempt(
         targetId: prepared.target_id,
         baseRevision: prepared.base_revision,
         baseDigest: prepared.base_digest,
+        expectedCurrent: { revision: currentTarget.revision, digest: prepared.candidate_digest },
+        recoveryWorkerIdentity: prepared.prepared_authority.identities.recovery_worker,
       });
       options.onPhase?.("restore");
       const readback = await target.read();

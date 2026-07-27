@@ -271,6 +271,9 @@ export interface RExactRecoveryWorker {
     targetId: string;
     baseRevision: string;
     baseDigest: string;
+    /** Fence recovery to the exact post-apply state recorded by this attempt. */
+    expectedCurrent: { revision: string; digest: string };
+    recoveryWorkerIdentity: string;
   }): Promise<{ restoredRevision: string; restoredDigest: string }>;
   narrowAndVerify(input: {
     binding: VerifiedW0Binding;
