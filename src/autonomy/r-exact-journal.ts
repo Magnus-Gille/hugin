@@ -1,5 +1,6 @@
 /** Exact W0.1 journal construction and semantic validation. */
 import { canonicalizeJcs } from "../jcs.js";
+import { canonicalJournalSchemaErrors } from "./grimnir-w0-schemas.js";
 import { W0_CONSTITUTION_DIGEST, w0Digest } from "./w0-authority.js";
 import type {
   JournalEntry,
@@ -14,6 +15,7 @@ const digestPattern = /^sha256:[a-f0-9]{64}$/;
 const idPattern = /^[a-z][a-z0-9-]{2,62}$/;
 const refPattern = /^ref:[a-z][a-z0-9-]{2,120}$/;
 const utcPattern = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
+const CONSTITUTIONAL_WINDOW_MS = 3_600_000;
 const exactKeys = (value: unknown, keys: string[]): boolean =>
   !!value
   && typeof value === "object"
@@ -145,7 +147,6 @@ export function validateRExactJournal(
     "writer_owner",
     "owner_authority_ref",
     "owner_authority_digest",
-    "owner_authorization_digest",
     "configuration_owner",
     "configuration_owner_authority_ref",
     "configuration_owner_authority_digest",
@@ -192,6 +193,10 @@ export function validateRExactJournal(
     || journal.binding.configuration_owner !== "hugin"
     || !Array.isArray(journal.entries)
     || journal.entries.length < 1
+    || (
+      journal.entries.length >= 2
+      && canonicalJournalSchemaErrors(journal).length > 0
+    )
   ) {
     throw new Error("r-exact-journal-schema");
   }
@@ -205,7 +210,6 @@ export function validateRExactJournal(
       "class",
       "worker_identity",
       "descriptor_digest",
-      "prepared_digest",
       "disarms_after_action",
     ])
     || journal.binding.canary.scope_digest
@@ -214,8 +218,6 @@ export function validateRExactJournal(
     || journal.binding.recovery.class !== "R-exact"
     || journal.binding.recovery.worker_identity
       !== journal.binding.recovery_worker_identity
-    || !digestPattern.test(journal.binding.owner_authorization_digest)
-    || !digestPattern.test(journal.binding.recovery.prepared_digest)
     || !digestPattern.test(journal.binding.recovery.descriptor_digest)
     || journal.binding.recovery.disarms_after_action !== true
     || !exactUtc(journal.binding.deadline)
@@ -386,6 +388,22 @@ export function validateRExactJournal(
       throw new Error("r-exact-journal-quarantine");
     }
     previous = entry;
+  }
+  if (
+    Date.parse(journal.binding.deadline)
+      - Date.parse(journal.entries[0].recorded_at)
+      > CONSTITUTIONAL_WINDOW_MS
+  ) {
+    throw new Error("r-exact-journal-deadline-bound");
+  }
+  const watchEntry = journal.entries.find((entry) => entry.phase === "watch");
+  if (
+    watchEntry
+    && Date.parse(journal.binding.canary.watch_deadline)
+      - Date.parse(watchEntry.recorded_at)
+      > CONSTITUTIONAL_WINDOW_MS
+  ) {
+    throw new Error("r-exact-journal-watch-bound");
   }
   if (journal.entries[0]!.phase !== "prepare") {
     throw new Error("r-exact-journal-start");

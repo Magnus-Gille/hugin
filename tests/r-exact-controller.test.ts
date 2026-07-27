@@ -33,6 +33,7 @@ import {
   type W0RuntimeGate,
 } from "../src/autonomy/r-exact-controller.js";
 import { roleForPhase } from "../src/autonomy/r-exact-journal.js";
+import { schemaErrors, type JsonValue } from "../src/node-substrate.js";
 import {
   R_EXACT_CONFORMANCE,
   verifyW0Authority,
@@ -58,6 +59,13 @@ const constitutionFixture = JSON.parse(readFileSync(
 const rolePhaseFixture = JSON.parse(readFileSync(
   new URL(
     "./fixtures/autonomy-contract/w0.1-role-phase-map.json",
+    import.meta.url,
+  ),
+  "utf8",
+));
+const canonicalJournalSchema = JSON.parse(readFileSync(
+  new URL(
+    "../docs/vendor/grimnir/autonomy/autonomous-mutation-journal-v1.schema.json",
     import.meta.url,
   ),
   "utf8",
@@ -620,6 +628,7 @@ function gate(
   ).toString("base64");
   const runtime: W0RuntimeGate = {
     authority: bundle,
+    readAuthority: async () => structuredClone(runtime.authority),
     roleServicePins,
     reader: backend,
     controller: backend.services.controller,
@@ -666,14 +675,20 @@ function gate(
       };
     },
     resolveNarrowingAuthority: async (input) => {
-      const matches = [runtime.authority, ...narrowingHistory].filter(
-        (candidate) => candidate.runtimeNarrowing.entries.some(
-          (entry: any) =>
-            entry.domain === input.domain
-            && entry.target_scope_digest === input.targetScopeDigest
-            && entry.journal_receipt_digest
-              === input.terminalReceiptDigest,
-        ),
+      const matches = [...narrowingHistory, runtime.authority].filter(
+        (candidate) =>
+          w0Digest(candidate.ownerAuthorization)
+            === input.ownerAuthorizationDigest
+          && candidate.runtimeNarrowing.entries.some(
+            (entry: any) =>
+              entry.domain === input.domain
+              && entry.target_scope_digest === input.targetScopeDigest
+              && entry.journal_receipt_digest
+                === input.terminalReceiptDigest
+              && entry.recovery_worker_identity
+                === input.recoveryWorkerIdentity
+              && entry.from_state === input.fromState,
+          ),
       );
       const matchingEntryDigests = new Set(matches.flatMap(
         (candidate) => candidate.runtimeNarrowing.entries
@@ -741,7 +756,8 @@ function gate(
         next.narrowingCheckpoint.minimum_entries =
           next.runtimeNarrowing.entries.length;
         next.narrowingCheckpoint.ledger_tail_digest = entry.entry_digest;
-        narrowingHistory.push(next);
+        narrowingHistory.push(structuredClone(next));
+        runtime.authority = next;
         return next;
       },
     },
@@ -799,6 +815,25 @@ describe("W0.1 R-exact controller", () => {
     validateRExactJournal(result.journal, false);
   });
 
+  it("emits a journal accepted by the exact canonical Grimnir schema", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const result = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      gate(backend, target, receipt),
+    );
+    expect(
+      schemaErrors(
+        canonicalJournalSchema,
+        canonicalJournalSchema,
+        result.journal as unknown as JsonValue,
+      ),
+    ).toEqual([]);
+  });
+
   it("binds fresh admission exactly to proposal, base, candidate, and evidence", async () => {
     const backend = new JournalBackend();
     const target = new Target();
@@ -814,6 +849,40 @@ describe("W0.1 R-exact controller", () => {
       ),
     ).rejects.toThrow("admission-subject-mismatch");
     expect(target.digest).toBe(h("base"));
+  });
+
+  it.each([
+    {
+      name: "deadline",
+      override: { deadline: "2026-07-26T15:00:01Z" },
+    },
+    {
+      name: "watch",
+      override: {
+        checkedAt: "2026-07-26T13:59:59Z",
+        trustedWatchdogTime: "2026-07-26T13:59:59Z",
+        deadline: "2026-07-26T15:00:00Z",
+        watchDeadline: "2026-07-26T15:00:00Z",
+      },
+    },
+  ])("rejects an overlong constitutional $name window before mutation", async ({
+    override,
+  }) => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    target.beforeReplace = async () => {
+      throw new Error("mutation-ran");
+    };
+    await expect(
+      applyRExactProposal(
+        receipt,
+        keys,
+        target,
+        gate(backend, target, receipt, authority(), override),
+      ),
+    ).rejects.toThrow("admission-window-bound");
+    expect(await backend.read(receipt.proposalId)).toBeNull();
   });
 
   it("rejects later admission drift before apply", async () => {
@@ -855,6 +924,48 @@ describe("W0.1 R-exact controller", () => {
     expect(target.digest).toBe(h("base"));
   });
 
+  it.each([
+    { phase: "pre-apply", disarmRead: 2, expectedReplaces: 0 },
+    { phase: "pre-commit", disarmRead: 3, expectedReplaces: 1 },
+  ])("observes protected global disarm at $phase", async ({
+    disarmRead,
+    expectedReplaces,
+  }) => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    let reads = 0;
+    let replaces = 0;
+    target.beforeReplace = async () => {
+      replaces += 1;
+    };
+    runtime.readAuthority = async () => {
+      reads += 1;
+      if (reads === disarmRead) {
+        runtime.authority.coverageIntent.global_state = "disarmed";
+        runtime.authority.coverageIntent.registry_digest = w0Digest(
+          runtime.authority.coverageIntent,
+          "registry_digest",
+        );
+        runtime.authority.ownerAuthorization.bindings
+          .coverage_intent_digest =
+            runtime.authority.coverageIntent.registry_digest;
+        resignOwnerBundle(runtime.authority);
+      }
+      return structuredClone(runtime.authority);
+    };
+    const result = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      runtime,
+    );
+    expect(result.status).toBe("disarmed");
+    expect(replaces).toBe(expectedReplaces);
+    expect(target.digest).toBe(h("base"));
+  });
+
   it("recovers after proposal expiry and signer-key retirement", async () => {
     const backend = new JournalBackend();
     const target = new Target();
@@ -877,6 +988,9 @@ describe("W0.1 R-exact controller", () => {
       killSwitchStateDigest: h("kill-switch-off"),
       journalHealthy: true,
     });
+    runtime.readAuthority = async () => {
+      throw new Error("live-authority-unavailable");
+    };
     const recovered = await applyRExactProposal(
       receipt,
       {},
@@ -1304,6 +1418,7 @@ describe("W0.1 R-exact controller", () => {
     target.partial = true;
     const receipt = proposal();
     const runtime = gate(backend, target, receipt);
+    const recoveryCauses: string[] = [];
     runtime.recovery.restoreAndVerify = async () => {
       throw new Error("restore-offline");
     };
@@ -1312,6 +1427,13 @@ describe("W0.1 R-exact controller", () => {
       keys,
       target,
       runtime,
+      {
+        onRecoveryCause: (error) => {
+          recoveryCauses.push(
+            error instanceof Error ? error.message : String(error),
+          );
+        },
+      },
     );
     expect(result.status).toBe("terminally-blocked");
     expect(result.journal.entries.at(-1)?.phase)
@@ -1322,6 +1444,8 @@ describe("W0.1 R-exact controller", () => {
     expect(
       runtime.authority.runtimeNarrowing.entries[0].journal_receipt_digest,
     ).toBe(result.journal.entries.at(-1)?.receipt_digest);
+    expect(recoveryCauses).toContain("r-exact-readback-mismatch");
+    expect(recoveryCauses).toContain("restore-offline");
   });
 
   it("never terminalizes a recovery worker's wrong target/receipt narrowing", async () => {
@@ -1330,6 +1454,8 @@ describe("W0.1 R-exact controller", () => {
     target.partial = true;
     const receipt = proposal();
     const runtime = gate(backend, target, receipt);
+    const recoveryPrivateKey =
+      (runtime.authority as any)._recoveryPrivateKey;
     const original = runtime.recovery.narrowAndVerify;
     runtime.recovery.narrowAndVerify = async (input) => {
       const next = await original(input);
@@ -1344,7 +1470,7 @@ describe("W0.1 R-exact controller", () => {
       entry.signature.value_base64 = sign(
         null,
         Buffer.from(canonicalizeJcs(unsigned)),
-        (runtime.authority as any)._recoveryPrivateKey,
+        recoveryPrivateKey,
       ).toString("base64");
       next.narrowingCheckpoint.ledger_tail_digest = entry.entry_digest;
       return next;
@@ -1483,6 +1609,15 @@ describe("W0.1 R-exact controller", () => {
       ?.journal_receipt_digest;
     expect(narrowedReceipt).toMatch(/^sha256:/);
 
+    runtime.verifyRecovery = async (_prepared, current) => ({
+      checkedAt: fixedNow,
+      trustedWatchdogTime: fixedNow,
+      killSwitchIdentity: current.state === "broader"
+        ? current.binding.identities.kill_switch
+        : current.killSwitchIdentity,
+      killSwitchStateDigest: h("changed-kill-switch-observation"),
+      journalHealthy: true,
+    });
     const recovered = await applyRExactProposal(
       receipt,
       keys,
@@ -1495,7 +1630,12 @@ describe("W0.1 R-exact controller", () => {
     expect(runtime.authority.runtimeNarrowing.entries).toHaveLength(1);
   });
 
-  it.each(["later-unrelated-narrowing", "owner-epoch-rotation"] as const)(
+  it.each([
+    "later-unrelated-narrowing",
+    "owner-epoch-rotation",
+    "global-disarm",
+    "binding-removed",
+  ] as const)(
     "replays pending terminal-blocked across %s before restore",
     async (mode) => {
     const backend = new JournalBackend();
@@ -1539,8 +1679,15 @@ describe("W0.1 R-exact controller", () => {
         binding: unrelatedBinding,
         journalReceiptDigest: h("later-unrelated-terminal"),
       });
-    } else {
+    } else if (mode === "owner-epoch-rotation") {
       runtime.authority = authority();
+    } else if (mode === "global-disarm") {
+      runtime.authority.coverageIntent.global_state = "disarmed";
+    } else {
+      const row = runtime.authority.coverageIntent.domains.find(
+        (item: any) => item.domain === "macro-routing",
+      );
+      row.bindings = [];
     }
 
     let laterRestoreCalls = 0;
@@ -1560,6 +1707,63 @@ describe("W0.1 R-exact controller", () => {
     expect(laterRestoreCalls).toBe(0);
     },
   );
+
+  it("refuses pending narrowing from a different owner epoch", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    target.partial = true;
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    const originalAppend = runtime.recoveryJournal.append
+      .bind(runtime.recoveryJournal);
+    let failed = false;
+    runtime.recoveryJournal.append = async (...args) => {
+      if (!failed && args[2].phase === "disarm") {
+        failed = true;
+        throw new Error("disarm-journal-offline");
+      }
+      return originalAppend(...args);
+    };
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("disarm-append-pending");
+    const historicalNarrowing = structuredClone(runtime.authority);
+
+    const wrongEpoch = authority();
+    wrongEpoch.recoveryWorkerRegistry = structuredClone(
+      historicalNarrowing.recoveryWorkerRegistry,
+    );
+    wrongEpoch.ownerAuthorization.bindings.recovery_worker_registry_digest =
+      wrongEpoch.recoveryWorkerRegistry.registry_digest;
+    wrongEpoch.runtimeNarrowing.entries = structuredClone(
+      historicalNarrowing.runtimeNarrowing.entries,
+    );
+    wrongEpoch.narrowingCheckpoint.minimum_entries =
+      wrongEpoch.runtimeNarrowing.entries.length;
+    wrongEpoch.narrowingCheckpoint.ledger_tail_digest =
+      wrongEpoch.runtimeNarrowing.entries.at(-1)?.entry_digest ?? null;
+    resignOwnerBundle(wrongEpoch);
+
+    let resolvedInput:
+      | Parameters<W0RuntimeGate["resolveNarrowingAuthority"]>[0]
+      | undefined;
+    runtime.resolveNarrowingAuthority = async (input) => {
+      resolvedInput = input;
+      return wrongEpoch;
+    };
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("pending-narrowing-authority-mismatch");
+    const stored = (await backend.read(receipt.proposalId))!;
+    expect(stored.journal.entries.at(-1)?.phase).toBe("revert");
+    expect(resolvedInput).toMatchObject({
+      ownerAuthorizationDigest:
+        stored.prepared.prepared_authority.authorizationDigest,
+      recoveryWorkerIdentity:
+        stored.prepared.prepared_authority.identities.recovery_worker,
+      fromState: stored.prepared.prepared_authority.state,
+    });
+  });
 
   it("rejects an altered receipt retry before recovery", async () => {
     const backend = new JournalBackend();
@@ -1661,7 +1865,7 @@ describe("W0.1 R-exact controller", () => {
     resignOwnerBundle(truncated);
     expect(
       () => verifyW0Authority(truncated, "macro-routing", scope),
-    ).toThrow("coverage-shape");
+    ).toThrow("w0-authority-rejected:schema");
 
     const forged = authority();
     const unsigned: any = {
@@ -1686,5 +1890,62 @@ describe("W0.1 R-exact controller", () => {
     expect(
       () => verifyW0Authority(forged, "macro-routing", scope),
     ).toThrow("narrowing-signature");
+  });
+
+  it("rejects schema-invalid W0 artifacts even after valid re-digesting", () => {
+    const impossibleDate = authority();
+    impossibleDate.coverageIntent.issued_at = "2026-02-31T00:00:00Z";
+    impossibleDate.coverageIntent.registry_digest = w0Digest(
+      impossibleDate.coverageIntent,
+      "registry_digest",
+    );
+    impossibleDate.ownerAuthorization.bindings.coverage_intent_digest =
+      impossibleDate.coverageIntent.registry_digest;
+    resignOwnerBundle(impossibleDate);
+
+    const malformedPrevious = authority();
+    malformedPrevious.ownerAuthorization.authorization_sequence = 2;
+    malformedPrevious.ownerAuthorization.previous_authorization_digest =
+      "not-a-digest";
+    resignOwnerBundle(malformedPrevious);
+
+    const invalidRegistryId = authority();
+    invalidRegistryId.ownerAttestations.registry_id = "Owner Attestations";
+    invalidRegistryId.ownerAttestations.registry_digest = w0Digest(
+      invalidRegistryId.ownerAttestations,
+      "registry_digest",
+    );
+    invalidRegistryId.ownerAuthorization.bindings
+      .owner_attestation_registry_digest =
+        invalidRegistryId.ownerAttestations.registry_digest;
+    resignOwnerBundle(invalidRegistryId);
+
+    const impossibleEntryDate = authority();
+    impossibleEntryDate.ownerAttestations.attestations[0].issued_at =
+      "2026-02-31T00:00:00Z";
+    impossibleEntryDate.ownerAttestations.attestations[0]
+      .attestation_digest = w0Digest(
+        impossibleEntryDate.ownerAttestations.attestations[0],
+        "attestation_digest",
+      );
+    impossibleEntryDate.ownerAttestations.registry_digest = w0Digest(
+      impossibleEntryDate.ownerAttestations,
+      "registry_digest",
+    );
+    impossibleEntryDate.ownerAuthorization.bindings
+      .owner_attestation_registry_digest =
+        impossibleEntryDate.ownerAttestations.registry_digest;
+    resignOwnerBundle(impossibleEntryDate);
+
+    for (const bundle of [
+      impossibleDate,
+      malformedPrevious,
+      invalidRegistryId,
+      impossibleEntryDate,
+    ]) {
+      expect(
+        () => verifyW0Authority(bundle, "macro-routing", scope),
+      ).toThrow("w0-authority-rejected:schema");
+    }
   });
 });

@@ -97,8 +97,15 @@ export function isPlainObject(value: unknown): value is Record<string, JsonValue
 }
 
 function canonical(value: JsonValue | undefined): string {
-  if (!isPlainObject(value)) return JSON.stringify(value);
-  return JSON.stringify(value, Object.keys(value).sort());
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value).sort().map(
+      (key) => `${JSON.stringify(key)}:${canonical(value[key])}`,
+    ).join(",")}}`;
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonical(item)).join(",")}]`;
+  }
+  return JSON.stringify(value);
 }
 
 function typeMatches(type: string, value: JsonValue | undefined): boolean {
@@ -133,9 +140,10 @@ function resolveRef(root: Record<string, JsonValue>, ref: string): JsonValue {
 }
 
 const SUPPORTED_KEYWORDS = new Set([
-  "$schema", "$id", "$defs", "$ref", "title", "description", "oneOf", "const",
-  "enum", "type", "minLength", "pattern", "format", "minimum", "minItems",
-  "uniqueItems", "items", "required", "properties", "additionalProperties",
+  "$schema", "$id", "$defs", "$ref", "title", "description", "oneOf",
+  "allOf", "const", "enum", "type", "minLength", "pattern", "format",
+  "minimum", "maximum", "minItems", "maxItems", "uniqueItems", "items",
+  "required", "properties", "additionalProperties",
 ]);
 
 /**
@@ -184,6 +192,9 @@ export function checkSchemaSupported(node: JsonValue, at = "$"): void {
   if (Array.isArray(node.oneOf)) {
     node.oneOf.forEach((child, index) => checkSchemaSupported(child, `${at}.oneOf[${index}]`));
   }
+  if (Array.isArray(node.allOf)) {
+    node.allOf.forEach((child, index) => checkSchemaSupported(child, `${at}.allOf[${index}]`));
+  }
 }
 
 /**
@@ -208,6 +219,11 @@ export function schemaErrors(
       ? []
       : [`${at}: expected exactly one branch (${attempts.flat().join("; ")})`];
   }
+  if (Array.isArray(node.allOf)) {
+    return node.allOf.flatMap(
+      (child) => schemaErrors(root, child, value, at),
+    );
+  }
   const errors: string[] = [];
   if (Object.hasOwn(node, "const") && canonical(value) !== canonical(node.const)) {
     errors.push(`${at}: const mismatch`);
@@ -225,14 +241,24 @@ export function schemaErrors(
     if (typeof node.pattern === "string" && !new RegExp(node.pattern).test(value)) {
       errors.push(`${at}: pattern`);
     }
-    if (node.format === "date-time" && !EXACT_UTC.test(value)) errors.push(`${at}: date-time`);
+    if (node.format === "date-time" && !isExactUtc(value)) {
+      errors.push(`${at}: date-time`);
+    }
   }
-  if (typeof value === "number" && typeof node.minimum === "number" && value < node.minimum) {
-    errors.push(`${at}: minimum`);
+  if (typeof value === "number") {
+    if (typeof node.minimum === "number" && value < node.minimum) {
+      errors.push(`${at}: minimum`);
+    }
+    if (typeof node.maximum === "number" && value > node.maximum) {
+      errors.push(`${at}: maximum`);
+    }
   }
   if (Array.isArray(value)) {
     if (typeof node.minItems === "number" && value.length < node.minItems) {
       errors.push(`${at}: minItems`);
+    }
+    if (typeof node.maxItems === "number" && value.length > node.maxItems) {
+      errors.push(`${at}: maxItems`);
     }
     if (node.uniqueItems && new Set(value.map(canonical)).size !== value.length) {
       errors.push(`${at}: duplicate items`);

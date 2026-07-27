@@ -1,0 +1,15 @@
+{
+  "source_repository": "Magnus-Gille/grimnir",
+  "source_revision": "ddf1cfa3d86d1a72e47b7d19fe16aab8d12db528",
+  "source_paths": [
+    "docs/autonomous-mutation-journal-v1.schema.json",
+    "docs/autonomy-constitution-v1.schema.json",
+    "docs/autonomy-coverage-registry-v1.schema.json",
+    "docs/autonomy-owner-attestation-registry-v1.schema.json",
+    "docs/autonomy-owner-authorization-v1.schema.json",
+    "docs/autonomy-recovery-worker-registry-v1.schema.json",
+    "docs/autonomy-runtime-narrowing-v1.schema.json"
+  ],
+  "vendored_path": "docs/vendor/grimnir/autonomy",
+  "interpretation": "Byte-exact canonical ADR-008/W0.1 schemas; no Hugin-specific schema overlay."
+}

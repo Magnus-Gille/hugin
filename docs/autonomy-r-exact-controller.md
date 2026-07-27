@@ -12,8 +12,15 @@ until the owner completes a separate arming action.
 
 ## Authority and admission
 
-Before mutation, and again immediately before the owner-owned replace call, the
-controller verifies:
+The seven canonical Grimnir W0.1 JSON Schemas are vendored byte-exact and
+SHA-256 pinned to the source revision recorded in
+`docs/autonomy-r-exact-controller.provenance.json`. Hugin applies those closed
+schemas before its cryptographic and cross-artifact semantic checks; it has no
+schema overlay.
+
+Before mutation, immediately before the owner-owned replace call, and again
+before commit, the controller asynchronously reads the protected authority
+checkpoint and verifies:
 
 - the pinned owner Ed25519 key and owner-signed authorization;
 - exact constitution, coverage, owner-attestation, recovery-registry, and
@@ -26,6 +33,7 @@ controller verifies:
 - that no signed recovery narrowing already reduced the binding to `shadow`;
 - fresh kill-switch, evidence, journal, rate-window, liveness, deadline, and
   watch-window facts against a protected clock;
+- the canonical one-hour maximum for both attempt deadline and watch window;
 - exact admission subject fields matching the signed proposal digest, base
   revision/digest, candidate digest, target scope, and evidence fingerprints.
 
@@ -57,6 +65,11 @@ tail.
 durable prefix of an attempt. Completed and recovered W0 journal envelopes have
 at least two entries. Every entry is content-blind and contains only digests,
 bounded references, phase facts, identities, and exact binding metadata.
+Every envelope with at least two entries is also checked directly against the
+canonical closed mutation-journal schema. Hugin adds no private binding fields:
+owner-authorization and prepared-record correlation remain in the separately
+authenticated prepared record, historical resolver, recovery descriptor, and
+signed role receipt.
 
 The controller service persists `prepare` and acquires the atomic
 `domain + target-scope` claim in one operation; mutation cannot begin until
@@ -88,15 +101,17 @@ the stored sidecar cannot nominate its own trust root. Recovery can therefore
 restore after owner rotation while using the current protected authority only
 for kill-switch observation and narrowing.
 
-Apply snapshots the owner authority, signed pins, public keys, and role-service
-capabilities once before its first asynchronous boundary. Atomic prepare/claim
-retains that exact historical capability set for the lifetime of the attempt.
-Recovery therefore does not depend on today's role-service handles or keys.
+Apply snapshots signed pins, public keys, and role-service capabilities before
+its first asynchronous boundary, then takes the owner-authority snapshot from
+the protected asynchronous reader before fresh admission. Atomic prepare/claim
+retains that exact historical set for the lifetime of the attempt. Recovery
+therefore does not depend on today's role-service handles or keys.
 
 Live proposal expiry and the current proposer-key registry are apply-time
 admission concerns. Once `prepare` is durable, restart authenticates the raw
 receipt by its exact digest inside the signed prepared record; expiry or later
-proposer-key retirement cannot strand recovery or terminal replay.
+proposer-key retirement—or loss of the current authority reader—cannot strand
+recovery or terminal replay.
 
 `revert` is written only after exact baseline revision and digest readback
 succeed. The worker deterministically constructs the terminal `disarm` or
@@ -115,10 +130,15 @@ reconciles both important crash windows:
 In the second window, restart reconstructs and appends the same deterministic
 terminal receipt already named by the narrowing checkpoint before attempting
 another restore or other recovery action. It never substitutes a differently
-bound terminal state. The protected resolver searches authenticated narrowing
-history by exact domain, target, worker, epoch, and terminal receipt; the entry
-need not be the global ledger tail and remains discoverable after later
-unrelated narrowing or owner-epoch rotation.
+bound terminal state. Its reason comes from the authenticated durable `unknown`
+entry, not a newly sampled kill-switch digest, so changing protection evidence
+cannot change the precomputed receipt. The protected resolver searches
+authenticated narrowing history by exact domain, target, prior state, recovery
+worker, owner-authorization epoch, and terminal receipt. The returned binding
+must equal the prepared historical authority except for its authenticated
+`shadow` effective state. The entry need not be the global ledger tail and
+remains discoverable after later unrelated narrowing, owner-epoch rotation,
+global disarm, or binding removal.
 
 If current protected coverage is globally disarmed, removed, or already
 shadowed, recovery recognizes that the target is already safe and does not try
@@ -138,12 +158,17 @@ An owning adapter must provide:
 - an owner-signed protected pin artifact for those three public keys;
 - a protected historical-authority resolver retaining independently pinned
   owner and role public keys for every nonterminal prepared attempt;
+- an asynchronous protected authority reader used immediately before fresh
+  apply and commit; an in-process mutable object is not an authority source;
+- a protected narrowing-history resolver bound to the expected owner epoch,
+  recovery identity, prior state, domain, target, and terminal receipt;
 - an atomic controller prepare/claim store that creates both or neither, holds
   the claim through terminalization, and permits reuse only after a terminal
   receipt;
 - a protected-clock admission verifier;
 - a recovery worker whose Ed25519 key and identity match the owner-signed
-  recovery registry;
+  recovery registry and whose `narrowAndVerify` call atomically persists the
+  returned narrowing before it reports success;
 - atomic, monotonic persistence for owner authorization and runtime-narrowing
   checkpoints.
 

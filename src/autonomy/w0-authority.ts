@@ -1,6 +1,7 @@
 /** Offline-verifiable Grimnir ADR-008/W0.1 authority contract. */
 import { createHash, createPublicKey, verify as verifySignature } from "node:crypto";
 import { canonicalizeJcs } from "../jcs.js";
+import { canonicalW0AuthoritySchemaErrors } from "./grimnir-w0-schemas.js";
 
 export const W0_CONSTITUTION_DIGEST = "sha256:51efdb78c4524780919649f285862543db8b38a6a3a07894f0fad8bdab40fc6c" as const;
 export const W0_JOURNAL_PHASES = ["prepare", "apply", "verify", "watch", "commit", "unknown", "revert", "recover", "quarantine", "disarm", "terminally-blocked"] as const;
@@ -134,6 +135,7 @@ export interface VerifiedW0Binding {
 
 /** Verify owner Ed25519 authority, exact artifact bindings and current narrowing. */
 export function verifyW0Authority(bundle: W0AuthorityBundle, domain: HuginRExactDomain, targetScopeDigest: string, allowNarrowed = false): VerifiedW0Binding {
+  if (canonicalW0AuthoritySchemaErrors(bundle).length) reject("schema");
   const { constitution:c, coverageIntent:cov, ownerAttestations:att, recoveryWorkerRegistry:rr, ownerAuthorization:a, authorizationCheckpoint:cp, runtimeNarrowing:n, narrowingCheckpoint:ncp } = bundle;
   for (const artifact of [c, cov, att, rr, a, cp, n, ncp]) bounded(artifact);
   if (!HUGIN_R_EXACT_DOMAINS.includes(domain) || !digestPattern.test(targetScopeDigest)) reject("invalid-target");

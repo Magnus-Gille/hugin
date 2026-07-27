@@ -52,6 +52,7 @@ const digestPattern = /^sha256:[a-f0-9]{64}$/;
 const refPattern = /^ref:[a-z][a-z0-9-]{2,120}$/;
 const proposalIdPattern = /^[a-z][a-z0-9-]{2,120}$/;
 const utcPattern = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
+const CONSTITUTIONAL_WINDOW_MS = 3_600_000;
 const exactKeys = (value: unknown, keys: string[]): boolean =>
   !!value
   && typeof value === "object"
@@ -161,6 +162,12 @@ function validateFresh(
   }
   if (watchDeadline > deadline || actual > deadline) {
     throw new Error("r-exact-deadline-expired");
+  }
+  if (
+    deadline - checked > CONSTITUTIONAL_WINDOW_MS
+    || watchDeadline - checked > CONSTITUTIONAL_WINDOW_MS
+  ) {
+    throw new Error("r-exact-admission-window-bound");
   }
   if (phase === "commit" && actual < watchDeadline) {
     throw new Error("r-exact-watch-incomplete");
@@ -278,8 +285,7 @@ function verifyReceiptForCurrentBase(
 function verifyOwner(
   receipt: AutonomyProposalReceipt,
   target: RExactConfigTarget,
-  gate: W0RuntimeGate,
-  authority = gate.authority,
+  authority: W0RuntimeGate["authority"],
 ): VerifiedW0Binding {
   const registry = proposalTargetRegistry.find(
     (entry) => entry.id === receipt.targetId,
@@ -383,7 +389,6 @@ export async function applyRExactProposal(
   gate: W0RuntimeGate,
   options: RExactOptions = {},
 ): Promise<RExactResult> {
-  const authoritySnapshot = structuredClone(gate.authority);
   const rolePinsSnapshot = structuredClone(gate.roleServicePins);
   const roleServicesSnapshot = {
     controller: gate.controller,
@@ -410,6 +415,7 @@ export async function applyRExactProposal(
       return recoverRExactAttempt(raw, keys, target, gate, options);
     }
   }
+  const authoritySnapshot = structuredClone(await gate.readAuthority());
   const receipt = verifyReceiptIdentityOnly(
     raw,
     keys,
@@ -417,7 +423,7 @@ export async function applyRExactProposal(
   );
   const current = await target.read();
   verifyReceiptForCurrentBase(receipt, keys, gate, current);
-  const owner = verifyOwner(receipt, target, gate, authoritySnapshot);
+  const owner = verifyOwner(receipt, target, authoritySnapshot);
   const historicalSnapshot = {
     authority: authoritySnapshot,
     roleServicePins: rolePinsSnapshot,
@@ -466,7 +472,6 @@ export async function applyRExactProposal(
     admission_digest: w0Digest(initialAdmission),
   };
   validatePrepared(prepared, receipt, target);
-  const preparedDigest = w0Digest(prepared);
   const binding = {
     mutation_id: idDigest("mutation", receipt.canonicalProposalDigest),
     attempt_id: attemptId,
@@ -478,7 +483,6 @@ export async function applyRExactProposal(
     writer_owner: "hugin",
     owner_authority_ref: owner.ownerAuthorityRef,
     owner_authority_digest: owner.ownerAuthorityDigest,
-    owner_authorization_digest: owner.authorizationDigest,
     configuration_owner: "hugin",
     configuration_owner_authority_ref:
       owner.configurationOwnerAuthorityRef,
@@ -509,7 +513,6 @@ export async function applyRExactProposal(
       class: "R-exact",
       worker_identity: owner.identities.recovery_worker,
       descriptor_digest: recoveryDescriptorDigest(prepared),
-      prepared_digest: preparedDigest,
       disarms_after_action: true,
     },
   };
@@ -588,7 +591,11 @@ export async function applyRExactProposal(
   options.onPhase?.("snapshot");
   try {
     await assertClaim(gate, target, prepared, attemptId);
-    const preApplyOwner = verifyOwner(receipt, target, gate);
+    const preApplyOwner = verifyOwner(
+      receipt,
+      target,
+      await gate.readAuthority(),
+    );
     if (!sameAuthority(owner, preApplyOwner)) {
       throw new Error("r-exact-authority-drift");
     }
@@ -650,7 +657,11 @@ export async function applyRExactProposal(
       prepared,
     );
     journal = state.journal;
-    const commitOwner = verifyOwner(receipt, target, gate);
+    const commitOwner = verifyOwner(
+      receipt,
+      target,
+      await gate.readAuthority(),
+    );
     if (!sameAuthority(owner, commitOwner)) {
       throw new Error("r-exact-authority-drift");
     }
@@ -711,7 +722,6 @@ async function narrowCurrentAuthority(
   });
   options.onPhase?.("narrowing");
   verifyW0NarrowingApplied(narrowed, binding, journalReceiptDigest);
-  gate.authority = narrowed;
 }
 
 function terminalBlockedReasonDigest(recoveryReasonDigest: string): string {
@@ -775,14 +785,34 @@ async function reconcilePendingNarrowing(
       domain: target.domain,
       targetScopeDigest: target.targetScopeDigest,
       terminalReceiptDigest: candidate.entry.receipt_digest,
+      ownerAuthorizationDigest:
+        prepared.prepared_authority.authorizationDigest,
+      recoveryWorkerIdentity:
+        prepared.prepared_authority.identities.recovery_worker,
+      fromState: prepared.prepared_authority.state,
     });
     if (authority) {
-      verifyW0NarrowingReceipt(
+      const resolved = verifyW0NarrowingReceipt(
         authority,
         target.domain,
         target.targetScopeDigest,
         candidate.entry.receipt_digest,
       );
+      const {
+        effectiveState: _preparedEffective,
+        ...preparedAuthority
+      } = prepared.prepared_authority;
+      const {
+        effectiveState: _resolvedEffective,
+        ...resolvedAuthority
+      } = resolved;
+      if (
+        resolved.effectiveState !== "shadow"
+        || canonicalizeJcs(resolvedAuthority)
+          !== canonicalizeJcs(preparedAuthority)
+      ) {
+        throw new Error("r-exact-pending-narrowing-authority-mismatch");
+      }
       if (pending) throw new Error("r-exact-pending-narrowing-ambiguous");
       pending = candidate;
     }
@@ -881,7 +911,7 @@ export async function recoverRExactAttempt(
   validatePrepared(prepared, receipt, target);
   validateRExactJournal(journal);
   const historical = await gate.resolveHistoricalAuthority(
-    journal.binding.owner_authorization_digest,
+    prepared.prepared_authority.authorizationDigest,
   );
   if (!historical) {
     throw new Error("r-exact-historical-authority-missing");
@@ -894,7 +924,7 @@ export async function recoverRExactAttempt(
   );
   if (
     historicalBinding.authorizationDigest
-      !== journal.binding.owner_authorization_digest
+      !== prepared.prepared_authority.authorizationDigest
     || canonicalizeJcs(prepared.prepared_authority)
       !== canonicalizeJcs(historicalBinding)
     || prepared.prepared_owner_key_fingerprint
@@ -933,9 +963,6 @@ export async function recoverRExactAttempt(
   if (claim === "busy") throw new Error("r-exact-target-busy");
   if (
     journal.binding_digest !== w0Digest(journal.binding)
-    || journal.binding.owner_authorization_digest
-      !== historicalBinding.authorizationDigest
-    || journal.binding.recovery.prepared_digest !== w0Digest(prepared)
     || journal.binding.recovery.descriptor_digest
       !== recoveryDescriptorDigest(prepared)
     || journal.binding.target_scope_digest
@@ -1001,11 +1028,16 @@ export async function recoverRExactAttempt(
     prepared,
     journal.binding.attempt_id,
   );
-  const reasonDigest = w0Digest({
+  const observedReasonDigest = w0Digest({
     kind: "r-exact-recovery",
     proposal_digest: prepared.proposal_digest,
     kill_switch_state_digest: protection.killSwitchStateDigest,
   });
+  const durableUnknown = [...journal.entries]
+    .reverse()
+    .find((entry) => entry.phase === "unknown");
+  const reasonDigest = durableUnknown?.terminal_reason_digest
+    ?? observedReasonDigest;
   const reconciledNarrowing = await reconcilePendingNarrowing(
     receipt,
     target,
@@ -1109,9 +1141,13 @@ export async function recoverRExactAttempt(
     await terminalizeClaim(gate, target, journal);
     return { status: "disarmed", journal };
   } catch (error) {
+    options.onRecoveryCause?.(error);
     if (
       error instanceof Error
-      && error.message.startsWith("r-exact-role-")
+      && (
+        error.message.startsWith("r-exact-role-")
+        || error.message.startsWith("w0-authority-rejected:")
+      )
     ) {
       throw error;
     }

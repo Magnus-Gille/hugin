@@ -240,7 +240,9 @@ export interface RExactRecoveryWorker {
 }
 
 export interface W0RuntimeGate {
+  /** Compatibility view only; controller decisions use readAuthority(). */
   authority: W0AuthorityBundle;
+  readAuthority(): Promise<W0AuthorityBundle>;
   roleServicePins: ProtectedRoleServicePins;
   reader: RExactJournalReader;
   controller: RExactControllerService;
@@ -265,6 +267,9 @@ export interface W0RuntimeGate {
     domain: HuginRExactDomain;
     targetScopeDigest: string;
     terminalReceiptDigest: string;
+    ownerAuthorizationDigest: string;
+    recoveryWorkerIdentity: string;
+    fromState: "armed-canary" | "armed-fleet";
   }): Promise<W0AuthorityBundle | null>;
   protectedNow(): Date;
   verifyFresh(
