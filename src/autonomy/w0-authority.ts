@@ -321,7 +321,72 @@ export function verifyW0Authority(bundle: W0AuthorityBundle, domain: HuginRExact
   if (!exactKeys(n,["kind","schema_version","ledger_id","owner_authorization_digest","entries","extensions"])||n.kind!=="autonomy-runtime-narrowing"||n.schema_version!=="v1"||!idPattern.test(n.ledger_id)||!Array.isArray(n.entries)||n.entries.length>4096||!Array.isArray(n.extensions)||n.extensions.length||n.owner_authorization_digest!==authDigest || !exactKeys(ncp,["kind","schema_version","owner_authorization_digest","ledger_tail_digest","minimum_entries"])||ncp.kind!=="autonomy-runtime-narrowing-checkpoint"||ncp.schema_version!=="v1"||ncp.owner_authorization_digest!==authDigest) reject("narrowing-authorization");
   let previous:null|string=null, effective:"armed-canary"|"armed-fleet"|"shadow"=binding.state;
   const usedNarrowingBindings = new Set<string>();
-  for (const [index,e] of n.entries.entries()) { if(!exactKeys(e,["sequence","recorded_at","domain","target_scope_digest","from_state","to_state","recovery_worker_identity","journal_receipt_digest","previous_entry_digest","entry_digest","signature"])||!exactKeys(e.signature,["algorithm","value_base64"])||e.signature.algorithm!=="Ed25519"||!Number.isFinite(Date.parse(e.recorded_at))||!HUGIN_R_EXACT_DOMAINS.includes(e.domain)||!digestPattern.test(e.target_scope_digest)||!digestPattern.test(e.journal_receipt_digest)||!digestPattern.test(e.entry_digest)||!idPattern.test(e.recovery_worker_identity)||!["armed-canary","armed-fleet"].includes(e.from_state)||e.to_state!=="shadow")reject("narrowing-entry-shape");if (e.sequence!==index+1 || e.previous_entry_digest!==previous || e.entry_digest!==w0Digest((()=>{const q=structuredClone(e);delete q.entry_digest;delete q.signature;return q;})())) reject("narrowing-chain");const exactBinding=`${e.domain}:${e.target_scope_digest}:${e.recovery_worker_identity}`;if(usedNarrowingBindings.has(exactBinding))reject("duplicate-narrowing-binding");usedNarrowingBindings.add(exactBinding);const rb=recoveryBindings.get(exactBinding);if(!rb)reject("unbound-recovery-worker");const unsigned=structuredClone(e);delete unsigned.signature;if(!verifySignature(null,Buffer.from(canonicalizeJcs(unsigned)),rb.key,Buffer.from(e.signature.value_base64,"base64")))reject("narrowing-signature"); previous=e.entry_digest; if(e.domain===domain&&e.target_scope_digest===targetScopeDigest){if(e.from_state!==effective||e.to_state!=="shadow")reject("narrowing-transition");effective="shadow";} }
+  for (const [index, e] of n.entries.entries()) {
+    if (
+      !exactKeys(e, [
+        "sequence", "recorded_at", "domain", "target_scope_digest",
+        "from_state", "to_state", "recovery_worker_identity",
+        "journal_receipt_digest", "previous_entry_digest", "entry_digest",
+        "signature",
+      ])
+      || !exactKeys(e.signature, ["algorithm", "value_base64"])
+      || e.signature.algorithm !== "Ed25519"
+      || !Number.isFinite(Date.parse(e.recorded_at))
+      || !classPolicy[e.domain]
+      || !digestPattern.test(e.target_scope_digest)
+      || !digestPattern.test(e.journal_receipt_digest)
+      || !digestPattern.test(e.entry_digest)
+      || !idPattern.test(e.recovery_worker_identity)
+      || !["armed-canary", "armed-fleet"].includes(e.from_state)
+      || e.to_state !== "shadow"
+    ) reject("narrowing-entry-shape");
+    const unsigned = structuredClone(e);
+    delete unsigned.entry_digest;
+    delete unsigned.signature;
+    if (
+      e.sequence !== index + 1
+      || e.previous_entry_digest !== previous
+      || e.entry_digest !== w0Digest(unsigned)
+    ) reject("narrowing-chain");
+    const exactBinding =
+      `${e.domain}:${e.target_scope_digest}:${e.recovery_worker_identity}`;
+    if (usedNarrowingBindings.has(exactBinding)) {
+      reject("duplicate-narrowing-binding");
+    }
+    usedNarrowingBindings.add(exactBinding);
+    const authorityBindings = cov.domains
+      .find((row: any) => row.domain === e.domain)
+      ?.bindings.filter(
+        (candidate: any) =>
+          candidate.target_scope_digest === e.target_scope_digest
+          && candidate.state === e.from_state
+          && candidate.identities.recovery_worker
+            === e.recovery_worker_identity,
+      ) ?? [];
+    if (authorityBindings.length !== 1) {
+      reject("narrowing-authority-binding");
+    }
+    const recoveryBinding = recoveryBindings.get(exactBinding);
+    if (!recoveryBinding) reject("unbound-recovery-worker");
+    const signed = structuredClone(e);
+    delete signed.signature;
+    if (
+      !verifySignature(
+        null,
+        Buffer.from(canonicalizeJcs(signed)),
+        recoveryBinding.key,
+        Buffer.from(e.signature.value_base64, "base64"),
+      )
+    ) reject("narrowing-signature");
+    previous = e.entry_digest;
+    if (
+      e.domain === domain
+      && e.target_scope_digest === targetScopeDigest
+    ) {
+      if (e.from_state !== effective) reject("narrowing-transition");
+      effective = "shadow";
+    }
+  }
   if (!Number.isSafeInteger(ncp.minimum_entries) || ncp.minimum_entries < 0 || ncp.minimum_entries>n.entries.length || ncp.ledger_tail_digest!==previous) reject("narrowing-checkpoint");
   if (effective==="shadow" && !allowNarrowed) reject("binding-narrowed");
   const recovery=recoveryBindings.get(`${domain}:${targetScopeDigest}:${ids.recovery_worker}`); if(!recovery)reject("recovery-worker-binding");

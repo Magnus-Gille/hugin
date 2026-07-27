@@ -26,7 +26,10 @@ export interface FreshAdmission {
   evidenceFresh: boolean;
   journalHealthy: boolean;
   rateWindowEligible: boolean;
+  attemptIntervalEligible: boolean;
+  attemptWindowEligible: boolean;
   livenessHealthy: boolean;
+  watchdogSilenceSeconds: number;
   proposalDigest: string;
   targetScopeDigest: string;
   baseRevision: string;
@@ -39,6 +42,17 @@ export interface FreshAdmission {
   configDigest: string;
   deadline: string;
   watchDeadline: string;
+}
+
+export interface ProtectedWatchProof {
+  watchStartedAt: string;
+  watchDeadline: string;
+  completedAt: string;
+  maxObservedSilenceSeconds: number;
+  killSwitchStayedOff: boolean;
+  evidenceStayedFresh: boolean;
+  journalStayedHealthy: boolean;
+  livenessStayedHealthy: boolean;
 }
 
 export interface RecoveryProtection {
@@ -255,12 +269,14 @@ export interface W0RuntimeGate {
   ): Promise<HistoricalRoleAuthority | null>;
   currentRecoveryPosture(
     prepared: VerifiedW0Binding,
+    authority: W0AuthorityBundle | null,
   ): Promise<
     | { state: "broader"; binding: VerifiedW0Binding }
     | {
         state: "already-safe";
         killSwitchIdentity: string;
         safetyDigest: string;
+        authorityDigest: string | null;
       }
   >;
   resolveNarrowingAuthority(input: {
@@ -272,6 +288,20 @@ export interface W0RuntimeGate {
     fromState: "armed-canary" | "armed-fleet";
   }): Promise<W0AuthorityBundle | null>;
   protectedNow(): Date;
+  /**
+   * Durable, idempotent protected-watch seam. The service, rather than this
+   * process, owns the elapsed watch and may be rejoined after restart.
+   */
+  awaitProtectedWatch(input: {
+    proposalId: string;
+    attemptId: string;
+    targetId: string;
+    targetScopeDigest: string;
+    candidateDigest: string;
+    watchStartedAt: string;
+    watchDeadline: string;
+    watchdogIdentity: string;
+  }): Promise<ProtectedWatchProof>;
   verifyFresh(
     phase: "apply" | "commit",
     binding: VerifiedW0Binding,
@@ -284,6 +314,7 @@ export interface W0RuntimeGate {
           state: "already-safe";
           killSwitchIdentity: string;
           safetyDigest: string;
+          authorityDigest: string | null;
         },
   ): Promise<RecoveryProtection>;
 }

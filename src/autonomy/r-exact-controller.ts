@@ -33,6 +33,7 @@ import type {
   FreshAdmission,
   JournalEntry,
   PreparedAttempt,
+  ProtectedWatchProof,
   RExactConfigTarget,
   RExactJournal,
   RExactOptions,
@@ -53,6 +54,7 @@ const refPattern = /^ref:[a-z][a-z0-9-]{2,120}$/;
 const proposalIdPattern = /^[a-z][a-z0-9-]{2,120}$/;
 const utcPattern = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
 const CONSTITUTIONAL_WINDOW_MS = 3_600_000;
+const CONSTITUTIONAL_MAX_SILENCE_SECONDS = 900;
 const exactKeys = (value: unknown, keys: string[]): boolean =>
   !!value
   && typeof value === "object"
@@ -107,13 +109,29 @@ function expectedAdmission(
   };
 }
 
+type ImmutableAdmission = Pick<
+  FreshAdmission,
+  | "proposalDigest"
+  | "targetScopeDigest"
+  | "baseRevision"
+  | "baseDigest"
+  | "candidateDigest"
+  | "evidenceFingerprintsDigest"
+  | "evidenceDigest"
+  | "policyDigest"
+  | "postconditionsDigest"
+  | "configDigest"
+  | "deadline"
+  | "watchDeadline"
+>;
+
 function validateFresh(
   proof: FreshAdmission,
   gate: W0RuntimeGate,
   phase: "apply" | "commit",
   receipt: AutonomyProposalReceipt,
   binding: VerifiedW0Binding,
-  immutable?: FreshAdmission,
+  immutable?: ImmutableAdmission,
 ): void {
   const actual = trustedNow(gate);
   const checked = Date.parse(proof.checkedAt);
@@ -135,7 +153,13 @@ function validateFresh(
     || !proof.evidenceFresh
     || !proof.journalHealthy
     || !proof.rateWindowEligible
+    || !proof.attemptIntervalEligible
+    || !proof.attemptWindowEligible
     || !proof.livenessHealthy
+    || !Number.isSafeInteger(proof.watchdogSilenceSeconds)
+    || proof.watchdogSilenceSeconds < 0
+    || proof.watchdogSilenceSeconds
+      > CONSTITUTIONAL_MAX_SILENCE_SECONDS
   ) {
     throw new Error(`r-exact-${phase}-gate-refused`);
   }
@@ -164,8 +188,11 @@ function validateFresh(
     throw new Error("r-exact-deadline-expired");
   }
   if (
-    deadline - checked > CONSTITUTIONAL_WINDOW_MS
-    || watchDeadline - checked > CONSTITUTIONAL_WINDOW_MS
+    !immutable
+    && (
+      deadline - checked !== CONSTITUTIONAL_WINDOW_MS
+      || watchDeadline - checked !== CONSTITUTIONAL_WINDOW_MS
+    )
   ) {
     throw new Error("r-exact-admission-window-bound");
   }
@@ -193,6 +220,148 @@ function validateFresh(
       }
     }
   }
+}
+
+function immutableAdmissionFromJournal(
+  receipt: AutonomyProposalReceipt,
+  binding: VerifiedW0Binding,
+  journal: RExactJournal,
+): ImmutableAdmission {
+  return {
+    ...expectedAdmission(receipt, binding),
+    evidenceDigest: journal.binding.evidence_digest,
+    policyDigest: journal.binding.policy_digest,
+    postconditionsDigest: journal.binding.postconditions_digest,
+    configDigest: journal.binding.config_digest,
+    deadline: journal.binding.deadline,
+    watchDeadline: journal.binding.canary.watch_deadline,
+  };
+}
+
+function protectedWatchInput(
+  receipt: AutonomyProposalReceipt,
+  target: RExactConfigTarget,
+  journal: RExactJournal,
+  prepared: PreparedAttempt,
+): Parameters<W0RuntimeGate["awaitProtectedWatch"]>[0] {
+  const watch = latest(journal);
+  if (watch.phase !== "watch") {
+    throw new Error("r-exact-watch-not-durable");
+  }
+  return {
+    proposalId: receipt.proposalId,
+    attemptId: journal.binding.attempt_id,
+    targetId: target.id,
+    targetScopeDigest: target.targetScopeDigest,
+    candidateDigest: prepared.candidate_digest,
+    watchStartedAt: watch.recorded_at,
+    watchDeadline: journal.binding.canary.watch_deadline,
+    watchdogIdentity: journal.binding.watchdog_identity,
+  };
+}
+
+function validateProtectedWatch(
+  proof: ProtectedWatchProof,
+  expected: Parameters<W0RuntimeGate["awaitProtectedWatch"]>[0],
+  gate: W0RuntimeGate,
+): void {
+  const completed = Date.parse(proof.completedAt);
+  const deadline = Date.parse(expected.watchDeadline);
+  const started = Date.parse(expected.watchStartedAt);
+  if (
+    !exactKeys(proof, [
+      "watchStartedAt",
+      "watchDeadline",
+      "completedAt",
+      "maxObservedSilenceSeconds",
+      "killSwitchStayedOff",
+      "evidenceStayedFresh",
+      "journalStayedHealthy",
+      "livenessStayedHealthy",
+    ])
+    || !exactUtc(proof.watchStartedAt)
+    || !exactUtc(proof.watchDeadline)
+    || !exactUtc(proof.completedAt)
+    || proof.watchStartedAt !== expected.watchStartedAt
+    || proof.watchDeadline !== expected.watchDeadline
+    || deadline - started !== CONSTITUTIONAL_WINDOW_MS
+    || completed < deadline
+    || Math.abs(trustedNow(gate) - completed) > 5_000
+    || !Number.isSafeInteger(proof.maxObservedSilenceSeconds)
+    || proof.maxObservedSilenceSeconds < 0
+    || proof.maxObservedSilenceSeconds
+      > CONSTITUTIONAL_MAX_SILENCE_SECONDS
+    || !proof.killSwitchStayedOff
+    || !proof.evidenceStayedFresh
+    || !proof.journalStayedHealthy
+    || !proof.livenessStayedHealthy
+  ) {
+    throw new Error("r-exact-watch-incomplete");
+  }
+}
+
+async function resumeDurableWatch(
+  receipt: AutonomyProposalReceipt,
+  target: RExactConfigTarget,
+  gate: W0RuntimeGate,
+  journal: RExactJournal,
+  prepared: PreparedAttempt,
+  owner: VerifiedW0Binding,
+  controllerService: RExactRoleService,
+  controllerRoleKey: VerifiedRoleServiceKey,
+  options: RExactOptions,
+): Promise<RExactResult> {
+  const watchInput = protectedWatchInput(
+    receipt,
+    target,
+    journal,
+    prepared,
+  );
+  const watchProof = await gate.awaitProtectedWatch(watchInput);
+  validateProtectedWatch(watchProof, watchInput, gate);
+  const commitOwner = verifyOwner(
+    receipt,
+    target,
+    await gate.readAuthority(),
+  );
+  if (!sameAuthority(owner, commitOwner)) {
+    throw new Error("r-exact-authority-drift");
+  }
+  const commitAdmission = await gate.verifyFresh("commit", commitOwner);
+  validateFresh(
+    commitAdmission,
+    gate,
+    "commit",
+    receipt,
+    commitOwner,
+    immutableAdmissionFromJournal(receipt, owner, journal),
+  );
+  await assertClaim(
+    gate,
+    target,
+    prepared,
+    journal.binding.attempt_id,
+  );
+  if ((await target.read()).digest !== prepared.candidate_digest) {
+    throw new Error("r-exact-commit-readback");
+  }
+  options.onPhase?.("terminalization");
+  const state = await appendThroughRole(
+    controllerService,
+    controllerRoleKey,
+    receipt.proposalId,
+    journal,
+    buildJournalEntry(
+      journal,
+      "commit",
+      commitAdmission.checkedAt,
+      owner.identities.controller,
+    ),
+    prepared,
+  );
+  validateRExactJournal(state.journal, false);
+  await terminalizeClaim(gate, target, state.journal);
+  return { status: "committed", journal: state.journal };
 }
 
 function validatePrepared(
@@ -657,45 +826,17 @@ export async function applyRExactProposal(
       prepared,
     );
     journal = state.journal;
-    const commitOwner = verifyOwner(
+    return await resumeDurableWatch(
       receipt,
       target,
-      await gate.readAuthority(),
-    );
-    if (!sameAuthority(owner, commitOwner)) {
-      throw new Error("r-exact-authority-drift");
-    }
-    const commitAdmission = await gate.verifyFresh("commit", commitOwner);
-    validateFresh(
-      commitAdmission,
       gate,
-      "commit",
-      receipt,
-      commitOwner,
-      initialAdmission,
-    );
-    await assertClaim(gate, target, prepared, attemptId);
-    if ((await target.read()).digest !== receipt.candidateContentDigest) {
-      throw new Error("r-exact-commit-readback");
-    }
-    options.onPhase?.("terminalization");
-    state = await appendThroughRole(
+      journal,
+      prepared,
+      owner,
       roleServicesSnapshot.controller,
       roleKeys.controller,
-      receipt.proposalId,
-      journal,
-      buildJournalEntry(
-        journal,
-        "commit",
-        commitAdmission.checkedAt,
-        owner.identities.controller,
-      ),
-      prepared,
+      options,
     );
-    journal = state.journal;
-    validateRExactJournal(journal, false);
-    await terminalizeClaim(gate, target, journal);
-    return { status: "committed", journal };
   } catch (error) {
     options.onRecoveryCause?.(error);
     return recoverRExactAttempt(receipt, keys, target, gate, options);
@@ -992,9 +1133,75 @@ export async function recoverRExactAttempt(
     await terminalizeClaim(gate, target, journal);
     return { status: "terminally-blocked", journal };
   }
+  if (latest(journal).phase === "watch") {
+    try {
+      return await resumeDurableWatch(
+        receipt,
+        target,
+        gate,
+        journal,
+        prepared,
+        historicalBinding,
+        historical.roleServices.controller,
+        roleKeys.controller,
+        options,
+      );
+    } catch (error) {
+      options.onRecoveryCause?.(error);
+      const afterResume = await gate.reader.read(receipt.proposalId);
+      if (!afterResume) throw new Error("r-exact-watch-resume-lost");
+      if (latest(afterResume.journal).phase === "commit") {
+        return recoverRExactAttempt(raw, keys, target, gate, options);
+      }
+      if (
+        canonicalizeJcs(afterResume.journal) !== canonicalizeJcs(journal)
+        || canonicalizeJcs(afterResume.prepared)
+          !== canonicalizeJcs(prepared)
+      ) {
+        throw new Error("r-exact-watch-resume-ambiguous");
+      }
+    }
+  }
+  let protectedRecoveryAuthority: W0RuntimeGate["authority"] | null = null;
+  try {
+    protectedRecoveryAuthority = structuredClone(
+      await gate.readAuthority(),
+    );
+  } catch {
+    // Durable historical recovery must remain available after loss of the
+    // current live authority reader. The protected posture service remains
+    // the authority in that degraded case.
+  }
   const currentPosture = await gate.currentRecoveryPosture(
     historicalBinding,
+    protectedRecoveryAuthority,
   );
+  if (
+    protectedRecoveryAuthority
+    && currentPosture.state === "already-safe"
+    && currentPosture.authorityDigest
+      !== w0Digest(protectedRecoveryAuthority)
+  ) {
+    throw new Error("r-exact-recovery-posture-authority-mismatch");
+  }
+  if (
+    protectedRecoveryAuthority
+    && currentPosture.state === "broader"
+  ) {
+    const independentlyVerified = verifyW0Authority(
+      protectedRecoveryAuthority,
+      target.domain,
+      target.targetScopeDigest,
+      true,
+    );
+    if (
+      independentlyVerified.effectiveState === "shadow"
+      || canonicalizeJcs(independentlyVerified)
+        !== canonicalizeJcs(currentPosture.binding)
+    ) {
+      throw new Error("r-exact-recovery-posture-authority-mismatch");
+    }
+  }
   const protection = await gate.verifyRecovery(
     prepared.prepared_authority,
     currentPosture,

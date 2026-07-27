@@ -35,9 +35,14 @@ checkpoint and verifies:
 - an owner-signed protected role-service pin set binding each writer identity
   to one independently pinned Ed25519 public-key fingerprint;
 - that no signed recovery narrowing already reduced the binding to `shadow`;
+- the signature, chain, recovery-key binding, and exact fleet coverage binding
+  of every runtime narrowing entry across all seven ADR-008 domains; unrelated
+  valid non-Hugin entries do not change the selected Hugin target state;
 - fresh kill-switch, evidence, journal, rate-window, liveness, deadline, and
   watch-window facts against a protected clock;
-- the canonical one-hour maximum for both attempt deadline and watch window;
+- the exact canonical one-hour attempt and watch duration, separate protected
+  attempt-interval/window predicates, and the 900-second maximum watchdog
+  silence;
 - exact admission subject fields matching the signed proposal digest, base
   revision/digest, candidate digest, target scope, and evidence fingerprints.
 
@@ -74,6 +79,16 @@ canonical closed mutation-journal schema. Hugin adds no private binding fields:
 owner-authorization and prepared-record correlation remain in the separately
 authenticated prepared record, historical resolver, recovery descriptor, and
 signed role receipt.
+
+The `watch` entry is also durable before elapsed observation begins. A
+deployment must provide an idempotent protected-watch service that owns the
+one-hour wait outside the controller process and returns an exact,
+target-bound proof of continuous kill-switch, evidence, journal, liveness, and
+maximum-silence health. A restarted controller rejoins that same protected
+watch and may commit only after its proof and a new protected admission pass;
+an early, stale, silent, or unhealthy proof enters R-exact recovery. No
+in-process sleep or assumption that one controller process survives for an
+hour is part of this seam.
 
 The controller service persists `prepare` and acquires the atomic
 `domain + target-scope` claim in one operation; mutation cannot begin until

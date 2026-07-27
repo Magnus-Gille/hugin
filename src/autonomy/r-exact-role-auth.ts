@@ -14,7 +14,6 @@ import type {
   RExactRoleService,
   RoleWriteReceipt,
   RoleWriteResult,
-  W0RuntimeGate,
 } from "./r-exact-types.js";
 import { w0Digest } from "./w0-authority.js";
 
@@ -152,19 +151,6 @@ function validateRoleKeys(
     });
   }
   return Object.freeze(verified);
-}
-
-export function validateRoleServices(
-  gate: W0RuntimeGate,
-  binding: VerifiedW0Binding,
-  pins: ProtectedRoleServicePins = gate.roleServicePins,
-  ownerPublicKeyPem: string = gate.authority.pinnedOwnerPublicKeyPem,
-): VerifiedRoleServiceKeys {
-  return validateRoleKeys(binding, pins, ownerPublicKeyPem, [
-    gate.controller,
-    gate.watchdog,
-    gate.recoveryJournal,
-  ]);
 }
 
 export function validateHistoricalRoleAuthority(

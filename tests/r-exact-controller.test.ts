@@ -337,6 +337,74 @@ function redigestAndResignAuthorityArtifacts(
   resignOwnerBundle(bundle);
 }
 
+function appendSignedForeignNarrowing(
+  bundle: W0AuthorityBundle,
+  fromState: "armed-canary" | "armed-fleet" = "armed-canary",
+): void {
+  const recoveryKeys = generateKeyPairSync("ed25519");
+  const publicKeyPem = recoveryKeys.publicKey
+    .export({ type: "spki", format: "pem" })
+    .toString();
+  const publicKeyFingerprint =
+    `sha256:${createHash("sha256")
+      .update(
+        recoveryKeys.publicKey.export({ type: "spki", format: "der" }),
+      )
+      .digest("hex")}`;
+  const microRow = bundle.coverageIntent.domains.find(
+    (row: any) => row.domain === "micro-routing",
+  );
+  const microBinding = microRow.bindings[0];
+  microRow.coverage = "armed-canary";
+  microBinding.state = "armed-canary";
+  bundle.coverageIntent.registry_digest = w0Digest(
+    bundle.coverageIntent,
+    "registry_digest",
+  );
+  bundle.ownerAuthorization.bindings.coverage_intent_digest =
+    bundle.coverageIntent.registry_digest;
+  bundle.recoveryWorkerRegistry.entries.push({
+    domain: "micro-routing",
+    target_scope_digest: microBinding.target_scope_digest,
+    recovery_worker_identity: microBinding.identities.recovery_worker,
+    public_key_pem: publicKeyPem,
+    public_key_fingerprint: publicKeyFingerprint,
+  });
+  bundle.recoveryWorkerRegistry.registry_digest = w0Digest(
+    bundle.recoveryWorkerRegistry,
+    "registry_digest",
+  );
+  bundle.ownerAuthorization.bindings.recovery_worker_registry_digest =
+    bundle.recoveryWorkerRegistry.registry_digest;
+  resignOwnerBundle(bundle);
+  const unsigned: any = {
+    sequence: 1,
+    recorded_at: fixedNow,
+    domain: "micro-routing",
+    target_scope_digest: microBinding.target_scope_digest,
+    from_state: fromState,
+    to_state: "shadow",
+    recovery_worker_identity: microBinding.identities.recovery_worker,
+    journal_receipt_digest: h("foreign-micro-journal"),
+    previous_entry_digest: null,
+  };
+  const entry: any = {
+    ...unsigned,
+    entry_digest: w0Digest(unsigned),
+    signature: { algorithm: "Ed25519", value_base64: "" },
+  };
+  const signed = structuredClone(entry);
+  delete signed.signature;
+  entry.signature.value_base64 = sign(
+    null,
+    Buffer.from(canonicalizeJcs(signed)),
+    recoveryKeys.privateKey,
+  ).toString("base64");
+  bundle.runtimeNarrowing.entries.push(entry);
+  bundle.narrowingCheckpoint.minimum_entries = 1;
+  bundle.narrowingCheckpoint.ledger_tail_digest = entry.entry_digest;
+}
+
 class Target implements RExactConfigTarget {
   id = "hugin-orin-macro-routing";
   owner = "hugin" as const;
@@ -586,7 +654,10 @@ function proofFor(
     evidenceFresh: true,
     journalHealthy: true,
     rateWindowEligible: true,
+    attemptIntervalEligible: true,
+    attemptWindowEligible: true,
     livenessHealthy: true,
+    watchdogSilenceSeconds: 0,
     proposalDigest: receipt.canonicalProposalDigest,
     targetScopeDigest: scope,
     baseRevision: receipt.base.revision,
@@ -598,7 +669,7 @@ function proofFor(
     postconditionsDigest: h("post"),
     configDigest: h("config"),
     deadline: "2026-07-26T15:00:00Z",
-    watchDeadline: fixedNow,
+    watchDeadline: "2026-07-26T15:00:00Z",
     ...override,
   };
 }
@@ -611,6 +682,7 @@ function gate(
   override: Partial<FreshAdmission> = {},
 ): W0RuntimeGate {
   const narrowingHistory: W0AuthorityBundle[] = [];
+  let protectedNow = fixedNow;
   const recoveryPrivateKey = (bundle as any)._recoveryPrivateKey;
   const rolePinEntries = Object.values(backend.services).map((service) => {
     const publicKey = createHash("sha256")
@@ -655,8 +727,9 @@ function gate(
     claims: backend.claims,
     resolveHistoricalAuthority: async (authorizationDigest) =>
       backend.historical.get(authorizationDigest) ?? null,
-    currentRecoveryPosture: async (prepared) => {
-      const row = runtime.authority.coverageIntent.domains.find(
+    currentRecoveryPosture: async (prepared, currentAuthority) => {
+      const authorityForPosture = currentAuthority ?? runtime.authority;
+      const row = authorityForPosture.coverageIntent.domains.find(
         (item: any) => item.domain === prepared.domain,
       );
       const binding = row?.bindings?.find(
@@ -664,7 +737,7 @@ function gate(
           item.target_scope_digest === prepared.targetScopeDigest,
       );
       if (
-        runtime.authority.coverageIntent.global_state !== "armed"
+        authorityForPosture.coverageIntent.global_state !== "armed"
         || !binding
         || binding.state === "shadow"
       ) {
@@ -672,10 +745,13 @@ function gate(
           state: "already-safe" as const,
           killSwitchIdentity: prepared.identities.kill_switch,
           safetyDigest: h("protected-already-safe"),
+          authorityDigest: currentAuthority
+            ? w0Digest(currentAuthority)
+            : null,
         };
       }
       const verified = verifyW0Authority(
-        runtime.authority,
+        authorityForPosture,
         prepared.domain,
         prepared.targetScopeDigest,
         true,
@@ -685,6 +761,9 @@ function gate(
           state: "already-safe" as const,
           killSwitchIdentity: verified.identities.kill_switch,
           safetyDigest: h("protected-narrowed"),
+          authorityDigest: currentAuthority
+            ? w0Digest(currentAuthority)
+            : null,
         };
       }
       return {
@@ -722,11 +801,28 @@ function gate(
       }
       return matches[0] ?? null;
     },
-    protectedNow: () => new Date(fixedNow),
-    verifyFresh: async () => proofFor(receipt, override),
+    protectedNow: () => new Date(protectedNow),
+    awaitProtectedWatch: async (input) => {
+      protectedNow = input.watchDeadline;
+      return {
+        watchStartedAt: input.watchStartedAt,
+        watchDeadline: input.watchDeadline,
+        completedAt: protectedNow,
+        maxObservedSilenceSeconds: 60,
+        killSwitchStayedOff: true,
+        evidenceStayedFresh: true,
+        journalStayedHealthy: true,
+        livenessStayedHealthy: true,
+      };
+    },
+    verifyFresh: async () => proofFor(receipt, {
+      checkedAt: protectedNow,
+      trustedWatchdogTime: protectedNow,
+      ...override,
+    }),
     verifyRecovery: async (_prepared, current) => ({
-      checkedAt: fixedNow,
-      trustedWatchdogTime: fixedNow,
+      checkedAt: protectedNow,
+      trustedWatchdogTime: protectedNow,
       killSwitchIdentity: current.state === "broader"
         ? current.binding.identities.kill_switch
         : current.killSwitchIdentity,
@@ -830,7 +926,114 @@ describe("W0.1 R-exact controller", () => {
       "watch",
       "commit",
     ]);
+    expect(result.journal.entries.at(-1)?.recorded_at)
+      .toBe("2026-07-26T15:00:00Z");
     validateRExactJournal(result.journal, false);
+  });
+
+  it("refuses commit when the protected watch returns before one hour", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    let recoveryCause: unknown;
+    (runtime as any).awaitProtectedWatch = async (input: any) => ({
+      watchStartedAt: input.watchStartedAt,
+      watchDeadline: input.watchDeadline,
+      completedAt: fixedNow,
+      maxObservedSilenceSeconds: 0,
+      killSwitchStayedOff: true,
+      evidenceStayedFresh: true,
+      journalStayedHealthy: true,
+      livenessStayedHealthy: true,
+    });
+    const result = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      runtime,
+      { onRecoveryCause: (error) => { recoveryCause = error; } },
+    );
+    expect(result.status).toBe("disarmed");
+    expect(recoveryCause).toEqual(
+      expect.objectContaining({ message: "r-exact-watch-incomplete" }),
+    );
+    expect(result.journal.entries.some((entry) => entry.phase === "commit"))
+      .toBe(false);
+  });
+
+  it("rejects a protected watch with a silence gap above 900 seconds", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    const awaitWatch = runtime.awaitProtectedWatch;
+    runtime.awaitProtectedWatch = async (input) => ({
+      ...await awaitWatch(input),
+      maxObservedSilenceSeconds: 901,
+    });
+    let recoveryCause: unknown;
+    const result = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      runtime,
+      { onRecoveryCause: (error) => { recoveryCause = error; } },
+    );
+    expect(result.status).toBe("disarmed");
+    expect(recoveryCause).toEqual(
+      expect.objectContaining({ message: "r-exact-watch-incomplete" }),
+    );
+  });
+
+  it("resumes a durable watch after process loss instead of reverting it", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    let now = fixedNow;
+    let watchCalls = 0;
+    runtime.protectedNow = () => new Date(now);
+    runtime.verifyFresh = async () => proofFor(receipt, {
+      checkedAt: now,
+      trustedWatchdogTime: now,
+    });
+    (runtime as any).awaitProtectedWatch = async (input: any) => {
+      watchCalls += 1;
+      if (watchCalls === 1) {
+        await new Promise<never>(() => {});
+      }
+      now = input.watchDeadline;
+      return {
+        watchStartedAt: input.watchStartedAt,
+        watchDeadline: input.watchDeadline,
+        completedAt: now,
+        maxObservedSilenceSeconds: 60,
+        killSwitchStayedOff: true,
+        evidenceStayedFresh: true,
+        journalStayedHealthy: true,
+        livenessStayedHealthy: true,
+      };
+    };
+    void applyRExactProposal(receipt, keys, target, runtime);
+    for (let tries = 0; tries < 20; tries += 1) {
+      const stored = await backend.read(receipt.proposalId);
+      if (stored?.journal.entries.at(-1)?.phase === "watch") break;
+      await Promise.resolve();
+    }
+    expect((await backend.read(receipt.proposalId))
+      ?.journal.entries.at(-1)?.phase).toBe("watch");
+
+    const resumed = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      runtime,
+    );
+    expect(resumed.status).toBe("committed");
+    expect(resumed.journal.entries.at(-1)?.recorded_at)
+      .toBe("2026-07-26T15:00:00Z");
+    expect(target.digest).toBe(h("candidate"));
   });
 
   it("emits a journal accepted by the exact canonical Grimnir schema", async () => {
@@ -883,7 +1086,11 @@ describe("W0.1 R-exact controller", () => {
         watchDeadline: "2026-07-26T15:00:00Z",
       },
     },
-  ])("rejects an overlong constitutional $name window before mutation", async ({
+    {
+      name: "short watch",
+      override: { watchDeadline: fixedNow },
+    },
+  ])("rejects a noncanonical constitutional $name window before mutation", async ({
     override,
   }) => {
     const backend = new JournalBackend();
@@ -900,6 +1107,27 @@ describe("W0.1 R-exact controller", () => {
         gate(backend, target, receipt, authority(), override),
       ),
     ).rejects.toThrow("admission-window-bound");
+    expect(await backend.read(receipt.proposalId)).toBeNull();
+  });
+
+  it.each([
+    { attemptIntervalEligible: false },
+    { attemptWindowEligible: false },
+    { watchdogSilenceSeconds: 901 },
+  ])("rejects incomplete protected frequency/liveness proof %#", async (
+    override,
+  ) => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    await expect(
+      applyRExactProposal(
+        receipt,
+        keys,
+        target,
+        gate(backend, target, receipt, authority(), override),
+      ),
+    ).rejects.toThrow("r-exact-apply-gate-refused");
     expect(await backend.read(receipt.proposalId)).toBeNull();
   });
 
@@ -1084,6 +1312,23 @@ describe("W0.1 R-exact controller", () => {
         .toHaveLength(0);
     },
   );
+
+  it("rejects an already-safe posture not bound to the protected authority read", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    target.partial = true;
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    runtime.currentRecoveryPosture = async (prepared) => ({
+      state: "already-safe",
+      killSwitchIdentity: prepared.identities.kill_switch,
+      safetyDigest: h("claimed-safe"),
+      authorityDigest: h("different-authority"),
+    });
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("r-exact-recovery-posture-authority-mismatch");
+  });
 
   it("freezes owner pins and role services before asynchronous admission", async () => {
     const backend = new JournalBackend();
@@ -1908,6 +2153,38 @@ describe("W0.1 R-exact controller", () => {
     expect(
       () => verifyW0Authority(forged, "macro-routing", scope),
     ).toThrow("narrowing-signature");
+  });
+
+  it("validates and ignores signed foreign-domain narrowing during Hugin recovery", async () => {
+    const bundle = authority();
+    appendSignedForeignNarrowing(bundle);
+    expect(
+      () => verifyW0Authority(bundle, "macro-routing", scope),
+    ).not.toThrow();
+
+    const backend = new JournalBackend();
+    const target = new Target();
+    target.partial = true;
+    const receipt = proposal();
+    const result = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      gate(backend, target, receipt, bundle),
+    );
+    expect(result.status).toBe("disarmed");
+    expect(target.digest).toBe(h("base"));
+    expect(bundle.runtimeNarrowing.entries[0].domain).toBe("micro-routing");
+
+    const wrongForeignBinding = authority();
+    appendSignedForeignNarrowing(wrongForeignBinding, "armed-fleet");
+    expect(
+      () => verifyW0Authority(
+        wrongForeignBinding,
+        "macro-routing",
+        scope,
+      ),
+    ).toThrow("narrowing-authority-binding");
   });
 
   it("rejects re-signed cross-row coverage semantic substitution", () => {
