@@ -30,10 +30,7 @@ const exactUtc = (value: unknown): value is string => {
     || !utcPattern.test(value)
     || Number.isNaN(Date.parse(value))
   ) return false;
-  const canonical = new Date(value).toISOString();
-  return value.includes(".")
-    ? canonical === value
-    : canonical.replace(".000Z", "Z") === value;
+  return new Date(value).toISOString().replace(".000Z", "Z") === value;
 };
 const idDigest = (prefix: string, value: string): string =>
   `${prefix}-${w0Digest({ value }).slice(7, 31)}`;

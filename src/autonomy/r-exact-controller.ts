@@ -70,10 +70,7 @@ const exactUtc = (value: unknown): value is string => {
     || !utcPattern.test(value)
     || Number.isNaN(Date.parse(value))
   ) return false;
-  const canonical = new Date(value).toISOString();
-  return value.includes(".")
-    ? canonical === value
-    : canonical.replace(".000Z", "Z") === value;
+  return new Date(value).toISOString().replace(".000Z", "Z") === value;
 };
 const utcFromMs = (value: number): string =>
   new Date(value).toISOString().replace(".000Z", "Z");
@@ -368,6 +365,7 @@ async function resumeDurableWatch(
   const state = await appendThroughRole(
     controllerService,
     controllerRoleKey,
+    gate.journalCheckpoints,
     receipt.proposalId,
     journal,
     buildJournalEntry(
@@ -493,9 +491,52 @@ function verifyOwner(
   );
 }
 
+function deriveSignedRecoveryPosture(
+  authority: W0RuntimeGate["authority"],
+  target: RExactConfigTarget,
+  prepared: VerifiedW0Binding,
+):
+  | { state: "broader"; binding: VerifiedW0Binding }
+  | { state: "already-safe"; killSwitchIdentity: string } {
+  const coverage = authority.coverageIntent;
+  const row = coverage.domains.find(
+    (candidate: any) => candidate.domain === target.domain,
+  );
+  const matchingBindings = row?.bindings?.filter(
+    (candidate: any) =>
+      candidate.target_scope_digest === target.targetScopeDigest,
+  ) ?? [];
+  if (
+    coverage.global_state !== "armed"
+    || matchingBindings.length === 0
+    || row?.coverage === "shadow"
+    || matchingBindings[0]?.state === "shadow"
+  ) {
+    return {
+      state: "already-safe",
+      killSwitchIdentity:
+        matchingBindings[0]?.identities?.kill_switch
+          ?? prepared.identities.kill_switch,
+    };
+  }
+  const binding = verifyW0Authority(
+    authority,
+    target.domain,
+    target.targetScopeDigest,
+    true,
+  );
+  return binding.effectiveState === "shadow"
+    ? {
+        state: "already-safe",
+        killSwitchIdentity: binding.identities.kill_switch,
+      }
+    : { state: "broader", binding };
+}
+
 async function appendThroughRole(
   service: RExactRoleService,
   pinned: VerifiedRoleServiceKey,
+  checkpoints: W0RuntimeGate["journalCheckpoints"],
   proposalId: string,
   journal: RExactJournal,
   entry: JournalEntry,
@@ -513,13 +554,30 @@ async function appendThroughRole(
     latest(journal).receipt_digest,
     entry,
   );
+  const returnedEntry = latest(result.journal);
+  const expectedEntryShape = structuredClone(entry);
+  const returnedEntryShape = structuredClone(returnedEntry);
+  if (entry.phase === "watch") {
+    delete (expectedEntryShape as Partial<JournalEntry>).recorded_at;
+    delete (expectedEntryShape as Partial<JournalEntry>).receipt_digest;
+    delete (returnedEntryShape as Partial<JournalEntry>).recorded_at;
+    delete (returnedEntryShape as Partial<JournalEntry>).receipt_digest;
+  }
   if (
     canonicalizeJcs(result.prepared) !== canonicalizeJcs(prepared)
     || result.journal.entries.length !== journal.entries.length + 1
     || canonicalizeJcs(result.journal.entries.slice(0, -1))
       !== canonicalizeJcs(journal.entries)
-    || canonicalizeJcs(latest(result.journal))
-      !== canonicalizeJcs(entry)
+    || canonicalizeJcs(returnedEntryShape)
+      !== canonicalizeJcs(expectedEntryShape)
+    || (
+      entry.phase === "watch"
+      && (
+        !exactUtc(returnedEntry.recorded_at)
+        || Date.parse(returnedEntry.recorded_at)
+          < Date.parse(entry.recorded_at)
+      )
+    )
   ) {
     throw new Error("r-exact-role-service-result");
   }
@@ -531,7 +589,57 @@ async function appendThroughRole(
     latest(journal).receipt_digest,
   );
   validateRExactJournal(result.journal);
+  await assertJournalCheckpoint(
+    checkpoints,
+    proposalId,
+    result.journal,
+  );
   return result;
+}
+
+async function assertJournalCheckpoint(
+  checkpoints: W0RuntimeGate["journalCheckpoints"],
+  proposalId: string,
+  journal: RExactJournal,
+): Promise<void> {
+  const checkpoint = await checkpoints.read(
+    proposalId,
+    journal.binding.attempt_id,
+  );
+  if (!checkpoint) throw new Error("r-exact-journal-checkpoint-missing");
+  if (
+    !exactKeys(checkpoint, [
+      "proposalId",
+      "attemptId",
+      "sequence",
+      "tailReceiptDigest",
+      "terminalReceiptDigest",
+    ])
+    || checkpoint.proposalId !== proposalId
+    || checkpoint.attemptId !== journal.binding.attempt_id
+    || !Number.isSafeInteger(checkpoint.sequence)
+    || checkpoint.sequence < 1
+    || !digestPattern.test(checkpoint.tailReceiptDigest)
+    || (
+      checkpoint.terminalReceiptDigest !== null
+      && !digestPattern.test(checkpoint.terminalReceiptDigest)
+    )
+  ) {
+    throw new Error("r-exact-journal-checkpoint-invalid");
+  }
+  const tail = latest(journal);
+  const terminal = ["commit", "disarm", "terminally-blocked"].includes(
+    tail.phase,
+  )
+    ? tail.receipt_digest
+    : null;
+  if (
+    checkpoint.sequence !== tail.sequence
+    || checkpoint.tailReceiptDigest !== tail.receipt_digest
+    || checkpoint.terminalReceiptDigest !== terminal
+  ) {
+    throw new Error("r-exact-journal-checkpoint-stale");
+  }
 }
 
 function sameAuthority(
@@ -760,6 +868,11 @@ export async function applyRExactProposal(
   ) {
     throw new Error("r-exact-atomic-prepare-not-durable");
   }
+  await assertJournalCheckpoint(
+    gate.journalCheckpoints,
+    receipt.proposalId,
+    durablePrepared.journal,
+  );
   const retainedHistorical = await gate.resolveHistoricalAuthority(
     owner.authorizationDigest,
   );
@@ -800,6 +913,7 @@ export async function applyRExactProposal(
     let state = await appendThroughRole(
       roleServicesSnapshot.controller,
       roleKeys.controller,
+      gate.journalCheckpoints,
       receipt.proposalId,
       journal,
       buildJournalEntry(
@@ -826,6 +940,7 @@ export async function applyRExactProposal(
     state = await appendThroughRole(
       roleServicesSnapshot.controller,
       roleKeys.controller,
+      gate.journalCheckpoints,
       receipt.proposalId,
       journal,
       buildJournalEntry(
@@ -840,6 +955,7 @@ export async function applyRExactProposal(
     state = await appendThroughRole(
       roleServicesSnapshot.controller,
       roleKeys.controller,
+      gate.journalCheckpoints,
       receipt.proposalId,
       journal,
       buildJournalEntry(
@@ -851,6 +967,14 @@ export async function applyRExactProposal(
       prepared,
     );
     journal = state.journal;
+    const durableWatchAt = Date.parse(latest(journal).recorded_at);
+    if (
+      Math.abs(trustedNow(gate) - durableWatchAt) > 5_000
+      || durableWatchAt - Date.parse(initialAdmission.checkedAt)
+        > APPLY_VERIFY_BUDGET_MS
+    ) {
+      throw new Error("r-exact-watch-receipt-time");
+    }
     return await resumeDurableWatch(
       receipt,
       target,
@@ -989,6 +1113,7 @@ async function reconcilePendingNarrowing(
   const state = await appendThroughRole(
     recoveryService,
     recoveryRoleKey,
+    gate.journalCheckpoints,
     receipt.proposalId,
     journal,
     pending.entry,
@@ -1040,6 +1165,7 @@ async function appendTerminalBlocked(
   const state = await appendThroughRole(
     recoveryService,
     recoveryRoleKey,
+    gate.journalCheckpoints,
     receipt.proposalId,
     journal,
     terminalEntry,
@@ -1116,6 +1242,11 @@ export async function recoverRExactAttempt(
     historicalRoleKeys[storedRole],
     storedAction,
     storedPrevious,
+  );
+  await assertJournalCheckpoint(
+    gate.journalCheckpoints,
+    receipt.proposalId,
+    journal,
   );
   const roleKeys = validateHistoricalRoleServices(
     historical,
@@ -1204,28 +1335,31 @@ export async function recoverRExactAttempt(
     historicalBinding,
     protectedRecoveryAuthority,
   );
-  if (
-    protectedRecoveryAuthority
-    && currentPosture.state === "already-safe"
-    && currentPosture.authorityDigest
-      !== w0Digest(protectedRecoveryAuthority)
-  ) {
-    throw new Error("r-exact-recovery-posture-authority-mismatch");
-  }
-  if (
-    protectedRecoveryAuthority
-    && currentPosture.state === "broader"
-  ) {
-    const independentlyVerified = verifyW0Authority(
+  if (protectedRecoveryAuthority) {
+    const signedPosture = deriveSignedRecoveryPosture(
       protectedRecoveryAuthority,
-      target.domain,
-      target.targetScopeDigest,
-      true,
+      target,
+      historicalBinding,
     );
     if (
-      independentlyVerified.effectiveState === "shadow"
-      || canonicalizeJcs(independentlyVerified)
-        !== canonicalizeJcs(currentPosture.binding)
+      (
+        currentPosture.state === "already-safe"
+        && (
+          signedPosture.state !== "already-safe"
+          || currentPosture.authorityDigest
+            !== w0Digest(protectedRecoveryAuthority)
+          || currentPosture.killSwitchIdentity
+            !== signedPosture.killSwitchIdentity
+        )
+      )
+      || (
+        currentPosture.state === "broader"
+        && (
+          signedPosture.state !== "broader"
+          || canonicalizeJcs(signedPosture.binding)
+            !== canonicalizeJcs(currentPosture.binding)
+        )
+      )
     ) {
       throw new Error("r-exact-recovery-posture-authority-mismatch");
     }
@@ -1288,6 +1422,7 @@ export async function recoverRExactAttempt(
     const state = await appendThroughRole(
       historical.roleServices.watchdog,
       roleKeys.watchdog,
+      gate.journalCheckpoints,
       receipt.proposalId,
       journal,
       buildJournalEntry(
@@ -1330,6 +1465,7 @@ export async function recoverRExactAttempt(
       const state = await appendThroughRole(
         historical.roleServices["recovery-worker"],
         roleKeys["recovery-worker"],
+        gate.journalCheckpoints,
         receipt.proposalId,
         journal,
         buildJournalEntry(
@@ -1366,6 +1502,7 @@ export async function recoverRExactAttempt(
     const state = await appendThroughRole(
       historical.roleServices["recovery-worker"],
       roleKeys["recovery-worker"],
+      gate.journalCheckpoints,
       receipt.proposalId,
       journal,
       disarmEntry,

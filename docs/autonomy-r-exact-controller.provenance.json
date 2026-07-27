@@ -14,5 +14,5 @@
     "docs/autonomy-coverage-registry-v1.schema.json"
   ],
   "vendored_path": "docs/vendor/grimnir/autonomy",
-  "interpretation": "Byte-exact canonical ADR-008/W0.2 journal, constitution, and coverage schemas plus the unchanged v1 owner-attestation, authorization, recovery-worker, and runtime-narrowing schemas; historical W0.1 journal/constitution/coverage schemas are retained as provenance only because the draft v1 Hugin controller never merged, deployed, or armed and therefore has no legitimate durable v1 attempts; no Hugin-specific schema overlay or in-place epoch migration."
+  "interpretation": "Byte-exact canonical ADR-008/W0.2 journal, constitution, and coverage schemas plus the unchanged v1 owner-attestation, authorization, recovery-worker, and runtime-narrowing schemas; Hugin also follows the pinned Grimnir validator's exact canonical UTC spelling, which rejects redundant .000Z; historical W0.1 journal/constitution/coverage schemas are retained as provenance only because the draft v1 Hugin controller never merged, deployed, or armed and therefore has no legitimate durable v1 attempts; no Hugin-specific schema overlay or in-place epoch migration."
 }

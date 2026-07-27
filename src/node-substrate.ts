@@ -92,10 +92,7 @@ export function isExactUtc(value: string): boolean {
     instant.getUTCSeconds() === second
   );
   if (!calendarMatches) return false;
-  const canonical = instant.toISOString();
-  return value.includes(".")
-    ? canonical === value
-    : canonical.replace(".000Z", "Z") === value;
+  return instant.toISOString().replace(".000Z", "Z") === value;
 }
 
 export function isPlainObject(value: unknown): value is Record<string, JsonValue> {

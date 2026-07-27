@@ -201,11 +201,30 @@ export interface RExactRoleService {
   role: JournalRole;
   identity: string;
   publicKeyPem: string;
+  /**
+   * The service must replace a watch entry's recorded_at and receipt_digest
+   * with its protected persistence time before signing the returned write.
+   */
   append(
     proposalId: string,
     expectedReceiptDigest: string,
     entry: JournalEntry,
   ): Promise<RoleWriteResult>;
+}
+
+export interface RExactJournalCheckpoint {
+  proposalId: string;
+  attemptId: string;
+  sequence: number;
+  tailReceiptDigest: string;
+  terminalReceiptDigest: string | null;
+}
+
+export interface RExactJournalCheckpoints {
+  read(
+    proposalId: string,
+    attemptId: string,
+  ): Promise<RExactJournalCheckpoint | null>;
 }
 
 export interface PreparedClaim {
@@ -270,6 +289,7 @@ export interface W0RuntimeGate {
   recoveryJournal: RExactRoleService;
   recovery: RExactRecoveryWorker;
   claims: RExactAttemptClaims;
+  journalCheckpoints: RExactJournalCheckpoints;
   resolveHistoricalAuthority(
     ownerAuthorizationDigest: string,
   ): Promise<HistoricalRoleAuthority | null>;

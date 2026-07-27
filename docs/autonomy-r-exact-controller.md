@@ -53,6 +53,9 @@ checkpoint and verifies:
   receipt, at most 300 seconds of commit grace, a 4200-second total attempt
   deadline, separate protected attempt-interval/window predicates, and the
   900-second maximum watchdog silence;
+- Grimnir's exact canonical UTC spelling: whole-second timestamps use `Z`,
+  nonzero milliseconds use exactly three digits, and redundant `.000Z` is
+  rejected;
 - exact admission subject fields matching the signed proposal digest, base
   revision/digest, candidate digest, target scope, and evidence fingerprints.
 
@@ -78,7 +81,13 @@ swap is therefore rejected. Every role receipt also signs the exact prepared
 record digest. On restart, the journal reader's result remains untrusted until
 the tail receipt is verified against the independently retained historical
 role key, including action, previous tail, binding, prepared digest, and new
-tail.
+tail. Every role write also atomically advances an independently protected,
+monotonic checkpoint for the exact proposal and attempt. That checkpoint binds
+the current sequence and tail receipt, and permanently binds the terminal
+receipt after `commit`, `disarm`, or `terminally-blocked`. Recovery requires the
+signed journal tail to equal this checkpoint before acquiring a claim or
+accessing the target, so an older authentic signed prefix cannot be replayed
+after a later or terminal write.
 
 `prepare` is persisted before mutation and can therefore be the one-entry
 durable prefix of an attempt. Completed and recovered W0 journal envelopes have
@@ -92,7 +101,10 @@ signed role receipt.
 
 The authenticated `watch` write receipt is the sole time anchor from which the
 minimum watch and commit-grace bounds are derived; no watch deadline is
-prebound at prepare time. A
+prebound at prepare time. The controller role service replaces the caller's
+proposed watch timestamp with its protected persistence time, recomputes the
+entry digest, atomically persists the entry and checkpoint, and then signs the
+result. The full watch therefore begins only after durable receipt. A
 deployment must provide an idempotent protected-watch service that owns the
 one-hour wait outside the controller process and returns an exact,
 attempt-, target-, candidate-, watch-receipt-, and watchdog-bound proof of
@@ -179,7 +191,10 @@ authenticated historical prepared authority. When a current authority bundle
 is readable, Hugin first validates its canonical schemas, artifact digests,
 pinned owner key, owner signature, checkpoint, cross-artifact bindings,
 recovery registry, and complete narrowing chain even on this already-safe
-path; matching a posture-reported raw digest alone is insufficient. If the
+path. It then derives the exact target posture from that signed authority and
+requires the protected posture service to agree; a still-armed binding cannot
+be labeled already safe, and matching a posture-reported raw digest alone is
+insufficient. If the
 live authority reader itself is unavailable, the protected posture service and
 the retained historical authority preserve the deliberately degraded recovery
 path.
@@ -204,6 +219,8 @@ An owning adapter must provide:
 - an atomic controller prepare/claim store that creates both or neither, holds
   the claim through terminalization, and permits reuse only after a terminal
   receipt;
+- a protected monotonic journal-checkpoint store that advances atomically with
+  every role write and cannot regress or move past a terminal receipt;
 - a protected-clock admission verifier;
 - a recovery worker whose Ed25519 key and identity match the owner-signed
   recovery registry and whose `narrowAndVerify` call atomically persists the

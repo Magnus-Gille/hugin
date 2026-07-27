@@ -20,6 +20,7 @@ import {
   recoverRExactAttempt,
   validateRExactJournal,
   type FreshAdmission,
+  type JournalEntry,
   type JournalRole,
   type PreparedAttempt,
   type RExactAttemptClaims,
@@ -33,7 +34,11 @@ import {
   type W0RuntimeGate,
 } from "../src/autonomy/r-exact-controller.js";
 import { roleForPhase } from "../src/autonomy/r-exact-journal.js";
-import { schemaErrors, type JsonValue } from "../src/node-substrate.js";
+import {
+  isExactUtc,
+  schemaErrors,
+  type JsonValue,
+} from "../src/node-substrate.js";
 import {
   R_EXACT_CONFORMANCE,
   verifyW0Authority,
@@ -490,8 +495,24 @@ class Claims implements RExactAttemptClaims {
 
 class JournalBackend implements RExactJournalReader {
   rows = new Map<string, RoleWriteResult>();
+  history: RoleWriteResult[] = [];
   historical = new Map<string, any>();
   claims = new Claims();
+  roleNow: () => string = () => fixedNow;
+  beforeAppend?: (entry: JournalEntry) => void;
+  checkpointRows = new Map<string, {
+    proposalId: string;
+    attemptId: string;
+    sequence: number;
+    tailReceiptDigest: string;
+    terminalReceiptDigest: string | null;
+  }>();
+  checkpoints = {
+    read: async (proposalId: string, attemptId: string) => {
+      const checkpoint = this.checkpointRows.get(`${proposalId}:${attemptId}`);
+      return checkpoint ? structuredClone(checkpoint) : null;
+    },
+  };
   services: Record<JournalRole, RExactRoleService>
     & { controller: RExactControllerService };
 
@@ -539,6 +560,8 @@ class JournalBackend implements RExactJournalReader {
               null,
             );
             this.rows.set(proposalId, structuredClone(result));
+            this.history.push(structuredClone(result));
+            this.recordCheckpoint(proposalId, result);
             this.historical.set(
               historicalAuthority.authority.ownerAuthorization
                 ? w0Digest(
@@ -553,6 +576,7 @@ class JournalBackend implements RExactJournalReader {
             };
           },
           append: async (proposalId, expected, entry) => {
+            this.beforeAppend?.(entry);
             const stored = this.rows.get(proposalId);
             if (!stored) throw new Error("missing");
             if (
@@ -571,9 +595,16 @@ class JournalBackend implements RExactJournalReader {
             ) {
               throw new Error("role-refused");
             }
+            const persistedEntry = structuredClone(entry);
+            if (persistedEntry.phase === "watch") {
+              persistedEntry.recorded_at = this.roleNow();
+              const unsignedEntry: any = structuredClone(persistedEntry);
+              delete unsignedEntry.receipt_digest;
+              persistedEntry.receipt_digest = w0Digest(unsignedEntry);
+            }
             const journal = {
               ...stored.journal,
-              entries: [...stored.journal.entries, entry],
+              entries: [...stored.journal.entries, persistedEntry],
             };
             validateRExactJournal(journal);
             const result = this.result(
@@ -586,6 +617,8 @@ class JournalBackend implements RExactJournalReader {
               expected,
             );
             this.rows.set(proposalId, structuredClone(result));
+            this.history.push(structuredClone(result));
+            this.recordCheckpoint(proposalId, result);
             return structuredClone(result);
           },
         };
@@ -598,6 +631,37 @@ class JournalBackend implements RExactJournalReader {
   async read(proposalId: string) {
     const row = this.rows.get(proposalId);
     return row ? structuredClone(row) : null;
+  }
+
+  private recordCheckpoint(
+    proposalId: string,
+    result: RoleWriteResult,
+  ): void {
+    const tail = result.journal.entries.at(-1)!;
+    const key = `${proposalId}:${result.journal.binding.attempt_id}`;
+    const current = this.checkpointRows.get(key);
+    if (
+      current
+      && (
+        current.sequence > tail.sequence
+        || current.terminalReceiptDigest !== null
+      )
+    ) {
+      return;
+    }
+    const terminal = ["commit", "disarm", "terminally-blocked"].includes(
+      tail.phase,
+    );
+    this.checkpointRows.set(
+      key,
+      {
+        proposalId,
+        attemptId: result.journal.binding.attempt_id,
+        sequence: tail.sequence,
+        tailReceiptDigest: tail.receipt_digest,
+        terminalReceiptDigest: terminal ? tail.receipt_digest : null,
+      },
+    );
   }
 
   private result(
@@ -731,6 +795,7 @@ function gate(
     watchdog: backend.services.watchdog,
     recoveryJournal: backend.services["recovery-worker"],
     claims: backend.claims,
+    journalCheckpoints: backend.checkpoints,
     resolveHistoricalAuthority: async (authorizationDigest) =>
       backend.historical.get(authorizationDigest) ?? null,
     currentRecoveryPosture: async (prepared, currentAuthority) => {
@@ -889,6 +954,8 @@ function gate(
       },
     },
   };
+  backend.roleNow = () =>
+    runtime.protectedNow().toISOString().replace(".000Z", "Z");
   return runtime;
 }
 
@@ -955,6 +1022,53 @@ describe("W0.2 R-exact controller", () => {
       .toBe("2026-07-26T15:00:00Z");
     expect(result.journal.schema_version).toBe("v2");
     validateRExactJournal(result.journal, false);
+  });
+
+  it("starts the full watch at the service-authored durable append time", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    let roleTime = fixedNow;
+    backend.beforeAppend = (entry) => {
+      if (entry.phase === "watch") {
+        roleTime = "2026-07-26T14:02:00Z";
+      }
+    };
+    backend.roleNow = () => roleTime;
+    runtime.protectedNow = () => new Date(roleTime);
+    runtime.verifyFresh = async () => proofFor(receipt, {
+      checkedAt: roleTime,
+      trustedWatchdogTime: roleTime,
+    });
+    let protectedWatchStartedAt: string | null = null;
+    runtime.awaitProtectedWatch = async (input) => {
+      protectedWatchStartedAt = input.watchStartedAt;
+      roleTime = input.watchDeadline;
+      return {
+        ...input,
+        completedAt: roleTime,
+        maxObservedSilenceSeconds: 0,
+        killSwitchStayedOff: true,
+        evidenceStayedFresh: true,
+        journalStayedHealthy: true,
+        livenessStayedHealthy: true,
+      };
+    };
+
+    const result = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      runtime,
+    );
+
+    expect(result.status).toBe("committed");
+    expect(result.journal.entries.find((entry) => entry.phase === "watch")
+      ?.recorded_at).toBe("2026-07-26T14:02:00Z");
+    expect(protectedWatchStartedAt).toBe("2026-07-26T14:02:00Z");
+    expect(result.journal.entries.at(-1)?.recorded_at)
+      .toBe("2026-07-26T15:02:00Z");
   });
 
   it("refuses commit when the protected watch returns before one hour", async () => {
@@ -1144,7 +1258,8 @@ describe("W0.2 R-exact controller", () => {
       });
       runtime.awaitProtectedWatch = async (input) => {
         now = new Date(Date.parse(input.watchStartedAt) + elapsed)
-          .toISOString();
+          .toISOString()
+          .replace(".000Z", "Z");
         return {
           ...input,
           completedAt: now,
@@ -1506,6 +1621,25 @@ describe("W0.2 R-exact controller", () => {
     await expect(
       applyRExactProposal(receipt, keys, target, runtime),
     ).rejects.toThrow("r-exact-recovery-posture-authority-mismatch");
+  });
+
+  it("refuses an already-safe claim when signed authority is still armed", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    target.partial = true;
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    runtime.currentRecoveryPosture = async (prepared, currentAuthority) => ({
+      state: "already-safe",
+      killSwitchIdentity: prepared.identities.kill_switch,
+      safetyDigest: h("claimed-safe"),
+      authorityDigest: w0Digest(currentAuthority),
+    });
+
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("r-exact-recovery-posture-authority-mismatch");
+    expect(runtime.authority.runtimeNarrowing.entries).toHaveLength(0);
   });
 
   it("cryptographically validates current authority on an already-safe recovery path", async () => {
@@ -2268,6 +2402,31 @@ describe("W0.2 R-exact controller", () => {
     expect(target.digest).toBe(h("candidate"));
   });
 
+  it("rejects an old authentic signed prefix after terminal commit", async () => {
+    const backend = new JournalBackend();
+    const target = new Target();
+    const receipt = proposal();
+    const runtime = gate(backend, target, receipt);
+    const committed = await applyRExactProposal(
+      receipt,
+      keys,
+      target,
+      runtime,
+    );
+    expect(committed.status).toBe("committed");
+    const staleApply = backend.history.find(
+      (result) => result.journal.entries.at(-1)?.phase === "apply",
+    );
+    expect(staleApply).toBeDefined();
+    backend.rows.set(receipt.proposalId, structuredClone(staleApply!));
+
+    await expect(
+      applyRExactProposal(receipt, keys, target, runtime),
+    ).rejects.toThrow("r-exact-journal-checkpoint-stale");
+    expect(target.digest).toBe(h("candidate"));
+    expect(runtime.authority.runtimeNarrowing.entries).toHaveLength(0);
+  });
+
   it("rejects stale base, bad signature, and partial writes", async () => {
     const staleBackend = new JournalBackend();
     const staleTarget = new Target();
@@ -2561,5 +2720,12 @@ describe("W0.2 R-exact controller", () => {
         () => verifyW0Authority(bundle, "macro-routing", scope),
       ).toThrow("w0-authority-rejected:schema");
     }
+  });
+
+  it("uses Grimnir's exact canonical UTC spelling", () => {
+    expect(isExactUtc("2026-07-27T00:00:00Z")).toBe(true);
+    expect(isExactUtc("2026-07-27T00:00:00.001Z")).toBe(true);
+    expect(isExactUtc("2026-07-27T00:00:00.999Z")).toBe(true);
+    expect(isExactUtc("2026-07-27T00:00:00.000Z")).toBe(false);
   });
 });
