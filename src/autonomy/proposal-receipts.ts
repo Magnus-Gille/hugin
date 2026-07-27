@@ -96,6 +96,11 @@ const proposalReceiptSchema = z.object({
 }).strict();
 
 export type AutonomyProposalReceipt = z.infer<typeof proposalReceiptSchema>;
+
+/** Runtime closed-shape parsing without asserting cryptographic verification. */
+export function parseAutonomyProposalReceipt(raw: unknown): AutonomyProposalReceipt {
+  return proposalReceiptSchema.parse(raw);
+}
 const proposalInputSchema = z.object({
   proposalId: targetId,
   experimentRef: opaqueRef,

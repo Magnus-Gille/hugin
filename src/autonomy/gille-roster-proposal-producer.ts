@@ -9,8 +9,11 @@ import { createHash } from "node:crypto";
 import { canonicalizeJcs } from "../jcs.js";
 import {
   AUTONOMY_PROPOSAL_POLICY_EPOCH_ID,
+  AUTONOMY_PROPOSAL_SIGNER_KEY_ID,
+  autonomyProposalOwnershipRegistry,
+  autonomyProposalPolicyAuthority,
   canonicalAutonomyProposalDigest,
-  type AutonomyProposalReceipt,
+  parseAutonomyProposalReceipt,
 } from "./proposal-receipts.js";
 
 export const GILLE_ROSTER_PROPOSAL_CONTRACT_VERSION = "gille-roster-proposal-v1" as const;
@@ -34,8 +37,12 @@ export interface GilleRosterEntryInput {
 }
 export interface GilleRosterProposalInput {
   proposalId: string; idempotencyKey: string; producerInstanceId: string;
-  /** The existing adapter-neutral, proposal-only W4 decision seam. */
-  sourceProposal: AutonomyProposalReceipt;
+  /**
+   * A cryptographically verified receipt from the adapter-neutral W4 seam.
+   * This serializer has no key store: it runtime-parses and cross-binds the
+   * receipt, while verifyAutonomyProposalReceipt remains an upstream precondition.
+   */
+  sourceProposal: unknown;
   baseline: { catalogueDigest: Digest; rosterDigest: Digest };
   candidateEntries: readonly GilleRosterEntryInput[];
   delta: { operation: Operation; modelId: string; backend: Backend; backendCapabilityDigest: Digest };
@@ -112,7 +119,12 @@ export function serializeGilleRosterProposal(input: GilleRosterProposalInput): {
     canary: { operation: input.canary.operation, model_id: input.canary.modelId, expected_state: input.canary.expectedState, fallback_model_id: input.canary.fallbackModelId, registry_id: input.canary.registryId, registry_version: input.canary.registryVersion, registry_digest: input.canary.registryDigest, max_requests: input.canary.maxRequests, duration_seconds: input.canary.durationSeconds, max_concurrency: 1 as const },
     requested_bounds: { max_changed_entries: 1 as const }, requested_operations: ["admit", "arm"] as ["admit", "arm"], created_at: input.createdAt, expires_at: input.expiresAt,
   };
-  const source = input.sourceProposal;
+  let source;
+  try {
+    source = parseAutonomyProposalReceipt(input.sourceProposal);
+  } catch {
+    throw new Error("source R-exact proposal receipt has invalid closed shape");
+  }
   const { signature: _signature, canonicalProposalDigest: _sourceDigest, ...sourceUnsigned } = source;
   if (
     source.proposalId !== input.proposalId
@@ -121,6 +133,12 @@ export function serializeGilleRosterProposal(input: GilleRosterProposalInput): {
     || source.owner !== "gille-inference"
     || source.disposition !== "proposal-only"
     || source.policyEpoch.id !== AUTONOMY_PROPOSAL_POLICY_EPOCH_ID
+    || canonicalizeJcs(source.policyEpoch) !== canonicalizeJcs(autonomyProposalPolicyAuthority)
+    || canonicalizeJcs(source.ownershipRegistry) !== canonicalizeJcs({
+      version: autonomyProposalOwnershipRegistry.version,
+      digest: autonomyProposalOwnershipRegistry.digest,
+    })
+    || source.signerKeyId !== AUTONOMY_PROPOSAL_SIGNER_KEY_ID
     || source.expiresAt !== input.expiresAt
     || source.canonicalProposalDigest !== canonicalAutonomyProposalDigest(sourceUnsigned)
   ) throw new Error("source R-exact proposal receipt is not an exact gille roster binding");
