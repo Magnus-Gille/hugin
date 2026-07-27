@@ -116,6 +116,7 @@ function makeDeps(munin: MuninClient): ExternalReceiptIntakeDeps {
     munin,
     registry: new LearningRegistryStore(munin, { now: () => "2026-07-20T09:05:00Z" }),
     keys: KEYS,
+    now: () => "2026-07-20T09:05:00Z",
   };
 }
 

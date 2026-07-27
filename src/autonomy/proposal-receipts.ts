@@ -17,15 +17,15 @@ const revision = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{2,127}$/);
 const targetId = z.string().regex(/^[a-z][a-z0-9-]{2,80}$/);
 
 export const AUTONOMY_PROPOSAL_SCHEMA_VERSION = "v1" as const;
-export const AUTONOMY_PROPOSAL_POLICY_EPOCH_ID = "grimnir-adr-008-v1" as const;
+export const AUTONOMY_PROPOSAL_POLICY_EPOCH_ID = "grimnir-adr-008-v2" as const;
 export const AUTONOMY_PROPOSAL_SIGNER_KEY_ID = "hugin-autonomy-proposer" as const;
 export const AUTONOMY_PROPOSAL_REGISTRY_VERSION = "v1" as const;
 
-/** Exact authority adopted by Grimnir ADR-008/W0, never caller-selected. */
+/** Exact authority adopted by Grimnir ADR-008/W0.2, never caller-selected. */
 export const autonomyProposalPolicyAuthority = Object.freeze({
   id: AUTONOMY_PROPOSAL_POLICY_EPOCH_ID,
-  constitutionId: "grimnir-autonomy-v1",
-  constitutionDigest: "sha256:76b0f28adca0046fad9f1d3d4b3a57046f9a1d11ee2ed232bbc495d2ab663bd0",
+  constitutionId: "grimnir-autonomy-v2",
+  constitutionDigest: "sha256:836aba8abbc48e05294dac301354ec6b1aa21307b992db78202342ce29aa8dc1",
 });
 
 /** Closed registry: broad learning axes never create an implicit apply right. */

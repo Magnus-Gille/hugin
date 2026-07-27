@@ -1,0 +1,6 @@
+{
+  "constitution_digest": "sha256:51efdb78c4524780919649f285862543db8b38a6a3a07894f0fad8bdab40fc6c",
+  "controller": ["prepare", "apply", "verify", "watch", "commit"],
+  "watchdog": ["unknown"],
+  "recovery-worker": ["revert", "disarm", "terminally-blocked"]
+}
