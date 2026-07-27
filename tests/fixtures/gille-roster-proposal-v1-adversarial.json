@@ -1,0 +1,12 @@
+{
+  "fixture_version": "hugin-gille-roster-proposal-adversarial-v1",
+  "source": "gille-roster-proposal-v1-positive.json",
+  "source_bytes_sha256": "da6c86260246755688dcc0a409fa2678b869ce4a05cecd7f62fec2018651a96e",
+  "cases": [
+    { "name": "malformed-dual-ordering", "mutations": [{ "path": "/candidate/entries", "value": "inject alpha/zulu then bravo/alpha in model order" }] },
+    { "name": "identity-mismatch", "mutations": [{ "path": "/candidate/entries/0/artifact_digest", "value": "sha256:0000000000000000000000000000000000000000000000000000000000000000" }] },
+    { "name": "proposal-digest-mismatch", "mutations": [{ "path": "/proposal_digest", "value": "sha256:0000000000000000000000000000000000000000000000000000000000000000" }] },
+    { "name": "expired", "mutations": [{ "path": "/expires_at", "value": "2026-07-27T14:58:00Z" }] },
+    { "name": "wrong-route-principal", "mutations": [{ "path": "/expected_transport_principal_id", "value": "service:other" }] }
+  ]
+}
