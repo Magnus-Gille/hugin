@@ -93,6 +93,17 @@ describe("gille roster proposal producer", () => {
     expect(() => serializeGilleRosterProposal(bad)).toThrow(/delta operation/i);
   });
 
+  it.each([
+    ["stale base", (value: GilleRosterProposalInput) => { value.sourceCurrentBase = { revision: "other", digest: digest("0") as `sha256:${string}` }; }],
+    ["expired source", (value: GilleRosterProposalInput) => { value.sourceNow = () => new Date("2026-07-27T17:00:00Z"); }],
+    ["candidate digest", (value: GilleRosterProposalInput) => { value.sourceProposal = { ...(value.sourceProposal as Record<string, unknown>), candidateContentDigest: digest("0") }; }],
+    ["canary", (value: GilleRosterProposalInput) => { value.canary = { ...value.canary, modelId: "other-model" }; }],
+    ["lifetime", (value: GilleRosterProposalInput) => { value.expiresAt = "2026-07-29T14:58:00Z"; }],
+    ["redundant milliseconds", (value: GilleRosterProposalInput) => { value.createdAt = "2026-07-27T14:58:00.000Z"; }],
+  ])("rejects %s before producing a proposal", (_name, mutate) => {
+    const value = input(); mutate(value); expect(() => serializeGilleRosterProposal(value)).toThrow();
+  });
+
   it("rejects a desired roster whose aliases cannot satisfy the consumer's dual ordering rule", () => {
     const invalid = input();
     invalid.candidateEntries = [
