@@ -165,7 +165,9 @@ describe("gille roster proposal producer", () => {
     ]));
     expect([...outputs.keys()]).toEqual([
       "malformed-dual-ordering", "identity-mismatch", "proposal-digest-mismatch",
-      "expired", "wrong-route-principal",
+      "expired", "wrong-route-principal", "bounds-inflation",
+      "forbidden-requested-operation", "canary-concurrency-inflation",
+      "canary-model-mismatch", "candidate-digest-tamper",
     ]);
     const ordering = outputs.get("malformed-dual-ordering")!;
     expect((ordering.candidate as { entries: Array<{ model_id: string; alias: string }> }).entries
@@ -181,6 +183,11 @@ describe("gille roster proposal producer", () => {
     expectSelfBound(outputs.get("expired")!);
     expect(outputs.get("wrong-route-principal")!.expected_transport_principal_id).toBe("service:other");
     expectSelfBound(outputs.get("wrong-route-principal")!);
+    expect((outputs.get("bounds-inflation")!.requested_bounds as { max_changed_entries: number }).max_changed_entries).toBe(2);
+    expect((outputs.get("forbidden-requested-operation")!.requested_operations as string[])[1]).toBe("apply");
+    expect((outputs.get("canary-concurrency-inflation")!.canary as { max_concurrency: number }).max_concurrency).toBe(2);
+    expect((outputs.get("canary-model-mismatch")!.canary as { model_id: string }).model_id).toBe("other-model");
+    expect((outputs.get("candidate-digest-tamper")!.candidate as { roster_digest: string }).roster_digest).toBe(digest("0"));
   });
 
   it("rejects malformed fixture manifests, paths, and operations", () => {

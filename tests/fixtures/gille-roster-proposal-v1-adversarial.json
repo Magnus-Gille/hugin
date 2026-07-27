@@ -35,6 +35,26 @@
         { "op": "replace", "path": "/expected_transport_principal_id", "value": "service:other" },
         { "op": "replace", "path": "/proposal_digest", "value": "sha256:11336acce22dee72d59110abae171c40160f19304f21d14a386da28db8ec174c" }
       ]
+    },
+    {
+      "name": "bounds-inflation",
+      "mutations": [{ "op": "replace", "path": "/requested_bounds/max_changed_entries", "value": 2 }]
+    },
+    {
+      "name": "forbidden-requested-operation",
+      "mutations": [{ "op": "replace", "path": "/requested_operations/1", "value": "apply" }]
+    },
+    {
+      "name": "canary-concurrency-inflation",
+      "mutations": [{ "op": "replace", "path": "/canary/max_concurrency", "value": 2 }]
+    },
+    {
+      "name": "canary-model-mismatch",
+      "mutations": [{ "op": "replace", "path": "/canary/model_id", "value": "other-model" }]
+    },
+    {
+      "name": "candidate-digest-tamper",
+      "mutations": [{ "op": "replace", "path": "/candidate/roster_digest", "value": "sha256:0000000000000000000000000000000000000000000000000000000000000000" }]
     }
   ]
 }
