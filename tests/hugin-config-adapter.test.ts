@@ -301,4 +301,62 @@ describe("Hugin strict autonomous config adapters", () => {
       "hugin-config-store-snapshots-limit",
     );
   });
+
+  it("rejects an overlong noncanonical snapshot reference", () => {
+    const root = mkdtempSync(join(tmpdir(), "hugin-config-snapshot-ref-"));
+    new HuginConfigStore(root);
+    const path = join(root, "hugin-r-exact-config.json");
+    const state = JSON.parse(readFileSync(path, "utf8"));
+    state.snapshots[
+      `ref:snapshot-${"hugin-orin-macro-routing-".repeat(8)}${"a".repeat(24)}`
+    ] = {
+      target: "hugin-orin-macro-routing",
+      document: state.current["hugin-orin-macro-routing"],
+    };
+    writeFileSync(path, JSON.stringify(state), "utf8");
+
+    expect(() => new HuginConfigStore(root))
+      .toThrowError("hugin-config-store-corrupt");
+  });
+
+  it.each(["stage", "snapshot"] as const)(
+    "keeps a near-cap valid store readable and byte-identical when %s would exceed the write cap",
+    (mutation) => {
+      const root = mkdtempSync(join(tmpdir(), `hugin-config-write-cap-${mutation}-`));
+      const initial = new HuginConfigStore(root);
+      const path = join(root, "hugin-r-exact-config.json");
+      const before = readFileSync(path);
+      const current = initial.read("hugin-orin-macro-routing");
+      const candidateBase = { revision: current.revision, digest: current.digest };
+      const store = new HuginConfigStore(root, {
+        maxStoreBytesForTest: before.byteLength + 32,
+      });
+
+      expect(() => {
+        if (mutation === "stage") {
+          store.stage(candidate("hugin-orin-macro-routing", candidateBase));
+        } else {
+          store.snapshot("hugin-orin-macro-routing");
+        }
+      }).toThrowError("hugin-config-store-too-large");
+
+      expect(readFileSync(path)).toEqual(before);
+      expect(store.read("hugin-orin-macro-routing")).toEqual(current);
+      expect(readdirSync(root).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    },
+  );
+
+  it("refuses the reduced-cap test hook outside Vitest", () => {
+    const root = mkdtempSync(join(tmpdir(), "hugin-config-test-hook-"));
+    new HuginConfigStore(root);
+    const priorVitest = process.env.VITEST;
+    delete process.env.VITEST;
+    try {
+      expect(() => new HuginConfigStore(root, { maxStoreBytesForTest: 1 }))
+        .toThrowError("hugin-config-store-test-hook-refused");
+    } finally {
+      if (priorVitest === undefined) delete process.env.VITEST;
+      else process.env.VITEST = priorVitest;
+    }
+  });
 });

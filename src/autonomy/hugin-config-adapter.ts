@@ -94,6 +94,10 @@ function initialDocument(value: { revision: string; payload: ConfigPayload }): S
   return { revision: value.revision, payload: clone(value.payload), digest: digest({ schemaVersion: HUGIN_CONFIG_ADAPTER_VERSION, revision: value.revision, config: value.payload }) };
 }
 
+function canonicalSnapshotRef(id: HuginConfigTargetId, documentDigest: string): string {
+  return `ref:snapshot-${id}-${documentDigest.slice(7, 31)}`;
+}
+
 function validateStoredDocument(
   raw: unknown,
   id: HuginConfigTargetId,
@@ -140,9 +144,11 @@ function validateStoreState(raw: unknown): StoreState {
   for (const id of targetIds) current[id] = validateStoredDocument(rawCurrent[id], id, documents);
   const snapshots: StoreState["snapshots"] = {};
   for (const [ref, value] of Object.entries(raw.snapshots)) {
-    if (!/^ref:snapshot-[a-z0-9-]+-[a-f0-9]{24}$/.test(ref) || !exactKeys(value, ["target", "document"])) throw new Error("hugin-config-store-corrupt");
+    if (!/^ref:snapshot-hugin-orin-macro-routing-[a-f0-9]{24}$/.test(ref) || !exactKeys(value, ["target", "document"])) throw new Error("hugin-config-store-corrupt");
     const id = targetId.parse(value.target);
-    snapshots[ref] = { target: id, document: validateStoredDocument(value.document, id, documents) };
+    const document = validateStoredDocument(value.document, id, documents);
+    if (ref !== canonicalSnapshotRef(id, document.digest)) throw new Error("hugin-config-store-corrupt");
+    snapshots[ref] = { target: id, document };
   }
   return { current, documents, snapshots };
 }
@@ -168,17 +174,30 @@ const processLocalLocks = new Set<string>();
 export class HuginConfigStore {
   #path: string;
   #lockPath: string;
+  #maxStoreBytes: number;
   #onLockReleaseReadyForTest: (() => void) | undefined;
   constructor(root: string, options: {
     initialize?: boolean;
     /** Deterministic race injection only; production composition never sets it. */
     onLockReleaseReadyForTest?: () => void;
+    /** Reduced write/read ceiling for deterministic boundary tests only. */
+    maxStoreBytesForTest?: number;
   } = {}) {
     if (!isAbsolute(root)) throw new Error("hugin-config-root-not-absolute");
     const initialize = options.initialize ?? true;
-    if (options.onLockReleaseReadyForTest && process.env.VITEST !== "true") {
+    if (
+      (options.onLockReleaseReadyForTest || options.maxStoreBytesForTest !== undefined)
+      && process.env.VITEST !== "true"
+    ) {
       throw new Error("hugin-config-store-test-hook-refused");
     }
+    if (
+      options.maxStoreBytesForTest !== undefined
+      && (!Number.isSafeInteger(options.maxStoreBytesForTest) || options.maxStoreBytesForTest < 1)
+    ) {
+      throw new Error("hugin-config-store-test-hook-refused");
+    }
+    this.#maxStoreBytes = options.maxStoreBytesForTest ?? MAX_STORE_BYTES;
     this.#onLockReleaseReadyForTest = options.onLockReleaseReadyForTest;
     this.#path = join(resolve(root), "hugin-r-exact-config.json"); this.#lockPath = `${this.#path}.lock`;
     if (initialize) mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -264,10 +283,10 @@ export class HuginConfigStore {
   }
   private load(): StoreState {
     const stat = lstatSync(this.#path); if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error("hugin-config-store-unsafe");
-    if (stat.size > MAX_STORE_BYTES) throw new Error("hugin-config-store-too-large");
+    if (stat.size > this.#maxStoreBytes) throw new Error("hugin-config-store-too-large");
     try {
       const serialized = readFileSync(this.#path);
-      if (serialized.byteLength > MAX_STORE_BYTES) throw new Error("hugin-config-store-too-large");
+      if (serialized.byteLength > this.#maxStoreBytes) throw new Error("hugin-config-store-too-large");
       return validateStoreState(JSON.parse(serialized.toString("utf8")));
     } catch (error) {
       if (error instanceof Error && error.message.startsWith("hugin-config-store-")) throw error;
@@ -275,9 +294,13 @@ export class HuginConfigStore {
     }
   }
   private write(state: StoreState) {
+    const serialized = Buffer.from(canonicalizeJcs(state), "utf8");
+    if (serialized.byteLength > this.#maxStoreBytes) {
+      throw new Error("hugin-config-store-too-large");
+    }
     const temp = `${this.#path}.${process.pid}.${randomUUID()}.tmp`; let fd: number | undefined;
     try {
-      fd = openSync(temp, "wx", 0o600); writeFileSync(fd, canonicalizeJcs(state)); fsyncSync(fd); closeSync(fd); fd = undefined;
+      fd = openSync(temp, "wx", 0o600); writeFileSync(fd, serialized); fsyncSync(fd); closeSync(fd); fd = undefined;
       renameSync(temp, this.#path); const dir = openSync(resolve(this.#path, ".."), "r"); try { fsyncSync(dir); } finally { closeSync(dir); }
     } catch (error) {
       try { unlinkSync(temp); } catch { /* only this UUID-bound failed temp is eligible for cleanup */ }
@@ -288,7 +311,7 @@ export class HuginConfigStore {
   readPayload(id: HuginConfigTargetId): ConfigPayload { return clone(this.load().current[id].payload); }
   candidateRevision(id: HuginConfigTargetId, candidateDigest: string): string { const candidate = this.load().documents[candidateDigest]; if (!candidate || candidate.targetId !== id) throw new Error("hugin-config-candidate-unavailable"); return candidate.revision; }
   stage(raw: unknown): HuginConfigCandidate { const candidate = validateHuginConfigCandidate(raw); return this.withLock(() => { const state = this.load(); state.documents[candidate.candidateDigest] = candidate; pruneState(state, candidate.candidateDigest); this.write(state); return clone(candidate); }); }
-  snapshot(id: HuginConfigTargetId): { ref: string; digest: string } { return this.withLock(() => { const state = this.load(); const doc = state.current[id]; const ref = `ref:snapshot-${id}-${doc.digest.slice(7, 31)}`; state.snapshots[ref] = { target: id, document: doc }; pruneState(state); this.write(state); return { ref, digest: doc.digest }; }); }
+  snapshot(id: HuginConfigTargetId): { ref: string; digest: string } { return this.withLock(() => { const state = this.load(); const doc = state.current[id]; const ref = canonicalSnapshotRef(id, doc.digest); state.snapshots[ref] = { target: id, document: doc }; pruneState(state); this.write(state); return { ref, digest: doc.digest }; }); }
   /** Called only by the separately authorized R-exact recovery adapter. */
   restoreSnapshot(
     id: HuginConfigTargetId,

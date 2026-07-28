@@ -47,13 +47,15 @@ parsing. The raw `documents` and `snapshots` objects are limited to 64 and 32
 entries respectively; those cardinalities are rejected before individual
 candidates, snapshots, or documents are deeply validated. Mutations enforce
 the same limits by retaining current and recovery-referenced documents before
-deterministic cache pruning.
+deterministic cache pruning. Snapshot references have one canonical,
+target-and-document-digest-bound form, so accepted keys are bounded as well.
 
 Within those bounds, the store validates the entire closed state, writes a
-unique fsynced temporary file, renames it atomically, then fsyncs the
-directory; a failed write removes only its own UUID-bound temporary file.
-Stored candidates and current/snapshot documents are revalidated and
-digest-bound on every read.
+unique fsynced temporary file, renames it atomically, then fsyncs the directory.
+Before creating that temporary file, it serializes and rejects any result over
+the same 256 KiB ceiling, leaving the prior readable store untouched. A failed
+write removes only its own UUID-bound temporary file. Stored candidates and
+current/snapshot documents are revalidated and digest-bound on every read.
 
 This composition makes the macro-routing target real: staged R-exact changes
 are visible to `selectOrinMacroRoute`, persist across restart, and an exact
