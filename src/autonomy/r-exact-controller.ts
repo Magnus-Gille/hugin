@@ -358,7 +358,11 @@ async function resumeDurableWatch(
     prepared,
     journal.binding.attempt_id,
   );
-  if ((await target.read()).digest !== prepared.candidate_digest) {
+  const committedTarget = await target.read();
+  if (
+    committedTarget.digest !== prepared.candidate_digest
+    || committedTarget.revision !== prepared.candidate_revision
+  ) {
     throw new Error("r-exact-commit-readback");
   }
   options.onPhase?.("terminalization");
@@ -396,6 +400,7 @@ function validatePrepared(
       "target_scope_digest",
       "base_revision",
       "base_digest",
+      "candidate_revision",
       "candidate_digest",
       "snapshot_ref",
       "snapshot_digest",
@@ -414,6 +419,7 @@ function validatePrepared(
     || prepared.target_scope_digest !== target.targetScopeDigest
     || prepared.base_revision !== receipt.base.revision
     || prepared.base_digest !== receipt.base.digest
+    || !/^[A-Za-z0-9][A-Za-z0-9._/-]{2,127}$/.test(prepared.candidate_revision)
     || prepared.candidate_digest !== receipt.candidateContentDigest
     || prepared.snapshot_digest !== receipt.base.digest
     || !refPattern.test(prepared.snapshot_ref)
@@ -755,6 +761,7 @@ export async function applyRExactProposal(
     target_scope_digest: target.targetScopeDigest,
     base_revision: receipt.base.revision,
     base_digest: receipt.base.digest,
+    candidate_revision: await target.candidateRevision(receipt.candidateContentDigest),
     candidate_digest: receipt.candidateContentDigest,
     snapshot_ref: snapshot.ref,
     snapshot_digest: snapshot.digest,
@@ -926,7 +933,10 @@ export async function applyRExactProposal(
     );
     journal = state.journal;
     const readback = await target.read();
-    if (readback.digest !== receipt.candidateContentDigest) {
+    if (
+      readback.digest !== receipt.candidateContentDigest
+      || readback.revision !== prepared.candidate_revision
+    ) {
       throw new Error("r-exact-readback-mismatch");
     }
     options.onPhase?.("readback");
@@ -1449,6 +1459,11 @@ export async function recoverRExactAttempt(
         targetId: prepared.target_id,
         baseRevision: prepared.base_revision,
         baseDigest: prepared.base_digest,
+        expectedCurrent: {
+          revision: prepared.candidate_revision,
+          digest: prepared.candidate_digest,
+        },
+        recoveryWorkerIdentity: prepared.prepared_authority.identities.recovery_worker,
       });
       options.onPhase?.("restore");
       const readback = await target.read();

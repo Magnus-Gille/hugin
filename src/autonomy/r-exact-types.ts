@@ -12,6 +12,8 @@ export interface RExactConfigTarget {
   domain: HuginRExactDomain;
   targetScopeDigest: string;
   read(): Promise<{ revision: string; digest: string }>;
+  /** Returns the immutable revision bound to a staged candidate digest. */
+  candidateRevision(candidateDigest: string): Promise<string>;
   snapshot(): Promise<{ ref: string; digest: string }>;
   replaceExact(
     expected: { revision: string; digest: string },
@@ -133,6 +135,7 @@ export interface PreparedAttempt {
   target_scope_digest: string;
   base_revision: string;
   base_digest: string;
+  candidate_revision: string;
   candidate_digest: string;
   snapshot_ref: string;
   snapshot_digest: string;
@@ -271,6 +274,9 @@ export interface RExactRecoveryWorker {
     targetId: string;
     baseRevision: string;
     baseDigest: string;
+    /** Fence recovery to the exact post-apply state recorded by this attempt. */
+    expectedCurrent: { revision: string; digest: string };
+    recoveryWorkerIdentity: string;
   }): Promise<{ restoredRevision: string; restoredDigest: string }>;
   narrowAndVerify(input: {
     binding: VerifiedW0Binding;
