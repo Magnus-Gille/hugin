@@ -136,7 +136,7 @@ describe("Hugin strict autonomous config adapters", () => {
     const lockPath = join(root, "hugin-r-exact-config.json.lock");
     const child = spawn(
       "/usr/bin/flock",
-      ["--exclusive", "--nonblock", lockPath, process.execPath, "-e", "process.stdout.write('locked'); setInterval(() => {}, 1_000)"],
+      ["--exclusive", "--nonblock", "--no-fork", lockPath, process.execPath, "-e", "process.stdout.write('locked'); setInterval(() => {}, 1_000)"],
       { stdio: ["ignore", "pipe", "inherit"] },
     );
 
