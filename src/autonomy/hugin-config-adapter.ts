@@ -6,7 +6,8 @@
  * provide a generic config writer or any Gille/deployment/auth surface.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import { canonicalizeJcs } from "../jcs.js";
@@ -79,19 +80,6 @@ interface StoreState {
 }
 const MAX_STAGED_DOCUMENTS = 64;
 const MAX_SNAPSHOTS = 32;
-interface LockMetadata {
-  version: 1;
-  bootId: string;
-  pid: number;
-  startTime: string;
-  device: number;
-  inode: number;
-}
-interface LockLease { device: number; inode: number; }
-const lockMetadataSchema = z.object({
-  version: z.literal(1), bootId: z.string().min(1).max(128), pid: z.number().int().positive(),
-  startTime: z.string().regex(/^\d+$/), device: z.number().int().nonnegative(), inode: z.number().int().positive(),
-}).strict();
 const defaults: Record<HuginConfigTargetId, { revision: string; payload: ConfigPayload }> = {
   "hugin-orin-macro-routing": { revision: "orin-macro-route-v1", payload: { routes: [
     { workerProvider: "homeserver", taskType: "classify", sensitivity: "internal", nodeId: "orin", modelId: "qwen2.5-coder:3b" },
@@ -167,75 +155,17 @@ function pruneState(state: StoreState, retainDocument?: string): void {
 }
 
 const domains = { "hugin-orin-macro-routing": "macro-routing" } as const;
-
-function linuxBootId(): string | null {
-  if (process.platform !== "linux") return null;
-  try {
-    const value = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-    return /^[a-f0-9-]{36}$/.test(value) ? value : null;
-  } catch { return null; }
-}
-
-type LinuxProcessStart = { state: "present"; startTime: string } | { state: "absent" | "unknown" };
-
-function linuxProcessStartTime(pid: number): LinuxProcessStart {
-  if (process.platform !== "linux") return { state: "unknown" };
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const closing = stat.lastIndexOf(")");
-    const fields = stat.slice(closing + 2).trim().split(/\s+/);
-    const start = fields[19];
-    return start && /^\d+$/.test(start) ? { state: "present", startTime: start } : { state: "unknown" };
-  } catch (error) {
-    const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-    return code === "ENOENT" || code === "ESRCH" ? { state: "absent" } : { state: "unknown" };
-  }
-}
-
-function currentLockMetadata(inode: LockLease): LockMetadata {
-  const bootId = linuxBootId(); const start = linuxProcessStartTime(process.pid);
-  return {
-    version: 1,
-    // Non-Linux systems can acquire/release their own locks but never reclaim one.
-    bootId: bootId ?? `nonlinux-${process.platform}`,
-    pid: process.pid,
-    startTime: start.state === "present" ? start.startTime : "0",
-    device: inode.device,
-    inode: inode.inode,
-  };
-}
-
-function isProvenStaleLinuxLock(lock: LockMetadata): boolean {
-  const bootId = linuxBootId();
-  if (!bootId) return false;
-  if (lock.bootId !== bootId) return true;
-  const start = linuxProcessStartTime(lock.pid);
-  return start.state === "absent" || (start.state === "present" && start.startTime !== lock.startTime);
-}
-
-/*
- * Reclamation moves the proven stale inode away atomically. New participants
- * can only create `lockPath` after that rename, and this reclaimer never
- * unlinks `lockPath` afterwards, so it cannot delete a live replacement.
- */
-function moveProvenStaleLock(lockPath: string, before: LockLease, claim: string): boolean {
-  if (process.platform !== "linux") return false;
-  try {
-    renameSync(lockPath, claim);
-    const claimed = lstatSync(claim);
-    return claimed.isFile() && !claimed.isSymbolicLink() && claimed.dev === before.device && claimed.ino === before.inode;
-  } catch { return false; }
-}
+const processLocalLocks = new Set<string>();
 
 /** Owner-local canonical store; mutations are only CAS through a target. */
 export class HuginConfigStore {
   #path: string;
   #lockPath: string;
-  #onStaleLockClaimed: (() => void) | undefined;
-  constructor(root: string, options: { initialize?: boolean; onStaleLockClaimed?: () => void } = {}) {
+  #onLockAcquired: (() => void) | undefined;
+  constructor(root: string, options: { initialize?: boolean; onLockAcquired?: () => void } = {}) {
     if (!isAbsolute(root)) throw new Error("hugin-config-root-not-absolute");
     const initialize = options.initialize ?? true;
-    this.#onStaleLockClaimed = options.onStaleLockClaimed;
+    this.#onLockAcquired = options.onLockAcquired;
     this.#path = join(resolve(root), "hugin-r-exact-config.json"); this.#lockPath = `${this.#path}.lock`;
     if (initialize) mkdirSync(root, { recursive: true, mode: 0o700 });
     const stat = lstatSync(root); if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error("hugin-config-root-unsafe");
@@ -254,50 +184,63 @@ export class HuginConfigStore {
   }
   private exists() { try { lstatSync(this.#path); return true; } catch { return false; } }
   private withLock<T>(operation: () => T): T {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      let fd: number | undefined;
-      try {
-        fd = openSync(this.#lockPath, "wx", 0o600);
-      } catch (error: unknown) {
-        if (!(error && typeof error === "object" && "code" in error && error.code === "EEXIST")) throw error;
-        if (attempt === 0 && this.reclaimProvenStaleLock()) continue;
-        throw new Error("hugin-config-store-contended");
-      }
+    let fd: number | undefined;
+    let processLocalLease = false;
+    try {
+      fd = openSync(
+        this.#lockPath,
+        constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW,
+        0o600,
+      );
       const stat = fstatSync(fd);
-      const metadata = currentLockMetadata({ device: stat.dev, inode: stat.ino });
-      try {
-        writeFileSync(fd, canonicalizeJcs(metadata)); fsyncSync(fd); closeSync(fd); fd = undefined;
-        return operation();
-      } finally {
-        if (fd !== undefined) closeSync(fd);
-        this.releaseExactLock({ device: stat.dev, inode: stat.ino });
+      if (!stat.isFile() || (stat.mode & 0o077) !== 0) {
+        throw new Error("hugin-config-store-lock-unsafe");
       }
+
+      if (process.platform === "linux") {
+        /*
+         * fd 3 in the helper is a duplicate of this process's open file
+         * description. Linux flock ownership therefore remains live on `fd`
+         * after the helper exits and is released atomically by closeSync.
+         */
+        const result = spawnSync(
+          "/usr/bin/flock",
+          ["--exclusive", "--nonblock", "3"],
+          { stdio: ["ignore", "ignore", "pipe", fd], encoding: "utf8" },
+        );
+        if (result.status === 1) throw new Error("hugin-config-store-contended");
+        if (result.error || result.status !== 0) {
+          throw new Error("hugin-config-store-lock-unavailable");
+        }
+      } else {
+        /*
+         * Hugin deploys on Linux. This process-local fallback keeps unit tests
+         * and unsupported developer hosts fail-fast without pretending to
+         * provide cross-process exclusion.
+         */
+        if (processLocalLocks.has(this.#lockPath)) {
+          throw new Error("hugin-config-store-contended");
+        }
+        processLocalLocks.add(this.#lockPath);
+        processLocalLease = true;
+      }
+
+      const pathStat = lstatSync(this.#lockPath);
+      if (
+        !pathStat.isFile()
+        || pathStat.isSymbolicLink()
+        || pathStat.dev !== stat.dev
+        || pathStat.ino !== stat.ino
+      ) {
+        throw new Error("hugin-config-store-lock-unsafe");
+      }
+      this.#onLockAcquired?.();
+      return operation();
+    } finally {
+      if (processLocalLease) processLocalLocks.delete(this.#lockPath);
+      if (fd !== undefined) closeSync(fd);
+      // The persistent lock inode is never renamed or unlinked.
     }
-    throw new Error("hugin-config-store-contended");
-  }
-  private releaseExactLock(lease: LockLease): void {
-    try {
-      const stat = lstatSync(this.#lockPath);
-      if (stat.isFile() && !stat.isSymbolicLink() && stat.dev === lease.device && stat.ino === lease.inode) unlinkSync(this.#lockPath);
-    } catch { /* A replacement lock is never ours to remove. */ }
-  }
-  private reclaimProvenStaleLock(): boolean {
-    let before;
-    let metadata: LockMetadata;
-    try {
-      before = lstatSync(this.#lockPath);
-      if (!before.isFile() || before.isSymbolicLink()) return false;
-      metadata = lockMetadataSchema.parse(JSON.parse(readFileSync(this.#lockPath, "utf8")));
-      if (metadata.device !== before.dev || metadata.inode !== before.ino || !isProvenStaleLinuxLock(metadata)) return false;
-    } catch { return false; }
-    const claim = `${this.#lockPath}.${process.pid}.${randomUUID()}.reclaim`; let claimedStale = false;
-    try {
-      claimedStale = moveProvenStaleLock(this.#lockPath, { device: before.dev, inode: before.ino }, claim);
-      if (!claimedStale) return false;
-      this.#onStaleLockClaimed?.();
-      return true;
-    } catch { return false; }
-    finally { if (claimedStale) try { unlinkSync(claim); } catch { /* best effort stale-claim cleanup */ } }
   }
   private load(): StoreState {
     const stat = lstatSync(this.#path); if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error("hugin-config-store-unsafe");

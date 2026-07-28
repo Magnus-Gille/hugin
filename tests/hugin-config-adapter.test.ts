@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
@@ -32,19 +32,6 @@ function candidateWithRoutes(
     config: { routes },
   };
   return { ...body, candidateDigest: digest(body) };
-}
-
-function linuxStartTime(pid: number): string {
-  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-  return stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19]!;
-}
-
-function writeLock(root: string, owner: { bootId: string; pid: number; startTime: string }) {
-  const path = join(root, "hugin-r-exact-config.json.lock");
-  writeFileSync(path, "{}", { mode: 0o600 });
-  const stat = lstatSync(path);
-  writeFileSync(path, canonicalizeJcs({ version: 1, ...owner, device: stat.dev, inode: stat.ino }), { mode: 0o600 });
-  return path;
 }
 
 describe("Hugin strict autonomous config adapters", () => {
@@ -121,44 +108,88 @@ describe("Hugin strict autonomous config adapters", () => {
     expect(() => validateHuginConfigCandidate({ ...candidate(), targetId: "hugin-agent-prompt" })).toThrow();
   });
 
-  it("fails immediately on a live exact lock without a wait loop", () => {
+  it("fails immediately when another participant holds the kernel-backed lock", () => {
     const root = mkdtempSync(join(tmpdir(), "hugin-config-live-lock-"));
-    const store = new HuginConfigStore(root); const { revision, digest: baseDigest } = store.read("hugin-orin-macro-routing"); const base = { revision, digest: baseDigest };
-    const lock = writeLock(root, { bootId: process.platform === "linux" ? readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() : "nonlinux-test", pid: process.pid, startTime: process.platform === "linux" ? linuxStartTime(process.pid) : "0" });
+    let probe = false;
+    let nestedError = "";
+    const store = new HuginConfigStore(root, {
+      onLockAcquired: () => {
+        if (!probe) return;
+        try { new HuginConfigStore(root); }
+        catch (error) { nestedError = error instanceof Error ? error.message : String(error); }
+      },
+    });
+    const { revision, digest: baseDigest } = store.read("hugin-orin-macro-routing");
+    probe = true;
+    const started = Date.now();
+
+    expect(() => store.stage(candidate("hugin-orin-macro-routing", { revision, digest: baseDigest }))).not.toThrow();
+    expect(nestedError).toBe("hugin-config-store-contended");
+    expect(Date.now() - started).toBeLessThan(100);
+  });
+
+  it.skipIf(process.platform !== "linux")("uses kernel ownership for contention and recovers only after SIGKILL closes the holder fd", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hugin-config-kernel-lock-"));
+    const store = new HuginConfigStore(root);
+    const { revision, digest: baseDigest } = store.read("hugin-orin-macro-routing");
+    const base = { revision, digest: baseDigest };
+    const lockPath = join(root, "hugin-r-exact-config.json.lock");
+    const child = spawn(
+      "/usr/bin/flock",
+      ["--exclusive", "--nonblock", lockPath, process.execPath, "-e", "process.stdout.write('locked'); setInterval(() => {}, 1_000)"],
+      { stdio: ["ignore", "pipe", "inherit"] },
+    );
+
+    await once(child.stdout!, "data");
+    const heldIdentity = statSync(lockPath);
     const started = Date.now();
     expect(() => store.stage(candidate("hugin-orin-macro-routing", base))).toThrow("hugin-config-store-contended");
     expect(Date.now() - started).toBeLessThan(100);
-    unlinkSync(lock);
-  });
 
-  it.skipIf(process.platform !== "linux")("reclaims a SIGKILLed child lock only after Linux boot/PID-start proof", async () => {
-    const root = mkdtempSync(join(tmpdir(), "hugin-config-stale-lock-"));
-    const store = new HuginConfigStore(root); const { revision, digest: baseDigest } = store.read("hugin-orin-macro-routing"); const base = { revision, digest: baseDigest };
-    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-    await once(child, "spawn");
-    const pid = child.pid!;
-    const lock = writeLock(root, { bootId: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(), pid, startTime: linuxStartTime(pid) });
-    child.kill("SIGKILL"); await once(child, "exit");
+    child.kill("SIGKILL");
+    await once(child, "exit");
+
     expect(() => store.stage(candidate("hugin-orin-macro-routing", base))).not.toThrow();
-    expect(existsSync(lock)).toBe(false);
+    const releasedIdentity = statSync(lockPath);
+    expect(releasedIdentity.dev).toBe(heldIdentity.dev);
+    expect(releasedIdentity.ino).toBe(heldIdentity.ino);
   });
 
-  it.skipIf(process.platform !== "linux")("never deletes a live replacement created after stale-lock claim", async () => {
-    const root = mkdtempSync(join(tmpdir(), "hugin-config-replacement-lock-"));
-    const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-    let replacement = "";
+  it.skipIf(process.platform !== "linux")("never interprets stale-looking lock-file contents as authority to reclaim the path", () => {
+    const root = mkdtempSync(join(tmpdir(), "hugin-config-stale-looking-lock-"));
+    const lockPath = join(root, "hugin-r-exact-config.json.lock");
+    writeFileSync(lockPath, '{"version":1,"pid":2147483647,"processStartTime":"1","bootId":"stale"}\n', { mode: 0o600 });
+    const before = statSync(lockPath);
+    const store = new HuginConfigStore(root);
+    const { revision, digest: baseDigest } = store.read("hugin-orin-macro-routing");
+
+    expect(() => store.stage(candidate("hugin-orin-macro-routing", { revision, digest: baseDigest }))).not.toThrow();
+    const after = statSync(lockPath);
+    expect(after.dev).toBe(before.dev);
+    expect(after.ino).toBe(before.ino);
+    expect(readFileSync(lockPath, "utf8")).toContain('"pid":2147483647');
+    expect(readdirSync(root).filter((name) => name.includes(".reclaim-"))).toEqual([]);
+  });
+
+  it.skipIf(process.platform !== "linux")("releases only the acquired kernel lock and never unlinks a replacement pathname", () => {
+    const root = mkdtempSync(join(tmpdir(), "hugin-config-release-race-"));
+    const lockPath = join(root, "hugin-r-exact-config.json.lock");
+    let hookCalled = false;
+    let armed = false;
     const store = new HuginConfigStore(root, {
-      onStaleLockClaimed: () => { replacement = writeLock(root, { bootId, pid: process.pid, startTime: linuxStartTime(process.pid) }); },
+      onLockAcquired: () => {
+        if (!armed) return;
+        hookCalled = true;
+        unlinkSync(lockPath);
+        writeFileSync(lockPath, "live replacement\n", { mode: 0o600 });
+      },
     });
-    const { revision, digest: baseDigest } = store.read("hugin-orin-macro-routing"); const base = { revision, digest: baseDigest };
-    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-    await once(child, "spawn"); const pid = child.pid!;
-    writeLock(root, { bootId, pid, startTime: linuxStartTime(pid) });
-    child.kill("SIGKILL"); await once(child, "exit");
-    expect(() => store.stage(candidate("hugin-orin-macro-routing", base))).toThrow("hugin-config-store-contended");
-    expect(existsSync(replacement)).toBe(true);
-    expect(JSON.parse(readFileSync(replacement, "utf8")).pid).toBe(process.pid);
-    unlinkSync(replacement);
+    const { revision, digest: baseDigest } = store.read("hugin-orin-macro-routing");
+    armed = true;
+
+    expect(() => store.stage(candidate("hugin-orin-macro-routing", { revision, digest: baseDigest }))).not.toThrow();
+    expect(hookCalled).toBe(true);
+    expect(readFileSync(lockPath, "utf8")).toBe("live replacement\n");
   });
 
   it("does not create an uninstalled durable root while reading the live selector", () => {
