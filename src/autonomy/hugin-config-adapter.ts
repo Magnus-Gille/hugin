@@ -80,6 +80,7 @@ interface StoreState {
 }
 const MAX_STAGED_DOCUMENTS = 64;
 const MAX_SNAPSHOTS = 32;
+const MAX_STORE_BYTES = 256 * 1024;
 const defaults: Record<HuginConfigTargetId, { revision: string; payload: ConfigPayload }> = {
   "hugin-orin-macro-routing": { revision: "orin-macro-route-v1", payload: { routes: [
     { workerProvider: "homeserver", taskType: "classify", sensitivity: "internal", nodeId: "orin", modelId: "qwen2.5-coder:3b" },
@@ -122,6 +123,12 @@ function validateStoreState(raw: unknown): StoreState {
     throw new Error("hugin-config-store-corrupt");
   }
   if (Object.keys(raw.current).sort().join("|") !== [...targetIds].sort().join("|")) throw new Error("hugin-config-store-corrupt");
+  if (Object.keys(raw.documents).length > MAX_STAGED_DOCUMENTS) {
+    throw new Error("hugin-config-store-documents-limit");
+  }
+  if (Object.keys(raw.snapshots).length > MAX_SNAPSHOTS) {
+    throw new Error("hugin-config-store-snapshots-limit");
+  }
   const documents: StoreState["documents"] = {};
   for (const [key, value] of Object.entries(raw.documents)) {
     const candidate = validateHuginConfigCandidate(value);
@@ -257,7 +264,15 @@ export class HuginConfigStore {
   }
   private load(): StoreState {
     const stat = lstatSync(this.#path); if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error("hugin-config-store-unsafe");
-    try { return validateStoreState(JSON.parse(readFileSync(this.#path, "utf8"))); } catch (error) { if (error instanceof Error && error.message.startsWith("hugin-config-store-")) throw error; throw new Error("hugin-config-store-corrupt"); }
+    if (stat.size > MAX_STORE_BYTES) throw new Error("hugin-config-store-too-large");
+    try {
+      const serialized = readFileSync(this.#path);
+      if (serialized.byteLength > MAX_STORE_BYTES) throw new Error("hugin-config-store-too-large");
+      return validateStoreState(JSON.parse(serialized.toString("utf8")));
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("hugin-config-store-")) throw error;
+      throw new Error("hugin-config-store-corrupt");
+    }
   }
   private write(state: StoreState) {
     const temp = `${this.#path}.${process.pid}.${randomUUID()}.tmp`; let fd: number | undefined;

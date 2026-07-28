@@ -262,4 +262,43 @@ describe("Hugin strict autonomous config adapters", () => {
       workerProvider: "homeserver", taskType: "classify", sensitivity: "public",
     })).toThrow("hugin-config-store-digest-mismatch");
   });
+
+  it("rejects an oversized persisted store before parsing it", () => {
+    const root = mkdtempSync(join(tmpdir(), "hugin-config-oversized-"));
+    new HuginConfigStore(root);
+    const path = join(root, "hugin-r-exact-config.json");
+    writeFileSync(path, "{".repeat(256 * 1024 + 1), "utf8");
+
+    expect(() => new HuginConfigStore(root)).toThrowError("hugin-config-store-too-large");
+  });
+
+  it("rejects raw document cardinality before deep document validation", () => {
+    const root = mkdtempSync(join(tmpdir(), "hugin-config-document-limit-"));
+    new HuginConfigStore(root);
+    const path = join(root, "hugin-r-exact-config.json");
+    const state = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    state.documents = Object.fromEntries(
+      Array.from({ length: 65 }, (_, index) => [`invalid-document-${index}`, {}]),
+    );
+    writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+
+    expect(() => new HuginConfigStore(root)).toThrowError(
+      "hugin-config-store-documents-limit",
+    );
+  });
+
+  it("rejects raw snapshot cardinality before deep snapshot validation", () => {
+    const root = mkdtempSync(join(tmpdir(), "hugin-config-snapshot-limit-"));
+    new HuginConfigStore(root);
+    const path = join(root, "hugin-r-exact-config.json");
+    const state = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    state.snapshots = Object.fromEntries(
+      Array.from({ length: 33 }, (_, index) => [`invalid-snapshot-${index}`, {}]),
+    );
+    writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+
+    expect(() => new HuginConfigStore(root)).toThrowError(
+      "hugin-config-store-snapshots-limit",
+    );
+  });
 });
