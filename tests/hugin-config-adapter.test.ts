@@ -108,26 +108,6 @@ describe("Hugin strict autonomous config adapters", () => {
     expect(() => validateHuginConfigCandidate({ ...candidate(), targetId: "hugin-agent-prompt" })).toThrow();
   });
 
-  it("fails immediately when another participant holds the kernel-backed lock", () => {
-    const root = mkdtempSync(join(tmpdir(), "hugin-config-live-lock-"));
-    let probe = false;
-    let nestedError = "";
-    const store = new HuginConfigStore(root, {
-      onLockAcquired: () => {
-        if (!probe) return;
-        try { new HuginConfigStore(root); }
-        catch (error) { nestedError = error instanceof Error ? error.message : String(error); }
-      },
-    });
-    const { revision, digest: baseDigest } = store.read("hugin-orin-macro-routing");
-    probe = true;
-    const started = Date.now();
-
-    expect(() => store.stage(candidate("hugin-orin-macro-routing", { revision, digest: baseDigest }))).not.toThrow();
-    expect(nestedError).toBe("hugin-config-store-contended");
-    expect(Date.now() - started).toBeLessThan(100);
-  });
-
   it.skipIf(process.platform !== "linux")("uses kernel ownership for contention and recovers only after SIGKILL closes the holder fd", async () => {
     const root = mkdtempSync(join(tmpdir(), "hugin-config-kernel-lock-"));
     const store = new HuginConfigStore(root);
@@ -177,9 +157,10 @@ describe("Hugin strict autonomous config adapters", () => {
     let hookCalled = false;
     let armed = false;
     const store = new HuginConfigStore(root, {
-      onLockAcquired: () => {
+      onLockReleaseReadyForTest: () => {
         if (!armed) return;
         hookCalled = true;
+        // This is the former identity-lstat -> unlink race window.
         unlinkSync(lockPath);
         writeFileSync(lockPath, "live replacement\n", { mode: 0o600 });
       },

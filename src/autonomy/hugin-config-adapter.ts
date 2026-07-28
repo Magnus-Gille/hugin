@@ -161,11 +161,18 @@ const processLocalLocks = new Set<string>();
 export class HuginConfigStore {
   #path: string;
   #lockPath: string;
-  #onLockAcquired: (() => void) | undefined;
-  constructor(root: string, options: { initialize?: boolean; onLockAcquired?: () => void } = {}) {
+  #onLockReleaseReadyForTest: (() => void) | undefined;
+  constructor(root: string, options: {
+    initialize?: boolean;
+    /** Deterministic race injection only; production composition never sets it. */
+    onLockReleaseReadyForTest?: () => void;
+  } = {}) {
     if (!isAbsolute(root)) throw new Error("hugin-config-root-not-absolute");
     const initialize = options.initialize ?? true;
-    this.#onLockAcquired = options.onLockAcquired;
+    if (options.onLockReleaseReadyForTest && process.env.VITEST !== "true") {
+      throw new Error("hugin-config-store-test-hook-refused");
+    }
+    this.#onLockReleaseReadyForTest = options.onLockReleaseReadyForTest;
     this.#path = join(resolve(root), "hugin-r-exact-config.json"); this.#lockPath = `${this.#path}.lock`;
     if (initialize) mkdirSync(root, { recursive: true, mode: 0o700 });
     const stat = lstatSync(root); if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error("hugin-config-root-unsafe");
@@ -185,6 +192,7 @@ export class HuginConfigStore {
   private exists() { try { lstatSync(this.#path); return true; } catch { return false; } }
   private withLock<T>(operation: () => T): T {
     let fd: number | undefined;
+    let leaseAcquired = false;
     let processLocalLease = false;
     try {
       fd = openSync(
@@ -193,7 +201,7 @@ export class HuginConfigStore {
         0o600,
       );
       const stat = fstatSync(fd);
-      if (!stat.isFile() || (stat.mode & 0o077) !== 0) {
+      if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0) {
         throw new Error("hugin-config-store-lock-unsafe");
       }
 
@@ -229,17 +237,22 @@ export class HuginConfigStore {
       if (
         !pathStat.isFile()
         || pathStat.isSymbolicLink()
+        || pathStat.nlink !== 1
         || pathStat.dev !== stat.dev
         || pathStat.ino !== stat.ino
       ) {
         throw new Error("hugin-config-store-lock-unsafe");
       }
-      this.#onLockAcquired?.();
+      leaseAcquired = true;
       return operation();
     } finally {
-      if (processLocalLease) processLocalLocks.delete(this.#lockPath);
-      if (fd !== undefined) closeSync(fd);
-      // The persistent lock inode is never renamed or unlinked.
+      try {
+        if (leaseAcquired) this.#onLockReleaseReadyForTest?.();
+      } finally {
+        if (processLocalLease) processLocalLocks.delete(this.#lockPath);
+        if (fd !== undefined) closeSync(fd);
+        // The persistent lock inode is never renamed or unlinked.
+      }
     }
   }
   private load(): StoreState {
