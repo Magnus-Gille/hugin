@@ -29,3 +29,14 @@ conflicting record under the same proposal ID is rejected. Receipt persistence
 does not call a configuration or deployment surface. W4.2 owns any future
 R-exact journal/controller and must revalidate this receipt rather than treating
 persistence as authority.
+
+## Hugin-produced Gille roster provenance
+
+The Gille roster proposal serializer verifies its source W4 receipt before it
+can issue the outer Ed25519 provenance signature. The trusted W4 `KeyStore`,
+protected current combined-Gille-base provider, and protected clock are supplied
+only by Hugin composition; caller content supplies the receipt and proposal
+content, never verifier authority. Missing, malformed, expired, stale, or
+badly signed receipts fail closed. The verified current base is then bound with
+the combined Gille baseline, candidate/evidence set, policy/constitution,
+principal, and full proposal content in the signed envelope.

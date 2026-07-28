@@ -13,7 +13,9 @@ import { decodeSecret, type KeyStore } from "../task-signing.js";
 
 const sha256 = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const opaqueRef = z.string().regex(/^ref:[a-z][a-z0-9-]{2,120}$/);
-const revision = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{2,127}$/);
+// Gille's protected observation epochs use the shared opaque-id alphabet,
+// including `:` (for example `epoch:gille:17`).
+const revision = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$/);
 const targetId = z.string().regex(/^[a-z][a-z0-9-]{2,80}$/);
 
 export const AUTONOMY_PROPOSAL_SCHEMA_VERSION = "v1" as const;
@@ -96,6 +98,11 @@ const proposalReceiptSchema = z.object({
 }).strict();
 
 export type AutonomyProposalReceipt = z.infer<typeof proposalReceiptSchema>;
+
+/** Runtime closed-shape parsing without asserting cryptographic verification. */
+export function parseAutonomyProposalReceipt(raw: unknown): AutonomyProposalReceipt {
+  return proposalReceiptSchema.parse(raw);
+}
 const proposalInputSchema = z.object({
   proposalId: targetId,
   experimentRef: opaqueRef,
