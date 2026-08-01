@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { normalizeObjectSchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+import { toJsonSchemaCompat } from "@modelcontextprotocol/sdk/server/zod-json-schema-compat.js";
 import {
   ALIAS_MAP_VERSION,
   ENVELOPE_VERSION,
@@ -9,6 +11,10 @@ import {
   BrokerNetworkError,
   type BrokerClient,
 } from "../../src/mcp/broker-client.js";
+import {
+  HUGIN_MCP_SERVER_INSTRUCTIONS,
+  HUGIN_MCP_SHARED_PREAMBLE,
+} from "../../src/mcp/server-instructions.js";
 import { makeExperimentInput, makeObservation } from "../fixtures/learning.js";
 
 function fakeBroker(overrides: Partial<BrokerClient> = {}): BrokerClient {
@@ -32,6 +38,188 @@ function fakeBroker(overrides: Partial<BrokerClient> = {}): BrokerClient {
 function parseResult(result: { content: { text: string }[]; isError?: boolean }): unknown {
   return JSON.parse(result.content[0]!.text);
 }
+
+function schemaForInputShape(inputShape: Record<string, unknown>): Record<string, unknown> {
+  const schema = normalizeObjectSchema(inputShape);
+  if (!schema) throw new Error("expected an object schema");
+  return toJsonSchemaCompat(schema, {
+    strictUnions: true,
+    pipeStrategy: "input",
+  }) as Record<string, unknown>;
+}
+
+function schemaPath(
+  value: unknown,
+  path: ReadonlyArray<string | number>,
+): unknown {
+  return path.reduce<unknown>((current, segment) => {
+    if (current === null || current === undefined) return undefined;
+    if (typeof segment === "number") {
+      return Array.isArray(current) ? current[segment] : undefined;
+    }
+    return typeof current === "object" ? (current as Record<string, unknown>)[segment] : undefined;
+  }, value);
+}
+
+describe("buildTools — MCP schema visibility", () => {
+  const tools = buildTools({
+    broker: fakeBroker(),
+    sessionId: "sess",
+    submitter: "claude-code",
+  });
+
+  it("surfaces closed submit/rate/list vocabularies in the discovery schema", () => {
+    const submitSchema = schemaForInputShape(tools.submit.inputShape);
+    const rateSchema = schemaForInputShape(tools.rate.inputShape);
+    const listSchema = schemaForInputShape(tools.list.inputShape);
+
+    expect(schemaPath(submitSchema, ["properties", "task_type", "enum"])).toEqual([
+      "draft",
+      "code-implement",
+      "code-edit",
+      "code-review",
+      "unit-test-gen",
+      "summarize",
+      "extract",
+      "classify",
+      "data-transform",
+      "regex",
+      "sql",
+      "reason-math",
+      "reason-hard",
+      "rewrite",
+      "translate",
+      "plan-decompose",
+      "qa-factual",
+      "triage",
+      "memory-decision",
+      "research-plan",
+      "source-distill",
+      "claim-verify",
+      "gap-check",
+      "synthesis",
+      "conversation",
+      "other",
+    ]);
+    expect(schemaPath(submitSchema, ["properties", "alias_requested", "enum"])).toEqual(["m5"]);
+    expect(schemaPath(submitSchema, ["properties", "acceptance", "oneOf", 0, "properties", "mode", "const"])).toBe("l1_review");
+    expect(schemaPath(submitSchema, ["properties", "acceptance", "oneOf", 1, "properties", "mode", "const"])).toBe("verifier");
+
+    expect(schemaPath(rateSchema, ["properties", "rating", "enum"])).toEqual([
+      "pass",
+      "partial",
+      "redo",
+      "wrong",
+    ]);
+    expect(schemaPath(rateSchema, ["properties", "verification_outcome", "enum"])).toEqual([
+      "accepted_unchanged",
+      "minor_edit",
+      "major_rewrite",
+      "discarded",
+      "escalated_to_claude",
+    ]);
+    expect(schemaPath(rateSchema, ["properties", "reviewer_role", "enum"])).toEqual([
+      "independent",
+      "self",
+    ]);
+
+    expect(schemaPath(listSchema, ["properties", "outcome", "enum"])).toEqual([
+      "completed",
+      "failed",
+      "running",
+      "any",
+    ]);
+  });
+
+  it("surfaces experiment vocabularies in the discovery schema", () => {
+    const createSchema = schemaForInputShape(tools.experimentCreate.inputShape);
+    const observeSchema = schemaForInputShape(tools.experimentObserve.inputShape);
+    const rateSchema = schemaForInputShape(tools.experimentRate.inputShape);
+
+    expect(schemaPath(createSchema, ["properties", "change_axis", "enum"])).toEqual([
+      "logging",
+      "test-harness",
+      "agent-prompt",
+      "agent-harness",
+      "model",
+      "model-config",
+      "routing",
+    ]);
+    expect(schemaPath(createSchema, ["properties", "gates", "properties", "primaryMetric", "enum"])).toEqual([
+      "quality-rate",
+      "useful-rate",
+      "rescue-rate",
+      "latency-ms",
+      "cost-usd",
+      "human-review-seconds",
+      "edit-start-ms",
+      "observability-coverage",
+      "verifier-score",
+    ]);
+    expect(schemaPath(createSchema, ["properties", "champion", "properties", "model", "properties", "config", "properties", "reasoning", "enum"])).toEqual([
+      "off",
+      "low",
+      "medium",
+      "high",
+    ]);
+
+    expect(schemaPath(observeSchema, ["properties", "arm", "enum"])).toEqual([
+      "champion",
+      "challenger",
+    ]);
+    expect(schemaPath(observeSchema, ["properties", "quality_outcome", "enum"])).toEqual([
+      "pass",
+      "fail",
+      "unverified",
+      "infra-error",
+    ]);
+    expect(schemaPath(observeSchema, ["properties", "product_outcome", "enum"])).toEqual([
+      "accepted-unchanged",
+      "minor-edit",
+      "major-rewrite",
+      "discarded",
+      "unrated",
+    ]);
+    expect(schemaPath(observeSchema, ["properties", "verifier", "properties", "kind", "enum"])).toEqual([
+      "mechanical",
+      "human",
+      "judge",
+      "none",
+    ]);
+    expect(schemaPath(observeSchema, ["properties", "agent_checks", "properties", "state", "enum"])).toEqual([
+      "none",
+      "attempted",
+      "unobservable",
+      "partial",
+    ]);
+    expect(schemaPath(observeSchema, ["properties", "agent_checks", "properties", "attempts", "items", "properties", "kind", "enum"])).toEqual([
+      "typescript",
+      "test",
+      "lint",
+      "build",
+      "validation",
+    ]);
+    expect(schemaPath(observeSchema, ["properties", "agent_checks", "properties", "attempts", "items", "properties", "status", "enum"])).toEqual([
+      "passed",
+      "failed",
+      "execution-error",
+    ]);
+
+    expect(schemaPath(rateSchema, ["properties", "product_outcome", "enum"])).toEqual([
+      "accepted-unchanged",
+      "minor-edit",
+      "major-rewrite",
+      "discarded",
+    ]);
+  });
+
+  it("moves the shared Hugin preamble to server instructions without duplicating it per tool", () => {
+    expect(HUGIN_MCP_SERVER_INSTRUCTIONS).toContain(HUGIN_MCP_SHARED_PREAMBLE);
+    for (const tool of Object.values(tools)) {
+      expect(tool.description).not.toContain(HUGIN_MCP_SHARED_PREAMBLE);
+    }
+  });
+});
 
 describe("buildTools — hugin_submit", () => {
   it.each(["draft", "conversation"] as const)(

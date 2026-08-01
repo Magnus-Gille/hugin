@@ -27,6 +27,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { BrokerClient } from "./mcp/broker-client.js";
 import { ALIAS_MAP_VERSION, buildTools, type HuginTool } from "./mcp/tools.js";
 import { aliasSchema, type Alias } from "./broker/types.js";
+import { HUGIN_MCP_SERVER_INSTRUCTIONS } from "./mcp/server-instructions.js";
 
 const SERVER_NAME = "hugin-mcp";
 const SERVER_VERSION = "0.1.0";
@@ -123,7 +124,10 @@ export async function main(): Promise<void> {
     executableAliases: brokerContract.executableAliases,
   });
 
-  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+  const server = new McpServer(
+    { name: SERVER_NAME, version: SERVER_VERSION },
+    { instructions: HUGIN_MCP_SERVER_INSTRUCTIONS },
+  );
 
   const allTools: HuginTool<Record<string, unknown>>[] = [
     tools.submit as HuginTool<Record<string, unknown>>,

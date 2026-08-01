@@ -148,9 +148,9 @@ const awaitInputSchema = z.object(awaitInputShape);
 
 export const rateInputShape = {
   task_id: z.string().min(1),
-  rating: ratingSchema.describe("`pass` / `partial` / `redo` / `wrong`."),
+  rating: ratingSchema.describe("Review verdict."),
   rating_reason: z.string().min(1),
-  verification_outcome: verificationOutcomeSchema,
+  verification_outcome: verificationOutcomeSchema.describe("Post-review disposition."),
   retries_count: z.number().int().nonnegative().optional(),
   reviewer_role: z.enum(["independent", "self"]).optional()
     .describe("Authenticated reviewer attestation. Same-task owners cannot claim independent."),
@@ -168,7 +168,7 @@ const rateInputSchema = z.object(rateInputShape);
 export const listInputShape = {
   limit: z.number().int().min(1).max(500).optional(),
   since_ts: z.string().min(1).optional(),
-  outcome: z.enum(["completed", "failed", "running", "any"]).optional(),
+  outcome: z.enum(["completed", "failed", "running", "any"]).optional().describe("Status filter."),
   alias: aliasSchema.optional(),
 };
 const listInputSchema = z.object(listInputShape);
@@ -353,7 +353,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_submit",
     title: "Submit a delegation task to Hugin",
     description:
-      "Persist one bounded task in Hugin's durable lifecycle and execute it as one M5 `/delegate` leaf. M5 chooses the model and owns capability evidence; Hugin owns lifecycle and delivery. Returns the task_id and idempotency_key — reuse that key only to retry the same logical request. For judgment-flavored task_type values (classify, qa-factual, triage, memory-decision, claim-verify) submitted with the default `l1_review` acceptance and a prompt with no rubric, the response carries a non-blocking `warnings` array — the task still runs, but attach a mechanical `acceptance.verifier` or add a rubric/grading-criteria section to the prompt for stronger capability evidence.",
+      "Submit one bounded task and get back the durable task_id plus idempotency_key. Reuse that key only to retry the same logical request. For judgment-flavored task_type values (classify, qa-factual, triage, memory-decision, claim-verify) submitted with the default `l1_review` acceptance and a prompt with no rubric, the response carries a non-blocking `warnings` array — the task still runs, but attach a mechanical `acceptance.verifier` or add a rubric/grading-criteria section to the prompt for stronger capability evidence.",
     inputShape: activeSubmitInputShape,
     handler: async (rawInput) => {
       let idempotencyKey: string | undefined;
@@ -396,7 +396,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_await",
     title: "Read the current state of a delegated task",
     description:
-      "Idempotent read of a task's status: `running` / `completed` / `failed`. Returns immediately. While `running`, the response also carries lease info and an `orphan_suspected` flag (true once the lease has expired without completion). Use `verbosity: summary` to avoid inlining full terminal provenance; the summary includes a namespace/key ref to it. Safe to poll.",
+      "Idempotent read of the broker's current task state. Returns immediately. While the task is still active, the response also carries lease info and an `orphan_suspected` flag (true once the lease has expired without completion). Use `verbosity: summary` to avoid inlining full terminal provenance; the summary includes a namespace/key ref to it. Safe to poll.",
     inputShape: awaitInputShape,
     handler: async (rawInput) => {
       try {
