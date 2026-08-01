@@ -62,6 +62,8 @@ export function createModelInvoker(
     timeoutMs: number;
     maxOutputChars?: number;
     maxTokens?: number;
+    workingDirectory?: string;
+    permissionProfile?: "read-only" | "trusted-code";
     workerWorktree?: WorkerWorktreeBinding;
   },
   executorFactory?: (provider: string, opts?: { role?: OrchestratorRole }) => WorkerExecutor,
@@ -98,6 +100,15 @@ export function createModelInvoker(
                 : {}),
             }
           : {};
+      const piHarnessMetadata =
+        binding.provider === "pi-harness"
+          ? {
+              cwd: defaults.workingDirectory,
+              permissionProfile:
+                role === "worker" ? defaults.permissionProfile ?? "read-only" : "read-only",
+              ...(role === "worker" ? { worktree: defaults.workerWorktree } : {}),
+            }
+          : {};
       return executor.run({
         provider: binding.provider,
         model: workerRoute?.modelId ?? binding.model,
@@ -107,9 +118,7 @@ export function createModelInvoker(
         maxOutputChars: defaults.maxOutputChars,
         maxTokens: binding.maxTokens ?? defaults.maxTokens,
         signal: opts?.signal,
-        ...(role === "worker" && binding.provider === "pi-harness"
-          ? { worktree: defaults.workerWorktree }
-          : {}),
+        ...piHarnessMetadata,
         ...delegateMetadata,
       });
     },

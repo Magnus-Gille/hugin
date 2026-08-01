@@ -20,18 +20,8 @@ export type PiHarnessBindingAssessment =
 export function assessPiHarnessWorktreeBindingRequest(
   input: PiHarnessWorktreeBindingRequest,
 ): PiHarnessBindingAssessment {
-  const nonWorkerPiRoles = (["planner", "verifier", "synthesizer"] as const)
-    .filter((role) => input.roles[role].provider === "pi-harness");
-  if (nonWorkerPiRoles.length > 0) {
-    return {
-      ok: false,
-      reason:
-        `pi-harness is only supported for the orchestrator worker role; found on ` +
-        nonWorkerPiRoles.join(", "),
-    };
-  }
-
-  if (input.roles.worker.provider !== "pi-harness") {
+  const workerUsesPiHarness = input.roles.worker.provider === "pi-harness";
+  if (!workerUsesPiHarness) {
     return { ok: true, needsBinding: false };
   }
 
@@ -39,19 +29,10 @@ export function assessPiHarnessWorktreeBindingRequest(
     input.permissionProfile === "trusted-code" &&
     Boolean(input.capabilities?.includes("code"));
   if (!writable) {
-    return {
-      ok: false,
-      reason:
-        "pi-harness worker requires the effective trusted-code + code-capability contract; " +
-        "read-only tasks cannot bind a writable task worktree",
-    };
+    return { ok: true, needsBinding: false };
   }
 
-  if (
-    input.branchResult.action !== "created" ||
-    !input.branchResult.branchName ||
-    !input.branchResult.baseCommit
-  ) {
+  if (!input.branchResult.branchName || !input.branchResult.baseCommit) {
     return {
       ok: false,
       reason:

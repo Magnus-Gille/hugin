@@ -11,7 +11,7 @@ const baseRoles: Record<OrchestratorRole, RoleBinding> = {
 };
 
 describe("assessPiHarnessWorktreeBindingRequest", () => {
-  it("refuses pi-harness on non-worker orchestrator roles", () => {
+  it("allows pi-harness on non-worker orchestrator roles without requiring a writable binding", () => {
     const result = assessPiHarnessWorktreeBindingRequest({
       roles: {
         ...baseRoles,
@@ -22,14 +22,10 @@ describe("assessPiHarnessWorktreeBindingRequest", () => {
       branchResult: { action: "created", branchName: "hugin/task-339", baseCommit: "a".repeat(40) },
     });
 
-    expect(result).toEqual({
-      ok: false,
-      reason:
-        "pi-harness is only supported for the orchestrator worker role; found on planner",
-    });
+    expect(result).toEqual({ ok: true, needsBinding: false });
   });
 
-  it("refuses writable pi-harness binding for read-only tasks", () => {
+  it("allows read-only pi-harness workers without requiring a writable binding", () => {
     const result = assessPiHarnessWorktreeBindingRequest({
       roles: {
         ...baseRoles,
@@ -40,11 +36,7 @@ describe("assessPiHarnessWorktreeBindingRequest", () => {
       branchResult: { action: "created", branchName: "hugin/task-339", baseCommit: "a".repeat(40) },
     });
 
-    expect(result).toEqual({
-      ok: false,
-      reason:
-        "pi-harness worker requires the effective trusted-code + code-capability contract; read-only tasks cannot bind a writable task worktree",
-    });
+    expect(result).toEqual({ ok: true, needsBinding: false });
   });
 
   it("refuses pi-harness when the managed task-branch binding is unavailable", () => {

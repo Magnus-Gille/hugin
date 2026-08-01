@@ -5948,6 +5948,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         timeoutMs: orchConfig.perCallTimeoutMs,
         maxOutputChars: config.maxOutputChars,
         maxTokens: orchConfig.maxTokens,
+        workingDirectory: task.workingDir,
+        permissionProfile: task.permissionProfile || "read-only",
         workerWorktree: piHarnessBinding.binding,
       });
       const orchResult = await runOrchestratorTask(

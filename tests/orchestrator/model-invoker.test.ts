@@ -265,6 +265,74 @@ describe("createModelInvoker", () => {
     expect(capturedRequests[0].delegatorModelId).toBeUndefined();
   });
 
+  it("threads the local working directory and read-only profile into non-worker pi-harness requests", async () => {
+    const piRoles: Record<OrchestratorRole, RoleBinding> = {
+      ...roles,
+      planner: { provider: "pi-harness", model: "qwen/qwen3-coder-next" },
+    };
+    const capturedRequests: WorkerRequest[] = [];
+    const mockExecutor: WorkerExecutor = {
+      run: vi.fn(async (req: WorkerRequest) => {
+        capturedRequests.push(req);
+        return makeResult("out");
+      }),
+    };
+
+    const invoker = createModelInvoker(
+      piRoles,
+      {
+        timeoutMs: 5000,
+        workingDirectory: "/home/magnus/repos/hugin",
+        permissionProfile: "trusted-code",
+      },
+      () => mockExecutor,
+    );
+
+    await invoker.invoke("planner", "plan locally");
+
+    expect(capturedRequests[0]).toMatchObject({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      cwd: "/home/magnus/repos/hugin",
+      permissionProfile: "read-only",
+    });
+    expect(capturedRequests[0].worktree).toBeUndefined();
+  });
+
+  it("threads read-only pi-harness workers through the local cwd instead of a writable task binding", async () => {
+    const piRoles: Record<OrchestratorRole, RoleBinding> = {
+      ...roles,
+      worker: { provider: "pi-harness", model: "qwen/qwen3-coder-next" },
+    };
+    const capturedRequests: WorkerRequest[] = [];
+    const mockExecutor: WorkerExecutor = {
+      run: vi.fn(async (req: WorkerRequest) => {
+        capturedRequests.push(req);
+        return makeResult("out");
+      }),
+    };
+
+    const invoker = createModelInvoker(
+      piRoles,
+      {
+        timeoutMs: 5000,
+        workingDirectory: "/home/magnus/repos/hugin",
+        permissionProfile: "read-only",
+      },
+      () => mockExecutor,
+    );
+
+    await invoker.invoke("worker", "inspect");
+
+    expect(capturedRequests[0]).toMatchObject({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      cwd: "/home/magnus/repos/hugin",
+      permissionProfile: "read-only",
+    });
+    expect(capturedRequests[0].worktree).toBeUndefined();
+  });
+
   it("threads the selected worktree binding only into pi-harness worker requests (issue #339)", async () => {
     const piRoles: Record<OrchestratorRole, RoleBinding> = {
       ...roles,
@@ -286,7 +354,12 @@ describe("createModelInvoker", () => {
 
     const invoker = createModelInvoker(
       piRoles,
-      { timeoutMs: 5000, workerWorktree: worktree },
+      {
+        timeoutMs: 5000,
+        workingDirectory: "/home/magnus/repos/hugin",
+        permissionProfile: "trusted-code",
+        workerWorktree: worktree,
+      },
       () => mockExecutor,
     );
 
@@ -295,6 +368,74 @@ describe("createModelInvoker", () => {
 
     expect(capturedRequests[0].worktree).toEqual(worktree);
     expect(capturedRequests[1].worktree).toBeUndefined();
+  });
+
+  it("routes every pi-harness orchestrator role with the intended mutability", async () => {
+    const piRoles: Record<OrchestratorRole, RoleBinding> = {
+      planner: { provider: "pi-harness", model: "planner-pi" },
+      worker: { provider: "pi-harness", model: "worker-pi" },
+      verifier: { provider: "pi-harness", model: "verifier-pi" },
+      synthesizer: { provider: "pi-harness", model: "synth-pi" },
+    };
+    const capturedRequests: WorkerRequest[] = [];
+    const mockExecutor: WorkerExecutor = {
+      run: vi.fn(async (req: WorkerRequest) => {
+        capturedRequests.push(req);
+        return makeResult("out");
+      }),
+    };
+    const worktree = {
+      cwd: "/home/magnus/repos/hugin-worktree",
+      expectedRevision: "a".repeat(40),
+      branchName: "hugin/task-339",
+      managedRoot: "/home/magnus/repos",
+    };
+
+    const invoker = createModelInvoker(
+      piRoles,
+      {
+        timeoutMs: 5000,
+        workingDirectory: "/home/magnus/repos/hugin",
+        permissionProfile: "trusted-code",
+        workerWorktree: worktree,
+      },
+      () => mockExecutor,
+    );
+
+    await invoker.invoke("planner", "plan");
+    await invoker.invoke("worker", "edit");
+    await invoker.invoke("verifier", "verify");
+    await invoker.invoke("synthesizer", "synthesize");
+
+    expect(capturedRequests).toHaveLength(4);
+    expect(capturedRequests[0]).toMatchObject({
+      provider: "pi-harness",
+      model: "planner-pi",
+      cwd: "/home/magnus/repos/hugin",
+      permissionProfile: "read-only",
+    });
+    expect(capturedRequests[0].worktree).toBeUndefined();
+    expect(capturedRequests[1]).toMatchObject({
+      provider: "pi-harness",
+      model: "worker-pi",
+      cwd: "/home/magnus/repos/hugin",
+      permissionProfile: "trusted-code",
+      worktree,
+    });
+    expect(capturedRequests[2]).toMatchObject({
+      provider: "pi-harness",
+      model: "verifier-pi",
+      cwd: "/home/magnus/repos/hugin",
+      permissionProfile: "read-only",
+    });
+    expect(capturedRequests[2].worktree).toBeUndefined();
+    expect(capturedRequests[3]).toMatchObject({
+      provider: "pi-harness",
+      model: "synth-pi",
+      cwd: "/home/magnus/repos/hugin",
+      permissionProfile: "read-only",
+    });
+    expect(capturedRequests[3].worktree).toBeUndefined();
   });
 
   it("returns executor result unchanged (propagates failures)", async () => {

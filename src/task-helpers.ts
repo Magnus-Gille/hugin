@@ -1093,7 +1093,7 @@ export async function finalizeTaskBranch(
 async function runGitCapture(
   workingDir: string,
   args: string[],
-): Promise<{ ok: boolean; stdout: Buffer; stderr: string }> {
+): Promise<{ ok: boolean; exitCode: number | null; stdout: Buffer; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn("git", args, {
       cwd: workingDir,
@@ -1106,11 +1106,13 @@ async function runGitCapture(
     child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
     child.on("close", (code) => resolve({
       ok: code === 0,
+      exitCode: code,
       stdout: Buffer.concat(stdout),
       stderr: stderr.trim(),
     }));
     child.on("error", (err) => resolve({
       ok: false,
+      exitCode: null,
       stdout: Buffer.alloc(0),
       stderr: err.message,
     }));
@@ -1350,7 +1352,7 @@ export interface ManagedTaskWorktreeBindingVerification {
 }
 
 function isPathWithinRoot(candidate: string, root: string): boolean {
-  return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+  return candidate.startsWith(`${root}${path.sep}`);
 }
 
 async function canonicalizeExistingPath(
@@ -1434,7 +1436,7 @@ export async function buildManagedTaskWorktreeBinding(
     return {
       ok: false,
       reason:
-        `selected worktree path ${JSON.stringify(workingDir)} resolves outside the configured managed repos root ` +
+        `selected worktree path ${JSON.stringify(workingDir)} must resolve beneath the configured managed repos root ` +
         `${JSON.stringify(managedRoot.path)}`,
     };
   }
@@ -1533,7 +1535,7 @@ export async function verifyManagedTaskWorktreeBinding(
     return {
       ok: false,
       reason:
-        `selected worktree path ${JSON.stringify(binding.cwd)} resolves outside the configured managed repos root ` +
+        `selected worktree path ${JSON.stringify(binding.cwd)} must resolve beneath the configured managed repos root ` +
         `${JSON.stringify(managedRoot.path)}`,
     };
   }
@@ -1570,7 +1572,7 @@ export async function verifyManagedTaskWorktreeBinding(
     };
   }
 
-  const status = await runGitCapture(canonicalCwd.path, ["status", "--porcelain", "--ignored"]);
+  const status = await runGitCapture(canonicalCwd.path, ["status", "--porcelain"]);
   if (!status.ok) {
     return {
       ok: false,
@@ -1596,6 +1598,14 @@ export async function verifyManagedTaskWorktreeBinding(
     headCommit,
   ]);
   if (!ancestry.ok) {
+    if (ancestry.exitCode !== 1) {
+      return {
+        ok: false,
+        reason:
+          `selected worktree ${canonicalCwd.path} merge-base --is-ancestor failed ` +
+          `for ${normalizedExpected}..${headCommit}: ${ancestry.stderr || "unknown error"}`,
+      };
+    }
     return {
       ok: false,
       reason:
@@ -1647,18 +1657,12 @@ export async function verifyCleanCheckout(
       reason: `expected commit ${JSON.stringify(expectedCommit)} is not a valid commit id`,
     };
   }
-  // `--ignored` is deliberate (M5 review, #236): plain `--porcelain` never
-  // reports gitignored paths, so a prior task's leftover ignored garbage
-  // (e.g. a stale `.env`, build cache, or partial `node_modules`) would
-  // otherwise verify as "clean" and never trigger `recoverCleanCheckout`
-  // (whose `git clean -fdx` DOES remove ignored files) — silently leaving
-  // untracked-but-invisible state for the next task to inherit.
-  const status = await runGitCapture(workingDir, ["status", "--porcelain", "--ignored"]);
+  const status = await runGitCapture(workingDir, ["status", "--porcelain"]);
   if (!status.ok) {
     return { clean: false, reason: `git status failed: ${status.stderr || "unknown error"}` };
   }
   if (status.stdout.toString("utf8").trim().length > 0) {
-    return { clean: false, reason: "working tree has uncommitted, untracked, or ignored leftover state" };
+    return { clean: false, reason: "working tree has uncommitted or untracked leftover state" };
   }
   const head = await runGitCapture(workingDir, ["rev-parse", "HEAD"]);
   if (!head.ok) {
