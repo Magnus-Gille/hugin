@@ -39,10 +39,11 @@ const ISSUE_318_WIRE_MODELS_RESPONSE = {
 // Reproducible discovery gate:
 // `byteLength(client.getInstructions()) + byteLength(JSON.stringify(await client.listTools()))`
 // measured through the production `discoverBrokerContract()` + `createHuginMcpServer()` path.
-// Parent `20f2cef` measured 30_361 bytes. This source tree measures 28_596 bytes,
-// so the ratchet allows only a 96-byte slack to 28_692 bytes.
+// Parent `20f2cef` measured 30_361 bytes through its equivalent inline server construction.
+// This source tree measures 28_632 bytes,
+// so the ratchet allows only a 96-byte slack to 28_728 bytes.
 const ISSUE_318_PARENT_DISCOVERY_BYTES = 30_361;
-const ISSUE_318_CURRENT_DISCOVERY_BYTES = 28_596;
+const ISSUE_318_CURRENT_DISCOVERY_BYTES = 28_632;
 const ISSUE_318_DISCOVERY_SLACK_BYTES = 96;
 const ISSUE_318_DISCOVERY_CEILING_BYTES =
   ISSUE_318_CURRENT_DISCOVERY_BYTES + ISSUE_318_DISCOVERY_SLACK_BYTES;
@@ -352,6 +353,7 @@ describe("hugin-mcp discovery wire surface", () => {
       expect(toolDescriptions.filter((description) => description.includes(M5_BOUNDARY_PHRASE))).toEqual([]);
       expect(awaitDescription).toContain("Returns immediately");
       expect(awaitDescription).toContain("safe to poll");
+      expect(awaitDescription).toContain("`running` / `completed` / `failed`");
       expect(awaitDescription).toContain("`orphan_suspected`");
       expect(awaitDescription).toContain("once the lease has expired without completion");
     } finally {
