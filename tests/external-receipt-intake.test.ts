@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MuninWriteRejectedError, type MuninClient } from "../src/munin-client.js";
 import { LearningRegistryStore } from "../src/learning-registry-store.js";
 import { buildTaskLifecycleTimeline } from "../src/learning-registry-view.js";
@@ -26,8 +26,8 @@ interface StoredEntry {
 }
 
 /** Same in-memory create-if-absent / CAS Munin double used by
- * tests/learning-registry-store.test.ts, with a controllable clock so
- * "late" coverage can be tested deterministically. */
+ * tests/learning-registry-store.test.ts, with deterministic write
+ * timestamps so registry storage stays stable in these tests. */
 class InMemoryMunin {
   private entries: StoredEntry[] = [];
   private seq = 0;
@@ -90,6 +90,7 @@ const SECRET_HEX = "c".repeat(64);
 const CODEX_CLI_KEY = "codex-cli-work";
 const PI_KEY = "pi-app-home";
 const KEYS = { [CODEX_CLI_KEY]: SECRET_HEX, [PI_KEY]: SECRET_HEX };
+const PROMPTLY_RECEIVED_AT = "2026-07-20T09:05:00Z";
 
 function makeReceipt(overrides: Partial<ExternalReceiptEnvelope> = {}): ExternalReceiptEnvelope {
   return {
@@ -111,11 +112,12 @@ function makeReceipt(overrides: Partial<ExternalReceiptEnvelope> = {}): External
   } as ExternalReceiptEnvelope;
 }
 
-function makeDeps(munin: MuninClient): ExternalReceiptIntakeDeps {
+function makeDeps(munin: MuninClient, receivedAt = PROMPTLY_RECEIVED_AT): ExternalReceiptIntakeDeps {
   return {
     munin,
-    registry: new LearningRegistryStore(munin, { now: () => "2026-07-20T09:05:00Z" }),
+    registry: new LearningRegistryStore(munin, { now: () => receivedAt }),
     keys: KEYS,
+    now: () => receivedAt,
   };
 }
 
@@ -347,13 +349,9 @@ describe("ingestExternalReceipt — reconciliation with a native Hugin task", ()
 describe("ingestExternalReceipt — honest coverage state", () => {
   it("marks a promptly-received receipt as imported", async () => {
     const munin = new InMemoryMunin() as unknown as MuninClient;
-    const deps = makeDeps(munin); // registry clock fixed at 2026-07-20T09:05:00Z
+    const deps = makeDeps(munin);
     const receipt = makeReceipt({ occurredAt: "2026-07-20T09:00:00Z" });
-    const result = await ingestExternalReceipt(
-      { ...deps, now: () => "2026-07-20T09:05:00Z" },
-      receipt,
-      sign(receipt),
-    );
+    const result = await ingestExternalReceipt(deps, receipt, sign(receipt));
     expect(result.status).toBe("admitted");
     if (result.status !== "admitted") throw new Error("unreachable");
     expect(result.coverage).toBe("imported");
@@ -363,14 +361,45 @@ describe("ingestExternalReceipt — honest coverage state", () => {
     const munin = new InMemoryMunin() as unknown as MuninClient;
     const deps = makeDeps(munin);
     const receipt = makeReceipt({ occurredAt: "2026-06-01T09:00:00Z", producedAt: "2026-06-01T09:00:05Z" });
-    const result = await ingestExternalReceipt(
-      { ...deps, now: () => "2026-07-20T09:05:00Z" },
-      receipt,
-      sign(receipt),
-    );
+    const result = await ingestExternalReceipt(deps, receipt, sign(receipt));
     expect(result.status).toBe("admitted");
     if (result.status !== "admitted") throw new Error("unreachable");
     expect(result.coverage).toBe("imported-late");
+  });
+
+  it("does not reclassify a prompt import merely because the calendar later advances", async () => {
+    vi.useFakeTimers();
+    try {
+      const receipt = makeReceipt({
+        receiptId: "receipt-obs-clock-independent",
+        occurredAt: "2026-07-20T09:00:00Z",
+        producedAt: "2026-07-20T09:00:05Z",
+      });
+
+      vi.setSystemTime(new Date("2026-07-20T09:05:00Z"));
+      const promptMunin = new InMemoryMunin() as unknown as MuninClient;
+      const promptResult = await ingestExternalReceipt(
+        makeDeps(promptMunin, PROMPTLY_RECEIVED_AT),
+        receipt,
+        sign(receipt),
+      );
+      expect(promptResult.status).toBe("admitted");
+      if (promptResult.status !== "admitted") throw new Error("unreachable");
+      expect(promptResult.coverage).toBe("imported");
+
+      vi.setSystemTime(new Date("2042-01-01T00:00:00Z"));
+      const advancedCalendarMunin = new InMemoryMunin() as unknown as MuninClient;
+      const advancedCalendarResult = await ingestExternalReceipt(
+        makeDeps(advancedCalendarMunin, PROMPTLY_RECEIVED_AT),
+        receipt,
+        sign(receipt),
+      );
+      expect(advancedCalendarResult.status).toBe("admitted");
+      if (advancedCalendarResult.status !== "admitted") throw new Error("unreachable");
+      expect(advancedCalendarResult.coverage).toBe("imported");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
