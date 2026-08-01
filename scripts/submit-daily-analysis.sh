@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Submit a daily invocation journal analysis task to Hugin via Munin.
-# Intended to run via systemd timer at 07:00 daily.
+# Intended to run via systemd timer at 07:00 local time daily.
 #
 # Deterministically summarizes the last 24 hours into bounded evidence and
 # submits that evidence as an ollama task with fallback to Claude.
@@ -46,14 +46,12 @@ TASK_CONTENT=$(cat <<TASK_EOF
 Turn the following precomputed Hugin invocation evidence into a concise operator report.
 The aggregation is authoritative: do not recalculate or invent missing values.
 
-Report:
-1. Total tasks executed, success rate, failure rate
-2. Average duration by runtime (claude, codex, ollama)
-3. Total estimated cost (sum cost_usd where available)
-4. Any anomalies (unusually long tasks, repeated failures, timeout patterns)
-5. Quota utilization trend (if quota_before/quota_after data present)
-
-Use markdown tables where appropriate. Keep the entire answer under 160 words.
+Output contract:
+- No markdown tables, code fences, headings, or bullet lists.
+- Use compact prose or up to four short key-value lines. The report must still read cleanly if line breaks collapse to spaces.
+- Front-load total tasks, success rate, failure rate, average duration or runtime summary, cost, and the most important anomaly.
+- Mention quota trend only if quota_before/quota_after data is present.
+- Keep the entire answer under 120 words.
 
 \`\`\`json
 ${ANALYSIS_INPUT}
