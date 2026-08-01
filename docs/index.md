@@ -32,9 +32,15 @@ scheduling, and pipeline phases.
 - [Artifact delivery recovery runbook](testing/delivery-recovery-e2e.md):
   End-to-end acceptance/recovery procedure for declared artifacts and the
   `delivery:*` terminal states.
+- [Workload contract v1](workload-contract.md): Owner-side requirement
+  declaration for moving Hugin across nodes, including drain/verify/restore
+  boundaries and the dependency map for Munin, Mimir, and M5.
 
 ## Security, trust, and provenance
 
+- [Autonomy proposal receipts](autonomy-proposal-receipts.md): W4.1
+  proposal-only receipt boundary for autonomy changes, Hugin-owned targets,
+  canonical signed receipts, and Gille roster provenance binding.
 - [Durable M5 lifecycle](mcp-durable-m5-lifecycle.md): Hugin-to-M5 delegation
   lifecycle, gateway authority, provenance sanitization, and the boundary that
   Hugin must not invent competing capability truth.
@@ -63,11 +69,18 @@ scheduling, and pipeline phases.
 
 ## Execution, orchestration, and scheduling
 
+- [Autonomy R-exact mutation controller](autonomy-r-exact-controller.md):
+  Disarmed ADR-008 controller for macro-routing, prompt, harness, and
+  tool-policy, including authority checks, durable sequencing, and recovery
+  requirements.
 - [Hugin v2 engineering plan](hugin-v2-engineering-plan.md): Multi-phase
   rollout plan and status summary for the pipeline/orchestrator architecture.
 - [Hugin v2 pipeline orchestrator](hugin-v2-pipeline-orchestrator.md):
   Post-debate design for pipeline phases, gated authority, and runtime
   envelopes.
+- [Hugin R-exact configuration store](hugin-r-exact-config-store.md):
+  Owner-installed durable macro-routing store, fail-closed selector behavior,
+  closed bounds, Linux locking, and atomic rename semantics.
 - [Orchestrator redesign](orchestrator-redesign.md): Accepted re-platforming
   ADR for synthesizer/worker orchestration.
 - [Orchestrator savings tracker](orchestrator-savings-tracker.md): Saved-USD
