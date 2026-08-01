@@ -1,42 +1,42 @@
 {
-  "$comment": "FROZEN 2026-08-01 from Hugin base commit 22bcf5d0e09424a9e498c16b088580cb64267d9f, BEFORE docs/index.md was authored. Probes are phrased as realistic lookup questions, avoid naming the target document, and avoid concepts already answerable from inline AGENTS.md, so a hit measures docs/index.md discovery rather than transcription. Do not edit these to match a new index; that invalidates the eval.",
+  "$comment": "FROZEN 2026-08-01 from Hugin base commit 22bcf5d0e09424a9e498c16b088580cb64267d9f, BEFORE docs/index.md was authored. Probes are realistic lookup questions that avoid naming the target document, avoid concepts already answerable from inline AGENTS.md, and require a target-document fact beyond the index summary. This makes the mechanical doc-open metric meaningful. Do not edit these to match a new index; that invalidates the eval.",
   "version": 1,
   "frozen_at_base_commit": "22bcf5d0e09424a9e498c16b088580cb64267d9f",
   "probes": [
     {
       "id": "canonical-task-identity",
       "kind": "retrieval",
-      "prompt": "Where is the reference for canonical task IDs and Hugin's side of the direct homeserver `/delegate` handshake?",
+      "prompt": "For Hugin's canonical logical-task fingerprint, what exact normalization and encoding steps run before SHA-256, and which orchestrator lane remains on the legacy identity and is not evidence-eligible?",
       "target": "docs/canonical-task-identity.md"
     },
     {
       "id": "operator-approval-decisions",
       "kind": "retrieval",
-      "prompt": "Which runbook covers approval artifacts and valid accept/reject decisions for `Authority: gated` pipeline phases?",
+      "prompt": "For an `Authority: gated` phase, what happens when an approval decision is missing a required identity or timestamp field, and which task state must remain unchanged?",
       "target": "docs/operator-guide-approval-decisions.md"
     },
     {
       "id": "orchestrator-savings-tracker",
       "kind": "retrieval",
-      "prompt": "Where is the document that defines saved-USD accounting against an all-Claude baseline for orchestrator runs?",
+      "prompt": "In Hugin's orchestrator savings accounting, how are calls with missing tokens or unknown actual price treated, and are saved USD and the savings multiple stored or derived?",
       "target": "docs/orchestrator-savings-tracker.md"
     },
     {
       "id": "learning-task-handshake",
       "kind": "retrieval",
-      "prompt": "Which document describes the producer-side handshake and joint live-smoke gate for learning evidence?",
+      "prompt": "In the direct M5 learning-evidence handshake, what must Hugin persist before `/delegate`, and what is the disposition when the principal-bound gateway echo is missing or mismatched?",
       "target": "docs/learning-task-handshake.md"
     },
     {
       "id": "orchestrator-verdict-layer",
       "kind": "retrieval",
-      "prompt": "Where is the design for keeping orchestrator synthesizer verdicts separate from worker execution results and savings accounting?",
+      "prompt": "When the orchestrator verdict layer excludes every worker output because each explicitly failed verification, what synthesis fallback is required and how must it be surfaced?",
       "target": "docs/orchestrator-verdict-layer.md"
     },
     {
       "id": "external-receipt-intake",
       "kind": "retrieval",
-      "prompt": "A non-Hugin system wants to submit its own signed task/outcome receipt. Where is the intake contract, and what must never happen to task ownership or terminal state when that arrives?",
+      "prompt": "For an authenticated external task/outcome receipt, what happens if a receipt ID is reused with different content, and after what delay is a terminal receipt marked imported-late?",
       "target": "docs/external-receipt-intake.md"
     },
     {
