@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { MuninEntry, MuninQueryResult, MuninReadResult } from "./munin-client.js";
-import type { WorkerWorktreeBinding } from "./orchestrator/worker-executor.js";
+import type { WorkerWorktreeBinding } from "./orchestrator/pi-harness-types.js";
 import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
 
 /**
@@ -1351,6 +1351,11 @@ export interface ManagedTaskWorktreeBindingVerification {
   reason?: string;
 }
 
+export interface ManagedTaskWorktreeBindingVerificationOptions {
+  allowDirtyTaskBranch?: boolean;
+  configuredManagedRoot?: string;
+}
+
 function isPathWithinRoot(candidate: string, root: string): boolean {
   return candidate.startsWith(`${root}${path.sep}`);
 }
@@ -1476,7 +1481,9 @@ export async function buildManagedTaskWorktreeBinding(
     };
   }
 
-  const verification = await verifyCleanCheckout(canonicalCwd.path, normalizedExpected);
+  const verification = await verifyCleanCheckout(canonicalCwd.path, normalizedExpected, {
+    includeIgnored: false,
+  });
   if (!verification.clean) {
     return {
       ok: false,
@@ -1499,7 +1506,7 @@ export async function buildManagedTaskWorktreeBinding(
 
 export async function verifyManagedTaskWorktreeBinding(
   binding: WorkerWorktreeBinding | undefined,
-  options: { allowDirtyTaskBranch?: boolean } = {},
+  options: ManagedTaskWorktreeBindingVerificationOptions = {},
 ): Promise<ManagedTaskWorktreeBindingVerification> {
   if (!binding) {
     return { ok: false, reason: "pi-harness requires a selected worktree binding" };
@@ -1520,6 +1527,21 @@ export async function verifyManagedTaskWorktreeBinding(
 
   const managedRoot = await canonicalizeExistingPath(binding.managedRoot, "managed repos root");
   if (!managedRoot.ok) return { ok: false, reason: managedRoot.reason };
+  if (options.configuredManagedRoot) {
+    const configuredRoot = await canonicalizeExistingPath(
+      options.configuredManagedRoot,
+      "configured managed repos root",
+    );
+    if (!configuredRoot.ok) return { ok: false, reason: configuredRoot.reason };
+    if (configuredRoot.path !== managedRoot.path) {
+      return {
+        ok: false,
+        reason:
+          `selected worktree binding root ${JSON.stringify(managedRoot.path)} does not match the ` +
+          `configured managed repos root ${JSON.stringify(configuredRoot.path)}`,
+      };
+    }
+  }
 
   const canonicalCwd = await canonicalizeExistingPath(binding.cwd, "selected worktree path");
   if (!canonicalCwd.ok) return { ok: false, reason: canonicalCwd.reason };
@@ -1649,6 +1671,7 @@ export async function verifyManagedTaskWorktreeBinding(
 export async function verifyCleanCheckout(
   workingDir: string,
   expectedCommit: string,
+  options: { includeIgnored?: boolean } = {},
 ): Promise<CleanCheckoutVerification> {
   const normalizedExpected = expectedCommit.trim().toLowerCase();
   if (!GIT_COMMIT_ID.test(normalizedExpected)) {
@@ -1657,7 +1680,12 @@ export async function verifyCleanCheckout(
       reason: `expected commit ${JSON.stringify(expectedCommit)} is not a valid commit id`,
     };
   }
-  const status = await runGitCapture(workingDir, ["status", "--porcelain"]);
+  const status = await runGitCapture(
+    workingDir,
+    options.includeIgnored === false
+      ? ["status", "--porcelain"]
+      : ["status", "--porcelain", "--ignored=matching"],
+  );
   if (!status.ok) {
     return { clean: false, reason: `git status failed: ${status.stderr || "unknown error"}` };
   }

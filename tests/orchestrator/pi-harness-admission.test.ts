@@ -22,7 +22,11 @@ describe("assessPiHarnessWorktreeBindingRequest", () => {
       branchResult: { action: "created", branchName: "hugin/task-339", baseCommit: "a".repeat(40) },
     });
 
-    expect(result).toEqual({ ok: true, needsBinding: false });
+    expect(result).toEqual({
+      ok: true,
+      needsBinding: false,
+      effectiveWorkerPermissionProfile: "trusted-code",
+    });
   });
 
   it("allows read-only pi-harness workers without requiring a writable binding", () => {
@@ -36,7 +40,29 @@ describe("assessPiHarnessWorktreeBindingRequest", () => {
       branchResult: { action: "created", branchName: "hugin/task-339", baseCommit: "a".repeat(40) },
     });
 
-    expect(result).toEqual({ ok: true, needsBinding: false });
+    expect(result).toEqual({
+      ok: true,
+      needsBinding: false,
+      effectiveWorkerPermissionProfile: "read-only",
+    });
+  });
+
+  it("degrades a trusted-code request without the code capability to an effective read-only worker", () => {
+    const result = assessPiHarnessWorktreeBindingRequest({
+      roles: {
+        ...baseRoles,
+        worker: { provider: "pi-harness", model: "qwen/qwen3-coder-next" },
+      },
+      capabilities: ["tools"],
+      permissionProfile: "trusted-code",
+      branchResult: { action: "created", branchName: "hugin/task-339", baseCommit: "a".repeat(40) },
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      needsBinding: false,
+      effectiveWorkerPermissionProfile: "read-only",
+    });
   });
 
   it("refuses pi-harness when the managed task-branch binding is unavailable", () => {
@@ -54,6 +80,7 @@ describe("assessPiHarnessWorktreeBindingRequest", () => {
       ok: false,
       reason:
         "pi-harness worker requires a managed task-branch checkout with a pinned base commit; binding unavailable",
+      effectiveWorkerPermissionProfile: "trusted-code",
     });
   });
 
@@ -65,7 +92,11 @@ describe("assessPiHarnessWorktreeBindingRequest", () => {
       branchResult: { action: "skipped" },
     });
 
-    expect(result).toEqual({ ok: true, needsBinding: false });
+    expect(result).toEqual({
+      ok: true,
+      needsBinding: false,
+      effectiveWorkerPermissionProfile: "read-only",
+    });
   });
 
   it("accepts a writable pi-harness worker when checkout evidence is present", () => {
@@ -83,6 +114,10 @@ describe("assessPiHarnessWorktreeBindingRequest", () => {
       },
     });
 
-    expect(result).toEqual({ ok: true, needsBinding: true });
+    expect(result).toEqual({
+      ok: true,
+      needsBinding: true,
+      effectiveWorkerPermissionProfile: "trusted-code",
+    });
   });
 });

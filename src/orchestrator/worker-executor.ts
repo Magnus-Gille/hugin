@@ -25,7 +25,11 @@ import { extractM5Provenance, sanitizeProviderTokenCount } from "../m5-provenanc
 import type { M5DelegationProvenance } from "../m5-provenance.js";
 import { estimateCostUsd } from "../model-pricing.js";
 import { getRegistryEntryById } from "../runtime-registry.js";
-import { verifyManagedTaskWorktreeBinding } from "../task-helpers.js";
+import {
+  DEFAULT_REPOS_ROOT,
+  normalizeRoot,
+  verifyManagedTaskWorktreeBinding,
+} from "../task-helpers.js";
 import { buildTaskSubprocessEnv } from "../task-subprocess-env.js";
 import {
   getProviderConfig,
@@ -33,6 +37,11 @@ import {
   resolveProviderBaseUrl,
 } from "./provider-config.js";
 import type { OrchestratorRole } from "./plan.js";
+import type {
+  PiHarnessPermissionProfile,
+  WorkerWorktreeBinding,
+} from "./pi-harness-types.js";
+export type { WorkerWorktreeBinding } from "./pi-harness-types.js";
 
 /** Default maximum output characters when not specified in the request. */
 export const DEFAULT_MAX_OUTPUT_CHARS = 50_000;
@@ -68,6 +77,7 @@ export const DEFAULT_BUSY_RETRY_BASE_DELAY_MS = 1_000;
 /** Cap any single busy wait (Retry-After or backoff step) to this. */
 const MAX_BUSY_WAIT_MS = 30_000;
 const PI_READ_ONLY_TOOLS = "read,grep,find,ls";
+const verifiedInitialPiBindings = new WeakSet<WorkerWorktreeBinding>();
 
 interface BusyRetryPolicy {
   maxRetries: number;
@@ -192,17 +202,6 @@ function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<"slept" | "ab
   });
 }
 
-export interface WorkerWorktreeBinding {
-  /** Exact absolute selected worktree path on the Pi. */
-  cwd: string;
-  /** Immutable ancestry floor the executor must verify immediately before launch. */
-  expectedRevision: string;
-  /** Exact task branch identity selected for this task. */
-  branchName: string;
-  /** Canonical managed repos root used by the dispatcher checkout gate. */
-  managedRoot: string;
-}
-
 export interface WorkerRequest {
   /** Provider id: "openrouter" | "berget" | "pi-harness" | "homeserver" */
   provider: string;
@@ -238,7 +237,7 @@ export interface WorkerRequest {
   /** Explicit local cwd for read-only pi-harness runs with no writable binding. */
   cwd?: string;
   /** Effective pi-harness permission profile for this invocation. */
-  permissionProfile?: "read-only" | "trusted-code";
+  permissionProfile?: PiHarnessPermissionProfile;
   /** Selected worktree binding for providers that must execute inside a checkout. */
   worktree?: WorkerWorktreeBinding;
 }
@@ -304,9 +303,15 @@ export function createWorkerExecutor(
 async function verifyPiWorktreeBinding(
   binding: WorkerWorktreeBinding | undefined,
 ): Promise<{ ok: true; cwd: string } | { ok: false; error: string }> {
+  const allowDirtyTaskBranch = binding ? verifiedInitialPiBindings.has(binding) : false;
   const verification = await verifyManagedTaskWorktreeBinding(
     binding,
-    { allowDirtyTaskBranch: true },
+    {
+      allowDirtyTaskBranch,
+      configuredManagedRoot: path.resolve(
+        normalizeRoot(process.env.HUGIN_REPOS_ROOT || DEFAULT_REPOS_ROOT),
+      ),
+    },
   );
   if (!verification.ok || !verification.cwd) {
     return {
@@ -314,12 +319,13 @@ async function verifyPiWorktreeBinding(
       error: verification.reason ?? "selected worktree binding verification failed",
     };
   }
+  if (binding) verifiedInitialPiBindings.add(binding);
   return { ok: true, cwd: verification.cwd };
 }
 
 function effectivePiPermissionProfile(
   req: WorkerRequest,
-): "read-only" | "trusted-code" {
+): PiHarnessPermissionProfile {
   return req.permissionProfile ?? (req.worktree ? "trusted-code" : "read-only");
 }
 
@@ -1190,9 +1196,20 @@ export class PiHarnessExecutor implements WorkerExecutor {
 function buildPiArgs(
   req: WorkerRequest,
   registryEntry: ReturnType<typeof getRegistryEntryById> & {},
-  permissionProfile: "read-only" | "trusted-code",
+  permissionProfile: PiHarnessPermissionProfile,
 ): string[] {
-  const flags: string[] = [...(registryEntry.harnessFlags ?? [])];
+  const flags: string[] = [];
+  for (let i = 0; i < (registryEntry.harnessFlags ?? []).length; i++) {
+    const flag = registryEntry.harnessFlags![i];
+    if (permissionProfile === "read-only" && flag === "--tools") {
+      i++;
+      continue;
+    }
+    if (permissionProfile === "read-only" && flag.startsWith("--tools=")) {
+      continue;
+    }
+    flags.push(flag);
+  }
   if (permissionProfile === "read-only") {
     flags.push("--tools", PI_READ_ONLY_TOOLS);
   }

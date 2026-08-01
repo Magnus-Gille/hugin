@@ -125,7 +125,16 @@ describe("verifyCleanCheckout", () => {
     expect(result.reason).toContain("uncommitted or untracked");
     // Never bothers checking HEAD once dirtiness is already proven.
     expect(spawnCalls).toHaveLength(1);
-    expect(spawnCalls[0].args).toEqual(["status", "--porcelain"]);
+    expect(spawnCalls[0].args).toEqual(["status", "--porcelain", "--ignored=matching"]);
+  });
+
+  it("fails when the working tree only differs by ignored leftovers", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: "!! node_modules/\n" }];
+    const result = await verifyCleanCheckout(WORKDIR, commit);
+    expect(result.clean).toBe(false);
+    expect(result.reason).toContain("uncommitted or untracked");
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0].args).toEqual(["status", "--porcelain", "--ignored=matching"]);
   });
 
   it("fails when HEAD does not match the expected commit even though the tree is clean", async () => {
@@ -342,7 +351,7 @@ describe("prepareManagedCheckout — the #236 pre-execution isolation/verificati
     expect(marker?.reason).toContain("uncommitted or untracked");
   });
 
-  it("uses plain `git status --porcelain`, so gitignored-only leftovers do not trigger recovery", async () => {
+  it("includes ignored leftovers in the global checkout gate, so stale caches/env/dependencies trigger recovery", async () => {
     const commit = "3".repeat(40);
     spawnBehaviors = [
       { exitCode: 0 },
@@ -351,9 +360,13 @@ describe("prepareManagedCheckout — the #236 pre-execution isolation/verificati
       { exitCode: 0, stdout: `${commit}\n` },
       { exitCode: 0 },
       { exitCode: 1 }, // readCheckoutContamination: not set
-      // Plain `--porcelain` does not report ignored files, so a run that only
-      // differs by ignored leftovers still verifies as clean here.
-      { exitCode: 0, stdout: "" },
+      // The issue #236 gate must include ignored leftovers so stale env files,
+      // caches, or dependency directories cannot bleed across managed tasks.
+      { exitCode: 0, stdout: "!! node_modules/\n" },
+      { exitCode: 0 }, // markCheckoutContaminated
+      { exitCode: 0 }, // reset --hard
+      { exitCode: 0 }, // clean -fdx
+      { exitCode: 0, stdout: "" }, // re-verify clean
       { exitCode: 0, stdout: `${commit}\n` },
       { exitCode: 0 }, // clearCheckoutContamination
     ];
@@ -362,10 +375,10 @@ describe("prepareManagedCheckout — the #236 pre-execution isolation/verificati
       fetchRetryDelaysMs: [0, 0],
       baseBranchOverride: "main",
     });
-    expect(result.recovered).toBeUndefined();
+    expect(result.recovered).toBe(true);
     expect(result.refusalReason).toBeUndefined();
     const statusCall = spawnCalls[6];
-    expect(statusCall.args).toEqual(["status", "--porcelain"]);
+    expect(statusCall.args).toEqual(["status", "--porcelain", "--ignored=matching"]);
   });
 
   it("marks contamination for a read-only task when the checkout is dirty, but never attempts recovery (no reset/clean calls)", async () => {

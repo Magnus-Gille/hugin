@@ -93,6 +93,7 @@ const {
   DEFAULT_MAX_OUTPUT_CHARS,
   DEFAULT_MAX_TOKENS,
 } = await import("../../src/orchestrator/worker-executor.js");
+const runtimeRegistry = await import("../../src/runtime-registry.js");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1606,6 +1607,28 @@ describe("PiHarnessExecutor — success path", () => {
     expect(options?.cwd).toBe(PI_WORKTREE_PATH);
   });
 
+  it("does not let registry harnessFlags override the enforced read-only tool allowlist", async () => {
+    const original = runtimeRegistry.getRegistryEntryById;
+    const piEntry = original("pi-harness");
+    if (!piEntry) throw new Error("pi-harness registry entry missing in test");
+    vi.spyOn(runtimeRegistry, "getRegistryEntryById").mockImplementation((id) =>
+      id === "pi-harness"
+        ? {
+            ...piEntry,
+            harnessFlags: ["--tools", "write,edit", "--no-session", "--provider", "openrouter"],
+          }
+        : original(id),
+    );
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    await new PiHarnessExecutor().run(makeReadOnlyPiRequest());
+
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]?.args).not.toContain("write,edit");
+    expect(spawnCalls[0]?.args.filter((arg) => arg === "--tools")).toHaveLength(1);
+    expect(spawnCalls[0]?.args).toContain("read,grep,find,ls");
+  });
+
   it("does not expose the dispatcher checkpoint secret to the Pi harness", async () => {
     vi.stubEnv("HUGIN_SENSITIVITY_CHECKPOINT_SECRET", "dispatcher-only-secret");
     vi.stubEnv("HUGIN_ORDINARY_CHILD_VALUE", "preserved");
@@ -1672,7 +1695,35 @@ describe("PiHarnessExecutor — success path", () => {
     expect(spawnCalls[5]?.options?.cwd).toBe(PI_WORKTREE_PATH);
   });
 
+  it("fails closed on the first worker turn when the selected task branch is already dirty", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
+      { exitCode: 0, stdout: "M src/worker.ts\n" },
+      { exitCode: 0, stdout: `${PI_EXPECTED_REVISION}\n` },
+      { exitCode: 0, stdout: "" },
+    ];
+
+    const result = await new PiHarnessExecutor().run(makeTrustedPiRequest());
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("initial clean binding");
+    expect(spawnCalls).toHaveLength(5);
+  });
+
   it("allows a legitimate follow-on worker turn on the same task branch after local edits", async () => {
+    const binding = makePiBinding();
+    spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS },
+    ];
+
+    const executor = new PiHarnessExecutor();
+    const first = await executor.run(makeTrustedPiRequest({ prompt: "start", worktree: binding }));
+    expect(first.ok).toBe(true);
+
+    spawnCalls.length = 0;
+    spawnCallIndex = 0;
     spawnBehaviors = [
       { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
       { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
@@ -1682,16 +1733,28 @@ describe("PiHarnessExecutor — success path", () => {
       { exitCode: 0, stdout: PI_JSONL_SUCCESS },
     ];
 
-    const result = await new PiHarnessExecutor().run(
-      makeTrustedPiRequest({ prompt: "continue the task" }),
+    const second = await executor.run(
+      makeTrustedPiRequest({ prompt: "continue the task", worktree: binding }),
     );
 
-    expect(result.ok).toBe(true);
+    expect(second.ok).toBe(true);
     expect(spawnCalls[5]?.cmd).toBe("pi");
   });
 
   it("allows a legitimate follow-on worker turn after HEAD advances on the same task branch", async () => {
     const advancedHead = "b".repeat(40);
+    const binding = makePiBinding();
+    spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS },
+    ];
+
+    const executor = new PiHarnessExecutor();
+    const first = await executor.run(makeTrustedPiRequest({ prompt: "start", worktree: binding }));
+    expect(first.ok).toBe(true);
+
+    spawnCalls.length = 0;
+    spawnCallIndex = 0;
     spawnBehaviors = [
       { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
       { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
@@ -1701,8 +1764,8 @@ describe("PiHarnessExecutor — success path", () => {
       { exitCode: 0, stdout: PI_JSONL_SUCCESS },
     ];
 
-    const result = await new PiHarnessExecutor().run(
-      makeTrustedPiRequest({ prompt: "continue after a commit" }),
+    const result = await executor.run(
+      makeTrustedPiRequest({ prompt: "continue after a commit", worktree: binding }),
     );
 
     expect(result.ok).toBe(true);
@@ -1712,6 +1775,17 @@ describe("PiHarnessExecutor — success path", () => {
       PI_EXPECTED_REVISION,
       advancedHead,
     ]);
+  });
+
+  it("cross-checks the selected binding against the executor's configured managed root", async () => {
+    vi.stubEnv("HUGIN_REPOS_ROOT", "/home/magnus/other-root");
+    setRealpath("/home/magnus/other-root");
+
+    const result = await new PiHarnessExecutor().run(makeTrustedPiRequest());
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("configured managed repos root");
+    expect(spawnCalls).toHaveLength(0);
   });
 });
 

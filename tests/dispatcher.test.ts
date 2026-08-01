@@ -18,13 +18,14 @@ type TaskPermissionProfile = "read-only" | "trusted-code";
 
 function parseTask(content: string, workspace = "/home/magnus/workspace") {
   const declaredRuntimeRaw =
-    content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|opencode|auto)/i)?.[1]?.toLowerCase();
+    content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|opencode|orchestrator|auto)/i)?.[1]?.toLowerCase();
   const isAutoRoute = declaredRuntimeRaw === "auto";
   const runtime = (isAutoRoute ? undefined : declaredRuntimeRaw) as
       | "claude"
       | "codex"
       | "ollama"
       | "opencode"
+      | "orchestrator"
       | undefined;
   const workingDir = content.match(
     /\*\*Working dir:\*\*\s*(.+)/i
@@ -428,6 +429,37 @@ Do work`;
     const task = parseTask(content);
     expect(task!.workingDir).toBe("/home/magnus/repos/hugin");
     expect(task!.context).toBe("repo:hugin");
+  });
+
+  it("keeps orchestrator scratch/files/default working directories non-empty and absolute", () => {
+    const scratchTask = parseTask(`## Task: Orchestrator scratch
+
+- **Runtime:** orchestrator
+- **Context:** scratch
+
+### Prompt
+Inspect the sandbox`);
+    const filesTask = parseTask(`## Task: Orchestrator files
+
+- **Runtime:** orchestrator
+- **Context:** files
+
+### Prompt
+Inspect the archive`);
+    const defaultTask = parseTask(`## Task: Orchestrator default
+
+- **Runtime:** orchestrator
+
+### Prompt
+Inspect the workspace`);
+
+    expect(scratchTask!.workingDir).toBe("/home/magnus/scratch");
+    expect(filesTask!.workingDir).toBe("/home/magnus/mimir");
+    expect(defaultTask!.workingDir).toBe("/home/magnus/workspace");
+    for (const task of [scratchTask, filesTask, defaultTask]) {
+      expect(task!.workingDir.length).toBeGreaterThan(0);
+      expect(task!.workingDir.startsWith("/")).toBe(true);
+    }
   });
 });
 

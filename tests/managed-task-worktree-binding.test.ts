@@ -264,7 +264,7 @@ describe("preparePiHarnessWorktreeBinding", () => {
       reposRoot: MANAGED_ROOT,
     });
 
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, effectiveWorkerPermissionProfile: "read-only" });
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -283,7 +283,27 @@ describe("preparePiHarnessWorktreeBinding", () => {
       reposRoot: MANAGED_ROOT,
     });
 
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, effectiveWorkerPermissionProfile: "trusted-code" });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("degrades a trusted-code request without the code capability before any binding or refusal path is consulted", async () => {
+    const spy = vi.spyOn(taskHelpers, "buildManagedTaskWorktreeBinding");
+
+    const result = await admission.preparePiHarnessWorktreeBinding({
+      roles: {
+        ...baseRoles,
+        worker: { provider: "pi-harness", model: "qwen/qwen3-coder-next" },
+      },
+      capabilities: ["tools"],
+      permissionProfile: "trusted-code",
+      branchResult: { action: "skipped" },
+      workingDir: WORKTREE,
+      reposRoot: MANAGED_ROOT,
+      checkoutGateRefusalReason: "dirty checkout",
+    });
+
+    expect(result).toEqual({ ok: true, effectiveWorkerPermissionProfile: "read-only" });
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -308,6 +328,7 @@ describe("preparePiHarnessWorktreeBinding", () => {
       reason:
         "pi-harness worker requires a verified managed task-branch checkout before model spending: " +
         "checkout is contaminated",
+      effectiveWorkerPermissionProfile: "trusted-code",
     });
     expect(spy).not.toHaveBeenCalled();
   });
@@ -333,6 +354,7 @@ describe("preparePiHarnessWorktreeBinding", () => {
       reason:
         "pi-harness worker requires a verified managed task-branch checkout before model spending; " +
         "the dispatcher only has degraded read-only checkout state",
+      effectiveWorkerPermissionProfile: "trusted-code",
     });
     expect(spy).not.toHaveBeenCalled();
   });
@@ -360,7 +382,11 @@ describe("preparePiHarnessWorktreeBinding", () => {
       reposRoot: MANAGED_ROOT,
     });
 
-    expect(result).toEqual({ ok: true, binding: makeBindingResult() });
+    expect(result).toEqual({
+      ok: true,
+      effectiveWorkerPermissionProfile: "trusted-code",
+      binding: makeBindingResult(),
+    });
     expect(spy).toHaveBeenCalledWith(WORKTREE, MANAGED_ROOT, BRANCH_NAME, EXPECTED_REVISION);
   });
 
@@ -385,6 +411,7 @@ describe("preparePiHarnessWorktreeBinding", () => {
     expect(result).toEqual({
       ok: false,
       reason: "selected worktree path could not be verified clean",
+      effectiveWorkerPermissionProfile: "trusted-code",
     });
     expect(spy).toHaveBeenCalledWith(WORKTREE, MANAGED_ROOT, BRANCH_NAME, EXPECTED_REVISION);
   });
@@ -425,7 +452,7 @@ describe("preparePiHarnessWorktreeBinding", () => {
         {
           timeoutMs: 5000,
           workingDirectory: WORKTREE,
-          permissionProfile: "trusted-code",
+          permissionProfile: binding.effectiveWorkerPermissionProfile,
           workerWorktree: binding.binding,
         },
         () => executor,
@@ -435,5 +462,78 @@ describe("preparePiHarnessWorktreeBinding", () => {
 
     expect(binding.ok).toBe(false);
     expect(executor.run).not.toHaveBeenCalled();
+  });
+
+  it("keeps both planner and worker executable as read-only when trusted-code was requested without the code capability", async () => {
+    const executorCalls: unknown[] = [];
+    const executor: WorkerExecutor = {
+      run: vi.fn(async (req) => {
+        executorCalls.push(req);
+        return {
+          ok: true,
+          output: "ok",
+          provider: String(req.provider),
+          model: String(req.model),
+          inputTokens: null,
+          outputTokens: null,
+          costUsd: null,
+          latencyMs: 1,
+        } satisfies WorkerResult;
+      }),
+    };
+
+    const binding = await admission.preparePiHarnessWorktreeBinding({
+      roles: {
+        planner: { provider: "pi-harness", model: "planner-pi" },
+        worker: { provider: "pi-harness", model: "worker-pi" },
+        verifier: { provider: "openrouter", model: "verifier" },
+        synthesizer: { provider: "openrouter", model: "synth" },
+      },
+      capabilities: ["tools"],
+      permissionProfile: "trusted-code",
+      branchResult: { action: "skipped" },
+      workingDir: READ_ONLY_CWD,
+      reposRoot: MANAGED_ROOT,
+      checkoutGateRefusalReason: "dirty checkout",
+    });
+
+    expect(binding).toEqual({ ok: true, effectiveWorkerPermissionProfile: "read-only" });
+    if (!binding.ok) return;
+
+    const invoker = createModelInvoker(
+      {
+        planner: { provider: "pi-harness", model: "planner-pi" },
+        worker: { provider: "pi-harness", model: "worker-pi" },
+        verifier: { provider: "openrouter", model: "verifier" },
+        synthesizer: { provider: "openrouter", model: "synth" },
+      },
+      {
+        timeoutMs: 5000,
+        workingDirectory: READ_ONLY_CWD,
+        permissionProfile: binding.effectiveWorkerPermissionProfile,
+        workerWorktree: binding.binding,
+      },
+      () => executor,
+    );
+
+    await invoker.invoke("planner", "plan");
+    await invoker.invoke("worker", "inspect");
+
+    expect(executorCalls).toMatchObject([
+      {
+        provider: "pi-harness",
+        model: "planner-pi",
+        cwd: READ_ONLY_CWD,
+        permissionProfile: "read-only",
+      },
+      {
+        provider: "pi-harness",
+        model: "worker-pi",
+        cwd: READ_ONLY_CWD,
+        permissionProfile: "read-only",
+      },
+    ]);
+    expect((executorCalls[0] as { worktree?: unknown }).worktree).toBeUndefined();
+    expect((executorCalls[1] as { worktree?: unknown }).worktree).toBeUndefined();
   });
 });

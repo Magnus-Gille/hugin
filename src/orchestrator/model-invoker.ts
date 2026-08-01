@@ -6,8 +6,8 @@ import type {
 import type {
   WorkerExecutor,
   WorkerResult,
-  WorkerWorktreeBinding,
 } from "./worker-executor.js";
+import type { WorkerWorktreeBinding } from "./pi-harness-types.js";
 import { createWorkerExecutor } from "./worker-executor.js";
 import type { OrinWorkerRoute } from "./orin-macro-route.js";
 
