@@ -46,6 +46,14 @@ import {
   probeCodexSandbox,
   type CodexSandboxProbeResult,
 } from "./codex-sandbox.js";
+import type { FailureClassification } from "./failure-classification.js";
+import {
+  buildFrictionContent,
+  buildFrictionKey,
+  buildFrictionNamespace,
+  buildFrictionTags,
+} from "./friction/munin-key.js";
+import type { ReportFrictionInput } from "./friction/schema.js";
 import {
   buildTaskSubprocessEnv,
   SENSITIVITY_CHECKPOINT_SECRET_ENV,
@@ -2240,6 +2248,65 @@ interface SpawnRuntimeResult {
   logFile: string;
   preflightFailureKind?: typeof CODEX_SANDBOX_FAILURE_KIND;
   preflightFailureReason?: string;
+}
+
+const PI_HARNESS_ADMISSION_FAILURE_KIND = "PI_HARNESS_ADMISSION_REFUSED";
+const PI_HARNESS_ADMISSION_FAILURE_TAG = "failure:infra";
+
+function piHarnessAdmissionFailureClassification(reason: string): FailureClassification {
+  return {
+    kind: PI_HARNESS_ADMISSION_FAILURE_KIND,
+    tag: PI_HARNESS_ADMISSION_FAILURE_TAG,
+    reason,
+  };
+}
+
+function buildPiHarnessAdmissionFrictionEvent(args: {
+  taskId: string;
+  modelId?: string;
+  reason: string;
+  recordedAt: Date;
+}): {
+  namespace: string;
+  key: string;
+  content: string;
+  tags: string[];
+} {
+  const input: ReportFrictionInput = {
+    event_id: randomUUID(),
+    friction_type: "tool_failure",
+    severity: "blocking",
+    summary: "Pi-harness admission failed before orchestrator execution",
+    detail: args.reason.slice(0, 8_000),
+    task_id: args.taskId,
+    model_id: args.modelId?.trim() || "orchestrator",
+    tool_name: "pi-harness-admission",
+    tags: ["runtime:orchestrator", `failure-kind:${PI_HARNESS_ADMISSION_FAILURE_KIND}`],
+  };
+  const modelId = input.model_id || "orchestrator";
+  const tags = buildFrictionTags({
+    input,
+    modelId,
+    resolvedTaskId: args.taskId,
+  }).filter((tag) => tag !== "source:model-self-report");
+  tags.push("source:hugin-preflight");
+  const baseContent = JSON.parse(buildFrictionContent({
+    input,
+    modelId,
+    resolvedTaskId: args.taskId,
+    recordedAt: args.recordedAt,
+  })) as Record<string, unknown>;
+
+  return {
+    namespace: buildFrictionNamespace(),
+    key: buildFrictionKey(args.taskId, args.recordedAt),
+    content: JSON.stringify({
+      ...baseContent,
+      reporter: "hugin-preflight",
+      failure_kind: PI_HARNESS_ADMISSION_FAILURE_KIND,
+    }, null, 2),
+    tags,
+  };
 }
 
 let codexSandboxStatus: CodexSandboxProbeResult | null = null;
@@ -5240,6 +5307,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // regex-sniff synthetic output.
     let sdkPreflightFailureKind: typeof AUTH_FAILURE_KIND | typeof DEPS_DRIFT_FAILURE_KIND | undefined;
     let codexPreflightFailureReason: string | undefined;
+    let piHarnessAdmissionFailureReason: string | undefined;
     let fallbackTriggered = false;
     let fallbackReason: string | null = null;
 
@@ -5936,6 +6004,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       orchLogStream.write(`${piHarnessBinding.reason}\n`);
       orchLogStream.end();
       currentOrchestratorAbort = null;
+      piHarnessAdmissionFailureReason = piHarnessBinding.reason;
+      repositoryOutcome = deriveRepositoryOutcome(
+        branchResult,
+        undefined,
+        Boolean(checkoutGateRefusalReason || checkoutGateDegraded),
+      );
       exitCode = 1;
       output = piHarnessBinding.reason;
       resultText = null;
@@ -6075,7 +6149,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // classifying its output (Codex review, #123: DEPS_DRIFT is never
     // inferred from output text).
     const failureClassification = !ok && !isTimeout && !isCancelled
-      ? checkoutGateRefusalReason
+      ? piHarnessAdmissionFailureReason
+        ? piHarnessAdmissionFailureClassification(piHarnessAdmissionFailureReason)
+        : checkoutGateRefusalReason
         ? checkoutGateFailureClassification(checkoutGateRefusalReason)
         : isCodex && codexPreflightFailureReason
         ? codexSandboxFailureClassification(codexPreflightFailureReason)
@@ -6091,7 +6167,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         `Task failed (${failureClassification.kind}): ${failureClassification.reason}`,
       );
     }
-    const preflightFriction = checkoutGateRefusalReason
+    const preflightFriction = piHarnessAdmissionFailureReason
+      ? buildPiHarnessAdmissionFrictionEvent({
+          taskId,
+          modelId: task.model,
+          reason: failureClassification?.reason ?? piHarnessAdmissionFailureReason,
+          recordedAt: new Date(),
+        })
+      : checkoutGateRefusalReason
       ? buildCheckoutGateFrictionEvent({
           taskId,
           runtime: task.runtime,
