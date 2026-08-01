@@ -1,0 +1,51 @@
+{
+  "$comment": "FROZEN 2026-08-01 from Hugin base commit 22bcf5d0e09424a9e498c16b088580cb64267d9f, BEFORE docs/index.md was authored. Probes are phrased as realistic lookup questions and deliberately avoid naming the target document, so a hit measures retrieval rather than transcription. Do not edit these to match a new index; that invalidates the eval.",
+  "version": 1,
+  "frozen_at_base_commit": "22bcf5d0e09424a9e498c16b088580cb64267d9f",
+  "probes": [
+    {
+      "id": "delivery-recovery",
+      "kind": "retrieval",
+      "prompt": "A task finished writing its staged artifact, then the process died before the transfer was clearly finalized. Where is the end-to-end recovery procedure, and which delivery states tell me whether it can retry or is terminal?",
+      "target": "docs/testing/delivery-recovery-e2e.md"
+    },
+    {
+      "id": "task-signing",
+      "kind": "retrieval",
+      "prompt": "How does Hugin distinguish a claimed task submitter from a verified one, and what is supposed to happen when signature policy is set to require?",
+      "target": "docs/security/task-signing.md"
+    },
+    {
+      "id": "daily-exam-factory",
+      "kind": "retrieval",
+      "prompt": "If a managed-repository task becomes a daily exam candidate, where are provisional holdout, regression, and quarantine defined and separated?",
+      "target": "docs/daily-exam-factory.md"
+    },
+    {
+      "id": "m5-lifecycle",
+      "kind": "retrieval",
+      "prompt": "Which document says Hugin preserves durable M5 delegation provenance but must not invent its own model-capability truth?",
+      "target": "docs/mcp-durable-m5-lifecycle.md"
+    },
+    {
+      "id": "orchestrator-verdict-layer",
+      "kind": "retrieval",
+      "prompt": "Where is the design for keeping orchestrator synthesizer verdicts separate from worker execution results and savings accounting?",
+      "target": "docs/orchestrator-verdict-layer.md"
+    },
+    {
+      "id": "external-receipt-intake",
+      "kind": "retrieval",
+      "prompt": "A non-Hugin system wants to submit its own signed task/outcome receipt. Where is the intake contract, and what must never happen to task ownership or terminal state when that arrives?",
+      "target": "docs/external-receipt-intake.md"
+    },
+    {
+      "id": "private-orchestrator-CONTROL",
+      "kind": "control",
+      "prompt": "The prompt is private. Can Runtime: orchestrator still fan out to the usual cloud roles by default?",
+      "target": "AGENTS.md",
+      "assert_regex": "(?i)(must be rejected|reject(ed)? before any model call|unless every configured role uses a sovereign/local provider|default cloud fan-out must never receive private data)",
+      "assert_note": "CONTROL PROBE. This targets inline runtime-permission rules that stay in AGENTS.md in both arms. If it changes, the harness is measuring unrelated drift rather than the docs-index split."
+    }
+  ]
+}
