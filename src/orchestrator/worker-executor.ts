@@ -15,6 +15,7 @@
  */
 
 import { spawn } from "node:child_process";
+import * as path from "node:path";
 import type {
   HomeserverResponseFormat,
   HomeserverVerifierSpec,
@@ -23,6 +24,7 @@ import { extractM5Provenance, sanitizeProviderTokenCount } from "../m5-provenanc
 import type { M5DelegationProvenance } from "../m5-provenance.js";
 import { estimateCostUsd } from "../model-pricing.js";
 import { getRegistryEntryById } from "../runtime-registry.js";
+import { verifyCleanCheckout } from "../task-helpers.js";
 import { buildTaskSubprocessEnv } from "../task-subprocess-env.js";
 import {
   getProviderConfig,
@@ -188,6 +190,13 @@ function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<"slept" | "ab
   });
 }
 
+export interface WorkerWorktreeBinding {
+  /** Exact absolute selected worktree path on the Pi. */
+  cwd: string;
+  /** Immutable selected revision the executor must verify immediately before launch. */
+  expectedRevision: string;
+}
+
 export interface WorkerRequest {
   /** Provider id: "openrouter" | "berget" | "pi-harness" | "homeserver" */
   provider: string;
@@ -220,6 +229,8 @@ export interface WorkerRequest {
   nodeId?: string;
   /** Model to use for the one bounded M5 fallback after an Orin failure. */
   fallbackModel?: string;
+  /** Selected worktree binding for providers that must execute inside a checkout. */
+  worktree?: WorkerWorktreeBinding;
 }
 
 export interface WorkerResult {
@@ -278,6 +289,51 @@ export function createWorkerExecutor(
     return new HomeserverDelegateWorkerExecutor();
   }
   return new DirectModelExecutor();
+}
+
+async function verifyPiWorktreeBinding(
+  binding: WorkerWorktreeBinding | undefined,
+): Promise<{ ok: true; cwd: string } | { ok: false; error: string }> {
+  if (!binding) {
+    return { ok: false, error: "pi-harness requires a selected worktree binding" };
+  }
+
+  const rawCwd = binding.cwd.trim();
+  if (!rawCwd) {
+    return { ok: false, error: "pi-harness requires a non-empty selected worktree path" };
+  }
+  if (!path.isAbsolute(rawCwd)) {
+    return {
+      ok: false,
+      error: `pi-harness worktree path ${JSON.stringify(binding.cwd)} must be absolute`,
+    };
+  }
+
+  const normalizedCwd = path.resolve(rawCwd);
+  if (
+    normalizedCwd !== rawCwd
+    || !normalizedCwd.startsWith(`/home/magnus${path.sep}`)
+  ) {
+    return {
+      ok: false,
+      error:
+        `pi-harness worktree path ${JSON.stringify(binding.cwd)} is unsafe; ` +
+        "expected a canonical absolute path under /home/magnus/",
+    };
+  }
+
+  const verification = await verifyCleanCheckout(normalizedCwd, binding.expectedRevision);
+  if (!verification.clean) {
+    return {
+      ok: false,
+      error:
+        `Selected worktree ${normalizedCwd} could not be verified clean at ` +
+        `${binding.expectedRevision.trim().toLowerCase()}: ` +
+        (verification.reason ?? "unknown verification failure"),
+    };
+  }
+
+  return { ok: true, cwd: normalizedCwd };
 }
 
 // ---------------------------------------------------------------------------
@@ -936,6 +992,21 @@ export class PiHarnessExecutor implements WorkerExecutor {
       };
     }
 
+    const boundWorktree = await verifyPiWorktreeBinding(req.worktree);
+    if (!boundWorktree.ok) {
+      return {
+        ok: false,
+        output: "",
+        provider: req.provider,
+        model: req.model,
+        inputTokens: null,
+        outputTokens: null,
+        costUsd: null,
+        latencyMs: Date.now() - start,
+        error: boundWorktree.error,
+      };
+    }
+
     const args = buildPiArgs(req, entry);
 
     return new Promise<WorkerResult>((resolve) => {
@@ -949,6 +1020,7 @@ export class PiHarnessExecutor implements WorkerExecutor {
       let child: ReturnType<typeof spawn>;
       try {
         child = spawn(entry.harnessCmd ?? "pi", args, {
+          cwd: boundWorktree.cwd,
           stdio: ["ignore", "pipe", "pipe"],
           env: buildTaskSubprocessEnv(),
         });

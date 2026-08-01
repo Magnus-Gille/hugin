@@ -3,7 +3,11 @@ import type {
   HomeserverResponseFormat,
   HomeserverVerifierSpec,
 } from "../homeserver-executor.js";
-import type { WorkerExecutor, WorkerResult } from "./worker-executor.js";
+import type {
+  WorkerExecutor,
+  WorkerResult,
+  WorkerWorktreeBinding,
+} from "./worker-executor.js";
 import { createWorkerExecutor } from "./worker-executor.js";
 import type { OrinWorkerRoute } from "./orin-macro-route.js";
 
@@ -54,7 +58,12 @@ export interface ModelInvoker {
  */
 export function createModelInvoker(
   roles: Record<OrchestratorRole, RoleBinding>,
-  defaults: { timeoutMs: number; maxOutputChars?: number; maxTokens?: number },
+  defaults: {
+    timeoutMs: number;
+    maxOutputChars?: number;
+    maxTokens?: number;
+    workerWorktree?: WorkerWorktreeBinding;
+  },
   executorFactory?: (provider: string, opts?: { role?: OrchestratorRole }) => WorkerExecutor,
 ): ModelInvoker {
   const factory = executorFactory ?? createWorkerExecutor;
@@ -98,6 +107,9 @@ export function createModelInvoker(
         maxOutputChars: defaults.maxOutputChars,
         maxTokens: binding.maxTokens ?? defaults.maxTokens,
         signal: opts?.signal,
+        ...(role === "worker" && binding.provider === "pi-harness"
+          ? { worktree: defaults.workerWorktree }
+          : {}),
         ...delegateMetadata,
       });
     },

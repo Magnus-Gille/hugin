@@ -26,7 +26,7 @@ interface SpawnBehavior {
 const spawnCalls: Array<{
   cmd: string;
   args: string[];
-  options?: { env?: NodeJS.ProcessEnv };
+  options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: unknown };
 }> = [];
 let spawnBehaviors: SpawnBehavior[] = [];
 let spawnCallIndex = 0;
@@ -1469,10 +1469,19 @@ const PI_JSONL_SUCCESS = [
   JSON.stringify({ type: "assistant", content: "the answer" }),
   JSON.stringify({ type: "usage", usage: { input_tokens: 50, output_tokens: 30 } }),
 ].join("\n") + "\n";
+const PI_WORKTREE_PATH = "/home/magnus/repos/hugin-worktree";
+const PI_EXPECTED_REVISION = "a".repeat(40);
+
+function cleanPiWorktreeBehaviors() {
+  return [
+    { exitCode: 0, stdout: "" },
+    { exitCode: 0, stdout: `${PI_EXPECTED_REVISION}\n` },
+  ];
+}
 
 describe("PiHarnessExecutor — success path", () => {
   it("parses JSONL output and returns ok=true with content and token counts", async () => {
-    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+    spawnBehaviors = [...cleanPiWorktreeBehaviors(), { exitCode: 0, stdout: PI_JSONL_SUCCESS }];
 
     const executor = new PiHarnessExecutor();
     const result = await executor.run({
@@ -1480,6 +1489,7 @@ describe("PiHarnessExecutor — success path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "write a function",
       timeoutMs: 5000,
+      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
     });
 
     expect(result.ok).toBe(true);
@@ -1494,7 +1504,7 @@ describe("PiHarnessExecutor — success path", () => {
   });
 
   it("builds args from registry (harnessFlags + mode + model + prompt)", async () => {
-    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+    spawnBehaviors = [...cleanPiWorktreeBehaviors(), { exitCode: 0, stdout: PI_JSONL_SUCCESS }];
 
     const executor = new PiHarnessExecutor();
     await executor.run({
@@ -1502,10 +1512,11 @@ describe("PiHarnessExecutor — success path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "hello",
       timeoutMs: 5000,
+      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
     });
 
-    expect(spawnCalls).toHaveLength(1);
-    const { cmd, args } = spawnCalls[0];
+    expect(spawnCalls).toHaveLength(3);
+    const { cmd, args } = spawnCalls[2];
     // harnessCmd from registry
     expect(cmd).toBe("pi");
     // harnessFlags present
@@ -1525,26 +1536,27 @@ describe("PiHarnessExecutor — success path", () => {
   it("does not expose the dispatcher checkpoint secret to the Pi harness", async () => {
     vi.stubEnv("HUGIN_SENSITIVITY_CHECKPOINT_SECRET", "dispatcher-only-secret");
     vi.stubEnv("HUGIN_ORDINARY_CHILD_VALUE", "preserved");
-    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+    spawnBehaviors = [...cleanPiWorktreeBehaviors(), { exitCode: 0, stdout: PI_JSONL_SUCCESS }];
 
     await new PiHarnessExecutor().run({
       provider: "pi-harness",
       model: "qwen/qwen3-coder-next",
       prompt: "hello",
       timeoutMs: 5000,
+      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
     });
 
-    expect(spawnCalls[0]?.options?.env).not.toHaveProperty(
+    expect(spawnCalls[2]?.options?.env).not.toHaveProperty(
       "HUGIN_SENSITIVITY_CHECKPOINT_SECRET",
     );
-    expect(spawnCalls[0]?.options?.env?.HUGIN_ORDINARY_CHILD_VALUE).toBe(
+    expect(spawnCalls[2]?.options?.env?.HUGIN_ORDINARY_CHILD_VALUE).toBe(
       "preserved",
     );
   });
 
   it("uses alternate_tokens field if content field absent (text field)", async () => {
     const jsonl = JSON.stringify({ type: "result", text: "text field result" }) + "\n";
-    spawnBehaviors = [{ exitCode: 0, stdout: jsonl }];
+    spawnBehaviors = [...cleanPiWorktreeBehaviors(), { exitCode: 0, stdout: jsonl }];
 
     const executor = new PiHarnessExecutor();
     const result = await executor.run({
@@ -1552,16 +1564,52 @@ describe("PiHarnessExecutor — success path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "hi",
       timeoutMs: 5000,
+      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
     });
 
     expect(result.ok).toBe(true);
     expect(result.output).toBe("text field result");
+  });
+
+  it("verifies the selected revision and spawns Pi in the selected worktree cwd (issue #339)", async () => {
+    spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS },
+    ];
+
+    const executor = new PiHarnessExecutor();
+    const result = await executor.run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hello",
+      timeoutMs: 5000,
+      worktree: {
+        cwd: PI_WORKTREE_PATH,
+        expectedRevision: PI_EXPECTED_REVISION,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls).toHaveLength(3);
+    expect(spawnCalls[0]).toMatchObject({
+      cmd: "git",
+      args: ["status", "--porcelain", "--ignored"],
+      options: { cwd: PI_WORKTREE_PATH },
+    });
+    expect(spawnCalls[1]).toMatchObject({
+      cmd: "git",
+      args: ["rev-parse", "HEAD"],
+      options: { cwd: PI_WORKTREE_PATH },
+    });
+    expect(spawnCalls[2]?.cmd).toBe("pi");
+    expect(spawnCalls[2]?.options?.cwd).toBe(PI_WORKTREE_PATH);
   });
 });
 
 describe("PiHarnessExecutor — non-zero exit path", () => {
   it("returns ok=false with stderr in error, does not throw", async () => {
     spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
       { exitCode: 1, stdout: "", stderr: "model not found" },
     ];
 
@@ -1571,6 +1619,7 @@ describe("PiHarnessExecutor — non-zero exit path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "hi",
       timeoutMs: 5000,
+      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
     });
 
     expect(result.ok).toBe(false);
@@ -1581,6 +1630,7 @@ describe("PiHarnessExecutor — non-zero exit path", () => {
 
   it("returns ok=false on spawn error", async () => {
     spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
       { exitCode: 1, spawnError: "ENOENT: pi not found" },
     ];
 
@@ -1590,17 +1640,47 @@ describe("PiHarnessExecutor — non-zero exit path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "hi",
       timeoutMs: 5000,
+      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
     });
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/pi not found/);
+  });
+
+  it("fails closed before spawning Pi when the selected worktree revision is stale (issue #339)", async () => {
+    const actualRevision = "b".repeat(40);
+    spawnBehaviors = [
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: `${actualRevision}\n` },
+    ];
+
+    const executor = new PiHarnessExecutor();
+    const result = await executor.run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hello",
+      timeoutMs: 5000,
+      worktree: {
+        cwd: PI_WORKTREE_PATH,
+        expectedRevision: PI_EXPECTED_REVISION,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain(actualRevision);
+    expect(result.error).toContain(PI_EXPECTED_REVISION);
+    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls.every((call) => call.cmd === "git")).toBe(true);
   });
 });
 
 describe("PiHarnessExecutor — timeout path", () => {
   it("kills the child and returns ok=false with timeout error", async () => {
     // delayMs > timeoutMs so the kill fires first
-    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS, delayMs: 500 }];
+    spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS, delayMs: 500 },
+    ];
 
     const executor = new PiHarnessExecutor();
     const result = await executor.run({
@@ -1608,6 +1688,7 @@ describe("PiHarnessExecutor — timeout path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "hi",
       timeoutMs: 10, // very short
+      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
     });
 
     expect(result.ok).toBe(false);
@@ -1628,6 +1709,7 @@ describe("PiHarnessExecutor — external AbortSignal (issue #110)", () => {
       prompt: "hi",
       timeoutMs: 5000,
       signal: controller.signal,
+      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
     });
 
     expect(result.ok).toBe(false);
@@ -1637,7 +1719,10 @@ describe("PiHarnessExecutor — external AbortSignal (issue #110)", () => {
 
   it("kills the child when the signal fires mid-run", async () => {
     // Child would run for 500ms; we abort well before that.
-    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS, delayMs: 500 }];
+    spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS, delayMs: 500 },
+    ];
     const controller = new AbortController();
 
     const executor = new PiHarnessExecutor();
@@ -1647,6 +1732,7 @@ describe("PiHarnessExecutor — external AbortSignal (issue #110)", () => {
       prompt: "hi",
       timeoutMs: 60000, // long — the abort, not the timeout, must end it
       signal: controller.signal,
+      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
     });
 
     // Let the spawn happen, then abort.
@@ -1656,7 +1742,7 @@ describe("PiHarnessExecutor — external AbortSignal (issue #110)", () => {
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/abort/i);
-    expect(spawnCalls.length).toBe(1);
+    expect(spawnCalls.length).toBe(3);
   });
 });
 
@@ -1680,7 +1766,7 @@ const PI_V3_JSONL = [
 
 describe("PiHarnessExecutor — pi v3 event schema", () => {
   it("extracts output and token counts from message_start/message_end events", async () => {
-    spawnBehaviors = [{ exitCode: 0, stdout: PI_V3_JSONL }];
+    spawnBehaviors = [...cleanPiWorktreeBehaviors(), { exitCode: 0, stdout: PI_V3_JSONL }];
 
     const executor = new PiHarnessExecutor();
     const result = await executor.run({
@@ -1688,6 +1774,7 @@ describe("PiHarnessExecutor — pi v3 event schema", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "ping",
       timeoutMs: 5000,
+      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
     });
 
     expect(result.ok).toBe(true);

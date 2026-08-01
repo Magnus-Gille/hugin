@@ -265,6 +265,36 @@ describe("createModelInvoker", () => {
     expect(capturedRequests[0].delegatorModelId).toBeUndefined();
   });
 
+  it("threads the selected worktree binding only into pi-harness worker requests (issue #339)", async () => {
+    const piRoles: Record<OrchestratorRole, RoleBinding> = {
+      ...roles,
+      worker: { provider: "pi-harness", model: "qwen/qwen3-coder-next" },
+    };
+    const capturedRequests: WorkerRequest[] = [];
+    const mockExecutor: WorkerExecutor = {
+      run: vi.fn(async (req: WorkerRequest) => {
+        capturedRequests.push(req);
+        return makeResult("out");
+      }),
+    };
+    const worktree = {
+      cwd: "/home/magnus/repos/hugin-worktree",
+      expectedRevision: "a".repeat(40),
+    };
+
+    const invoker = createModelInvoker(
+      piRoles,
+      { timeoutMs: 5000, workerWorktree: worktree },
+      () => mockExecutor,
+    );
+
+    await invoker.invoke("worker", "edit");
+    await invoker.invoke("planner", "plan");
+
+    expect(capturedRequests[0].worktree).toEqual(worktree);
+    expect(capturedRequests[1].worktree).toBeUndefined();
+  });
+
   it("returns executor result unchanged (propagates failures)", async () => {
     const failResult: WorkerResult = {
       ok: false,

@@ -5928,6 +5928,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       timeoutMs: orchConfig.perCallTimeoutMs,
       maxOutputChars: config.maxOutputChars,
       maxTokens: orchConfig.maxTokens,
+      workerWorktree: branchResult.baseCommit
+        ? {
+            cwd: task.workingDir,
+            expectedRevision: branchResult.baseCommit,
+          }
+        : undefined,
     });
     const orchResult = await runOrchestratorTask(
       {
