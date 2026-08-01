@@ -234,12 +234,26 @@ export interface WorkerRequest {
   nodeId?: string;
   /** Model to use for the one bounded M5 fallback after an Orin failure. */
   fallbackModel?: string;
-  /** Explicit local cwd for read-only pi-harness runs with no writable binding. */
+  /**
+   * Explicit local cwd admission target for pi-harness.
+   *
+   * This is an integrity control for where Pi is allowed to start, not a
+   * filesystem sandbox confinement boundary. Pi still runs with the process's
+   * ambient OS privileges.
+   */
   cwd?: string;
   /** Effective pi-harness permission profile for this invocation. */
   permissionProfile?: PiHarnessPermissionProfile;
   /** Selected worktree binding for providers that must execute inside a checkout. */
   worktree?: WorkerWorktreeBinding;
+  /** Dispatcher-configured managed root to cross-check against the selected binding. */
+  configuredManagedRoot?: string;
+  /**
+   * Canonical roots a read-only pi-harness launch may start within.
+   *
+   * This is an admission allowlist, not a filesystem sandbox.
+   */
+  allowedReadOnlyRoots?: string[];
 }
 
 export interface WorkerResult {
@@ -302,15 +316,20 @@ export function createWorkerExecutor(
 
 async function verifyPiWorktreeBinding(
   binding: WorkerWorktreeBinding | undefined,
+  configuredManagedRoot: string | undefined,
 ): Promise<{ ok: true; cwd: string } | { ok: false; error: string }> {
+  if (!configuredManagedRoot?.trim()) {
+    return {
+      ok: false,
+      error: "pi-harness trusted-code execution requires the configured managed repos root",
+    };
+  }
   const allowDirtyTaskBranch = binding ? verifiedInitialPiBindings.has(binding) : false;
   const verification = await verifyManagedTaskWorktreeBinding(
     binding,
     {
       allowDirtyTaskBranch,
-      configuredManagedRoot: path.resolve(
-        normalizeRoot(process.env.HUGIN_REPOS_ROOT || DEFAULT_REPOS_ROOT),
-      ),
+      configuredManagedRoot: path.resolve(normalizeRoot(configuredManagedRoot)),
     },
   );
   if (!verification.ok || !verification.cwd) {
@@ -329,20 +348,25 @@ function effectivePiPermissionProfile(
   return req.permissionProfile ?? (req.worktree ? "trusted-code" : "read-only");
 }
 
-async function canonicalizePiLaunchDirectory(
-  cwd: string | undefined,
+function isContainedByRoot(candidate: string, root: string): boolean {
+  return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+}
+
+async function canonicalizePiPath(
+  rawPath: string | undefined,
+  label: string,
 ): Promise<{ ok: true; cwd: string } | { ok: false; error: string }> {
-  const trimmed = cwd?.trim();
+  const trimmed = rawPath?.trim();
   if (!trimmed) {
     return {
       ok: false,
-      error: "pi-harness read-only execution requires an explicit working directory",
+      error: `${label} requires an explicit working directory`,
     };
   }
   if (!path.isAbsolute(trimmed)) {
     return {
       ok: false,
-      error: `pi-harness working directory ${JSON.stringify(cwd)} must be absolute`,
+      error: `${label} ${JSON.stringify(rawPath)} must be absolute`,
     };
   }
 
@@ -354,30 +378,93 @@ async function canonicalizePiLaunchDirectory(
     if (code === "ENOENT") {
       return {
         ok: false,
-        error: `pi-harness working directory ${JSON.stringify(cwd)} does not exist`,
+        error: `${label} ${JSON.stringify(rawPath)} does not exist`,
       };
     }
     return {
       ok: false,
       error:
-        `pi-harness working directory ${JSON.stringify(cwd)} could not be canonicalized via realpath: ` +
+        `${label} ${JSON.stringify(rawPath)} could not be canonicalized via realpath: ` +
         (err instanceof Error ? err.message : String(err)),
     };
   }
+}
+
+async function canonicalizePiLaunchDirectory(
+  cwd: string | undefined,
+  allowedRoots: string[] | undefined,
+): Promise<{ ok: true; cwd: string } | { ok: false; error: string }> {
+  const canonicalCwd = await canonicalizePiPath(cwd, "pi-harness working directory");
+  if (!canonicalCwd.ok) {
+    return canonicalCwd;
+  }
+  if (!allowedRoots || allowedRoots.length === 0) {
+    return {
+      ok: false,
+      error:
+        "pi-harness read-only execution requires an explicit allowlist of launch roots",
+    };
+  }
+
+  const canonicalRoots: string[] = [];
+  for (const root of allowedRoots) {
+    const canonicalRoot = await canonicalizePiPath(root, "pi-harness allowed launch root");
+    if (!canonicalRoot.ok) {
+      return canonicalRoot;
+    }
+    if (!canonicalRoots.includes(canonicalRoot.cwd)) {
+      canonicalRoots.push(canonicalRoot.cwd);
+    }
+  }
+
+  if (!canonicalRoots.some((root) => isContainedByRoot(canonicalCwd.cwd, root))) {
+    return {
+      ok: false,
+      error:
+        `pi-harness working directory ${JSON.stringify(cwd)} must stay within an allowed read-only root`,
+    };
+  }
+  return canonicalCwd;
+}
+
+async function assertDuplicatePiLaunchDirectoryMatchesBinding(
+  req: WorkerRequest,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!req.worktree || req.cwd === undefined) return { ok: true };
+  const canonicalDuplicate = await canonicalizePiPath(
+    req.cwd,
+    "pi-harness duplicate working directory",
+  );
+  if (!canonicalDuplicate.ok) {
+    return canonicalDuplicate;
+  }
+  if (canonicalDuplicate.cwd !== req.worktree.cwd) {
+    return {
+      ok: false,
+      error:
+        `pi-harness request supplied conflicting cwd ${JSON.stringify(req.cwd)} for bound worktree ` +
+        `${JSON.stringify(req.worktree.cwd)}`,
+    };
+  }
+  return { ok: true };
 }
 
 async function resolvePiHarnessLaunchCwd(
   req: WorkerRequest,
 ): Promise<{ ok: true; cwd: string } | { ok: false; error: string }> {
   const permissionProfile = effectivePiPermissionProfile(req);
-  if (req.worktree) return verifyPiWorktreeBinding(req.worktree);
+  const duplicateCheck = await assertDuplicatePiLaunchDirectoryMatchesBinding(req);
+  if (!duplicateCheck.ok) return duplicateCheck;
+  if (req.worktree) {
+    return verifyPiWorktreeBinding(req.worktree, req.configuredManagedRoot);
+  }
   if (permissionProfile === "trusted-code") {
     return {
       ok: false,
       error: "pi-harness trusted-code execution requires a selected worktree binding",
     };
   }
-  return canonicalizePiLaunchDirectory(req.cwd);
+  return canonicalizePiLaunchDirectory(req.cwd, req.allowedReadOnlyRoots);
 }
 
 // ---------------------------------------------------------------------------
@@ -1053,6 +1140,19 @@ export class PiHarnessExecutor implements WorkerExecutor {
     }
 
     const args = buildPiArgs(req, entry, permissionProfile);
+    if (!args.ok) {
+      return {
+        ok: false,
+        output: "",
+        provider: req.provider,
+        model: req.model,
+        inputTokens: null,
+        outputTokens: null,
+        costUsd: null,
+        latencyMs: Date.now() - start,
+        error: args.error,
+      };
+    }
 
     return new Promise<WorkerResult>((resolve) => {
       let stdout = "";
@@ -1070,7 +1170,7 @@ export class PiHarnessExecutor implements WorkerExecutor {
 
       let child: ReturnType<typeof spawn>;
       try {
-        child = spawn(entry.harnessCmd ?? "pi", args, {
+        child = spawn(entry.harnessCmd ?? "pi", args.args, {
           cwd: launchCwd.cwd,
           stdio: ["ignore", "pipe", "pipe"],
           env: buildTaskSubprocessEnv(),
@@ -1197,18 +1297,43 @@ function buildPiArgs(
   req: WorkerRequest,
   registryEntry: ReturnType<typeof getRegistryEntryById> & {},
   permissionProfile: PiHarnessPermissionProfile,
-): string[] {
+): { ok: true; args: string[] } | { ok: false; error: string } {
   const flags: string[] = [];
-  for (let i = 0; i < (registryEntry.harnessFlags ?? []).length; i++) {
-    const flag = registryEntry.harnessFlags![i];
-    if (permissionProfile === "read-only" && flag === "--tools") {
+  const registryFlags = registryEntry.harnessFlags ?? [];
+  for (let i = 0; i < registryFlags.length; i++) {
+    const flag = registryFlags[i];
+    if (permissionProfile !== "read-only") {
+      flags.push(flag);
+      continue;
+    }
+    if (flag === "--tools") {
       i++;
       continue;
     }
-    if (permissionProfile === "read-only" && flag.startsWith("--tools=")) {
+    if (flag.startsWith("--tools=")) {
       continue;
     }
-    flags.push(flag);
+    if (flag === "--no-session" || flag.startsWith("--provider=")) {
+      flags.push(flag);
+      continue;
+    }
+    if (flag === "--provider") {
+      const provider = registryFlags[i + 1];
+      if (!provider) {
+        return {
+          ok: false,
+          error: "pi-harness read-only mode requires complete registry --provider flag pairs",
+        };
+      }
+      flags.push(flag, provider);
+      i++;
+      continue;
+    }
+    return {
+      ok: false,
+      error:
+        `pi-harness read-only mode refuses unsupported registry flag ${JSON.stringify(flag)}`,
+    };
   }
   if (permissionProfile === "read-only") {
     flags.push("--tools", PI_READ_ONLY_TOOLS);
@@ -1216,7 +1341,7 @@ function buildPiArgs(
   flags.push("--mode", "json");
   flags.push("--model", req.model);
   flags.push("-p", req.prompt);
-  return flags;
+  return { ok: true, args: flags };
 }
 
 /**

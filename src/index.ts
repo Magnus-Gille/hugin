@@ -22,7 +22,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, listEligibleTasks, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, prepareManagedCheckout, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt, PUBLICATION_FAILED_TAG } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, listEligibleTasks, buildCheckoutGateFrictionEvent, checkoutGateFailureClassification, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, prepareManagedCheckout, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_FILES, DEFAULT_REPOS_ROOT, DEFAULT_SCRATCH, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt, PUBLICATION_FAILED_TAG } from "./task-helpers.js";
 import { persistPublicationFailure } from "./publication-recovery.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
 import {
@@ -554,6 +554,12 @@ const config = {
 };
 
 const brokerEnv = readBrokerEnv(process.env);
+const piReadOnlyAllowedRoots = Array.from(new Set([
+  path.resolve(config.reposRoot),
+  path.resolve(config.workspace),
+  path.resolve(DEFAULT_SCRATCH),
+  path.resolve(DEFAULT_FILES),
+]));
 
 if (config.signingPolicy !== "off") {
   const keyIds = Object.keys(config.submitterKeys);
@@ -575,17 +581,6 @@ if (config.sensitivityCheckpointSecret.length < 32) {
 }
 
 const legacyClaudeExecutor = process.env.HUGIN_CLAUDE_EXECUTOR?.trim().toLowerCase();
-if (legacyClaudeExecutor && legacyClaudeExecutor !== "sdk") {
-  console.error(
-    `HUGIN_CLAUDE_EXECUTOR=${legacyClaudeExecutor} is no longer supported; Claude tasks now always use the Agent SDK`,
-  );
-  process.exit(1);
-}
-
-if (!config.muninApiKey) {
-  console.error("MUNIN_API_KEY is required");
-  process.exit(1);
-}
 
 // --- Worker identity ---
 
@@ -5932,6 +5927,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       branchResult,
       workingDir: task.workingDir,
       reposRoot: config.reposRoot,
+      allowedReadOnlyRoots: piReadOnlyAllowedRoots,
       checkoutGateRefusalReason,
       checkoutGateDegraded,
     });
@@ -5951,6 +5947,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         workingDirectory: task.workingDir,
         permissionProfile: piHarnessBinding.effectiveWorkerPermissionProfile,
         workerWorktree: piHarnessBinding.binding,
+        configuredManagedRoot: config.reposRoot,
+        allowedReadOnlyRoots: piReadOnlyAllowedRoots,
       });
       const orchResult = await runOrchestratorTask(
         {
@@ -6065,17 +6063,21 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // the task finalizes as `cancelled`, not as a spurious DELIVERY_FAILED.
     let isCancelled = cancellation !== null;
 
-    // Distinct failure classification: a Claude SDK run (direct or via
+    // Distinct failure classification: a pre-spend refusal (managed checkout
+    // gate or Codex sandbox), or a Claude SDK run (direct or via
     // ollama→claude fallback) that failed to authenticate (401 / expired Pi
     // credential, issue #129) or was refused by the version-drift pre-flight
-    // check (issue #123) is tagged + surfaced distinctly from a generic
+    // check (issue #123), is tagged + surfaced distinctly from a generic
     // task-logic failure, so the cause is legible in Munin instead of buried
     // in the raw log. A pre-flight short-circuit already carries a trusted
-    // discriminator (sdkPreflightFailureKind) — only a REAL SDK run (no
-    // discriminator) falls back to regex-classifying its output (Codex
-    // review, #123: DEPS_DRIFT is never inferred from output text).
+    // discriminator (checkoutGateRefusalReason, sdkPreflightFailureKind) —
+    // only a REAL SDK run (no discriminator) falls back to regex-
+    // classifying its output (Codex review, #123: DEPS_DRIFT is never
+    // inferred from output text).
     const failureClassification = !ok && !isTimeout && !isCancelled
-      ? isCodex && codexPreflightFailureReason
+      ? checkoutGateRefusalReason
+        ? checkoutGateFailureClassification(checkoutGateRefusalReason)
+        : isCodex && codexPreflightFailureReason
         ? codexSandboxFailureClassification(codexPreflightFailureReason)
         : isClaude || fallbackTriggered
           ? sdkPreflightFailureKind === DEPS_DRIFT_FAILURE_KIND
@@ -6089,25 +6091,35 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         `Task failed (${failureClassification.kind}): ${failureClassification.reason}`,
       );
     }
-    if (failureClassification?.kind === CODEX_SANDBOX_FAILURE_KIND) {
-      const friction = buildCodexSandboxFrictionEvent({
-        taskId,
-        modelId: task.model,
-        reason: failureClassification.reason,
-        recordedAt: new Date(),
-      });
+    const preflightFriction = checkoutGateRefusalReason
+      ? buildCheckoutGateFrictionEvent({
+          taskId,
+          runtime: task.runtime,
+          modelId: task.model,
+          reason: failureClassification?.reason ?? checkoutGateRefusalReason,
+          recordedAt: new Date(),
+        })
+      : failureClassification?.kind === CODEX_SANDBOX_FAILURE_KIND
+        ? buildCodexSandboxFrictionEvent({
+            taskId,
+            modelId: task.model,
+            reason: failureClassification.reason,
+            recordedAt: new Date(),
+          })
+        : null;
+    if (preflightFriction) {
       try {
         await munin.write(
-          friction.namespace,
-          friction.key,
-          friction.content,
-          friction.tags,
+          preflightFriction.namespace,
+          preflightFriction.key,
+          preflightFriction.content,
+          preflightFriction.tags,
           undefined,
           taskClassification,
         );
       } catch (err) {
         console.error(
-          `[codex-sandbox] failed to persist infrastructure friction for ${taskNs}:`,
+          `[preflight] failed to persist infrastructure friction for ${taskNs}:`,
           err,
         );
       }
@@ -7188,6 +7200,28 @@ const stopHeimdallPanelReporter = startHeimdallPanelReporter(() =>
   buildLearningLoopHealthPanels(learningLoopCollector)
 );
 
+export const __test__ = {
+  parseTask,
+  parseDeclaredRuntime,
+  parseSubmittedByField,
+  isSubmitterAllowed,
+  pollOnce,
+  inspectState: () => ({
+    currentTask,
+    currentTaskConfig,
+    lastPendingQueueSnapshot,
+  }),
+  resetState: () => {
+    shuttingDown = false;
+    currentTask = null;
+    currentClaimTags = null;
+    currentTaskConfig = null;
+    currentCancellation = null;
+    lastPendingQueueSnapshot = snapshotPendingQueue([], false);
+    lastQueueTruncationWarningAtMs = null;
+  },
+};
+
 // --- Graceful shutdown ---
 
 async function shutdown(signal: string): Promise<void> {
@@ -7344,117 +7378,122 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 
 // --- Start ---
 
-// Ensure log directory exists
-ensureLogDir();
-console.log(`Worker ID: ${workerId} (instance: ${processInstanceId})`);
-console.log(`Log directory: ${LOG_DIR}`);
-
-// Configure ollama hosts
-configureHosts({
-  piUrl: config.ollamaPiUrl,
-  laptopUrl: config.ollamaLaptopUrl,
-  orinUrl: config.ollamaOrinUrl,
-});
-if (config.ollamaPiUrl) {
-  console.log(`Ollama Pi: ${config.ollamaPiUrl}`);
-}
-if (config.ollamaLaptopUrl) {
-  console.log(`Ollama Laptop: ${config.ollamaLaptopUrl}`);
-}
-if (config.ollamaOrinUrl) {
-  console.log(`Ollama Orin: ${config.ollamaOrinUrl}`);
-}
-console.log(`Ollama default model: ${config.ollamaDefaultModel}`);
-
-server = app.listen(config.port, config.host, () => {
-  console.log(`Hugin health endpoint: http://${config.host}:${config.port}/health`);
-  console.log(`Munin: ${config.muninUrl}`);
-  console.log(`Workspace: ${config.workspace}`);
-  console.log("Claude executor: agent-sdk");
-  console.log(`Allowed submitters: ${config.allowedSubmitters.includes("*") ? "* (all)" : config.allowedSubmitters.join(", ")}`);
-  console.log(`Egress policy: allowlist (${egressPolicy.allowedHosts.join(", ")})`);
-});
-
-server.on("error", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EADDRINUSE") {
-    console.error(`Port ${config.port} already in use — another Hugin instance is running. Exiting.`);
-  } else {
-    console.error(`Server error: ${err.message}`);
+function startDispatcher(): void {
+  if (legacyClaudeExecutor && legacyClaudeExecutor !== "sdk") {
+    console.error(
+      `HUGIN_CLAUDE_EXECUTOR=${legacyClaudeExecutor} is no longer supported; Claude tasks now always use the Agent SDK`,
+    );
+    process.exit(1);
   }
-  process.exit(1);
-});
+  if (!config.muninApiKey) {
+    console.error("MUNIN_API_KEY is required");
+    process.exit(1);
+  }
 
-// Optional orchestrator-v1 broker (separate port; opt-in via HUGIN_BROKER_KEYS).
-if (brokerEnv.enabled) {
-  const brokerHome = path.join(HUGIN_HOME, "delegation-events.jsonl");
-  const journal = new DelegationJournal({ path: brokerHome });
-  const taskStore = new BrokerTaskStore(munin, { attestationSecret: config.muninApiKey });
-  const learningStore = new LearningExperimentStore(learningExperimentMunin);
-  const idempotency = new IdempotencyIndex();
-  const homeserverReady = loadHomeserverGatewayConfig(process.env) !== null;
-  const executorCapabilities = brokerExecutorCapabilities({
-    homeserverEnabled: homeserverReady,
+  // Ensure log directory exists
+  ensureLogDir();
+  console.log(`Worker ID: ${workerId} (instance: ${processInstanceId})`);
+  console.log(`Log directory: ${LOG_DIR}`);
+
+  // Configure ollama hosts
+  configureHosts({
+    piUrl: config.ollamaPiUrl,
+    laptopUrl: config.ollamaLaptopUrl,
+    orinUrl: config.ollamaOrinUrl,
   });
-  // Bounded-retry bind (issue #252): a not-yet-assigned tailnet IP
-  // (HUGIN_BROKER_HOST) at boot fails EADDRNOTAVAIL until tailscaled
-  // assigns it — retry transient failures with backoff rather than
-  // degrading to "dispatcher without broker" on the first attempt.
-  // Permanent errors (EADDRINUSE/EACCES) fail fast without retrying.
-  // brokerBindStatus is updated on every transition so /health reflects
-  // the live state instead of only learning about success after the fact.
-  brokerBindAbort = new AbortController();
-  startBrokerWithRetry(
-    {
-      host: brokerEnv.host,
-      port: brokerEnv.port,
-      keys: brokerEnv.keys,
-      learningStore,
-      deps: { taskStore, journal, idempotency, executorCapabilities },
-    },
-    {
-      signal: brokerBindAbort.signal,
-      onStatus: (status) => {
-        brokerBindStatus = status;
-      },
-      onLog: (level, message) => {
-        if (level === "error") console.error(`[broker] ${message}`);
-        else if (level === "warn") console.warn(`[broker] ${message}`);
-        else console.log(`[broker] ${message}`);
-      },
-    },
-  ).then((rb) => {
-    if (!rb) return; // permanently failed, retries exhausted, or cancelled — already logged/reported
-    if (shuttingDown) {
-      // Bound while shutdown was already in progress (retry sleep raced the
-      // shutdown signal): don't leak an open listener into a dying process.
-      rb.close().catch(() => {});
-      return;
+  if (config.ollamaPiUrl) {
+    console.log(`Ollama Pi: ${config.ollamaPiUrl}`);
+  }
+  if (config.ollamaLaptopUrl) {
+    console.log(`Ollama Laptop: ${config.ollamaLaptopUrl}`);
+  }
+  if (config.ollamaOrinUrl) {
+    console.log(`Ollama Orin: ${config.ollamaOrinUrl}`);
+  }
+  console.log(`Ollama default model: ${config.ollamaDefaultModel}`);
+
+  server = app.listen(config.port, config.host, () => {
+    console.log(`Hugin health endpoint: http://${config.host}:${config.port}/health`);
+    console.log(`Munin: ${config.muninUrl}`);
+    console.log(`Workspace: ${config.workspace}`);
+    console.log("Claude executor: agent-sdk");
+    console.log(`Allowed submitters: ${config.allowedSubmitters.includes("*") ? "* (all)" : config.allowedSubmitters.join(", ")}`);
+    console.log(`Egress policy: allowlist (${egressPolicy.allowedHosts.join(", ")})`);
+  });
+
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`Port ${config.port} already in use — another Hugin instance is running. Exiting.`);
+    } else {
+      console.error(`Server error: ${err.message}`);
     }
-    runningBroker = rb;
-    console.log(
-      `Broker endpoint: http://${brokerEnv.host}:${brokerEnv.port}/v1/delegate/* (principals: ${Object.keys(brokerEnv.keys).join(", ")})`,
-    );
-    console.log(
-      `Broker canonical lifecycle: Munin dispatcher (legacy journal read-only: ${brokerHome})`,
-    );
-    console.log(`Broker M5 delegate executor: ${homeserverReady ? "enabled" : "disabled"}`);
+    process.exit(1);
   });
-} else {
-  brokerBindStatus = null;
-  console.log("Broker: disabled (set HUGIN_BROKER_KEYS to enable)");
+
+  // Optional orchestrator-v1 broker (separate port; opt-in via HUGIN_BROKER_KEYS).
+  if (brokerEnv.enabled) {
+    const brokerHome = path.join(HUGIN_HOME, "delegation-events.jsonl");
+    const journal = new DelegationJournal({ path: brokerHome });
+    const taskStore = new BrokerTaskStore(munin, { attestationSecret: config.muninApiKey });
+    const learningStore = new LearningExperimentStore(learningExperimentMunin);
+    const idempotency = new IdempotencyIndex();
+    const homeserverReady = loadHomeserverGatewayConfig(process.env) !== null;
+    const executorCapabilities = brokerExecutorCapabilities({
+      homeserverEnabled: homeserverReady,
+    });
+    brokerBindAbort = new AbortController();
+    startBrokerWithRetry(
+      {
+        host: brokerEnv.host,
+        port: brokerEnv.port,
+        keys: brokerEnv.keys,
+        learningStore,
+        deps: { taskStore, journal, idempotency, executorCapabilities },
+      },
+      {
+        signal: brokerBindAbort.signal,
+        onStatus: (status) => {
+          brokerBindStatus = status;
+        },
+        onLog: (level, message) => {
+          if (level === "error") console.error(`[broker] ${message}`);
+          else if (level === "warn") console.warn(`[broker] ${message}`);
+          else console.log(`[broker] ${message}`);
+        },
+      },
+    ).then((rb) => {
+      if (!rb) return;
+      if (shuttingDown) {
+        rb.close().catch(() => {});
+        return;
+      }
+      runningBroker = rb;
+      console.log(
+        `Broker endpoint: http://${brokerEnv.host}:${brokerEnv.port}/v1/delegate/* (principals: ${Object.keys(brokerEnv.keys).join(", ")})`,
+      );
+      console.log(
+        `Broker canonical lifecycle: Munin dispatcher (legacy journal read-only: ${brokerHome})`,
+      );
+      console.log(`Broker M5 delegate executor: ${homeserverReady ? "enabled" : "disabled"}`);
+    });
+  } else {
+    brokerBindStatus = null;
+    console.log("Broker: disabled (set HUGIN_BROKER_KEYS to enable)");
+  }
+
+  Promise.all([munin.health(), refreshCodexSandboxStatus()]).then(([ok]) => {
+    if (!ok) {
+      console.warn("WARNING: Munin health check failed — will retry on first poll");
+    } else {
+      console.log("Munin health check: ok");
+    }
+    pollLoop().then(() => {
+      server.close();
+      process.exit(0);
+    });
+  });
 }
 
-// Check Munin and the zero-token Codex sandbox concurrently before polling.
-// The HTTP server is already listening so deploy acceptance can observe the
-// probe's transient `checking` state, then its definitive result.
-Promise.all([munin.health(), refreshCodexSandboxStatus()]).then(([ok]) => {
-  if (!ok) {
-    console.warn("WARNING: Munin health check failed — will retry on first poll");
-  } else {
-    console.log("Munin health check: ok");
-  }
-  pollLoop().then(() => {
-    server.close();
-    process.exit(0);
-  });
-});
+if (!process.env.VITEST) {
+  startDispatcher();
+}

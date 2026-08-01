@@ -122,7 +122,7 @@ describe("verifyCleanCheckout", () => {
     spawnBehaviors = [{ exitCode: 0, stdout: "M leftover.txt\n" }];
     const result = await verifyCleanCheckout(WORKDIR, commit);
     expect(result.clean).toBe(false);
-    expect(result.reason).toContain("uncommitted or untracked");
+    expect(result.reason).toContain("tracked or untracked leftover state");
     // Never bothers checking HEAD once dirtiness is already proven.
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0].args).toEqual(["status", "--porcelain", "--ignored=matching"]);
@@ -132,7 +132,16 @@ describe("verifyCleanCheckout", () => {
     spawnBehaviors = [{ exitCode: 0, stdout: "!! node_modules/\n" }];
     const result = await verifyCleanCheckout(WORKDIR, commit);
     expect(result.clean).toBe(false);
-    expect(result.reason).toContain("uncommitted or untracked");
+    expect(result.reason).toContain("ignored leftover state");
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0].args).toEqual(["status", "--porcelain", "--ignored=matching"]);
+  });
+
+  it("reports mixed tracked and ignored leftovers without collapsing them into the wrong category", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: "M src/index.ts\n!! node_modules/\n" }];
+    const result = await verifyCleanCheckout(WORKDIR, commit);
+    expect(result.clean).toBe(false);
+    expect(result.reason).toContain("tracked/untracked and ignored leftover state");
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0].args).toEqual(["status", "--porcelain", "--ignored=matching"]);
   });
@@ -348,7 +357,7 @@ describe("prepareManagedCheckout — the #236 pre-execution isolation/verificati
     spawnBehaviors = [{ exitCode: 0, stdout: `${markCall.args[3]}\n` }];
     const marker = await readCheckoutContamination(WORKDIR);
     expect(marker?.taskId).toBe("task-recover-fail");
-    expect(marker?.reason).toContain("uncommitted or untracked");
+    expect(marker?.reason).toContain("tracked or untracked leftover state");
   });
 
   it("includes ignored leftovers in the global checkout gate, so stale caches/env/dependencies trigger recovery", async () => {

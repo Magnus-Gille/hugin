@@ -1,7 +1,15 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { FailureClassification } from "./failure-classification.js";
+import {
+  buildFrictionContent,
+  buildFrictionKey,
+  buildFrictionNamespace,
+  buildFrictionTags,
+} from "./friction/munin-key.js";
+import type { ReportFrictionInput } from "./friction/schema.js";
 import type { MuninEntry, MuninQueryResult, MuninReadResult } from "./munin-client.js";
 import type { WorkerWorktreeBinding } from "./orchestrator/pi-harness-types.js";
 import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
@@ -20,6 +28,8 @@ import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
  */
 export const DEFAULT_REPOS_ROOT = "/home/magnus/repos";
 export const DEFAULT_WORKSPACE = "/home/magnus/workspace";
+export const DEFAULT_SCRATCH = "/home/magnus/scratch";
+export const DEFAULT_FILES = "/home/magnus/mimir";
 
 export interface WorkspaceRoots {
   /** Root for `repo:<name>` resolution. Defaults to {@link DEFAULT_REPOS_ROOT}. */
@@ -63,8 +73,8 @@ export function resolveContext(raw: string, roots: WorkspaceRoots = {}): string 
     return resolved;
   }
   switch (trimmed) {
-    case "scratch": return "/home/magnus/scratch";
-    case "files": return "/home/magnus/mimir";
+    case "scratch": return DEFAULT_SCRATCH;
+    case "files": return DEFAULT_FILES;
     default: {
       // Normalize before checking the prefix. A lexical prefix check alone
       // accepts `/home/magnus/../../etc`, which later filesystem calls resolve
@@ -517,6 +527,68 @@ export function deriveRepositoryOutcome(
   if (finalizeAction === "pr-created") return { state: "changes-present", ...base };
   if (finalizeAction === "push-failed") return { state: "publication-failed", ...base };
   return { state: "not-finalized", ...base };
+}
+
+export const CHECKOUT_GATE_FAILURE_KIND = "CHECKOUT_CONTAMINATED";
+export const CHECKOUT_GATE_FAILURE_TAG = "failure:infra";
+
+export function checkoutGateFailureClassification(reason: string): FailureClassification {
+  return {
+    kind: CHECKOUT_GATE_FAILURE_KIND,
+    tag: CHECKOUT_GATE_FAILURE_TAG,
+    reason,
+  };
+}
+
+export interface CheckoutGateFrictionEvent {
+  namespace: string;
+  key: string;
+  content: string;
+  tags: string[];
+}
+
+export function buildCheckoutGateFrictionEvent(args: {
+  taskId: string;
+  runtime: string;
+  modelId?: string;
+  reason: string;
+  recordedAt: Date;
+}): CheckoutGateFrictionEvent {
+  const input: ReportFrictionInput = {
+    event_id: randomUUID(),
+    friction_type: "tool_failure",
+    severity: "blocking",
+    summary: "Managed checkout admission failed before task execution",
+    detail: args.reason.slice(0, 8_000),
+    task_id: args.taskId,
+    model_id: args.modelId?.trim() || args.runtime,
+    tool_name: "managed-checkout-gate",
+    tags: [`runtime:${args.runtime}`, `failure-kind:${CHECKOUT_GATE_FAILURE_KIND}`],
+  };
+  const modelId = input.model_id || args.runtime;
+  const tags = buildFrictionTags({
+    input,
+    modelId,
+    resolvedTaskId: args.taskId,
+  }).filter((tag) => tag !== "source:model-self-report");
+  tags.push("source:hugin-preflight");
+  const baseContent = JSON.parse(buildFrictionContent({
+    input,
+    modelId,
+    resolvedTaskId: args.taskId,
+    recordedAt: args.recordedAt,
+  })) as Record<string, unknown>;
+
+  return {
+    namespace: buildFrictionNamespace(),
+    key: buildFrictionKey(args.taskId, args.recordedAt),
+    content: JSON.stringify({
+      ...baseContent,
+      reporter: "hugin-preflight",
+      failure_kind: CHECKOUT_GATE_FAILURE_KIND,
+    }, null, 2),
+    tags,
+  };
 }
 
 /**
@@ -1356,6 +1428,33 @@ export interface ManagedTaskWorktreeBindingVerificationOptions {
   configuredManagedRoot?: string;
 }
 
+// Use `--ignored=matching`, not bare `--ignored`: the clean-checkout gate
+// only needs a stable signal that ignored leftovers exist. `matching` reports
+// the ignored path itself (for example `!! node_modules/`) instead of
+// recursively exploding a whole ignored tree into noisy child entries.
+const CLEAN_CHECKOUT_STATUS_ARGS_WITH_IGNORED = [
+  "status",
+  "--porcelain",
+  "--ignored=matching",
+] as const;
+
+function describeCheckoutLeftovers(porcelain: string): string {
+  const lines = porcelain
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const hasIgnored = lines.some((line) => line.startsWith("!!"));
+  const hasVisible = lines.some((line) => !line.startsWith("!!"));
+
+  if (hasIgnored && hasVisible) {
+    return "working tree has tracked/untracked and ignored leftover state";
+  }
+  if (hasIgnored) {
+    return "working tree has ignored leftover state";
+  }
+  return "working tree has tracked or untracked leftover state";
+}
+
 function isPathWithinRoot(candidate: string, root: string): boolean {
   return candidate.startsWith(`${root}${path.sep}`);
 }
@@ -1684,13 +1783,14 @@ export async function verifyCleanCheckout(
     workingDir,
     options.includeIgnored === false
       ? ["status", "--porcelain"]
-      : ["status", "--porcelain", "--ignored=matching"],
+      : [...CLEAN_CHECKOUT_STATUS_ARGS_WITH_IGNORED],
   );
   if (!status.ok) {
     return { clean: false, reason: `git status failed: ${status.stderr || "unknown error"}` };
   }
-  if (status.stdout.toString("utf8").trim().length > 0) {
-    return { clean: false, reason: "working tree has uncommitted or untracked leftover state" };
+  const statusOutput = status.stdout.toString("utf8").trim();
+  if (statusOutput.length > 0) {
+    return { clean: false, reason: describeCheckoutLeftovers(statusOutput) };
   }
   const head = await runGitCapture(workingDir, ["rev-parse", "HEAD"]);
   if (!head.ok) {

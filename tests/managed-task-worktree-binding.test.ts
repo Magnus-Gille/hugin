@@ -63,7 +63,12 @@ const { createModelInvoker } = await import("../src/orchestrator/model-invoker.j
 const MANAGED_ROOT = "/home/magnus/repos";
 const WORKTREE = `${MANAGED_ROOT}/demo`;
 const WORKTREE_SUBDIR = `${WORKTREE}/src`;
+const WORKSPACE_ROOT = "/home/magnus/workspace";
+const SCRATCH_ROOT = "/home/magnus/scratch";
+const FILES_ROOT = "/home/magnus/mimir";
 const READ_ONLY_CWD = "/home/magnus/workspace/demo-readonly";
+const SCRATCH_CWD = `${SCRATCH_ROOT}/demo-readonly`;
+const READ_ONLY_ROOTS = [MANAGED_ROOT, WORKSPACE_ROOT, SCRATCH_ROOT, FILES_ROOT];
 const BRANCH_NAME = "hugin/task-339";
 const EXPECTED_REVISION = "a".repeat(40);
 
@@ -86,7 +91,11 @@ function primeDefaultRealpaths() {
   setRealpath(MANAGED_ROOT);
   setRealpath(WORKTREE);
   setRealpath(WORKTREE_SUBDIR);
+  setRealpath(WORKSPACE_ROOT);
+  setRealpath(SCRATCH_ROOT);
+  setRealpath(FILES_ROOT);
   setRealpath(READ_ONLY_CWD);
+  setRealpath(SCRATCH_CWD);
 }
 
 function cleanBuilderBehaviors(head = EXPECTED_REVISION) {
@@ -243,7 +252,7 @@ describe("buildManagedTaskWorktreeBinding", () => {
     );
 
     expect(result.ok).toBe(false);
-    expect(result.reason).toContain("uncommitted or untracked");
+    expect(result.reason).toContain("tracked or untracked leftover state");
     expect(spawnCalls).toHaveLength(3);
   });
 });
@@ -359,7 +368,30 @@ describe("preparePiHarnessWorktreeBinding", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it("supports reused/recovered branch identities whenever branch name and base commit are still pinned", async () => {
+  it("degrades trusted-code pi-harness workers on scratch/files into read-only admission when no managed binding exists", async () => {
+    const spy = vi.spyOn(taskHelpers, "buildManagedTaskWorktreeBinding");
+
+    const result = await admission.preparePiHarnessWorktreeBinding({
+      roles: {
+        ...baseRoles,
+        worker: { provider: "pi-harness", model: "qwen/qwen3-coder-next" },
+      },
+      capabilities: ["tools", "code"],
+      permissionProfile: "trusted-code",
+      branchResult: { action: "skipped" },
+      workingDir: SCRATCH_CWD,
+      reposRoot: MANAGED_ROOT,
+      allowedReadOnlyRoots: READ_ONLY_ROOTS,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      effectiveWorkerPermissionProfile: "read-only",
+    });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("forwards reused/recovered pinned branch identities to the builder", async () => {
     const spy = vi.spyOn(taskHelpers, "buildManagedTaskWorktreeBinding").mockResolvedValue({
       ok: true,
       binding: makeBindingResult(),
@@ -388,6 +420,65 @@ describe("preparePiHarnessWorktreeBinding", () => {
       binding: makeBindingResult(),
     });
     expect(spy).toHaveBeenCalledWith(WORKTREE, MANAGED_ROOT, BRANCH_NAME, EXPECTED_REVISION);
+  });
+
+  it("accepts a reused/recovered pinned branch identity when the actual worktree still verifies", async () => {
+    spawnBehaviors = cleanBuilderBehaviors();
+
+    const result = await admission.preparePiHarnessWorktreeBinding({
+      roles: {
+        ...baseRoles,
+        worker: { provider: "pi-harness", model: "qwen/qwen3-coder-next" },
+      },
+      capabilities: ["tools", "code"],
+      permissionProfile: "trusted-code",
+      branchResult: {
+        action: "fetch-failed",
+        branchName: BRANCH_NAME,
+        baseCommit: EXPECTED_REVISION,
+        error: "branch already existed and was reused",
+      },
+      workingDir: WORKTREE,
+      reposRoot: MANAGED_ROOT,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      effectiveWorkerPermissionProfile: "trusted-code",
+      binding: makeBindingResult(),
+    });
+  });
+
+  it("refuses a reused/recovered pinned branch identity when the actual worktree no longer verifies", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${WORKTREE}\n` },
+      { exitCode: 0, stdout: "main\n" },
+    ];
+
+    const result = await admission.preparePiHarnessWorktreeBinding({
+      roles: {
+        ...baseRoles,
+        worker: { provider: "pi-harness", model: "qwen/qwen3-coder-next" },
+      },
+      capabilities: ["tools", "code"],
+      permissionProfile: "trusted-code",
+      branchResult: {
+        action: "fetch-failed",
+        branchName: BRANCH_NAME,
+        baseCommit: EXPECTED_REVISION,
+        error: "branch already existed and was reused",
+      },
+      workingDir: WORKTREE,
+      reposRoot: MANAGED_ROOT,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason:
+        `selected worktree ${WORKTREE} is on branch ${JSON.stringify("main")} ` +
+        `instead of the task branch ${JSON.stringify(BRANCH_NAME)}`,
+      effectiveWorkerPermissionProfile: "trusted-code",
+    });
   });
 
   it("propagates builder failures when a writable pi-harness worker cannot be bound", async () => {
@@ -454,6 +545,8 @@ describe("preparePiHarnessWorktreeBinding", () => {
           workingDirectory: WORKTREE,
           permissionProfile: binding.effectiveWorkerPermissionProfile,
           workerWorktree: binding.binding,
+          configuredManagedRoot: MANAGED_ROOT,
+          allowedReadOnlyRoots: READ_ONLY_ROOTS,
         },
         () => executor,
       );
@@ -512,6 +605,8 @@ describe("preparePiHarnessWorktreeBinding", () => {
         workingDirectory: READ_ONLY_CWD,
         permissionProfile: binding.effectiveWorkerPermissionProfile,
         workerWorktree: binding.binding,
+        configuredManagedRoot: MANAGED_ROOT,
+        allowedReadOnlyRoots: READ_ONLY_ROOTS,
       },
       () => executor,
     );

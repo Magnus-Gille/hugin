@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import * as path from "node:path";
+type WorkerRequest = import("../../src/orchestrator/worker-executor.js").WorkerRequest;
 
 // ---------------------------------------------------------------------------
 // Mock node:child_process before importing the module
@@ -1484,10 +1485,21 @@ const PI_JSONL_SUCCESS = [
   JSON.stringify({ type: "usage", usage: { input_tokens: 50, output_tokens: 30 } }),
 ].join("\n") + "\n";
 const PI_MANAGED_ROOT = "/home/magnus/repos";
+const PI_WORKSPACE_ROOT = "/home/magnus/workspace";
+const PI_SCRATCH_ROOT = "/home/magnus/scratch";
+const PI_FILES_ROOT = "/home/magnus/mimir";
 const PI_WORKTREE_PATH = `${PI_MANAGED_ROOT}/hugin-worktree`;
 const PI_WORKTREE_SUBDIR = `${PI_WORKTREE_PATH}/src`;
+const PI_READ_ONLY_CWD = `${PI_WORKSPACE_ROOT}/readonly-hugin`;
+const PI_SCRATCH_CWD = `${PI_SCRATCH_ROOT}/readonly-hugin`;
 const PI_BRANCH_NAME = "hugin/task-339";
 const PI_EXPECTED_REVISION = "a".repeat(40);
+const PI_ALLOWED_READ_ONLY_ROOTS = [
+  PI_MANAGED_ROOT,
+  PI_WORKSPACE_ROOT,
+  PI_SCRATCH_ROOT,
+  PI_FILES_ROOT,
+];
 
 function cleanPiWorktreeBehaviors() {
   return [
@@ -1509,8 +1521,13 @@ function setRealpath(
 
 function primeDefaultRealpaths() {
   setRealpath(PI_MANAGED_ROOT);
+  setRealpath(PI_WORKSPACE_ROOT);
+  setRealpath(PI_SCRATCH_ROOT);
+  setRealpath(PI_FILES_ROOT);
   setRealpath(PI_WORKTREE_PATH);
   setRealpath(PI_WORKTREE_SUBDIR);
+  setRealpath(PI_READ_ONLY_CWD);
+  setRealpath(PI_SCRATCH_CWD);
 }
 
 function makePiBinding(
@@ -1536,8 +1553,9 @@ function makeReadOnlyPiRequest(overrides: Partial<WorkerRequest> = {}): WorkerRe
     model: "qwen/qwen3-coder-next",
     prompt: "hello",
     timeoutMs: 5000,
-    cwd: PI_WORKTREE_PATH,
+    cwd: PI_READ_ONLY_CWD,
     permissionProfile: "read-only",
+    allowedReadOnlyRoots: PI_ALLOWED_READ_ONLY_ROOTS,
     ...overrides,
   };
 }
@@ -1547,6 +1565,8 @@ function makeTrustedPiRequest(overrides: Partial<WorkerRequest> = {}): WorkerReq
     ...makeReadOnlyPiRequest(),
     permissionProfile: "trusted-code",
     worktree: makePiBinding(),
+    configuredManagedRoot: PI_MANAGED_ROOT,
+    cwd: undefined,
     ...overrides,
   };
 }
@@ -1604,7 +1624,19 @@ describe("PiHarnessExecutor — success path", () => {
     expect(cmd).toBe("pi");
     expect(args).toContain("--tools");
     expect(args).toContain("read,grep,find,ls");
-    expect(options?.cwd).toBe(PI_WORKTREE_PATH);
+    expect(options?.cwd).toBe(PI_READ_ONLY_CWD);
+  });
+
+  it("allows read-only pi-harness launches within scratch/files roots when explicitly allowlisted", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    const result = await new PiHarnessExecutor().run(
+      makeReadOnlyPiRequest({ cwd: PI_SCRATCH_CWD, prompt: "inspect scratch state" }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]?.options?.cwd).toBe(PI_SCRATCH_CWD);
   });
 
   it("does not let registry harnessFlags override the enforced read-only tool allowlist", async () => {
@@ -1627,6 +1659,47 @@ describe("PiHarnessExecutor — success path", () => {
     expect(spawnCalls[0]?.args).not.toContain("write,edit");
     expect(spawnCalls[0]?.args.filter((arg) => arg === "--tools")).toHaveLength(1);
     expect(spawnCalls[0]?.args).toContain("read,grep,find,ls");
+  });
+
+  it("fails closed on unsupported registry harness flags in read-only mode", async () => {
+    const original = runtimeRegistry.getRegistryEntryById;
+    const piEntry = original("pi-harness");
+    if (!piEntry) throw new Error("pi-harness registry entry missing in test");
+    vi.spyOn(runtimeRegistry, "getRegistryEntryById").mockImplementation((id) =>
+      id === "pi-harness"
+        ? {
+            ...piEntry,
+            harnessFlags: ["--no-session", "--dangerous-write"],
+          }
+        : original(id),
+    );
+
+    const result = await new PiHarnessExecutor().run(makeReadOnlyPiRequest());
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("refuses unsupported registry flag");
+    expect(result.error).toContain("--dangerous-write");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed on incomplete read-only provider flag pairs from the registry", async () => {
+    const original = runtimeRegistry.getRegistryEntryById;
+    const piEntry = original("pi-harness");
+    if (!piEntry) throw new Error("pi-harness registry entry missing in test");
+    vi.spyOn(runtimeRegistry, "getRegistryEntryById").mockImplementation((id) =>
+      id === "pi-harness"
+        ? {
+            ...piEntry,
+            harnessFlags: ["--no-session", "--provider"],
+          }
+        : original(id),
+    );
+
+    const result = await new PiHarnessExecutor().run(makeReadOnlyPiRequest());
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("requires complete registry --provider flag pairs");
+    expect(spawnCalls).toHaveLength(0);
   });
 
   it("does not expose the dispatcher checkpoint secret to the Pi harness", async () => {
@@ -1777,15 +1850,16 @@ describe("PiHarnessExecutor — success path", () => {
     ]);
   });
 
-  it("cross-checks the selected binding against the executor's configured managed root", async () => {
+  it("prefers the explicit configured managed root over process.env when verifying the selected binding", async () => {
     vi.stubEnv("HUGIN_REPOS_ROOT", "/home/magnus/other-root");
     setRealpath("/home/magnus/other-root");
+    spawnBehaviors = [...cleanPiWorktreeBehaviors(), { exitCode: 0, stdout: PI_JSONL_SUCCESS }];
 
-    const result = await new PiHarnessExecutor().run(makeTrustedPiRequest());
+    const result = await new PiHarnessExecutor().run(makeTrustedPiRequest({ prompt: "edit safely" }));
 
-    expect(result.ok).toBe(false);
-    expect(result.error).toContain("configured managed repos root");
-    expect(spawnCalls).toHaveLength(0);
+    expect(result.ok).toBe(true);
+    expect(spawnCalls).toHaveLength(6);
+    expect(spawnCalls[5]?.cmd).toBe("pi");
   });
 });
 
@@ -1810,6 +1884,64 @@ describe("PiHarnessExecutor — non-zero exit path", () => {
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain("trusted-code execution requires a selected worktree binding");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when read-only execution lacks an explicit allowlist of launch roots", async () => {
+    const result = await new PiHarnessExecutor().run(
+      makeReadOnlyPiRequest({ allowedReadOnlyRoots: [] }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("requires an explicit allowlist of launch roots");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when a read-only launch cwd escapes the configured allowlist", async () => {
+    const outside = "/tmp/pi-readonly";
+    setRealpath(outside);
+
+    const result = await new PiHarnessExecutor().run(
+      makeReadOnlyPiRequest({ cwd: outside }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("must stay within an allowed read-only root");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when a duplicate cwd conflicts with the selected worktree binding", async () => {
+    const result = await new PiHarnessExecutor().run(
+      makeTrustedPiRequest({ cwd: PI_READ_ONLY_CWD }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("conflicting cwd");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("allows an identical duplicate cwd when it matches the selected worktree binding exactly", async () => {
+    spawnBehaviors = [...cleanPiWorktreeBehaviors(), { exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    const result = await new PiHarnessExecutor().run(
+      makeTrustedPiRequest({ cwd: PI_WORKTREE_PATH }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls).toHaveLength(6);
+    expect(spawnCalls[5]?.options?.cwd).toBe(PI_WORKTREE_PATH);
+  });
+
+  it("fails closed when the explicit configured managed root disagrees with the bound worktree", async () => {
+    const otherRoot = "/home/magnus/other-root";
+    setRealpath(otherRoot);
+
+    const result = await new PiHarnessExecutor().run(
+      makeTrustedPiRequest({ configuredManagedRoot: otherRoot }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("configured managed repos root");
     expect(spawnCalls).toHaveLength(0);
   });
 

@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import type { RuntimeCapability } from "../runtime-registry.js";
 import type { TaskBranchResult } from "../task-helpers.js";
 import { buildManagedTaskWorktreeBinding } from "../task-helpers.js";
@@ -67,6 +68,28 @@ export function assessPiHarnessWorktreeBindingRequest(
   return { ok: true, needsBinding: true, effectiveWorkerPermissionProfile };
 }
 
+function isContainedByRoot(candidate: string, root: string): boolean {
+  return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+}
+
+function canDowngradeTrustedPiWorkerToReadOnly(input: {
+  workingDir: string;
+  reposRoot: string;
+  allowedReadOnlyRoots?: string[];
+}): boolean {
+  if (!input.allowedReadOnlyRoots || input.allowedReadOnlyRoots.length === 0) {
+    return false;
+  }
+  const resolvedWorkingDir = path.resolve(input.workingDir);
+  const resolvedReposRoot = path.resolve(input.reposRoot);
+  if (isContainedByRoot(resolvedWorkingDir, resolvedReposRoot)) {
+    return false;
+  }
+  return input.allowedReadOnlyRoots
+    .map((root) => path.resolve(root))
+    .some((root) => isContainedByRoot(resolvedWorkingDir, root));
+}
+
 export async function preparePiHarnessWorktreeBinding(input: {
   roles: Record<OrchestratorRole, RoleBinding>;
   capabilities?: RuntimeCapability[];
@@ -74,6 +97,7 @@ export async function preparePiHarnessWorktreeBinding(input: {
   branchResult: TaskBranchResult;
   workingDir: string;
   reposRoot: string;
+  allowedReadOnlyRoots?: string[];
   checkoutGateRefusalReason?: string;
   checkoutGateDegraded?: boolean;
 }): Promise<
@@ -88,6 +112,21 @@ export async function preparePiHarnessWorktreeBinding(input: {
       effectiveWorkerPermissionProfile: PiHarnessPermissionProfile;
     }
 > {
+  const effectiveWorkerPermissionProfile = deriveEffectivePiHarnessWorkerPermissionProfile(input);
+  const workerUsesPiHarness = input.roles.worker.provider === "pi-harness";
+  const bindingUnavailable = !input.branchResult.branchName || !input.branchResult.baseCommit;
+  if (
+    workerUsesPiHarness &&
+    effectiveWorkerPermissionProfile === "trusted-code" &&
+    bindingUnavailable &&
+    canDowngradeTrustedPiWorkerToReadOnly(input)
+  ) {
+    return {
+      ok: true,
+      effectiveWorkerPermissionProfile: "read-only",
+    };
+  }
+
   const assessment = assessPiHarnessWorktreeBindingRequest(input);
   if (!assessment.ok) return assessment;
   if (!assessment.needsBinding) {

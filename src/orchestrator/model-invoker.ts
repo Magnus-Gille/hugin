@@ -65,6 +65,8 @@ export function createModelInvoker(
     workingDirectory?: string;
     permissionProfile?: "read-only" | "trusted-code";
     workerWorktree?: WorkerWorktreeBinding;
+    configuredManagedRoot?: string;
+    allowedReadOnlyRoots?: string[];
   },
   executorFactory?: (provider: string, opts?: { role?: OrchestratorRole }) => WorkerExecutor,
 ): ModelInvoker {
@@ -102,12 +104,29 @@ export function createModelInvoker(
           : {};
       const piHarnessMetadata =
         binding.provider === "pi-harness"
-          ? {
-              cwd: defaults.workingDirectory,
-              permissionProfile:
-                role === "worker" ? defaults.permissionProfile ?? "read-only" : "read-only",
-              ...(role === "worker" ? { worktree: defaults.workerWorktree } : {}),
-            }
+          ? (() => {
+              const permissionProfile =
+                role === "worker" ? defaults.permissionProfile ?? "read-only" : "read-only";
+              const readOnlyLaunch = {
+                cwd: defaults.workingDirectory,
+                allowedReadOnlyRoots: defaults.allowedReadOnlyRoots,
+              };
+              if (
+                role === "worker" &&
+                permissionProfile === "trusted-code" &&
+                defaults.workerWorktree
+              ) {
+                return {
+                  permissionProfile,
+                  worktree: defaults.workerWorktree,
+                  configuredManagedRoot: defaults.configuredManagedRoot,
+                };
+              }
+              return {
+                permissionProfile,
+                ...readOnlyLaunch,
+              };
+            })()
           : {};
       return executor.run({
         provider: binding.provider,

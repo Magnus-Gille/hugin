@@ -17,6 +17,14 @@ function makeResult(output: string, costUsd: number | null = 0.001): WorkerResul
   };
 }
 
+const PI_CONFIGURED_ROOT = "/home/magnus/repos";
+const PI_READ_ONLY_ROOTS = [
+  "/home/magnus/repos",
+  "/home/magnus/workspace",
+  "/home/magnus/scratch",
+  "/home/magnus/mimir",
+];
+
 describe("createModelInvoker", () => {
   const roles: Record<OrchestratorRole, RoleBinding> = {
     planner: { provider: "openrouter", model: "planner-model" },
@@ -284,6 +292,7 @@ describe("createModelInvoker", () => {
         timeoutMs: 5000,
         workingDirectory: "/home/magnus/repos/hugin",
         permissionProfile: "trusted-code",
+        allowedReadOnlyRoots: PI_READ_ONLY_ROOTS,
       },
       () => mockExecutor,
     );
@@ -294,6 +303,7 @@ describe("createModelInvoker", () => {
       provider: "pi-harness",
       model: "qwen/qwen3-coder-next",
       cwd: "/home/magnus/repos/hugin",
+      allowedReadOnlyRoots: PI_READ_ONLY_ROOTS,
       permissionProfile: "read-only",
     });
     expect(capturedRequests[0].worktree).toBeUndefined();
@@ -318,6 +328,7 @@ describe("createModelInvoker", () => {
         timeoutMs: 5000,
         workingDirectory: "/home/magnus/repos/hugin",
         permissionProfile: "read-only",
+        allowedReadOnlyRoots: PI_READ_ONLY_ROOTS,
       },
       () => mockExecutor,
     );
@@ -328,6 +339,7 @@ describe("createModelInvoker", () => {
       provider: "pi-harness",
       model: "qwen/qwen3-coder-next",
       cwd: "/home/magnus/repos/hugin",
+      allowedReadOnlyRoots: PI_READ_ONLY_ROOTS,
       permissionProfile: "read-only",
     });
     expect(capturedRequests[0].worktree).toBeUndefined();
@@ -359,6 +371,8 @@ describe("createModelInvoker", () => {
         workingDirectory: "/home/magnus/repos/hugin",
         permissionProfile: "trusted-code",
         workerWorktree: worktree,
+        configuredManagedRoot: PI_CONFIGURED_ROOT,
+        allowedReadOnlyRoots: PI_READ_ONLY_ROOTS,
       },
       () => mockExecutor,
     );
@@ -366,7 +380,12 @@ describe("createModelInvoker", () => {
     await invoker.invoke("worker", "edit");
     await invoker.invoke("planner", "plan");
 
-    expect(capturedRequests[0].worktree).toEqual(worktree);
+    expect(capturedRequests[0]).toMatchObject({
+      worktree,
+      configuredManagedRoot: PI_CONFIGURED_ROOT,
+      permissionProfile: "trusted-code",
+    });
+    expect(capturedRequests[0].cwd).toBeUndefined();
     expect(capturedRequests[1].worktree).toBeUndefined();
   });
 
@@ -398,6 +417,8 @@ describe("createModelInvoker", () => {
         workingDirectory: "/home/magnus/repos/hugin",
         permissionProfile: "trusted-code",
         workerWorktree: worktree,
+        configuredManagedRoot: PI_CONFIGURED_ROOT,
+        allowedReadOnlyRoots: PI_READ_ONLY_ROOTS,
       },
       () => mockExecutor,
     );
@@ -412,20 +433,23 @@ describe("createModelInvoker", () => {
       provider: "pi-harness",
       model: "planner-pi",
       cwd: "/home/magnus/repos/hugin",
+      allowedReadOnlyRoots: PI_READ_ONLY_ROOTS,
       permissionProfile: "read-only",
     });
     expect(capturedRequests[0].worktree).toBeUndefined();
     expect(capturedRequests[1]).toMatchObject({
       provider: "pi-harness",
       model: "worker-pi",
-      cwd: "/home/magnus/repos/hugin",
       permissionProfile: "trusted-code",
       worktree,
+      configuredManagedRoot: PI_CONFIGURED_ROOT,
     });
+    expect(capturedRequests[1].cwd).toBeUndefined();
     expect(capturedRequests[2]).toMatchObject({
       provider: "pi-harness",
       model: "verifier-pi",
       cwd: "/home/magnus/repos/hugin",
+      allowedReadOnlyRoots: PI_READ_ONLY_ROOTS,
       permissionProfile: "read-only",
     });
     expect(capturedRequests[2].worktree).toBeUndefined();
@@ -433,6 +457,7 @@ describe("createModelInvoker", () => {
       provider: "pi-harness",
       model: "synth-pi",
       cwd: "/home/magnus/repos/hugin",
+      allowedReadOnlyRoots: PI_READ_ONLY_ROOTS,
       permissionProfile: "read-only",
     });
     expect(capturedRequests[3].worktree).toBeUndefined();
