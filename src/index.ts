@@ -283,6 +283,7 @@ import {
   isVerdictStoreEnabled,
   isSavingsEnabled,
 } from "./orchestrator/config.js";
+import { preparePiHarnessWorktreeBinding } from "./orchestrator/pi-harness-admission.js";
 import { isSovereignGatewayHost } from "./orchestrator/provider-config.js";
 import { createModelInvoker } from "./orchestrator/model-invoker.js";
 import { runOrchestratorTask } from "./orchestrator/orchestrator-executor.js";
@@ -5924,46 +5925,61 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // Guarded config: runOrchestratorTask's sensitivity guard judges THIS
     // (post-Model:-override) config — see effectiveOrchestratorConfig's doc.
     const orchConfig = effectiveOrchestratorConfig(process.env, task.model);
-    const orchInvoker = createModelInvoker(orchConfig.roles, {
-      timeoutMs: orchConfig.perCallTimeoutMs,
-      maxOutputChars: config.maxOutputChars,
-      maxTokens: orchConfig.maxTokens,
-      workerWorktree: branchResult.baseCommit
-        ? {
-            cwd: task.workingDir,
-            expectedRevision: branchResult.baseCommit,
-          }
-        : undefined,
+    const piHarnessBinding = await preparePiHarnessWorktreeBinding({
+      roles: orchConfig.roles,
+      capabilities: task.capabilities,
+      permissionProfile: task.permissionProfile,
+      branchResult,
+      workingDir: task.workingDir,
+      reposRoot: config.reposRoot,
+      checkoutGateRefusalReason,
+      checkoutGateDegraded,
     });
-    const orchResult = await runOrchestratorTask(
-      {
-        prompt: task.prompt,
-        sensitivity: task.effectiveSensitivity || "internal",
-        timeoutMs: task.timeoutMs,
+    if (!piHarnessBinding.ok) {
+      console.error(`Orchestrator admission refused for ${taskNs}: ${piHarnessBinding.reason}`);
+      orchLogStream.write(`${piHarnessBinding.reason}\n`);
+      orchLogStream.end();
+      currentOrchestratorAbort = null;
+      exitCode = 1;
+      output = piHarnessBinding.reason;
+      resultText = null;
+    } else {
+      const orchInvoker = createModelInvoker(orchConfig.roles, {
+        timeoutMs: orchConfig.perCallTimeoutMs,
         maxOutputChars: config.maxOutputChars,
-        injectedContext: task.contextResolution?.content || undefined,
-      },
-      orchConfig,
-      {
-        invoker: orchInvoker,
-        onLog: (line) => {
-          console.log(`[orch:${taskId}] ${line}`);
-          orchLogStream.write(`${line}\n`);
+        maxTokens: orchConfig.maxTokens,
+        workerWorktree: piHarnessBinding.binding,
+      });
+      const orchResult = await runOrchestratorTask(
+        {
+          prompt: task.prompt,
+          sensitivity: task.effectiveSensitivity || "internal",
+          timeoutMs: task.timeoutMs,
+          maxOutputChars: config.maxOutputChars,
+          injectedContext: task.contextResolution?.content || undefined,
         },
-        signal: orchAbort.signal,
-        verdictStore: orchVerdictStore,
-        ledgerClient: orchLedgerClient,
-        savingsStore: orchSavingsStore,
-      },
-    );
-    orchLogStream.end();
-    currentOrchestratorAbort = null;
-    exitCode = orchResult.exitCode;
-    output = orchResult.output;
-    resultText = orchResult.resultText;
-    costUsd = orchResult.costUsd;
-    orchOutcomes = orchResult.outcomes;
-    orchSavings = orchResult.savings;
+        orchConfig,
+        {
+          invoker: orchInvoker,
+          onLog: (line) => {
+            console.log(`[orch:${taskId}] ${line}`);
+            orchLogStream.write(`${line}\n`);
+          },
+          signal: orchAbort.signal,
+          verdictStore: orchVerdictStore,
+          ledgerClient: orchLedgerClient,
+          savingsStore: orchSavingsStore,
+        },
+      );
+      orchLogStream.end();
+      currentOrchestratorAbort = null;
+      exitCode = orchResult.exitCode;
+      output = orchResult.output;
+      resultText = orchResult.resultText;
+      costUsd = orchResult.costUsd;
+      orchOutcomes = orchResult.outcomes;
+      orchSavings = orchResult.savings;
+    }
     } else {
       const executeCodexOneShot = async (): Promise<LaneAttemptOutcome> => {
         const spawnContext = { taskNs, muninClient: munin };

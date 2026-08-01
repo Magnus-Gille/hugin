@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { MuninEntry, MuninQueryResult, MuninReadResult } from "./munin-client.js";
+import type { WorkerWorktreeBinding } from "./orchestrator/worker-executor.js";
 import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
 
 /**
@@ -1337,6 +1339,294 @@ export interface CleanCheckoutVerification {
   clean: boolean;
   reason?: string;
   headCommit?: string;
+}
+
+export interface ManagedTaskWorktreeBindingVerification {
+  ok: boolean;
+  cwd?: string;
+  headCommit?: string;
+  state?: "initial-clean" | "task-branch";
+  reason?: string;
+}
+
+function isPathWithinRoot(candidate: string, root: string): boolean {
+  return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+}
+
+async function canonicalizeExistingPath(
+  rawPath: string,
+  label: string,
+): Promise<{ ok: true; path: string } | { ok: false; reason: string }> {
+  const trimmed = rawPath.trim();
+  if (!trimmed) {
+    return { ok: false, reason: `${label} must be non-empty` };
+  }
+  if (!path.isAbsolute(trimmed)) {
+    return {
+      ok: false,
+      reason: `${label} ${JSON.stringify(rawPath)} must be absolute`,
+    };
+  }
+
+  const normalized = path.resolve(trimmed);
+  try {
+    return { ok: true, path: await fs.realpath(normalized) };
+  } catch (err) {
+    const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : "";
+    if (code === "ENOENT") {
+      return {
+        ok: false,
+        reason: `${label} ${JSON.stringify(rawPath)} does not exist`,
+      };
+    }
+    return {
+      ok: false,
+      reason:
+        `${label} ${JSON.stringify(rawPath)} could not be canonicalized via realpath: ` +
+        (err instanceof Error ? err.message : String(err)),
+    };
+  }
+}
+
+async function runGitText(
+  workingDir: string,
+  args: string[],
+  label: string,
+): Promise<{ ok: true; output: string } | { ok: false; reason: string }> {
+  const result = await runGitCapture(workingDir, args);
+  if (!result.ok) {
+    return {
+      ok: false,
+      reason: `${label} failed: ${result.stderr || "unknown error"}`,
+    };
+  }
+  return { ok: true, output: result.stdout.toString("utf8").trim() };
+}
+
+export async function buildManagedTaskWorktreeBinding(
+  workingDir: string,
+  reposRoot: string,
+  branchName: string,
+  expectedRevision: string,
+): Promise<{ ok: true; binding: WorkerWorktreeBinding } | { ok: false; reason: string }> {
+  const normalizedExpected = expectedRevision.trim().toLowerCase();
+  if (!GIT_COMMIT_ID.test(normalizedExpected)) {
+    return {
+      ok: false,
+      reason: `expected revision ${JSON.stringify(expectedRevision)} is not a full commit id`,
+    };
+  }
+
+  const trimmedBranch = branchName.trim();
+  if (!trimmedBranch) {
+    return { ok: false, reason: "task branch name must be non-empty" };
+  }
+
+  const managedRoot = await canonicalizeExistingPath(
+    path.resolve(normalizeRoot(reposRoot || DEFAULT_REPOS_ROOT)),
+    "managed repos root",
+  );
+  if (!managedRoot.ok) return managedRoot;
+
+  const canonicalCwd = await canonicalizeExistingPath(workingDir, "selected worktree path");
+  if (!canonicalCwd.ok) return canonicalCwd;
+  if (!isPathWithinRoot(canonicalCwd.path, managedRoot.path)) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree path ${JSON.stringify(workingDir)} resolves outside the configured managed repos root ` +
+        `${JSON.stringify(managedRoot.path)}`,
+    };
+  }
+
+  const topLevel = await runGitText(
+    canonicalCwd.path,
+    ["rev-parse", "--show-toplevel"],
+    "git rev-parse --show-toplevel",
+  );
+  if (!topLevel.ok) return topLevel;
+  const canonicalTopLevel = await canonicalizeExistingPath(
+    topLevel.output,
+    "selected git toplevel",
+  );
+  if (!canonicalTopLevel.ok) return canonicalTopLevel;
+  if (canonicalTopLevel.path !== canonicalCwd.path) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree path ${JSON.stringify(workingDir)} must be the exact git toplevel selected for this task; ` +
+        `resolved to ${JSON.stringify(canonicalCwd.path)} but git toplevel is ${JSON.stringify(canonicalTopLevel.path)}`,
+    };
+  }
+
+  const currentBranch = await runGitText(
+    canonicalCwd.path,
+    ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    "git symbolic-ref --short HEAD",
+  );
+  if (!currentBranch.ok) return currentBranch;
+  if (currentBranch.output !== trimmedBranch) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree ${canonicalCwd.path} is on branch ${JSON.stringify(currentBranch.output)} ` +
+        `instead of the task branch ${JSON.stringify(trimmedBranch)}`,
+    };
+  }
+
+  const verification = await verifyCleanCheckout(canonicalCwd.path, normalizedExpected);
+  if (!verification.clean) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree ${canonicalCwd.path} could not be verified clean at ${normalizedExpected}: ` +
+        (verification.reason ?? "unknown verification failure"),
+    };
+  }
+
+  return {
+    ok: true,
+    binding: {
+      cwd: canonicalCwd.path,
+      expectedRevision: normalizedExpected,
+      branchName: trimmedBranch,
+      managedRoot: managedRoot.path,
+    },
+  };
+}
+
+export async function verifyManagedTaskWorktreeBinding(
+  binding: WorkerWorktreeBinding | undefined,
+  options: { allowDirtyTaskBranch?: boolean } = {},
+): Promise<ManagedTaskWorktreeBindingVerification> {
+  if (!binding) {
+    return { ok: false, reason: "pi-harness requires a selected worktree binding" };
+  }
+
+  const normalizedExpected = binding.expectedRevision.trim().toLowerCase();
+  if (!GIT_COMMIT_ID.test(normalizedExpected)) {
+    return {
+      ok: false,
+      reason: `expected revision ${JSON.stringify(binding.expectedRevision)} is not a full commit id`,
+    };
+  }
+
+  const trimmedBranch = binding.branchName.trim();
+  if (!trimmedBranch) {
+    return { ok: false, reason: "pi-harness requires a non-empty task branch name" };
+  }
+
+  const managedRoot = await canonicalizeExistingPath(binding.managedRoot, "managed repos root");
+  if (!managedRoot.ok) return { ok: false, reason: managedRoot.reason };
+
+  const canonicalCwd = await canonicalizeExistingPath(binding.cwd, "selected worktree path");
+  if (!canonicalCwd.ok) return { ok: false, reason: canonicalCwd.reason };
+  if (canonicalCwd.path !== binding.cwd) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree path ${JSON.stringify(binding.cwd)} must already be canonical; ` +
+        `realpath resolved it to ${JSON.stringify(canonicalCwd.path)}`,
+    };
+  }
+  if (!isPathWithinRoot(canonicalCwd.path, managedRoot.path)) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree path ${JSON.stringify(binding.cwd)} resolves outside the configured managed repos root ` +
+        `${JSON.stringify(managedRoot.path)}`,
+    };
+  }
+
+  const topLevel = await runGitText(
+    canonicalCwd.path,
+    ["rev-parse", "--show-toplevel"],
+    "git rev-parse --show-toplevel",
+  );
+  if (!topLevel.ok) return { ok: false, reason: topLevel.reason };
+  const canonicalTopLevel = await canonicalizeExistingPath(topLevel.output, "selected git toplevel");
+  if (!canonicalTopLevel.ok) return { ok: false, reason: canonicalTopLevel.reason };
+  if (canonicalTopLevel.path !== canonicalCwd.path) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree path ${JSON.stringify(binding.cwd)} must be the exact git toplevel selected for this task; ` +
+        `git toplevel is ${JSON.stringify(canonicalTopLevel.path)}`,
+    };
+  }
+
+  const currentBranch = await runGitText(
+    canonicalCwd.path,
+    ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    "git symbolic-ref --short HEAD",
+  );
+  if (!currentBranch.ok) return { ok: false, reason: currentBranch.reason };
+  if (currentBranch.output !== trimmedBranch) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree ${canonicalCwd.path} is on branch ${JSON.stringify(currentBranch.output)} ` +
+        `instead of the bound task branch ${JSON.stringify(trimmedBranch)}`,
+    };
+  }
+
+  const status = await runGitCapture(canonicalCwd.path, ["status", "--porcelain", "--ignored"]);
+  if (!status.ok) {
+    return {
+      ok: false,
+      reason: `git status failed: ${status.stderr || "unknown error"}`,
+    };
+  }
+  const dirty = status.stdout.toString("utf8").trim().length > 0;
+
+  const head = await runGitText(canonicalCwd.path, ["rev-parse", "HEAD"], "git rev-parse HEAD");
+  if (!head.ok) return { ok: false, reason: head.reason };
+  const headCommit = head.output.toLowerCase();
+  if (!GIT_COMMIT_ID.test(headCommit)) {
+    return {
+      ok: false,
+      reason: `git rev-parse HEAD returned an invalid commit id ${JSON.stringify(head.output)}`,
+    };
+  }
+
+  const ancestry = await runGitCapture(canonicalCwd.path, [
+    "merge-base",
+    "--is-ancestor",
+    normalizedExpected,
+    headCommit,
+  ]);
+  if (!ancestry.ok) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree ${canonicalCwd.path} moved off the bound task branch ancestry: ` +
+        `${headCommit} is not descended from ${normalizedExpected}`,
+    };
+  }
+
+  if (!dirty && headCommit === normalizedExpected) {
+    return {
+      ok: true,
+      cwd: canonicalCwd.path,
+      headCommit,
+      state: "initial-clean",
+    };
+  }
+
+  if (!options.allowDirtyTaskBranch) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree ${canonicalCwd.path} is no longer the initial clean binding at ${normalizedExpected}`,
+    };
+  }
+
+  return {
+    ok: true,
+    cwd: canonicalCwd.path,
+    headCommit,
+    state: "task-branch",
+  };
 }
 
 /**

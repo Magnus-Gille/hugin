@@ -873,6 +873,22 @@ describe("runOrchestration — homeserver fanout concurrency cap (issue #157)", 
 
     expect(getMaxInFlight()).toBeGreaterThan(1);
   });
+
+  it("serializes pi-harness workers onto one task branch even when maxConcurrency is higher", async () => {
+    const { invoker, getMaxInFlight } = buildInFlightTracker(5);
+
+    await runOrchestration("pi task-branch fanout", invoker, {
+      roles: {
+        ...DEFAULT_ORCHESTRATOR_CONFIG.roles,
+        worker: { provider: "pi-harness", model: "qwen/qwen3-coder-next" },
+      },
+      maxConcurrency: 4,
+      homeserverMaxConcurrency: 2,
+      maxSubtasks: 6,
+    });
+
+    expect(getMaxInFlight()).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------

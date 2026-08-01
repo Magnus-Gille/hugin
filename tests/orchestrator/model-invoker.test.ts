@@ -280,6 +280,8 @@ describe("createModelInvoker", () => {
     const worktree = {
       cwd: "/home/magnus/repos/hugin-worktree",
       expectedRevision: "a".repeat(40),
+      branchName: "hugin/task-339",
+      managedRoot: "/home/magnus/repos",
     };
 
     const invoker = createModelInvoker(

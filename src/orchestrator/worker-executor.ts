@@ -15,7 +15,6 @@
  */
 
 import { spawn } from "node:child_process";
-import * as path from "node:path";
 import type {
   HomeserverResponseFormat,
   HomeserverVerifierSpec,
@@ -24,7 +23,7 @@ import { extractM5Provenance, sanitizeProviderTokenCount } from "../m5-provenanc
 import type { M5DelegationProvenance } from "../m5-provenance.js";
 import { estimateCostUsd } from "../model-pricing.js";
 import { getRegistryEntryById } from "../runtime-registry.js";
-import { verifyCleanCheckout } from "../task-helpers.js";
+import { verifyManagedTaskWorktreeBinding } from "../task-helpers.js";
 import { buildTaskSubprocessEnv } from "../task-subprocess-env.js";
 import {
   getProviderConfig,
@@ -195,6 +194,10 @@ export interface WorkerWorktreeBinding {
   cwd: string;
   /** Immutable selected revision the executor must verify immediately before launch. */
   expectedRevision: string;
+  /** Exact task branch identity selected for this task. */
+  branchName: string;
+  /** Canonical managed repos root used by the dispatcher checkout gate. */
+  managedRoot: string;
 }
 
 export interface WorkerRequest {
@@ -294,46 +297,17 @@ export function createWorkerExecutor(
 async function verifyPiWorktreeBinding(
   binding: WorkerWorktreeBinding | undefined,
 ): Promise<{ ok: true; cwd: string } | { ok: false; error: string }> {
-  if (!binding) {
-    return { ok: false, error: "pi-harness requires a selected worktree binding" };
-  }
-
-  const rawCwd = binding.cwd.trim();
-  if (!rawCwd) {
-    return { ok: false, error: "pi-harness requires a non-empty selected worktree path" };
-  }
-  if (!path.isAbsolute(rawCwd)) {
+  const verification = await verifyManagedTaskWorktreeBinding(
+    binding,
+    { allowDirtyTaskBranch: true },
+  );
+  if (!verification.ok || !verification.cwd) {
     return {
       ok: false,
-      error: `pi-harness worktree path ${JSON.stringify(binding.cwd)} must be absolute`,
+      error: verification.reason ?? "selected worktree binding verification failed",
     };
   }
-
-  const normalizedCwd = path.resolve(rawCwd);
-  if (
-    normalizedCwd !== rawCwd
-    || !normalizedCwd.startsWith(`/home/magnus${path.sep}`)
-  ) {
-    return {
-      ok: false,
-      error:
-        `pi-harness worktree path ${JSON.stringify(binding.cwd)} is unsafe; ` +
-        "expected a canonical absolute path under /home/magnus/",
-    };
-  }
-
-  const verification = await verifyCleanCheckout(normalizedCwd, binding.expectedRevision);
-  if (!verification.clean) {
-    return {
-      ok: false,
-      error:
-        `Selected worktree ${normalizedCwd} could not be verified clean at ` +
-        `${binding.expectedRevision.trim().toLowerCase()}: ` +
-        (verification.reason ?? "unknown verification failure"),
-    };
-  }
-
-  return { ok: true, cwd: normalizedCwd };
+  return { ok: true, cwd: verification.cwd };
 }
 
 // ---------------------------------------------------------------------------
@@ -1012,6 +986,12 @@ export class PiHarnessExecutor implements WorkerExecutor {
     return new Promise<WorkerResult>((resolve) => {
       let stdout = "";
       let stderr = "";
+      // Residual TOCTOU: the executor realpaths and re-verifies the selected
+      // task branch immediately before spawn, but a local actor could still
+      // race the path between those checks and `spawn()`. Closing that last
+      // gap would require descriptor-bound exec semantics the current Node/Git
+      // stack does not expose; this contract narrows the window and keeps the
+      // branch identity pinned instead of eliminating it entirely.
       // First-writer-wins kill reason (issue #110): whichever of the per-call
       // timeout or the external abort fires first owns the reported reason, so a
       // later kill of the other kind can't mislabel it before `close` arrives.

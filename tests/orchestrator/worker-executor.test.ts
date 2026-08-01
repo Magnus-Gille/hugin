@@ -8,6 +8,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
+import * as path from "node:path";
 
 // ---------------------------------------------------------------------------
 // Mock node:child_process before importing the module
@@ -30,6 +31,7 @@ const spawnCalls: Array<{
 }> = [];
 let spawnBehaviors: SpawnBehavior[] = [];
 let spawnCallIndex = 0;
+const realpathResults = new Map<string, { value?: string; error?: Error & { code?: string } }>();
 
 class MockChildProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -73,6 +75,15 @@ vi.mock("node:child_process", () => ({
   },
 }));
 
+vi.mock("node:fs/promises", () => ({
+  realpath: async (input: string) => {
+    const key = path.resolve(input);
+    const entry = realpathResults.get(key);
+    if (entry?.error) throw entry.error;
+    return entry?.value ?? key;
+  },
+}));
+
 // Import AFTER mocking so the mock is in place when the module loads
 const {
   createWorkerExecutor,
@@ -113,6 +124,8 @@ beforeEach(() => {
   spawnCalls.length = 0;
   spawnBehaviors = [];
   spawnCallIndex = 0;
+  realpathResults.clear();
+  primeDefaultRealpaths();
   vi.unstubAllEnvs();
 });
 
@@ -1469,14 +1482,51 @@ const PI_JSONL_SUCCESS = [
   JSON.stringify({ type: "assistant", content: "the answer" }),
   JSON.stringify({ type: "usage", usage: { input_tokens: 50, output_tokens: 30 } }),
 ].join("\n") + "\n";
-const PI_WORKTREE_PATH = "/home/magnus/repos/hugin-worktree";
+const PI_MANAGED_ROOT = "/home/magnus/repos";
+const PI_WORKTREE_PATH = `${PI_MANAGED_ROOT}/hugin-worktree`;
+const PI_WORKTREE_SUBDIR = `${PI_WORKTREE_PATH}/src`;
+const PI_BRANCH_NAME = "hugin/task-339";
 const PI_EXPECTED_REVISION = "a".repeat(40);
 
 function cleanPiWorktreeBehaviors() {
   return [
+    { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+    { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
     { exitCode: 0, stdout: "" },
     { exitCode: 0, stdout: `${PI_EXPECTED_REVISION}\n` },
+    { exitCode: 0, stdout: "" },
   ];
+}
+
+function setRealpath(
+  rawPath: string,
+  value: string = rawPath,
+  error?: Error & { code?: string },
+) {
+  realpathResults.set(path.resolve(rawPath), error ? { error } : { value });
+}
+
+function primeDefaultRealpaths() {
+  setRealpath(PI_MANAGED_ROOT);
+  setRealpath(PI_WORKTREE_PATH);
+  setRealpath(PI_WORKTREE_SUBDIR);
+}
+
+function makePiBinding(
+  overrides: Partial<{
+    cwd: string;
+    expectedRevision: string;
+    branchName: string;
+    managedRoot: string;
+  }> = {},
+) {
+  return {
+    cwd: PI_WORKTREE_PATH,
+    expectedRevision: PI_EXPECTED_REVISION,
+    branchName: PI_BRANCH_NAME,
+    managedRoot: PI_MANAGED_ROOT,
+    ...overrides,
+  };
 }
 
 describe("PiHarnessExecutor — success path", () => {
@@ -1489,7 +1539,7 @@ describe("PiHarnessExecutor — success path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "write a function",
       timeoutMs: 5000,
-      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
+      worktree: makePiBinding(),
     });
 
     expect(result.ok).toBe(true);
@@ -1512,11 +1562,11 @@ describe("PiHarnessExecutor — success path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "hello",
       timeoutMs: 5000,
-      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
+      worktree: makePiBinding(),
     });
 
-    expect(spawnCalls).toHaveLength(3);
-    const { cmd, args } = spawnCalls[2];
+    expect(spawnCalls).toHaveLength(6);
+    const { cmd, args } = spawnCalls[5];
     // harnessCmd from registry
     expect(cmd).toBe("pi");
     // harnessFlags present
@@ -1543,13 +1593,13 @@ describe("PiHarnessExecutor — success path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "hello",
       timeoutMs: 5000,
-      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
+      worktree: makePiBinding(),
     });
 
-    expect(spawnCalls[2]?.options?.env).not.toHaveProperty(
+    expect(spawnCalls[5]?.options?.env).not.toHaveProperty(
       "HUGIN_SENSITIVITY_CHECKPOINT_SECRET",
     );
-    expect(spawnCalls[2]?.options?.env?.HUGIN_ORDINARY_CHILD_VALUE).toBe(
+    expect(spawnCalls[5]?.options?.env?.HUGIN_ORDINARY_CHILD_VALUE).toBe(
       "preserved",
     );
   });
@@ -1564,7 +1614,7 @@ describe("PiHarnessExecutor — success path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "hi",
       timeoutMs: 5000,
-      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
+      worktree: makePiBinding(),
     });
 
     expect(result.ok).toBe(true);
@@ -1583,30 +1633,105 @@ describe("PiHarnessExecutor — success path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "hello",
       timeoutMs: 5000,
-      worktree: {
-        cwd: PI_WORKTREE_PATH,
-        expectedRevision: PI_EXPECTED_REVISION,
-      },
+      worktree: makePiBinding(),
     });
 
     expect(result.ok).toBe(true);
-    expect(spawnCalls).toHaveLength(3);
+    expect(spawnCalls).toHaveLength(6);
     expect(spawnCalls[0]).toMatchObject({
       cmd: "git",
-      args: ["status", "--porcelain", "--ignored"],
+      args: ["rev-parse", "--show-toplevel"],
       options: { cwd: PI_WORKTREE_PATH },
     });
     expect(spawnCalls[1]).toMatchObject({
       cmd: "git",
+      args: ["symbolic-ref", "--quiet", "--short", "HEAD"],
+      options: { cwd: PI_WORKTREE_PATH },
+    });
+    expect(spawnCalls[2]).toMatchObject({
+      cmd: "git",
+      args: ["status", "--porcelain", "--ignored"],
+      options: { cwd: PI_WORKTREE_PATH },
+    });
+    expect(spawnCalls[3]).toMatchObject({
+      cmd: "git",
       args: ["rev-parse", "HEAD"],
       options: { cwd: PI_WORKTREE_PATH },
     });
-    expect(spawnCalls[2]?.cmd).toBe("pi");
-    expect(spawnCalls[2]?.options?.cwd).toBe(PI_WORKTREE_PATH);
+    expect(spawnCalls[4]).toMatchObject({
+      cmd: "git",
+      args: ["merge-base", "--is-ancestor", PI_EXPECTED_REVISION, PI_EXPECTED_REVISION],
+      options: { cwd: PI_WORKTREE_PATH },
+    });
+    expect(spawnCalls[5]?.cmd).toBe("pi");
+    expect(spawnCalls[5]?.options?.cwd).toBe(PI_WORKTREE_PATH);
+  });
+
+  it("allows a legitimate follow-on worker turn on the same task branch after local edits", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
+      { exitCode: 0, stdout: "M src/worker.ts\n" },
+      { exitCode: 0, stdout: `${PI_EXPECTED_REVISION}\n` },
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS },
+    ];
+
+    const result = await new PiHarnessExecutor().run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "continue the task",
+      timeoutMs: 5000,
+      worktree: makePiBinding(),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls[5]?.cmd).toBe("pi");
+  });
+
+  it("allows a legitimate follow-on worker turn after HEAD advances on the same task branch", async () => {
+    const advancedHead = "b".repeat(40);
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: `${advancedHead}\n` },
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS },
+    ];
+
+    const result = await new PiHarnessExecutor().run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "continue after a commit",
+      timeoutMs: 5000,
+      worktree: makePiBinding(),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls[4]?.args).toEqual([
+      "merge-base",
+      "--is-ancestor",
+      PI_EXPECTED_REVISION,
+      advancedHead,
+    ]);
   });
 });
 
 describe("PiHarnessExecutor — non-zero exit path", () => {
+  it("fails closed when the worker request omits the selected worktree binding", async () => {
+    const result = await new PiHarnessExecutor().run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hello",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("requires a selected worktree binding");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
   it("returns ok=false with stderr in error, does not throw", async () => {
     spawnBehaviors = [
       ...cleanPiWorktreeBehaviors(),
@@ -1619,7 +1744,7 @@ describe("PiHarnessExecutor — non-zero exit path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "hi",
       timeoutMs: 5000,
-      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
+      worktree: makePiBinding(),
     });
 
     expect(result.ok).toBe(false);
@@ -1640,7 +1765,7 @@ describe("PiHarnessExecutor — non-zero exit path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "hi",
       timeoutMs: 5000,
-      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
+      worktree: makePiBinding(),
     });
 
     expect(result.ok).toBe(false);
@@ -1650,8 +1775,11 @@ describe("PiHarnessExecutor — non-zero exit path", () => {
   it("fails closed before spawning Pi when the selected worktree revision is stale (issue #339)", async () => {
     const actualRevision = "b".repeat(40);
     spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
       { exitCode: 0, stdout: "" },
       { exitCode: 0, stdout: `${actualRevision}\n` },
+      { exitCode: 1, stderr: "not ancestor" },
     ];
 
     const executor = new PiHarnessExecutor();
@@ -1660,17 +1788,150 @@ describe("PiHarnessExecutor — non-zero exit path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "hello",
       timeoutMs: 5000,
-      worktree: {
-        cwd: PI_WORKTREE_PATH,
-        expectedRevision: PI_EXPECTED_REVISION,
-      },
+      worktree: makePiBinding(),
     });
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain(actualRevision);
     expect(result.error).toContain(PI_EXPECTED_REVISION);
-    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls).toHaveLength(5);
     expect(spawnCalls.every((call) => call.cmd === "git")).toBe(true);
+  });
+
+  it("fails closed when the selected path is relative", async () => {
+    const result = await new PiHarnessExecutor().run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hello",
+      timeoutMs: 5000,
+      worktree: makePiBinding({ cwd: "relative/worktree" }),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("must be absolute");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when the selected path resolves outside the managed repos root", async () => {
+    const outside = "/home/magnus/workspace/hugin";
+    setRealpath(outside);
+
+    const result = await new PiHarnessExecutor().run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hello",
+      timeoutMs: 5000,
+      worktree: makePiBinding({ cwd: outside }),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("outside the configured managed repos root");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when a traversal-looking path resolves outside the managed repos root", async () => {
+    const traversal = `${PI_MANAGED_ROOT}/../workspace/hugin`;
+    setRealpath(traversal, "/home/magnus/workspace/hugin");
+
+    const result = await new PiHarnessExecutor().run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hello",
+      timeoutMs: 5000,
+      worktree: makePiBinding({ cwd: traversal }),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("must already be canonical");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when the selected path is non-canonical or symlinked", async () => {
+    const symlinkPath = `${PI_MANAGED_ROOT}/symlinked-worktree`;
+    const targetPath = `${PI_MANAGED_ROOT}/real-worktree`;
+    setRealpath(symlinkPath, targetPath);
+
+    const result = await new PiHarnessExecutor().run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hello",
+      timeoutMs: 5000,
+      worktree: makePiBinding({ cwd: symlinkPath }),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("must already be canonical");
+    expect(result.error).toContain(targetPath);
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when the selected path does not exist", async () => {
+    const missing = `${PI_MANAGED_ROOT}/missing-worktree`;
+    const err = new Error("ENOENT") as Error & { code?: string };
+    err.code = "ENOENT";
+    setRealpath(missing, missing, err);
+
+    const result = await new PiHarnessExecutor().run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hello",
+      timeoutMs: 5000,
+      worktree: makePiBinding({ cwd: missing }),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("does not exist");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when the selected path is only a subdirectory of the bound worktree", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` }];
+
+    const result = await new PiHarnessExecutor().run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hello",
+      timeoutMs: 5000,
+      worktree: makePiBinding({ cwd: PI_WORKTREE_SUBDIR }),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("exact git toplevel selected for this task");
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  it("fails closed when the bound task branch identity no longer matches", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: "main\n" },
+    ];
+
+    const result = await new PiHarnessExecutor().run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hello",
+      timeoutMs: 5000,
+      worktree: makePiBinding(),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("bound task branch");
+    expect(result.error).toContain(PI_BRANCH_NAME);
+    expect(spawnCalls).toHaveLength(2);
+  });
+
+  it("fails closed when the expected revision is not a full SHA", async () => {
+    const result = await new PiHarnessExecutor().run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hello",
+      timeoutMs: 5000,
+      worktree: makePiBinding({ expectedRevision: "abc123" }),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("not a full commit id");
+    expect(spawnCalls).toHaveLength(0);
   });
 });
 
@@ -1688,7 +1949,7 @@ describe("PiHarnessExecutor — timeout path", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "hi",
       timeoutMs: 10, // very short
-      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
+      worktree: makePiBinding(),
     });
 
     expect(result.ok).toBe(false);
@@ -1709,7 +1970,7 @@ describe("PiHarnessExecutor — external AbortSignal (issue #110)", () => {
       prompt: "hi",
       timeoutMs: 5000,
       signal: controller.signal,
-      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
+      worktree: makePiBinding(),
     });
 
     expect(result.ok).toBe(false);
@@ -1732,7 +1993,7 @@ describe("PiHarnessExecutor — external AbortSignal (issue #110)", () => {
       prompt: "hi",
       timeoutMs: 60000, // long — the abort, not the timeout, must end it
       signal: controller.signal,
-      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
+      worktree: makePiBinding(),
     });
 
     // Let the spawn happen, then abort.
@@ -1742,7 +2003,7 @@ describe("PiHarnessExecutor — external AbortSignal (issue #110)", () => {
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/abort/i);
-    expect(spawnCalls.length).toBe(3);
+    expect(spawnCalls.length).toBe(6);
   });
 });
 
@@ -1774,7 +2035,7 @@ describe("PiHarnessExecutor — pi v3 event schema", () => {
       model: "qwen/qwen3-coder-next",
       prompt: "ping",
       timeoutMs: 5000,
-      worktree: { cwd: PI_WORKTREE_PATH, expectedRevision: PI_EXPECTED_REVISION },
+      worktree: makePiBinding(),
     });
 
     expect(result.ok).toBe(true);
