@@ -1,31 +1,31 @@
 {
-  "$comment": "FROZEN 2026-08-01 from Hugin base commit 22bcf5d0e09424a9e498c16b088580cb64267d9f, BEFORE docs/index.md was authored. Probes are phrased as realistic lookup questions and deliberately avoid naming the target document, so a hit measures retrieval rather than transcription. Do not edit these to match a new index; that invalidates the eval.",
+  "$comment": "FROZEN 2026-08-01 from Hugin base commit 22bcf5d0e09424a9e498c16b088580cb64267d9f, BEFORE docs/index.md was authored. Probes are phrased as realistic lookup questions, avoid naming the target document, and avoid concepts already answerable from inline AGENTS.md, so a hit measures docs/index.md discovery rather than transcription. Do not edit these to match a new index; that invalidates the eval.",
   "version": 1,
   "frozen_at_base_commit": "22bcf5d0e09424a9e498c16b088580cb64267d9f",
   "probes": [
     {
-      "id": "delivery-recovery",
+      "id": "canonical-task-identity",
       "kind": "retrieval",
-      "prompt": "A task finished writing its staged artifact, then the process died before the transfer was clearly finalized. Where is the end-to-end recovery procedure, and which delivery states tell me whether it can retry or is terminal?",
-      "target": "docs/testing/delivery-recovery-e2e.md"
+      "prompt": "Where is the reference for canonical task IDs and Hugin's side of the direct homeserver `/delegate` handshake?",
+      "target": "docs/canonical-task-identity.md"
     },
     {
-      "id": "task-signing",
+      "id": "operator-approval-decisions",
       "kind": "retrieval",
-      "prompt": "How does Hugin distinguish a claimed task submitter from a verified one, and what is supposed to happen when signature policy is set to require?",
-      "target": "docs/security/task-signing.md"
+      "prompt": "Which runbook covers approval artifacts and valid accept/reject decisions for `Authority: gated` pipeline phases?",
+      "target": "docs/operator-guide-approval-decisions.md"
     },
     {
-      "id": "daily-exam-factory",
+      "id": "orchestrator-savings-tracker",
       "kind": "retrieval",
-      "prompt": "If a managed-repository task becomes a daily exam candidate, where are provisional holdout, regression, and quarantine defined and separated?",
-      "target": "docs/daily-exam-factory.md"
+      "prompt": "Where is the document that defines saved-USD accounting against an all-Claude baseline for orchestrator runs?",
+      "target": "docs/orchestrator-savings-tracker.md"
     },
     {
-      "id": "m5-lifecycle",
+      "id": "learning-task-handshake",
       "kind": "retrieval",
-      "prompt": "Which document says Hugin preserves durable M5 delegation provenance but must not invent its own model-capability truth?",
-      "target": "docs/mcp-durable-m5-lifecycle.md"
+      "prompt": "Which document describes the producer-side handshake and joint live-smoke gate for learning evidence?",
+      "target": "docs/learning-task-handshake.md"
     },
     {
       "id": "orchestrator-verdict-layer",
