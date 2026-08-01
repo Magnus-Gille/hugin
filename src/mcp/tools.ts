@@ -391,7 +391,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_await",
     title: "Read the current state of a delegated task",
     description:
-      "Idempotent read of task `status` (`running` | `completed` | `failed`). While `running`, includes lease data and `orphan_suspected`. Use `verbosity: summary` for a compact result with refs to the full terminal record.",
+      "Idempotent read of current task state. Returns immediately and is safe to poll. While active, includes lease info and `orphan_suspected` (true once the lease has expired without completion). Use `verbosity: summary` for a compact result with refs to the full terminal record.",
     inputShape: awaitInputShape,
     handler: async (rawInput) => {
       try {
