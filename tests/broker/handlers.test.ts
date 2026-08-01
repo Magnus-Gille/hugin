@@ -18,10 +18,15 @@ import {
   learningTaskExecutionEvidenceSchema,
 } from "../../src/learning-task-handshake.js";
 import { buildHomeserverRequestBody } from "../../src/homeserver-executor.js";
+import { parseTaskTraceContext } from "../../src/task-tracing.js";
 import {
   withLearningTaskContext,
   withLearningTaskGatewayEcho,
 } from "../helpers/learning-task.js";
+import {
+  CONTENT_BLIND_TRACE_JOIN_FIXTURE,
+  CONTENT_BLIND_TRACEPARENT,
+} from "../helpers/task-tracing-fixtures.js";
 
 const SECRET = "a".repeat(64);
 const OTHER_SECRET = "b".repeat(64);
@@ -381,6 +386,30 @@ describe("POST /v1/delegate/submit", () => {
     expect(harness.munin.writes).toHaveLength(1);
     expect(harness.munin.writes[0]!.tags).toContain("broker:mcp-v2");
     expect(harness.munin.writes[0]!.tags).not.toContain("orch-v1");
+  });
+
+  it("persists a content-blind trace context for the claimed task", async () => {
+    const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: {
+        ...authHeader(),
+        traceparent: CONTENT_BLIND_TRACEPARENT,
+        baggage: "tenant.id=owner,unsafe=value",
+      },
+      body: JSON.stringify(validRequest()),
+    });
+
+    expect(res.status).toBe(202);
+    const stored = harness.munin.writes[0]?.content;
+    expect(stored).toBeDefined();
+    expect(parseTaskTraceContext(stored!)).toEqual({
+      traceparent: CONTENT_BLIND_TRACEPARENT,
+      taskClass: CONTENT_BLIND_TRACE_JOIN_FIXTURE.taskClass,
+      runtimeLane: CONTENT_BLIND_TRACE_JOIN_FIXTURE.runtimeLane,
+      retryOrdinal: CONTENT_BLIND_TRACE_JOIN_FIXTURE.retryOrdinal,
+    });
+    expect(stored).not.toContain("tenant.id");
+    expect(stored).not.toContain("unsafe=value");
   });
 
   it("persists a fresh submit atomically without a preflight Munin read", async () => {

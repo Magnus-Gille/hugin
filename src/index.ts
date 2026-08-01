@@ -13,6 +13,16 @@ import {
 } from "./heimdall-descriptor.js";
 import { startHeimdallPanelReporter } from "./heimdall-report.js";
 import {
+  TaskTraceRuntime,
+  buildChildTaskTraceContext,
+  createFileTaskTraceExporter,
+  endTaskSpan,
+  parseTaskTraceContext,
+  parseTraceSampleRatePerMille,
+  type TaskTraceContext,
+  type TaskTraceSpan,
+} from "./task-tracing.js";
+import {
   buildDefaultEgressHosts,
   installFetchEgressPolicy,
 } from "./egress-policy.js";
@@ -92,6 +102,11 @@ import {
   type LearningTaskExecutionEvidence,
   type LearningTaskSource,
 } from "./learning-task-handshake.js";
+import {
+  buildLearningTaskPreflightPanel,
+  classifyLearningTaskPreflightError,
+  createLearningTaskPreflightStore,
+} from "./learning-task-preflight-status.js";
 import {
   recoverAmbiguousStoredLearningTaskCandidate,
   recoverLatestStoredLearningTaskAttempt,
@@ -609,6 +624,15 @@ const LEASE_REAPER_INTERVAL_MS = 60_000; // scan for expired foreign leases ever
 // in-flight tasks immediately. The PID is retained separately for observability.
 const workerId = `hugin-${os.hostname()}`;
 const processInstanceId = `${workerId}-${process.pid}`;
+const taskTraceRuntime = new TaskTraceRuntime({
+  exportEnabled: Boolean(process.env.HUGIN_TRACE_EXPORT_PATH?.trim()),
+  sampleRatePerMille: parseTraceSampleRatePerMille(
+    process.env.HUGIN_TRACE_SAMPLE_RATE_PER_MILLE,
+  ),
+  release: HEIMDALL_DESCRIPTOR.version,
+  instanceId: workerId,
+  exporter: createFileTaskTraceExporter(process.env.HUGIN_TRACE_EXPORT_PATH),
+});
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1458,6 +1482,36 @@ function getExternalProvenanceViolationForTask(task: TaskConfig): string | null 
 
 function ensureLogDir(): void {
   fs.mkdirSync(LOG_DIR, { recursive: true });
+}
+
+function traceDate(value: string | undefined, fallback = new Date()): Date {
+  const parsed = value ? new Date(value) : new Date(NaN);
+  return Number.isNaN(parsed.getTime()) ? fallback : parsed;
+}
+
+function startTaskLifecycleSpan(
+  context: TaskTraceContext | null,
+  name: string,
+  phase: "queue" | "execution" | "publication",
+  startedAt?: Date,
+): TaskTraceSpan | null {
+  if (!context) return null;
+  return taskTraceRuntime.startSpan({
+    name,
+    surface: "task",
+    phase,
+    taskContext: context,
+    ...(startedAt ? { startedAt } : {}),
+  });
+}
+
+async function finishTaskLifecycleSpan(
+  span: TaskTraceSpan | null,
+  outcome: "ok" | "degraded" | "failed" | "stale" | "unknown",
+  errorClass?: string,
+): Promise<void> {
+  if (!span) return;
+  await endTaskSpan(span, { outcome, errorClass });
 }
 
 async function writeStructuredTaskResult(
@@ -5043,6 +5097,28 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     Number.isNaN(acceptedAtMs) ? Date.now() : Math.max(Date.now(), acceptedAtMs),
   ).toISOString();
   const taskId = extractTaskId(taskNs);
+  const inboundTaskTraceContext = parseTaskTraceContext(entry.content);
+  const queueSpan = startTaskLifecycleSpan(
+    inboundTaskTraceContext,
+    "task.queue",
+    "queue",
+    traceDate(entry.created_at, traceDate(claimAcceptedAt)),
+  );
+  await finishTaskLifecycleSpan(
+    queueSpan,
+    "ok",
+  );
+  const executionSpan = startTaskLifecycleSpan(
+    inboundTaskTraceContext,
+    "task.execution",
+    "execution",
+    traceDate(startedAt),
+  );
+  const executionTraceContext = executionSpan && inboundTaskTraceContext
+    ? buildChildTaskTraceContext(executionSpan.traceparent, inboundTaskTraceContext)
+    : null;
+  let executionTraceOutcome: "ok" | "degraded" | "failed" | "stale" | "unknown" = "unknown";
+  let executionTraceErrorClass: string | undefined;
   console.log(`Executing task ${taskNs}...`);
 
   // Start periodic lease renewal
@@ -5089,6 +5165,24 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       );
       stopLeaseRenewal();
       stopCancellationWatch();
+      const pipelineOutcome = (
+        pipelineTerminalResult as { result?: { outcome?: string } } | null
+      )?.result?.outcome;
+      if (pipelineOutcome === "completed") {
+        executionTraceOutcome = "ok";
+      } else if (pipelineOutcome === "timed_out") {
+        executionTraceOutcome = "failed";
+        executionTraceErrorClass = "timeout";
+      } else if (pipelineOutcome === "cancelled") {
+        executionTraceOutcome = "failed";
+        executionTraceErrorClass = "cancelled";
+      } else if (pipelineOutcome === "failed") {
+        executionTraceOutcome = "failed";
+        executionTraceErrorClass = "pipeline-failed";
+      } else {
+        executionTraceOutcome = "stale";
+        executionTraceErrorClass = "pipeline-terminal-missing";
+      }
       releaseCurrentClaimWithSchedulerOutcome({
         taskNamespace: taskNs,
         prediction: schedulerPrediction,
@@ -5705,6 +5799,23 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         },
       })
         : null;
+      if (authenticatedLearningSource) {
+        const checkedAt = new Date().toISOString();
+        if (preparedLearningTask?.preparation.kind === "preflight-failed") {
+          learningTaskPreflightStore.record({
+            checkedAt,
+            outcome: "failed",
+            errorClass: classifyLearningTaskPreflightError(
+              preparedLearningTask.preparation.failureReason,
+            ),
+          });
+        } else {
+          learningTaskPreflightStore.record({
+            checkedAt,
+            outcome: "ok",
+          });
+        }
+      }
       const learningAttempt = preparedLearningTask?.attempt;
       const learningAttemptKey = learningAttempt
         ? learningTaskAttemptKey(learningAttempt.attemptId)
@@ -5714,6 +5825,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         learningTask: preparedLearningTask?.preparation ?? { kind: "ineligible" },
       }, taskId, LOG_DIR, {
         abortController: homeserverAbort,
+        ...(executionTraceContext
+          ? {
+              tracing: {
+                runtime: taskTraceRuntime,
+                taskContext: executionTraceContext,
+              },
+            }
+          : {}),
         recoverAmbiguousLearningTask: async (failureEvidence) => {
           const preparation = preparedLearningTask?.preparation;
           if (homeserverAbort.signal.aborted || preparation?.kind !== "ready") return null;
@@ -6122,6 +6241,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // auto-commit and publish whatever was ALREADY on disk — that state may
     // belong to an earlier task entirely, not to this one's output.
     if (ok && !isCancelled && !checkoutGateDegraded && branchResult.action === "created" && branchResult.branchName) {
+      const publicationSpan = startTaskLifecycleSpan(
+        executionTraceContext,
+        "task.publication",
+        "publication",
+      );
       const prBody = [
         `Automated changes from Hugin task \`${taskId}\`.`,
         "",
@@ -6131,46 +6255,56 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         "---",
         "*Created automatically by [Hugin](https://github.com/Magnus-Gille/hugin).*",
       ].join("\n");
-      const finalizeResult = await finalizeTaskBranch(
-        task.workingDir,
-        branchResult.branchName,
-        prBody,
-        egressPolicy.allowedHosts,
-        {
-          captureRepositoryChange: true,
-          baseBranch: branchResult.baseBranch,
-          baseCommit: branchResult.baseCommit,
-        },
-      );
-      repositoryChange = finalizeResult.repositoryChange;
-      repositoryOutcome = deriveRepositoryOutcome(branchResult, finalizeResult.action);
-      if (finalizeResult.action === "pr-created" && finalizeResult.prUrl) {
-        prUrl = finalizeResult.prUrl;
-        await munin.log(taskNs, `PR created: ${prUrl}`);
-      } else if (finalizeResult.action === "push-failed") {
-        console.warn(`Post-task branch finalization failed for ${taskNs}: ${finalizeResult.error}`);
-        publicationFailureTag = PUBLICATION_FAILED_TAG;
-        try {
-          await persistPublicationFailure(munin, {
-            taskId,
-            taskNamespace: taskNs,
-            workingDir: task.workingDir,
-            branchName: finalizeResult.branchName ?? branchResult.branchName,
-            baseBranch: branchResult.baseBranch ?? "main",
-            baseCommit: repositoryChange?.baseCommit ?? branchResult.baseCommit ?? "",
-            headCommit: repositoryChange?.headCommit,
-            prBody,
-            allowedEgressHosts: egressPolicy.allowedHosts,
-            failureReason: finalizeResult.error ?? "publication failed",
-            classification: taskClassification,
-          });
-        } catch (err) {
-          // The durable record is best-effort UX for recovery, not the
-          // source of truth — result-structured's `publication-failed`
-          // repositoryOutcome (written below) is. Never let this throw
-          // strand the task off its terminal write.
-          console.error(`[publication-recovery] failed to persist durable record for ${taskNs}:`, err);
+      try {
+        const finalizeResult = await finalizeTaskBranch(
+          task.workingDir,
+          branchResult.branchName,
+          prBody,
+          egressPolicy.allowedHosts,
+          {
+            captureRepositoryChange: true,
+            baseBranch: branchResult.baseBranch,
+            baseCommit: branchResult.baseCommit,
+          },
+        );
+        repositoryChange = finalizeResult.repositoryChange;
+        repositoryOutcome = deriveRepositoryOutcome(branchResult, finalizeResult.action);
+        if (finalizeResult.action === "pr-created" && finalizeResult.prUrl) {
+          prUrl = finalizeResult.prUrl;
+          await munin.log(taskNs, `PR created: ${prUrl}`);
+        } else if (finalizeResult.action === "push-failed") {
+          console.warn(`Post-task branch finalization failed for ${taskNs}: ${finalizeResult.error}`);
+          publicationFailureTag = PUBLICATION_FAILED_TAG;
+          try {
+            await persistPublicationFailure(munin, {
+              taskId,
+              taskNamespace: taskNs,
+              workingDir: task.workingDir,
+              branchName: finalizeResult.branchName ?? branchResult.branchName,
+              baseBranch: branchResult.baseBranch ?? "main",
+              baseCommit: repositoryChange?.baseCommit ?? branchResult.baseCommit ?? "",
+              headCommit: repositoryChange?.headCommit,
+              prBody,
+              allowedEgressHosts: egressPolicy.allowedHosts,
+              failureReason: finalizeResult.error ?? "publication failed",
+              classification: taskClassification,
+            });
+          } catch (err) {
+            // The durable record is best-effort UX for recovery, not the
+            // source of truth — result-structured's `publication-failed`
+            // repositoryOutcome (written below) is. Never let this throw
+            // strand the task off its terminal write.
+            console.error(`[publication-recovery] failed to persist durable record for ${taskNs}:`, err);
+          }
         }
+        await finishTaskLifecycleSpan(
+          publicationSpan,
+          finalizeResult.action === "push-failed" ? "failed" : "ok",
+          finalizeResult.action === "push-failed" ? "publication-failed" : undefined,
+        );
+      } catch (err) {
+        await finishTaskLifecycleSpan(publicationSpan, "failed", "publication-error");
+        throw err;
       }
     }
 
@@ -6446,6 +6580,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           taskNs,
           `Delivery deferred (attempt ${attempts}): ${deliveryResult.error ?? "infra failure"} — will retry`,
         );
+        executionTraceOutcome = "degraded";
+        executionTraceErrorClass = "delivery-pending";
         currentTask = null;
         currentTaskConfig = null;
         return { hadTask: true, queueDepth };
@@ -6666,75 +6802,89 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       | (SchedulerTerminalResultRevision & { result: StructuredTaskResult })
       | null = null;
     if (isCancelled && cancellation) {
-      await munin.write(
-        taskNs,
-        "result",
-        buildCancelledTaskResultDocument({
-          startedAt,
-          completedAt,
-          durationSeconds: Math.round(durationMs / 1000),
-          executor: effectiveExecutor,
-          resultSource,
-          logFile: `~/.hugin/logs/${taskId}.log`,
-          reason: cancellation.reason,
-          replyTo: task.replyTo,
-          replyFormat: task.replyFormat,
-          group: task.group,
-          sequence: task.sequence,
-          body: finalResultBody,
-        }),
-        exfilOutcome.resultTags,
-        undefined,
-        taskClassification,
+      const resultRecordingSpan = startTaskLifecycleSpan(
+        executionTraceContext,
+        "task.result-recording",
+        "publication",
       );
-      const cancelledFinalize = await finalizeTaskCompletion(munin, taskNs, {
-        statusContent: entry.content,
-        terminalTags: buildClaimedTerminalStatusTags("cancelled", finalizeBaseTags, `runtime:${task.runtime}`),
-        classification: taskClassification,
-        // Single-owner CAS for runtime-owned delivery (#68, Codex review C):
-        // if a startup reconciler reclaimed the delivery checkpoint while we
-        // were delivering, this CAS is rejected and we must NOT finalize. When
-        // the task never entered delivery this is undefined → no CAS, same as
-        // the prior behaviour.
-        expectedUpdatedAt: deliveryCheckpointUpdatedAt,
-        writeStructuredResult: async () => {
-          terminalStructuredResult = await writeStructuredTaskResult(
-            taskNs,
-            createCancelledStructuredResult(taskNs, task.runtime, cancellation.reason, {
-              executor: effectiveExecutor,
-              resultSource,
-              startedAt,
-              completedAt,
-              durationSeconds: Math.round(durationMs / 1000),
-              logFile: `~/.hugin/logs/${taskId}.log`,
-              replyTo: task.replyTo,
-              replyFormat: task.replyFormat,
-              group: task.group,
-              sequence: task.sequence,
-              pipeline: task.pipeline,
-              runtimeMetadata,
-              approval: approvalMetadata,
-              bodyKind: structuredBodyKind,
-              bodyText: structuredBodyText,
-              sensitivity: taskSensitivitySnapshot,
-            }),
-            taskClassification,
-          );
-        },
-        logMessage: `Task cancelled in ${Math.round(durationMs / 1000)}s (reason: ${cancellation.reason}, executor: ${executorLabel})`,
-      });
-      if (cancelledFinalize.statusCasLost) {
-        // The startup reconciler re-owns this task (single-owner model). It
-        // will write the terminal state, promote dependents, and refresh the
-        // pipeline — doing it here too would double-fire those side effects.
-        console.warn(
-          `Task ${taskNs} cancelled-finalize CAS lost — delivery reconciliation owns terminalization`,
+      try {
+        await munin.write(
+          taskNs,
+          "result",
+          buildCancelledTaskResultDocument({
+            startedAt,
+            completedAt,
+            durationSeconds: Math.round(durationMs / 1000),
+            executor: effectiveExecutor,
+            resultSource,
+            logFile: `~/.hugin/logs/${taskId}.log`,
+            reason: cancellation.reason,
+            replyTo: task.replyTo,
+            replyFormat: task.replyFormat,
+            group: task.group,
+            sequence: task.sequence,
+            body: finalResultBody,
+          }),
+          exfilOutcome.resultTags,
+          undefined,
+          taskClassification,
         );
-        currentTask = null;
-        currentTaskConfig = null;
-        return { hadTask: true, queueDepth };
+        const cancelledFinalize = await finalizeTaskCompletion(munin, taskNs, {
+          statusContent: entry.content,
+          terminalTags: buildClaimedTerminalStatusTags("cancelled", finalizeBaseTags, `runtime:${task.runtime}`),
+          classification: taskClassification,
+          // Single-owner CAS for runtime-owned delivery (#68, Codex review C):
+          // if a startup reconciler reclaimed the delivery checkpoint while we
+          // were delivering, this CAS is rejected and we must NOT finalize. When
+          // the task never entered delivery this is undefined → no CAS, same as
+          // the prior behaviour.
+          expectedUpdatedAt: deliveryCheckpointUpdatedAt,
+          writeStructuredResult: async () => {
+            terminalStructuredResult = await writeStructuredTaskResult(
+              taskNs,
+              createCancelledStructuredResult(taskNs, task.runtime, cancellation.reason, {
+                executor: effectiveExecutor,
+                resultSource,
+                startedAt,
+                completedAt,
+                durationSeconds: Math.round(durationMs / 1000),
+                logFile: `~/.hugin/logs/${taskId}.log`,
+                replyTo: task.replyTo,
+                replyFormat: task.replyFormat,
+                group: task.group,
+                sequence: task.sequence,
+                pipeline: task.pipeline,
+                runtimeMetadata,
+                approval: approvalMetadata,
+                bodyKind: structuredBodyKind,
+                bodyText: structuredBodyText,
+                sensitivity: taskSensitivitySnapshot,
+              }),
+              taskClassification,
+            );
+          },
+          logMessage: `Task cancelled in ${Math.round(durationMs / 1000)}s (reason: ${cancellation.reason}, executor: ${executorLabel})`,
+        });
+        if (cancelledFinalize.statusCasLost) {
+          await finishTaskLifecycleSpan(resultRecordingSpan, "stale", "status-cas-lost");
+          // The startup reconciler re-owns this task (single-owner model). It
+          // will write the terminal state, promote dependents, and refresh the
+          // pipeline — doing it here too would double-fire those side effects.
+          console.warn(
+            `Task ${taskNs} cancelled-finalize CAS lost — delivery reconciliation owns terminalization`,
+          );
+          executionTraceOutcome = "stale";
+          executionTraceErrorClass = "status-cas-lost";
+          currentTask = null;
+          currentTaskConfig = null;
+          return { hadTask: true, queueDepth };
+        }
+        await finishTaskLifecycleSpan(resultRecordingSpan, "ok");
+        terminalStructuredResultOk = cancelledFinalize.structuredResultOk;
+      } catch (err) {
+        await finishTaskLifecycleSpan(resultRecordingSpan, "failed", "result-recording-error");
+        throw err;
       }
-      terminalStructuredResultOk = cancelledFinalize.structuredResultOk;
     } else {
       // Append the distinct failure tag (issue #129) and the publication
       // failure tag (issue #225) AFTER the claimed terminal-tag transform, whose
@@ -6749,88 +6899,102 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         ...(failureClassification ? [failureClassification.tag] : []),
         ...(publicationFailureTag ? [publicationFailureTag] : []),
       ];
-      const finalizeOutcome = await finalizeTaskCompletion(munin, taskNs, {
-        statusContent: entry.content,
-        terminalTags: extraTerminalTags.length > 0
-          ? [...terminalTags, ...extraTerminalTags]
-          : terminalTags,
-        classification: taskClassification,
-        // Single-owner CAS for runtime-owned delivery (#68): if a startup
-        // reconciler reclaimed the checkpoint while we were delivering, this
-        // CAS is rejected and we must NOT finalize — the new owner stands.
-        expectedUpdatedAt: deliveryCheckpointUpdatedAt,
-        writeStructuredResult: async () => {
-          terminalStructuredResult = await writeStructuredTaskResult(
-            taskNs,
-            buildStructuredTaskResult({
-              schemaVersion: 1,
-              taskId,
-              taskNamespace: taskNs,
-              lifecycle: ok ? "completed" : "failed",
-              outcome: ok ? "completed" : isTimeout ? "timed_out" : "failed",
-              runtime: task.runtime,
-              executor: effectiveExecutor,
-              resultSource,
-              exitCode,
-              startedAt,
-              completedAt,
-              durationSeconds: Math.round(durationMs / 1000),
-              logFile: `~/.hugin/logs/${taskId}.log`,
-              replyTo: task.replyTo,
-              replyFormat: task.replyFormat,
-              group: task.group,
-              sequence: task.sequence,
-              costUsd: costUsd ?? undefined,
-              prUrl,
-              repositoryOutcome,
-              repositoryChange,
-              bodyKind: structuredBodyKind,
-              bodyText: structuredBodyText,
-              errorMessage: ok
-                ? undefined
-                : failureClassification
-                  ? failureClassification.reason
-                  : deliveryResult && !deliveryResult.ok
-                    ? deliveryResult.error ?? structuredBodyText
-                    : structuredBodyText,
-              runtimeMetadata,
-              pipeline: task.pipeline,
-              approval: approvalMetadata,
-              sensitivity: taskSensitivitySnapshot,
-              artifactDelivery: deliveryResult
-                ? {
-                    ok: deliveryResult.ok,
-                    failureKind: deliveryResult.failureKind,
-                    artifacts: deliveryResult.records.map((r) => ({
-                      id: r.id,
-                      status: r.status,
-                      remote: r.remote,
-                      bytes: r.bytes,
-                      sha256: r.sha256,
-                      error: r.error,
-                    })),
-                  }
-                : undefined,
-              orchestratorOutcomes,
-              savings: savingsResult,
-            }),
-            taskClassification,
+      const resultRecordingSpan = startTaskLifecycleSpan(
+        executionTraceContext,
+        "task.result-recording",
+        "publication",
+      );
+      try {
+        const finalizeOutcome = await finalizeTaskCompletion(munin, taskNs, {
+          statusContent: entry.content,
+          terminalTags: extraTerminalTags.length > 0
+            ? [...terminalTags, ...extraTerminalTags]
+            : terminalTags,
+          classification: taskClassification,
+          // Single-owner CAS for runtime-owned delivery (#68): if a startup
+          // reconciler reclaimed the checkpoint while we were delivering, this
+          // CAS is rejected and we must NOT finalize — the new owner stands.
+          expectedUpdatedAt: deliveryCheckpointUpdatedAt,
+          writeStructuredResult: async () => {
+            terminalStructuredResult = await writeStructuredTaskResult(
+              taskNs,
+              buildStructuredTaskResult({
+                schemaVersion: 1,
+                taskId,
+                taskNamespace: taskNs,
+                lifecycle: ok ? "completed" : "failed",
+                outcome: ok ? "completed" : isTimeout ? "timed_out" : "failed",
+                runtime: task.runtime,
+                executor: effectiveExecutor,
+                resultSource,
+                exitCode,
+                startedAt,
+                completedAt,
+                durationSeconds: Math.round(durationMs / 1000),
+                logFile: `~/.hugin/logs/${taskId}.log`,
+                replyTo: task.replyTo,
+                replyFormat: task.replyFormat,
+                group: task.group,
+                sequence: task.sequence,
+                costUsd: costUsd ?? undefined,
+                prUrl,
+                repositoryOutcome,
+                repositoryChange,
+                bodyKind: structuredBodyKind,
+                bodyText: structuredBodyText,
+                errorMessage: ok
+                  ? undefined
+                  : failureClassification
+                    ? failureClassification.reason
+                    : deliveryResult && !deliveryResult.ok
+                      ? deliveryResult.error ?? structuredBodyText
+                      : structuredBodyText,
+                runtimeMetadata,
+                pipeline: task.pipeline,
+                approval: approvalMetadata,
+                sensitivity: taskSensitivitySnapshot,
+                artifactDelivery: deliveryResult
+                  ? {
+                      ok: deliveryResult.ok,
+                      failureKind: deliveryResult.failureKind,
+                      artifacts: deliveryResult.records.map((r) => ({
+                        id: r.id,
+                        status: r.status,
+                        remote: r.remote,
+                        bytes: r.bytes,
+                        sha256: r.sha256,
+                        error: r.error,
+                      })),
+                    }
+                  : undefined,
+                orchestratorOutcomes,
+                savings: savingsResult,
+              }),
+              taskClassification,
+            );
+          },
+          logMessage: `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`,
+        });
+        if (finalizeOutcome.statusCasLost) {
+          await finishTaskLifecycleSpan(resultRecordingSpan, "stale", "status-cas-lost");
+          // The startup reconciler re-owns this task (single-owner model). It
+          // will write the terminal state, promote dependents, and refresh the
+          // pipeline — doing it here too would double-fire those side effects.
+          console.warn(
+            `Task ${taskNs} finalize CAS lost — delivery reconciliation owns terminalization`,
           );
-        },
-        logMessage: `Task ${ok ? "completed" : isTimeout ? "timed out" : "failed"} in ${Math.round(durationMs / 1000)}s (exit ${exitCode}, executor: ${executorLabel}${costUsd !== null ? `, cost: $${costUsd.toFixed(4)}` : ""})`,
-      });
-      if (finalizeOutcome.statusCasLost) {
-        // The startup reconciler re-owns this task (single-owner model). It
-        // will write the terminal state, promote dependents, and refresh the
-        // pipeline — doing it here too would double-fire those side effects.
-        console.warn(
-          `Task ${taskNs} finalize CAS lost — delivery reconciliation owns terminalization`,
-        );
-        currentTask = null;
-        currentTaskConfig = null;
-        return { hadTask: true, queueDepth };
+          executionTraceOutcome = "stale";
+          executionTraceErrorClass = "status-cas-lost";
+          currentTask = null;
+          currentTaskConfig = null;
+          return { hadTask: true, queueDepth };
+        }
+        await finishTaskLifecycleSpan(resultRecordingSpan, "ok");
+        terminalStructuredResultOk = finalizeOutcome.structuredResultOk;
+      } catch (err) {
+        await finishTaskLifecycleSpan(resultRecordingSpan, "failed", "result-recording-error");
+        throw err;
       }
-      terminalStructuredResultOk = finalizeOutcome.structuredResultOk;
     }
 
     // hugin#284: capture from the DURABLE terminal result, never from mutable
@@ -6944,8 +7108,36 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       harness: sampledHarnessLane ? "opencode-sampled" : undefined,
       model: effectiveSchedulerModel,
     });
+    if (isCancelled) {
+      executionTraceOutcome = "failed";
+      executionTraceErrorClass = "cancelled";
+    } else if (publicationFailureTag) {
+      executionTraceOutcome = "degraded";
+      executionTraceErrorClass = "publication-failed";
+    } else if (ok) {
+      executionTraceOutcome = "ok";
+      executionTraceErrorClass = undefined;
+    } else if (isTimeout) {
+      executionTraceOutcome = "failed";
+      executionTraceErrorClass = "timeout";
+    } else {
+      executionTraceOutcome = "failed";
+      executionTraceErrorClass =
+        failureClassification?.kind
+        ?? deliveryFailureKind?.toLowerCase().replace(/_/g, "-")
+        ?? "task-failed";
+    }
     return { hadTask: true, queueDepth };
   } finally {
+    if (executionSpan) {
+      await finishTaskLifecycleSpan(
+        executionSpan,
+        executionTraceOutcome === "unknown" ? "failed" : executionTraceOutcome,
+        executionTraceOutcome === "unknown"
+          ? executionTraceErrorClass ?? "execution-error"
+          : executionTraceErrorClass,
+      );
+    }
     stopLeaseRenewal();
     stopCancellationWatch();
     currentSdkAbort = null;
@@ -7146,6 +7338,7 @@ const learningLoopCollector = new LearningLoopCollector({
   munin,
   ledgerClient: new LedgerClient({ env: process.env }),
 });
+const learningTaskPreflightStore = createLearningTaskPreflightStore();
 
 registerHeimdallDescriptorRoute(app, {
   health: () => ({
@@ -7161,7 +7354,10 @@ registerHeimdallDescriptorRoute(app, {
 // response. No-op until HEIMDALL_HUB_URL + HEIMDALL_FLEET_TOKEN are
 // configured in this service's environment; see src/heimdall-report.ts.
 const stopHeimdallPanelReporter = startHeimdallPanelReporter(() =>
-  buildLearningLoopHealthPanels(learningLoopCollector)
+  [
+    ...buildLearningLoopHealthPanels(learningLoopCollector),
+    buildLearningTaskPreflightPanel(learningTaskPreflightStore.snapshot()),
+  ]
 );
 
 // --- Graceful shutdown ---

@@ -55,6 +55,7 @@ import {
 } from "../quality-receipt.js";
 import { structuredTaskResultSchema } from "../task-result-schema.js";
 import { MuninWriteRejectedError } from "../munin-client.js";
+import { createInboundTaskTraceContext } from "../task-tracing.js";
 
 const brokerFrictionInputSchema = reportFrictionInputSchema.extend({
   event_id: z.string().uuid(),
@@ -241,9 +242,24 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
       alias_resolved: aliasResolution.alias_resolved,
       policy_version: POLICY_VERSION,
     };
+    const traceContext = createInboundTaskTraceContext({
+      traceparent: req.header("traceparent") ?? undefined,
+      baggage: req.header("baggage") ?? undefined,
+      taskClass: "delegation",
+      runtimeLane: "default",
+      retryOrdinal: 0,
+    });
 
     try {
-      await deps.taskStore.submit({ envelope });
+      await deps.taskStore.submit({
+        envelope,
+        traceContext: {
+          traceparent: traceContext.traceparent,
+          taskClass: traceContext.taskClass,
+          runtimeLane: traceContext.runtimeLane,
+          retryOrdinal: traceContext.retryOrdinal,
+        },
+      });
     } catch (err) {
       if (
         err instanceof MuninWriteRejectedError &&

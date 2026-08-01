@@ -1,5 +1,36 @@
 # Hugin — Status
 
+## 2026-08-01 — #340 content-blind tracing propagation (local issue branch)
+
+- Branch `codex/issue-340-content-blind-tracing` in
+  `/private/tmp/hugin-340-content-blind-tracing` adds a manual, optional
+  content-blind tracing layer for Hugin. Broker submit now accepts strict W3C
+  `traceparent`, replaces malformed inbound context, strips/rejects baggage, and
+  persists only a sanitized `### Trace context` section in task documents.
+- The dispatcher now parses persisted trace context at claim time, emits
+  content-blind queue and execution spans, passes execution-child trace context
+  into homeserver gateway calls, and records separate publication and
+  result-recording spans. Export remains disabled by default unless an explicit
+  `HUGIN_TRACE_EXPORT_PATH` is configured.
+- Homeserver gateway requests now propagate only `traceparent`, never baggage.
+  A new producer-owned Heimdall status panel reports authenticated
+  learning-task preflight success/failure using only coarse error classes. The
+  tracing serializer remains deny-by-default and excludes prompt/result text,
+  repository paths, URLs, baggage, tool payloads, exception detail, and other
+  content-bearing fields.
+- Added focused regression coverage for inbound continuation/replacement,
+  async/retry parentage, sampling/export loss, bounded allowlisted envelopes,
+  broker persistence of sanitized trace context, homeserver propagation of the
+  fixed shared join fixture, and the content-blind preflight panel.
+
+**Verification:** focused tracing suites (4 files / 129 tests), `npm run build`,
+full `npm test` (165 files / 2,575 tests, 3 skipped), `bash scripts/deploy-pi.test.sh`,
+`bash -n scripts/deploy-pi.sh scripts/deploy-pi.test.sh`, and `git diff --check`
+all passed on Saturday, August 1, 2026.
+
+**Next:** keep this branch local until independent review lands; no deploy,
+push, PR mutation, or cross-repo change has been performed from this session.
+
 ## 2026-07-28 — #336 W5 roster provenance verification (draft PR #337)
 
 - Branch `codex/issue-336-roster-producer` restores W4 receipt verification
