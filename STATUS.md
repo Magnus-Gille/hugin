@@ -12,21 +12,36 @@
   into homeserver gateway calls, and records separate publication and
   result-recording spans. Export remains disabled by default unless an explicit
   `HUGIN_TRACE_EXPORT_PATH` is configured.
+- Validated native review follow-up now keeps production trace export
+  non-blocking and fail-open with a bounded in-memory queue plus deterministic
+  test-only flush seam, rejects persisted `task_class` / `runtime_lane` values
+  outside explicit closed allowlists, degrades Heimdall authenticated
+  learning-task preflight status to `unknown` once the last observation reaches
+  the fixed 15-minute freshness bound (or when its timestamp is future or
+  malformed), and marks result-recording spans `degraded` with the fixed
+  allowlisted `structured-result-write-failed` class when the terminal status
+  write succeeds but `result-structured` does not.
 - Homeserver gateway requests now propagate only `traceparent`, never baggage.
   A new producer-owned Heimdall status panel reports authenticated
   learning-task preflight success/failure using only coarse error classes. The
   tracing serializer remains deny-by-default and excludes prompt/result text,
   repository paths, URLs, baggage, tool payloads, exception detail, and other
   content-bearing fields.
+- Focused regression coverage now proves that a never-resolving exporter cannot
+  block span completion or grow beyond the bounded queue, hostile persisted
+  trace labels are ignored rather than propagated, preflight freshness
+  boundaries fail closed to `unknown`, and dispatcher-side structured-result
+  trace classification never leaks exception text.
 - Added focused regression coverage for inbound continuation/replacement,
   async/retry parentage, sampling/export loss, bounded allowlisted envelopes,
   broker persistence of sanitized trace context, homeserver propagation of the
   fixed shared join fixture, and the content-blind preflight panel.
 
-**Verification:** focused tracing suites (4 files / 129 tests), `npm run build`,
-full `npm test` (165 files / 2,575 tests, 3 skipped), `bash scripts/deploy-pi.test.sh`,
-`bash -n scripts/deploy-pi.sh scripts/deploy-pi.test.sh`, and `git diff --check`
-all passed on Saturday, August 1, 2026.
+**Verification:** focused tracing/preflight/dispatcher suites (3 files / 82
+tests), `npm run build`, full `npm test` (165 files / 2,578 tests, 3 skipped),
+and `git diff --check` all passed on Saturday, August 1, 2026. Deployment
+script checks were not rerun because this follow-up did not touch deployment
+scripts.
 
 **Next:** keep this branch local until independent review lands; no deploy,
 push, PR mutation, or cross-repo change has been performed from this session.

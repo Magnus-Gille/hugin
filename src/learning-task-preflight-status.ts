@@ -1,5 +1,7 @@
 import type { TypedPanel } from "./learning-loop-health.js";
 
+export const LEARNING_TASK_PREFLIGHT_FRESHNESS_MS = 15 * 60 * 1_000;
+
 export interface LearningTaskPreflightObservation {
   checkedAt: string;
   outcome: "ok" | "failed";
@@ -11,6 +13,11 @@ export interface LearningTaskPreflightSnapshot {
   checkedAt: string | null;
   outcome: "unknown" | "ok" | "failed";
   errorClass?: string;
+}
+
+interface BuildLearningTaskPreflightPanelOptions {
+  now?: () => Date;
+  freshnessMs?: number;
 }
 
 function sanitizeErrorClass(value: string | undefined): string | undefined {
@@ -65,9 +72,81 @@ export function createLearningTaskPreflightStore(): {
   };
 }
 
+function formatObservedAt(checkedAt: string, ageSeconds: number): string {
+  return `Observed ${checkedAt} (age ${ageSeconds}s).`;
+}
+
 export function buildLearningTaskPreflightPanel(
   snapshot: LearningTaskPreflightSnapshot,
+  options: BuildLearningTaskPreflightPanelOptions = {},
 ): TypedPanel {
+  const now = options.now ?? (() => new Date());
+  const freshnessMs = Math.max(
+    1,
+    Math.min(24 * 60 * 60 * 1_000, Math.trunc(options.freshnessMs ?? LEARNING_TASK_PREFLIGHT_FRESHNESS_MS)),
+  );
+  if (snapshot.checkedAt) {
+    const checkedAtMs = Date.parse(snapshot.checkedAt);
+    const nowMs = now().getTime();
+    if (!Number.isFinite(checkedAtMs)) {
+      return {
+        id: "hugin-learning-task-preflight",
+        label: "Authenticated learning-task preflight",
+        kind: "status",
+        refresh: 300,
+        state: "unknown",
+        message: "Authenticated learning-task preflight observation time is invalid.",
+      };
+    }
+    const ageMs = nowMs - checkedAtMs;
+    if (!Number.isFinite(nowMs) || ageMs < 0) {
+      return {
+        id: "hugin-learning-task-preflight",
+        label: "Authenticated learning-task preflight",
+        kind: "status",
+        refresh: 300,
+        state: "unknown",
+        message: `Authenticated learning-task preflight observation is in the future (${snapshot.checkedAt}).`,
+      };
+    }
+    const ageSeconds = Math.floor(ageMs / 1000);
+    if (ageMs >= freshnessMs) {
+      return {
+        id: "hugin-learning-task-preflight",
+        label: "Authenticated learning-task preflight",
+        kind: "status",
+        refresh: 300,
+        state: "unknown",
+        message:
+          "Authenticated learning-task preflight observation is stale. "
+          + formatObservedAt(snapshot.checkedAt, ageSeconds),
+      };
+    }
+    if (snapshot.outcome === "ok") {
+      return {
+        id: "hugin-learning-task-preflight",
+        label: "Authenticated learning-task preflight",
+        kind: "status",
+        refresh: 300,
+        state: "pass",
+        message:
+          "Authenticated learning-task preflight succeeded. "
+          + formatObservedAt(snapshot.checkedAt, ageSeconds),
+      };
+    }
+    if (snapshot.outcome === "failed") {
+      return {
+        id: "hugin-learning-task-preflight",
+        label: "Authenticated learning-task preflight",
+        kind: "status",
+        refresh: 300,
+        state: "fail",
+        message:
+          `Authenticated learning-task preflight failed (${snapshot.errorClass ?? "preflight-failed"}). `
+          + formatObservedAt(snapshot.checkedAt, ageSeconds),
+      };
+    }
+  }
   if (snapshot.outcome === "ok") {
     return {
       id: "hugin-learning-task-preflight",

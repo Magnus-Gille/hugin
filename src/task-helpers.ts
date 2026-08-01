@@ -1838,6 +1838,21 @@ export interface TaskCompletionResult {
   statusCasLost?: boolean;
 }
 
+export const STRUCTURED_RESULT_TRACE_ERROR_CLASS = "structured-result-write-failed" as const;
+
+export function deriveResultRecordingTraceOutcome(input: Pick<TaskCompletionResult, "structuredResultOk" | "structuredResultError">): {
+  outcome: "ok" | "degraded";
+  errorClass?: typeof STRUCTURED_RESULT_TRACE_ERROR_CLASS;
+} {
+  if (input.structuredResultOk) {
+    return { outcome: "ok" };
+  }
+  return {
+    outcome: "degraded",
+    errorClass: STRUCTURED_RESULT_TRACE_ERROR_CLASS,
+  };
+}
+
 /**
  * Atomically finalize a task by writing the terminal status FIRST (guaranteed),
  * then the structured result in a try/catch (non-fatal), then the log entry.

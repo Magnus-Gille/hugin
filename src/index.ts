@@ -32,7 +32,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, listEligibleTasks, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, prepareManagedCheckout, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt, PUBLICATION_FAILED_TAG } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, listEligibleTasks, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, prepareManagedCheckout, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, deriveResultRecordingTraceOutcome, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt, PUBLICATION_FAILED_TAG } from "./task-helpers.js";
 import { persistPublicationFailure } from "./publication-recovery.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
 import {
@@ -6879,7 +6879,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           currentTaskConfig = null;
           return { hadTask: true, queueDepth };
         }
-        await finishTaskLifecycleSpan(resultRecordingSpan, "ok");
+        const resultRecordingTraceOutcome = deriveResultRecordingTraceOutcome(cancelledFinalize);
+        await finishTaskLifecycleSpan(
+          resultRecordingSpan,
+          resultRecordingTraceOutcome.outcome,
+          resultRecordingTraceOutcome.errorClass,
+        );
         terminalStructuredResultOk = cancelledFinalize.structuredResultOk;
       } catch (err) {
         await finishTaskLifecycleSpan(resultRecordingSpan, "failed", "result-recording-error");
@@ -6989,7 +6994,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           currentTaskConfig = null;
           return { hadTask: true, queueDepth };
         }
-        await finishTaskLifecycleSpan(resultRecordingSpan, "ok");
+        const resultRecordingTraceOutcome = deriveResultRecordingTraceOutcome(finalizeOutcome);
+        await finishTaskLifecycleSpan(
+          resultRecordingSpan,
+          resultRecordingTraceOutcome.outcome,
+          resultRecordingTraceOutcome.errorClass,
+        );
         terminalStructuredResultOk = finalizeOutcome.structuredResultOk;
       } catch (err) {
         await finishTaskLifecycleSpan(resultRecordingSpan, "failed", "result-recording-error");

@@ -15,6 +15,17 @@ import {
 } from "../src/task-tracing.js";
 
 describe("task tracing", () => {
+  function taskWithTraceContext(section: string): string {
+    return [
+      "## Task: trace fixture",
+      "",
+      section,
+      "",
+      "### Prompt",
+      "hello",
+    ].join("\n");
+  }
+
   it("continues a strict W3C traceparent and strips baggage", () => {
     const context = createInboundTaskTraceContext({
       traceparent: CONTENT_BLIND_TRACEPARENT,
@@ -58,14 +69,7 @@ describe("task tracing", () => {
       runtimeLane: "default",
       retryOrdinal: 2,
     });
-    const content = [
-      "## Task: trace fixture",
-      "",
-      section,
-      "",
-      "### Prompt",
-      "hello",
-    ].join("\n");
+    const content = taskWithTraceContext(section);
 
     expect(parseTaskTraceContext(content)).toEqual({
       traceparent: CONTENT_BLIND_TRACEPARENT,
@@ -73,6 +77,22 @@ describe("task tracing", () => {
       runtimeLane: "default",
       retryOrdinal: 2,
     });
+  });
+
+  it("rejects persisted task trace labels outside the closed allowlists", () => {
+    const content = taskWithTraceContext([
+      "### Trace context",
+      "```json",
+      JSON.stringify({
+        traceparent: CONTENT_BLIND_TRACEPARENT,
+        task_class: "customer:alice@example.com",
+        runtime_lane: "lane:https://private.example/review?token=secret",
+        retry_ordinal: 2,
+      }, null, 2),
+      "```",
+    ].join("\n"));
+
+    expect(parseTaskTraceContext(content)).toBeNull();
   });
 
   it("derives child task contexts from an execution span traceparent", () => {
@@ -135,9 +155,9 @@ describe("task tracing", () => {
         surface: "task",
         phase: "publication",
       });
-      endTaskSpan(child, { outcome: "ok" });
+      await endTaskSpan(child, { outcome: "ok" });
     });
-    endTaskSpan(root, { outcome: "ok" });
+    await endTaskSpan(root, { outcome: "ok" });
 
     const retry = runtime.startSpan({
       name: "task.execution.retry",
@@ -150,7 +170,8 @@ describe("task tracing", () => {
         retryOrdinal: 1,
       },
     });
-    endTaskSpan(retry, { outcome: "failed", errorClass: "timeout" });
+    await endTaskSpan(retry, { outcome: "failed", errorClass: "timeout" });
+    await runtime.flushExportsForTest();
 
     expect(records).toHaveLength(3);
     const bySpanId = new Map(
@@ -273,7 +294,118 @@ describe("task tracing", () => {
       },
     });
     await expect(endTaskSpan(span, { outcome: "ok" })).resolves.toBeUndefined();
+    await runtime.flushExportsForTest();
     expect(runtime.stats.exportFailures).toBe(1);
+  });
+
+  it("keeps export fail-open and bounded when the sink wedges", async () => {
+    let firstExportStartedResolve: (() => void) | null = null;
+    const firstExportStarted = new Promise<void>((resolve) => {
+      firstExportStartedResolve = resolve;
+    });
+    const exporter = {
+      exportSpan: vi.fn(async () => {
+        firstExportStartedResolve?.();
+        await new Promise<void>(() => {});
+      }),
+    };
+    const runtime = new TaskTraceRuntime({
+      exportEnabled: true,
+      sampleRatePerMille: 1000,
+      release: "git-test",
+      exporter,
+      maxPendingExports: 2,
+      traceIdGenerator: () => "10101010101010101010101010101010",
+      idGenerator: vi
+        .fn()
+        .mockReturnValueOnce("1111111111111111")
+        .mockReturnValueOnce("2222222222222222")
+        .mockReturnValueOnce("3333333333333333"),
+      now: () => new Date("2026-08-01T12:00:00Z"),
+    });
+    const makeSpan = () => runtime.startSpan({
+      name: "task.execution",
+      surface: "task",
+      phase: "execution",
+      taskContext: {
+        taskClass: "delegation",
+        runtimeLane: "default",
+        retryOrdinal: 0,
+      },
+    });
+
+    const completion = (span: ReturnType<typeof makeSpan>) =>
+      Promise.race([
+        endTaskSpan(span, { outcome: "ok" }).then(() => "done"),
+        new Promise<string>((resolve) => {
+          setTimeout(() => resolve("timeout"), 20);
+        }),
+      ]);
+
+    expect(await completion(makeSpan())).toBe("done");
+    await firstExportStarted;
+    expect(await completion(makeSpan())).toBe("done");
+    expect(await completion(makeSpan())).toBe("done");
+    expect(exporter.exportSpan).toHaveBeenCalledTimes(1);
+    expect(runtime.stats.exportDropped).toBe(1);
+  });
+
+  it("flushes queued exports deterministically in tests", async () => {
+    let releaseFirstExport: (() => void) | null = null;
+    const firstExportReleased = new Promise<void>((resolve) => {
+      releaseFirstExport = resolve;
+    });
+    const exportedSpanIds: string[] = [];
+    let callCount = 0;
+    const runtime = new TaskTraceRuntime({
+      exportEnabled: true,
+      sampleRatePerMille: 1000,
+      release: "git-test",
+      exporter: {
+        exportSpan: vi.fn(async (span) => {
+          exportedSpanIds.push(span.span_id);
+          callCount += 1;
+          if (callCount === 1) {
+            await firstExportReleased;
+          }
+        }),
+      },
+      maxPendingExports: 4,
+      traceIdGenerator: () => "20202020202020202020202020202020",
+      idGenerator: vi
+        .fn()
+        .mockReturnValueOnce("4444444444444444")
+        .mockReturnValueOnce("5555555555555555"),
+      now: () => new Date("2026-08-01T12:00:00Z"),
+    });
+    const makeSpan = () => runtime.startSpan({
+      name: "task.execution",
+      surface: "task",
+      phase: "execution",
+      taskContext: {
+        taskClass: "delegation",
+        runtimeLane: "default",
+        retryOrdinal: 0,
+      },
+    });
+
+    await endTaskSpan(makeSpan(), { outcome: "ok" });
+    await endTaskSpan(makeSpan(), { outcome: "failed", errorClass: "timeout" });
+    let flushed = false;
+    const flush = runtime.flushExportsForTest().then(() => {
+      flushed = true;
+    });
+
+    await Promise.resolve();
+    expect(flushed).toBe(false);
+    expect(exportedSpanIds).toEqual(["4444444444444444"]);
+
+    releaseFirstExport?.();
+    await flush;
+    expect(exportedSpanIds).toEqual([
+      "4444444444444444",
+      "5555555555555555",
+    ]);
   });
 
   it("parses sampling rates with bounded defaults", () => {

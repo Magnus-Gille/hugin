@@ -12,6 +12,7 @@ export const TRACE_DEFAULT_INSTANCE_ID = "huginmunin" as const;
 export const TRACE_DEFAULT_RELEASE = "0.1.0" as const;
 export const TRACE_DEFAULT_MAX_ATTRIBUTES = 12;
 export const TRACE_DEFAULT_MAX_STRING_LENGTH = 64;
+export const TRACE_DEFAULT_MAX_PENDING_EXPORTS = 256;
 
 const TRACEPARENT_RE =
   /^00-([a-f0-9]{32})-([a-f0-9]{16})-([a-f0-9]{2})$/;
@@ -21,21 +22,27 @@ const TRACE_CONTEXT_SECTION_RE =
 const BANNED_TOKEN_RE =
   /:\/\/|[/?#=@\\]|(?:^|[^0-9])(?:10|127|169\.254|172\.(?:1[6-9]|2\d|3[01])|192\.168)\./i;
 
-export type TaskTraceClass =
-  | "diagnostic"
-  | "delegation"
-  | "maintenance"
-  | "publication"
-  | "read_only"
-  | "not_applicable";
+export const TASK_TRACE_CLASSES = [
+  "diagnostic",
+  "delegation",
+  "maintenance",
+  "publication",
+  "read_only",
+  "not_applicable",
+] as const;
 
-export type TaskTraceRuntimeLane =
-  | "default"
-  | "reason-hard"
-  | "reason-fast"
-  | "numeric"
-  | "review"
-  | "not_applicable";
+export type TaskTraceClass = (typeof TASK_TRACE_CLASSES)[number];
+
+export const TASK_TRACE_RUNTIME_LANES = [
+  "default",
+  "reason-hard",
+  "reason-fast",
+  "numeric",
+  "review",
+  "not_applicable",
+] as const;
+
+export type TaskTraceRuntimeLane = (typeof TASK_TRACE_RUNTIME_LANES)[number];
 
 export type TaskTraceSurface =
   | "task"
@@ -98,6 +105,7 @@ export interface TaskTraceRuntimeOptions {
   serviceId?: string;
   instanceId?: string;
   exporter?: TaskTraceExporter;
+  maxPendingExports?: number;
   traceIdGenerator?: () => string;
   idGenerator?: () => string;
   now?: () => Date;
@@ -107,6 +115,7 @@ export interface TaskTraceRuntimeOptions {
 
 export interface TaskTraceRuntimeStats {
   exportFailures: number;
+  exportDropped: number;
 }
 
 export interface SerializedTaskTraceSpan {
@@ -183,6 +192,14 @@ function defaultSpanId(): string {
 
 function isNonZeroHex(value: string): boolean {
   return NON_ZERO_HEX_RE.test(value);
+}
+
+export function isTaskTraceClass(value: string): value is TaskTraceClass {
+  return (TASK_TRACE_CLASSES as readonly string[]).includes(value);
+}
+
+export function isTaskTraceRuntimeLane(value: string): value is TaskTraceRuntimeLane {
+  return (TASK_TRACE_RUNTIME_LANES as readonly string[]).includes(value);
 }
 
 export function parseTraceparent(
@@ -369,12 +386,14 @@ export function parseTaskTraceContext(
     if (typeof parsed.traceparent !== "string") return null;
     if (!parseTraceparent(parsed.traceparent)) return null;
     if (typeof parsed.task_class !== "string") return null;
+    if (!isTaskTraceClass(parsed.task_class)) return null;
     if (typeof parsed.runtime_lane !== "string") return null;
+    if (!isTaskTraceRuntimeLane(parsed.runtime_lane)) return null;
     if (typeof parsed.retry_ordinal !== "number") return null;
     return {
       traceparent: parsed.traceparent,
-      taskClass: parsed.task_class as TaskTraceClass,
-      runtimeLane: parsed.runtime_lane as TaskTraceRuntimeLane,
+      taskClass: parsed.task_class,
+      runtimeLane: parsed.runtime_lane,
       retryOrdinal: normalizeRetryOrdinal(parsed.retry_ordinal),
     };
   } catch {
@@ -405,7 +424,7 @@ export function createFileTaskTraceExporter(
 }
 
 export class TaskTraceRuntime {
-  readonly stats: TaskTraceRuntimeStats = { exportFailures: 0 };
+  readonly stats: TaskTraceRuntimeStats = { exportFailures: 0, exportDropped: 0 };
   readonly serviceId: string;
   readonly instanceId: string;
   readonly release: string;
@@ -413,6 +432,7 @@ export class TaskTraceRuntime {
   readonly sampleRatePerMille: number;
   readonly maxAttributes: number;
   readonly maxStringLength: number;
+  readonly maxPendingExports: number;
 
   private readonly exporter?: TaskTraceExporter;
   private readonly traceIdGenerator: () => string;
@@ -420,6 +440,9 @@ export class TaskTraceRuntime {
   private readonly now: () => Date;
   private readonly context =
     new AsyncLocalStorage<ActiveTaskTraceContext>();
+  private readonly exportQueue: SerializedTaskTraceSpan[] = [];
+  private readonly exportFlushWaiters: Array<() => void> = [];
+  private exportPumpRunning = false;
 
   constructor(options: TaskTraceRuntimeOptions) {
     this.exportEnabled = options.exportEnabled;
@@ -433,6 +456,10 @@ export class TaskTraceRuntime {
     this.maxStringLength = Math.max(
       1,
       Math.min(256, Math.trunc(options.maxStringLength ?? TRACE_DEFAULT_MAX_STRING_LENGTH)),
+    );
+    this.maxPendingExports = Math.max(
+      1,
+      Math.min(4096, Math.trunc(options.maxPendingExports ?? TRACE_DEFAULT_MAX_PENDING_EXPORTS)),
     );
     this.serviceId = sanitizeSafeToken(
       options.serviceId,
@@ -517,10 +544,56 @@ export class TaskTraceRuntime {
     if (!this.exportEnabled || !span.sampled) return;
     const serialized = span.serialize();
     if (!serialized || !this.exporter) return;
+    if (this.exportQueue.length >= this.maxPendingExports) {
+      this.stats.exportDropped += 1;
+      return;
+    }
+    this.exportQueue.push(serialized);
+    this.scheduleExportPump();
+  }
+
+  // Test-only seam so focused suites can deterministically drain background
+  // export work without making production task completion await the sink.
+  async flushExportsForTest(): Promise<void> {
+    if (!this.exportPumpRunning && this.exportQueue.length === 0) return;
+    await new Promise<void>((resolve) => {
+      this.exportFlushWaiters.push(resolve);
+    });
+  }
+
+  private scheduleExportPump(): void {
+    if (this.exportPumpRunning || !this.exporter) return;
+    this.exportPumpRunning = true;
+    void this.pumpExports();
+  }
+
+  private async pumpExports(): Promise<void> {
     try {
-      await this.exporter.exportSpan(serialized);
-    } catch {
-      this.stats.exportFailures += 1;
+      while (this.exportQueue.length > 0) {
+        const serialized = this.exportQueue[0];
+        if (!serialized || !this.exporter) break;
+        try {
+          await this.exporter.exportSpan(serialized);
+        } catch {
+          this.stats.exportFailures += 1;
+        } finally {
+          this.exportQueue.shift();
+        }
+      }
+    } finally {
+      this.exportPumpRunning = false;
+      if (this.exportQueue.length > 0) {
+        this.scheduleExportPump();
+      } else {
+        this.resolveExportFlushWaiters();
+      }
+    }
+  }
+
+  private resolveExportFlushWaiters(): void {
+    const waiters = this.exportFlushWaiters.splice(0);
+    for (const resolve of waiters) {
+      resolve();
     }
   }
 }

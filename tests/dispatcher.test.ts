@@ -7,6 +7,8 @@ import { describe, it, expect } from "vitest";
 
 import {
   MAX_TASK_TIMEOUT_MS,
+  STRUCTURED_RESULT_TRACE_ERROR_CLASS,
+  deriveResultRecordingTraceOutcome,
   parseBoundedPositiveInt,
   resolveContext,
   resolveTaskWorkingDirectory,
@@ -504,6 +506,23 @@ Do something`;
     const task = parseTask(content);
     expect(task!.group).toBe("some-group");
     expect(task!.sequence).toBeUndefined();
+  });
+});
+
+describe("result recording trace classification", () => {
+  it("degrades structured-result write failures without propagating exception text", () => {
+    const secret = new Error("zod failed for https://private.example/path?token=secret");
+    const outcome = deriveResultRecordingTraceOutcome({
+      structuredResultOk: false,
+      structuredResultError: secret,
+    });
+
+    expect(outcome).toEqual({
+      outcome: "degraded",
+      errorClass: STRUCTURED_RESULT_TRACE_ERROR_CLASS,
+    });
+    expect(JSON.stringify(outcome)).not.toContain("private.example");
+    expect(JSON.stringify(outcome)).not.toContain("token=secret");
   });
 });
 
