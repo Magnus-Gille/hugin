@@ -298,15 +298,11 @@ The executable deployment contract is `scripts/deploy-pi.sh`,
 ## Focused references
 
 - Operator overview and submission example: `README.md`.
-- Artifact recovery: `docs/testing/delivery-recovery-e2e.md`.
-- Task signing and authenticated provenance: `docs/security/task-signing.md`.
-- Context provenance and scanners: `docs/security/`.
-- Durable M5 Broker lifecycle and authority: `docs/mcp-durable-m5-lifecycle.md`.
-- Orchestrator behavior: `docs/orchestrator-redesign.md`,
-  `docs/orchestrator-verdict-layer.md`, and `docs/orchestrator-savings-tracker.md`.
-- Daily candidate factory: `docs/daily-exam-factory.md`.
-- Friction taxonomy and submission surfaces: `docs/friction-reporting.md`.
 - Current execution state: `STATUS.md`.
+- Lookup/reference docs under `docs/` start at `docs/index.md`.
+  It is exhaustive for the docs corpus and groups Hugin entities/components by
+  category: core contracts, security/provenance, orchestration/scheduling,
+  learning/evaluation, historical validations, and design/research archives.
 
 Environment defaults belong with their parser, service unit, and focused operating
 document. Do not regrow a copied environment-variable catalogue here.
