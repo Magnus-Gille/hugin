@@ -1,0 +1,685 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  CONTENT_BLIND_TRACE_JOIN_FIXTURE,
+  CONTENT_BLIND_TRACEPARENT,
+} from "./helpers/task-tracing-fixtures.js";
+import {
+  TaskTraceRuntime,
+  buildChildTaskTraceContext,
+  buildTaskTraceContextSection,
+  createFileTaskTraceExporter,
+  createInboundTaskTraceContext,
+  endTaskSpan,
+  parseTaskTraceContext,
+  parseTraceSampleRatePerMille,
+} from "../src/task-tracing.js";
+
+describe("task tracing", () => {
+  function taskWithTraceContext(section: string): string {
+    return [
+      "## Task: trace fixture",
+      "",
+      section,
+      "",
+      "### Prompt",
+      "hello",
+    ].join("\n");
+  }
+
+  it("continues a strict W3C traceparent and strips baggage", () => {
+    const context = createInboundTaskTraceContext({
+      traceparent: CONTENT_BLIND_TRACEPARENT,
+      baggage: "tenant.id=owner,unsafe=value",
+      taskClass: CONTENT_BLIND_TRACE_JOIN_FIXTURE.taskClass,
+      runtimeLane: CONTENT_BLIND_TRACE_JOIN_FIXTURE.runtimeLane,
+      retryOrdinal: CONTENT_BLIND_TRACE_JOIN_FIXTURE.retryOrdinal,
+      idGenerator: () => "1111111111111111",
+    });
+
+    expect(context.traceId).toBe(CONTENT_BLIND_TRACE_JOIN_FIXTURE.traceId);
+    expect(context.parentSpanId).toBe(
+      CONTENT_BLIND_TRACE_JOIN_FIXTURE.inboundParentSpanId,
+    );
+    expect(context.traceFlags).toBe(CONTENT_BLIND_TRACE_JOIN_FIXTURE.flags);
+    expect(context.baggage).toBeUndefined();
+    expect(context.invalidReason).toBe("forbidden-baggage");
+  });
+
+  it("replaces malformed inbound context with a fresh root", () => {
+    const context = createInboundTaskTraceContext({
+      traceparent: "00-not-a-traceparent",
+      baggage: "bad baggage",
+      taskClass: "read_only",
+      runtimeLane: "default",
+      retryOrdinal: 0,
+      traceIdGenerator: () => "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      idGenerator: () => "bbbbbbbbbbbbbbbb",
+    });
+
+    expect(context.traceId).toBe("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(context.parentSpanId).toBeUndefined();
+    expect(context.traceFlags).toBe("01");
+    expect(context.invalidReason).toBe("malformed-traceparent");
+  });
+
+  it("applies a deterministic per-mille cap to roots and trusted inbound parents", () => {
+    const sampled = createInboundTaskTraceContext({
+      traceparent: `00-${"000000f9".padEnd(32, "1")}-1111111111111111-01`,
+      taskClass: "delegation",
+      runtimeLane: "default",
+      retryOrdinal: 0,
+      sampleRatePerMille: 250,
+      samplingPolicy: "trusted-inbound",
+    });
+    const droppedAtBoundary = createInboundTaskTraceContext({
+      traceparent: `00-${"000000fa".padEnd(32, "1")}-1111111111111111-01`,
+      taskClass: "delegation",
+      runtimeLane: "default",
+      retryOrdinal: 0,
+      sampleRatePerMille: 250,
+      samplingPolicy: "trusted-inbound",
+    });
+    const disabled = createInboundTaskTraceContext({
+      traceparent: CONTENT_BLIND_TRACEPARENT,
+      taskClass: "delegation",
+      runtimeLane: "default",
+      retryOrdinal: 0,
+      sampleRatePerMille: 0,
+    });
+
+    expect(sampled.traceFlags).toBe("01");
+    expect(droppedAtBoundary.traceFlags).toBe("00");
+    expect(disabled.traceFlags).toBe("00");
+  });
+
+  it("enforces operator sampling instead of trusting inbound flags or trace-id steering", () => {
+    const forcedOn = createInboundTaskTraceContext({
+      traceparent: `00-${"ffffffff".padEnd(32, "f")}-1111111111111111-00`,
+      sampleRatePerMille: 250,
+      traceIdGenerator: () => "000000f9".padEnd(32, "1"),
+    });
+    const steeredOff = createInboundTaskTraceContext({
+      traceparent: `00-${"000000fa".padEnd(32, "1")}-2222222222222222-01`,
+      sampleRatePerMille: 250,
+      traceIdGenerator: () => "000000f9".padEnd(32, "1"),
+    });
+
+    expect(forcedOn.traceFlags).toBe("01");
+    expect(steeredOff.traceFlags).toBe("01");
+  });
+
+  it("round-trips the persisted task trace context section", () => {
+    const section = buildTaskTraceContextSection({
+      traceparent: CONTENT_BLIND_TRACEPARENT,
+      taskClass: "delegation",
+      runtimeLane: "default",
+      retryOrdinal: 2,
+    });
+    const content = taskWithTraceContext(section);
+
+    expect(parseTaskTraceContext(content)).toEqual({
+      traceparent: CONTENT_BLIND_TRACEPARENT,
+      taskClass: "delegation",
+      runtimeLane: "default",
+      retryOrdinal: 2,
+    });
+  });
+
+  it("round-trips the persisted task trace context section when task facts are unavailable", () => {
+    const section = buildTaskTraceContextSection({
+      traceparent: CONTENT_BLIND_TRACEPARENT,
+    });
+    const content = taskWithTraceContext(section);
+
+    expect(parseTaskTraceContext(content)).toEqual({
+      traceparent: CONTENT_BLIND_TRACEPARENT,
+    });
+  });
+
+  it("rejects persisted task trace labels outside the closed allowlists", () => {
+    const content = taskWithTraceContext([
+      "### Trace context",
+      "```json",
+      JSON.stringify({
+        traceparent: CONTENT_BLIND_TRACEPARENT,
+        task_class: "customer:alice@example.com",
+        runtime_lane: "lane:https://private.example/review?token=secret",
+        retry_ordinal: 2,
+      }, null, 2),
+      "```",
+    ].join("\n"));
+
+    expect(parseTaskTraceContext(content)).toBeNull();
+  });
+
+  it("derives child task contexts from an execution span traceparent", () => {
+    expect(buildChildTaskTraceContext(CONTENT_BLIND_TRACEPARENT, {
+      taskClass: "delegation",
+      runtimeLane: "default",
+      retryOrdinal: 12,
+    })).toEqual({
+      traceparent: CONTENT_BLIND_TRACEPARENT,
+      taskClass: "delegation",
+      runtimeLane: "default",
+      retryOrdinal: 10,
+    });
+    expect(buildChildTaskTraceContext("not-a-traceparent", {
+      taskClass: "delegation",
+      runtimeLane: "default",
+      retryOrdinal: 0,
+    })).toBeNull();
+  });
+
+  it("preserves parentage across async work and retries", async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const runtime = new TaskTraceRuntime({
+      exportEnabled: true,
+      sampleRatePerMille: 1000,
+      release: "git-test",
+      exporter: {
+        exportSpan: async (span) => {
+          records.push(span as Record<string, unknown>);
+        },
+      },
+      traceIdGenerator: () => CONTENT_BLIND_TRACE_JOIN_FIXTURE.traceId,
+      idGenerator: vi
+        .fn()
+        .mockReturnValueOnce("1111111111111111")
+        .mockReturnValueOnce("2222222222222222")
+        .mockReturnValueOnce("3333333333333333"),
+      now: () => new Date("2026-08-01T12:00:00Z"),
+    });
+
+    const inbound = createInboundTaskTraceContext({
+      traceparent: CONTENT_BLIND_TRACEPARENT,
+      taskClass: "delegation",
+      runtimeLane: "default",
+      retryOrdinal: 0,
+      idGenerator: () => "1111111111111111",
+    });
+
+    const root = runtime.startSpan({
+      name: "task.execution",
+      surface: "task",
+      phase: "execution",
+      taskContext: inbound,
+    });
+
+    await runtime.runWithSpan(root, async () => {
+      await Promise.resolve();
+      const child = runtime.startSpan({
+        name: "task.result-recording",
+        surface: "task",
+        phase: "publication",
+      });
+      await endTaskSpan(child, { outcome: "ok" });
+    });
+    await endTaskSpan(root, { outcome: "ok" });
+
+    const retry = runtime.startSpan({
+      name: "task.execution.retry",
+      surface: "task",
+      phase: "execution",
+      taskContext: {
+        traceparent: CONTENT_BLIND_TRACEPARENT,
+        taskClass: "delegation",
+        runtimeLane: "default",
+        retryOrdinal: 1,
+      },
+    });
+    await endTaskSpan(retry, { outcome: "failed", errorClass: "timeout" });
+    await runtime.flushExportsForTest();
+
+    expect(records).toHaveLength(3);
+    const bySpanId = new Map(
+      records.map((record) => [
+        record.span_id as string,
+        record,
+      ]),
+    );
+    expect(bySpanId.get("1111111111111111")?.trace_id).toBe(
+      CONTENT_BLIND_TRACE_JOIN_FIXTURE.traceId,
+    );
+    expect(bySpanId.get("1111111111111111")?.parent_span_id).toBe(
+      CONTENT_BLIND_TRACE_JOIN_FIXTURE.inboundParentSpanId,
+    );
+    expect(bySpanId.get("2222222222222222")?.parent_span_id).toBe(
+      "1111111111111111",
+    );
+    expect(bySpanId.get("3333333333333333")?.trace_id).toBe(
+      CONTENT_BLIND_TRACE_JOIN_FIXTURE.traceId,
+    );
+    expect(bySpanId.get("3333333333333333")?.parent_span_id).toBe(
+      CONTENT_BLIND_TRACE_JOIN_FIXTURE.inboundParentSpanId,
+    );
+    expect(bySpanId.get("3333333333333333")?.attributes).toMatchObject({
+      retry_ordinal: 1,
+    });
+  });
+
+  it("classifies cancellation and timeout without leaking exception details", () => {
+    const runtime = new TaskTraceRuntime({
+      exportEnabled: false,
+      sampleRatePerMille: 1000,
+      release: "git-test",
+      traceIdGenerator: () => "cccccccccccccccccccccccccccccccc",
+      idGenerator: () => "dddddddddddddddd",
+      now: () => new Date("2026-08-01T12:00:00Z"),
+    });
+
+    const cancelled = runtime.startSpan({
+      name: "task.execution",
+      surface: "task",
+      phase: "execution",
+      taskContext: {
+        taskClass: "delegation",
+        runtimeLane: "default",
+        retryOrdinal: 0,
+      },
+    });
+    endTaskSpan(cancelled, { outcome: "failed", errorClass: "cancelled" });
+    expect(cancelled.serialize()?.attributes).toMatchObject({
+      error_class: "cancelled",
+    });
+
+    const timedOut = runtime.startSpan({
+      name: "task.execution",
+      surface: "task",
+      phase: "execution",
+      taskContext: {
+        taskClass: "delegation",
+        runtimeLane: "default",
+        retryOrdinal: 0,
+      },
+    });
+    endTaskSpan(timedOut, {
+      outcome: "failed",
+      errorClass: "timeout",
+      error: new Error("timeout on https://private.example/path?token=secret"),
+    });
+    const serialized = timedOut.serialize();
+    expect(serialized?.attributes).toMatchObject({ error_class: "timeout" });
+    expect(JSON.stringify(serialized)).not.toContain("private.example");
+    expect(JSON.stringify(serialized)).not.toContain("token=secret");
+  });
+
+  it("drops spans when sampling is zero or export fails, without throwing", async () => {
+    const exporter = {
+      exportSpan: vi.fn(async () => {
+        throw new Error("write /tmp/private-url?token=secret");
+      }),
+    };
+    const sampledOut = new TaskTraceRuntime({
+      exportEnabled: true,
+      sampleRatePerMille: 0,
+      release: "git-test",
+      exporter,
+      traceIdGenerator: () => "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      idGenerator: () => "ffffffffffffffff",
+      now: () => new Date("2026-08-01T12:00:00Z"),
+    });
+    const unsampled = sampledOut.startSpan({
+      name: "task.execution",
+      surface: "task",
+      phase: "execution",
+      taskContext: {
+        taskClass: "delegation",
+        runtimeLane: "default",
+        retryOrdinal: 0,
+      },
+    });
+    await expect(endTaskSpan(unsampled, { outcome: "ok" })).resolves.toBeUndefined();
+    expect(exporter.exportSpan).not.toHaveBeenCalled();
+
+    const runtime = new TaskTraceRuntime({
+      exportEnabled: true,
+      sampleRatePerMille: 1000,
+      release: "git-test",
+      exporter,
+      traceIdGenerator: () => "abababababababababababababababab",
+      idGenerator: () => "cdcdcdcdcdcdcdcd",
+      now: () => new Date("2026-08-01T12:00:00Z"),
+    });
+    const span = runtime.startSpan({
+      name: "task.execution",
+      surface: "task",
+      phase: "execution",
+      taskContext: {
+        taskClass: "delegation",
+        runtimeLane: "default",
+        retryOrdinal: 0,
+      },
+    });
+    await expect(endTaskSpan(span, { outcome: "ok" })).resolves.toBeUndefined();
+    await runtime.flushExportsForTest();
+    expect(runtime.stats.exportFailures).toBe(1);
+    expect(runtime.getHealth()).toMatchObject({
+      exportEnabled: true,
+      sampleRatePerMille: 1000,
+      exportFailures: 1,
+      exportDropped: 0,
+      pendingExports: 0,
+    });
+  });
+
+  it("clamps future span starts to the observed end boundary", async () => {
+    const runtime = new TaskTraceRuntime({
+      exportEnabled: false,
+      sampleRatePerMille: 1000,
+      release: "git-test",
+      traceIdGenerator: () => "12121212121212121212121212121212",
+      idGenerator: () => "3434343434343434",
+      now: () => new Date("2026-08-01T12:00:00Z"),
+    });
+    const span = runtime.startSpan({
+      name: "task.queue",
+      surface: "task",
+      phase: "queue",
+      startedAt: new Date("2026-08-01T12:05:00Z"),
+    });
+    await endTaskSpan(span, {
+      outcome: "ok",
+      endedAt: new Date("2026-08-01T12:00:00Z"),
+    });
+
+    const serialized = span.serialize();
+    expect(serialized?.started_at).toBe("2026-08-01T12:00:00Z");
+    expect(serialized?.ended_at).toBe("2026-08-01T12:00:00Z");
+  });
+
+  it("keeps export fail-open and bounded when the sink wedges", async () => {
+    let firstExportStartedResolve: (() => void) | null = null;
+    const firstExportStarted = new Promise<void>((resolve) => {
+      firstExportStartedResolve = resolve;
+    });
+    const exporter = {
+      exportSpan: vi.fn(async () => {
+        firstExportStartedResolve?.();
+        await new Promise<void>(() => {});
+      }),
+    };
+    const runtime = new TaskTraceRuntime({
+      exportEnabled: true,
+      sampleRatePerMille: 1000,
+      release: "git-test",
+      exporter,
+      maxPendingExports: 2,
+      traceIdGenerator: () => "10101010101010101010101010101010",
+      idGenerator: vi
+        .fn()
+        .mockReturnValueOnce("1111111111111111")
+        .mockReturnValueOnce("2222222222222222")
+        .mockReturnValueOnce("3333333333333333"),
+      now: () => new Date("2026-08-01T12:00:00Z"),
+    });
+    const makeSpan = () => runtime.startSpan({
+      name: "task.execution",
+      surface: "task",
+      phase: "execution",
+      taskContext: {
+        taskClass: "delegation",
+        runtimeLane: "default",
+        retryOrdinal: 0,
+      },
+    });
+
+    const completion = (span: ReturnType<typeof makeSpan>) =>
+      Promise.race([
+        endTaskSpan(span, { outcome: "ok" }).then(() => "done"),
+        new Promise<string>((resolve) => {
+          setTimeout(() => resolve("timeout"), 20);
+        }),
+      ]);
+
+    expect(await completion(makeSpan())).toBe("done");
+    await firstExportStarted;
+    expect(await completion(makeSpan())).toBe("done");
+    expect(await completion(makeSpan())).toBe("done");
+    expect(exporter.exportSpan).toHaveBeenCalledTimes(1);
+    expect(runtime.stats.exportDropped).toBe(1);
+    expect(runtime.getHealth()).toMatchObject({
+      exportDropped: 1,
+      pendingExports: 2,
+    });
+  });
+
+  it("omits unresolved task facts instead of hardcoding defaults", async () => {
+    const runtime = new TaskTraceRuntime({
+      exportEnabled: false,
+      sampleRatePerMille: 1000,
+      release: "git-test",
+      traceIdGenerator: () => "56565656565656565656565656565656",
+      idGenerator: () => "7878787878787878",
+      now: () => new Date("2026-08-01T12:00:00Z"),
+    });
+    const span = runtime.startSpan({
+      name: "task.execution",
+      surface: "task",
+      phase: "execution",
+      taskContext: {
+        traceparent: CONTENT_BLIND_TRACEPARENT,
+      },
+    });
+
+    await endTaskSpan(span, { outcome: "ok" });
+    expect(span.serialize()?.attributes).toEqual({});
+  });
+
+  it("rotates file exports and bounds on-disk growth", async () => {
+    const tmpPath = await mkdtemp(path.join(tmpdir(), "hugin-trace-export-"));
+    const exportPath = path.join(tmpPath, "trace.jsonl");
+
+    try {
+      const baseSpan = {
+        kind: "trace-span" as const,
+        contract_version: "v1.0" as const,
+        policy_id: "trace-policy-hugin" as const,
+        source: {
+          source_kind: "service_internal" as const,
+          producer: "hugin",
+          producer_version: "git-test",
+        },
+        service: {
+          service_id: "hugin",
+          instance_id: "huginmunin",
+        },
+        trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
+        operation: {
+          surface: "task" as const,
+          phase: "execution" as const,
+        },
+        started_at: "2026-08-01T12:00:00Z",
+        ended_at: "2026-08-01T12:00:01Z",
+        collected_at: "2026-08-01T12:00:01Z",
+        sampled: true as const,
+        outcome: "ok" as const,
+        attributes: {
+          task_class: "delegation" as const,
+          runtime_lane: "default" as const,
+          retry_ordinal: 0,
+        },
+        diagnostic_ref: "ref:hugin-trace-test",
+        extensions: [] as [],
+      };
+      const maxBytes = Buffer.byteLength(
+        `${JSON.stringify({ ...baseSpan, span_id: "1111111111111111" })}\n`,
+        "utf8",
+      ) + 16;
+      const exporter = createFileTaskTraceExporter(exportPath, {
+        maxBytes,
+        maxFiles: 3,
+      });
+      expect(exporter).toBeDefined();
+
+      await exporter!.exportSpan({ ...baseSpan, span_id: "1111111111111111" });
+      await exporter!.exportSpan({ ...baseSpan, span_id: "2222222222222222" });
+      await exporter!.exportSpan({ ...baseSpan, span_id: "3333333333333333" });
+      await exporter!.exportSpan({ ...baseSpan, span_id: "4444444444444444" });
+
+      expect(await readFile(exportPath, "utf8")).toContain("\"span_id\":\"4444444444444444\"");
+      expect(await readFile(`${exportPath}.1`, "utf8")).toContain("\"span_id\":\"3333333333333333\"");
+      expect(await readFile(`${exportPath}.2`, "utf8")).toContain("\"span_id\":\"2222222222222222\"");
+      await expect(readFile(`${exportPath}.3`, "utf8")).rejects.toThrow();
+    } finally {
+      await rm(tmpPath, { recursive: true, force: true });
+    }
+  });
+
+  it("flushes queued exports deterministically in tests", async () => {
+    let releaseFirstExport: (() => void) | null = null;
+    const firstExportReleased = new Promise<void>((resolve) => {
+      releaseFirstExport = resolve;
+    });
+    const exportedSpanIds: string[] = [];
+    let callCount = 0;
+    const runtime = new TaskTraceRuntime({
+      exportEnabled: true,
+      sampleRatePerMille: 1000,
+      release: "git-test",
+      exporter: {
+        exportSpan: vi.fn(async (span) => {
+          exportedSpanIds.push(span.span_id);
+          callCount += 1;
+          if (callCount === 1) {
+            await firstExportReleased;
+          }
+        }),
+      },
+      maxPendingExports: 4,
+      traceIdGenerator: () => "20202020202020202020202020202020",
+      idGenerator: vi
+        .fn()
+        .mockReturnValueOnce("4444444444444444")
+        .mockReturnValueOnce("5555555555555555"),
+      now: () => new Date("2026-08-01T12:00:00Z"),
+    });
+    const makeSpan = () => runtime.startSpan({
+      name: "task.execution",
+      surface: "task",
+      phase: "execution",
+      taskContext: {
+        taskClass: "delegation",
+        runtimeLane: "default",
+        retryOrdinal: 0,
+      },
+    });
+
+    await endTaskSpan(makeSpan(), { outcome: "ok" });
+    await endTaskSpan(makeSpan(), { outcome: "failed", errorClass: "timeout" });
+    let flushed = false;
+    const flush = runtime.flushExportsForTest().then(() => {
+      flushed = true;
+    });
+
+    await Promise.resolve();
+    expect(flushed).toBe(false);
+    expect(exportedSpanIds).toEqual(["4444444444444444"]);
+
+    releaseFirstExport?.();
+    await flush;
+    expect(exportedSpanIds).toEqual([
+      "4444444444444444",
+      "5555555555555555",
+    ]);
+  });
+
+  it("parses sampling rates with bounded defaults", () => {
+    expect(parseTraceSampleRatePerMille(undefined)).toBe(1000);
+    expect(parseTraceSampleRatePerMille("250")).toBe(250);
+    expect(parseTraceSampleRatePerMille("-1")).toBe(1000);
+    expect(parseTraceSampleRatePerMille(5000)).toBe(1000);
+  });
+
+  it("serializes only the allowlisted, bounded envelope", () => {
+    const runtime = new TaskTraceRuntime({
+      exportEnabled: false,
+      sampleRatePerMille: 1000,
+      release: "git-unsafe.example/path?token=secret",
+      traceIdGenerator: () => "1234567890abcdef1234567890abcdef",
+      idGenerator: () => "abcdefabcdefabcd",
+      now: () => new Date("2026-08-01T12:00:00Z"),
+    });
+
+    const span = runtime.startSpan({
+      name: "task.execution",
+      surface: "task",
+      phase: "execution",
+      taskContext: {
+        taskClass: "delegation",
+        runtimeLane: "default",
+        retryOrdinal: 0,
+      },
+      unsafeAttributes: {
+        prompt: "secret prompt",
+        result: "secret result",
+        repository_path: "/Users/magnus/private",
+        query: "token=secret",
+      },
+    });
+    endTaskSpan(span, {
+      outcome: "failed",
+      errorClass: "gateway-error",
+      error: {
+        message: "postgres://user:pw@localhost/db",
+        stack: "Error: postgres://user:pw@localhost/db",
+      },
+    });
+    const serialized = span.serialize();
+
+    expect(serialized?.attributes).toEqual({
+      task_class: "delegation",
+      runtime_lane: "default",
+      retry_ordinal: 0,
+      error_class: "gateway-error",
+    });
+    expect(serialized?.source.producer_version.length).toBeLessThanOrEqual(64);
+    expect(JSON.stringify(serialized)).not.toContain("secret prompt");
+    expect(JSON.stringify(serialized)).not.toContain("/Users/magnus/private");
+    expect(JSON.stringify(serialized)).not.toContain("postgres://");
+  });
+
+  it("emits the fixed Hugin to gateway join tuple", () => {
+    const runtime = new TaskTraceRuntime({
+      exportEnabled: false,
+      sampleRatePerMille: 1000,
+      release: "git-test",
+      traceIdGenerator: () => CONTENT_BLIND_TRACE_JOIN_FIXTURE.traceId,
+      idGenerator: () => CONTENT_BLIND_TRACE_JOIN_FIXTURE.gatewayCallSpanId,
+      now: () => new Date("2026-08-01T12:00:00Z"),
+    });
+
+    const inbound = createInboundTaskTraceContext({
+      traceparent: CONTENT_BLIND_TRACEPARENT,
+      taskClass: CONTENT_BLIND_TRACE_JOIN_FIXTURE.taskClass,
+      runtimeLane: CONTENT_BLIND_TRACE_JOIN_FIXTURE.runtimeLane,
+      retryOrdinal: CONTENT_BLIND_TRACE_JOIN_FIXTURE.retryOrdinal,
+      idGenerator: () => CONTENT_BLIND_TRACE_JOIN_FIXTURE.gatewayCallSpanId,
+    });
+    const span = runtime.startSpan({
+      name: "gateway.delegate",
+      surface: "gateway",
+      phase: "execution",
+      taskContext: inbound,
+    });
+    endTaskSpan(span, { outcome: "ok" });
+
+    expect(span.traceparent).toBe(
+      `00-${CONTENT_BLIND_TRACE_JOIN_FIXTURE.traceId}-${CONTENT_BLIND_TRACE_JOIN_FIXTURE.gatewayCallSpanId}-01`,
+    );
+    expect(span.serialize()).toMatchObject({
+      trace_id: CONTENT_BLIND_TRACE_JOIN_FIXTURE.traceId,
+      span_id: CONTENT_BLIND_TRACE_JOIN_FIXTURE.gatewayCallSpanId,
+      parent_span_id: CONTENT_BLIND_TRACE_JOIN_FIXTURE.inboundParentSpanId,
+      attributes: {
+        task_class: CONTENT_BLIND_TRACE_JOIN_FIXTURE.taskClass,
+        runtime_lane: CONTENT_BLIND_TRACE_JOIN_FIXTURE.runtimeLane,
+        retry_ordinal: CONTENT_BLIND_TRACE_JOIN_FIXTURE.retryOrdinal,
+      },
+    });
+  });
+});

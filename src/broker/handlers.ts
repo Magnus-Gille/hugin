@@ -42,7 +42,9 @@ import {
   delegationRequestSchema,
   listRequestSchema,
   rateRequestSchema,
+  type AliasResolved,
   type DelegationEnvelope,
+  type DelegationRequest,
 } from "./types.js";
 import type { AwaitLifecycle } from "./await-observation.js";
 import type { AuthenticatedRequest } from "./auth.js";
@@ -55,6 +57,13 @@ import {
 } from "../quality-receipt.js";
 import { structuredTaskResultSchema } from "../task-result-schema.js";
 import { MuninWriteRejectedError } from "../munin-client.js";
+import {
+  createInboundTaskTraceContext,
+  parseTraceSampleRatePerMille,
+  type TaskTraceInvalidReason,
+  type TaskTraceRuntimeLane,
+  type TaskTraceIngressCounter,
+} from "../task-tracing.js";
 
 const brokerFrictionInputSchema = reportFrictionInputSchema.extend({
   event_id: z.string().uuid(),
@@ -65,6 +74,7 @@ export interface BrokerHandlerDependencies {
   journal: DelegationJournal;
   idempotency: IdempotencyIndex;
   executorCapabilities: BrokerExecutorCapabilities;
+  traceIngressCounter?: TaskTraceIngressCounter;
   now?: () => Date;
 }
 
@@ -74,6 +84,36 @@ function nowFn(deps: BrokerHandlerDependencies): () => Date {
 
 function scopedIdempotencyKey(principal: string, idempotencyKey: string): string {
   return `${principal}\0${idempotencyKey}`;
+}
+
+function deriveBrokerTraceRuntimeLane(
+  request: Pick<DelegationRequest, "acceptance" | "task_type">,
+  aliasResolved: AliasResolved,
+): TaskTraceRuntimeLane {
+  if (request.task_type === "reason-hard") return "reason-hard";
+  if (request.task_type === "reason-math") return "numeric";
+  if (request.task_type === "code-review" || request.acceptance.mode === "verifier") {
+    return "review";
+  }
+  if (aliasResolved.reasoning_level === "medium" || aliasResolved.reasoning_level === "low") {
+    return "reason-fast";
+  }
+  if (aliasResolved.reasoning_level === "high") {
+    return "reason-hard";
+  }
+  return "default";
+}
+
+function traceContextWarnings(
+  invalidReason: TaskTraceInvalidReason | undefined,
+): string[] {
+  if (invalidReason === "forbidden-baggage") {
+    return ["trace context sanitized: baggage header ignored"];
+  }
+  if (invalidReason === "malformed-traceparent") {
+    return ["trace context replaced: malformed traceparent header"];
+  }
+  return [];
 }
 
 function storedBrokerPrincipal(content: string): string | null {
@@ -204,6 +244,27 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
       return;
     }
 
+    const traceContext = createInboundTaskTraceContext({
+      traceparent: req.header("traceparent") ?? undefined,
+      baggage: req.header("baggage") ?? undefined,
+      taskClass: "delegation",
+      runtimeLane: deriveBrokerTraceRuntimeLane(
+        request,
+        aliasResolution.alias_resolved,
+      ),
+      retryOrdinal: 0,
+      sampleRatePerMille: parseTraceSampleRatePerMille(
+        process.env.HUGIN_TRACE_SAMPLE_RATE_PER_MILLE,
+      ),
+    });
+    if (traceContext.invalidReason) {
+      deps.traceIngressCounter?.noteInvalidReason(traceContext.invalidReason);
+    }
+    const responseWarnings = [
+      ...submitWarnings,
+      ...traceContextWarnings(traceContext.invalidReason),
+    ];
+
     const taskId = generateBrokerTaskId(principal, request.idempotency_key);
     const reservationKey = scopedIdempotencyKey(principal, request.idempotency_key);
     const idemOutcome = deps.idempotency.reserve(reservationKey, request);
@@ -212,7 +273,7 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
         task_id: idemOutcome.task_id,
         received_at: nowFn(deps)().toISOString(),
         reused_idempotency: true,
-        ...(submitWarnings.length > 0 ? { warnings: submitWarnings } : {}),
+        ...(responseWarnings.length > 0 ? { warnings: responseWarnings } : {}),
       });
       return;
     }
@@ -241,9 +302,16 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
       alias_resolved: aliasResolution.alias_resolved,
       policy_version: POLICY_VERSION,
     };
-
     try {
-      await deps.taskStore.submit({ envelope });
+      await deps.taskStore.submit({
+        envelope,
+        traceContext: {
+          traceparent: traceContext.traceparent,
+          taskClass: traceContext.taskClass,
+          runtimeLane: traceContext.runtimeLane,
+          retryOrdinal: traceContext.retryOrdinal,
+        },
+      });
     } catch (err) {
       if (
         err instanceof MuninWriteRejectedError &&
@@ -293,7 +361,7 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
           task_id: taskId,
           received_at: persistedEnvelope.received_at,
           reused_idempotency: true,
-          ...(submitWarnings.length > 0 ? { warnings: submitWarnings } : {}),
+          ...(responseWarnings.length > 0 ? { warnings: responseWarnings } : {}),
         });
         return;
       }
@@ -311,7 +379,7 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
       task_id: taskId,
       received_at: envelope.received_at,
       reused_idempotency: false,
-      ...(submitWarnings.length > 0 ? { warnings: submitWarnings } : {}),
+      ...(responseWarnings.length > 0 ? { warnings: responseWarnings } : {}),
     });
   };
 }
