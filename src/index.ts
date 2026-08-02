@@ -5098,12 +5098,6 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   currentClaimTags = [...claimTags];
   currentCancellation = null;
   const traceNow = new Date();
-  const acceptedAtMs = Date.parse(claimAcceptedAt);
-  const startedAt = new Date(
-    Number.isNaN(acceptedAtMs)
-      ? traceNow.getTime()
-      : Math.min(traceNow.getTime(), acceptedAtMs),
-  ).toISOString();
   const taskId = extractTaskId(taskNs);
   const inboundTaskTraceContext = parseTaskTraceContext(entry.content);
   const queueSpan = startTaskLifecycleSpan(
@@ -5120,6 +5114,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     queueSpan,
     "ok",
   );
+  // Execution begins only after queue handling has completed. Use a fresh
+  // local observation rather than the (possibly skewed) persisted claim time,
+  // so queue and execution remain distinct latency categories.
+  const startedAt = new Date().toISOString();
   const executionSpan = startTaskLifecycleSpan(
     inboundTaskTraceContext,
     "task.execution",
