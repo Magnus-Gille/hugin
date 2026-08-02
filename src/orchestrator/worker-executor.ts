@@ -1150,6 +1150,17 @@ export class PiHarnessExecutor implements WorkerExecutor {
     const start = Date.now();
     const maxOutput = req.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
     const permissionProfile = effectivePiPermissionProfile(req);
+    const abortedBeforeStart = (): WorkerResult => ({
+      ok: false,
+      output: "",
+      provider: req.provider,
+      model: req.model,
+      inputTokens: null,
+      outputTokens: null,
+      costUsd: null,
+      latencyMs: Date.now() - start,
+      error: "Process aborted before it started",
+    });
 
     const entry = getRegistryEntryById("pi-harness");
     if (!entry) {
@@ -1168,17 +1179,7 @@ export class PiHarnessExecutor implements WorkerExecutor {
 
     // Short-circuit an already-cancelled call before spawning (issue #110).
     if (req.signal?.aborted) {
-      return {
-        ok: false,
-        output: "",
-        provider: req.provider,
-        model: req.model,
-        inputTokens: null,
-        outputTokens: null,
-        costUsd: null,
-        latencyMs: Date.now() - start,
-        error: "Process aborted before it started",
-      };
+      return abortedBeforeStart();
     }
 
     const launchCwd = await resolvePiHarnessLaunchCwd(req);
@@ -1209,6 +1210,12 @@ export class PiHarnessExecutor implements WorkerExecutor {
         latencyMs: Date.now() - start,
         error: args.error,
       };
+    }
+
+    // Re-check after async launch-cwd verification so a pre-spawn abort cannot
+    // slip through and launch pi after the signal has already fired.
+    if (req.signal?.aborted) {
+      return abortedBeforeStart();
     }
 
     return new Promise<WorkerResult>((resolve) => {

@@ -1,5 +1,25 @@
 # Hugin — Status
 
+## 2026-08-02 — #339 pi-harness pre-spawn abort gap fixed
+
+- Branch `codex/issue-339-worktree-binding` now re-checks `req.signal.aborted`
+  immediately before the final `pi` spawn, after async launch-CWD / worktree
+  binding verification and argument construction. An abort that fires during
+  pre-spawn binding verification now returns a no-spend `Process aborted before
+  it started` result instead of launching the harness after the signal already
+  fired.
+- `tests/orchestrator/worker-executor.test.ts` now covers the reproduced abort
+  window directly: the signal fires while launch-CWD resolution is still in
+  progress, and the regression asserts that no `pi` child is spawned.
+
+**Verification:** red/green focused `npm test -- tests/orchestrator/worker-executor.test.ts`
+(103 tests, reproduced failure first, then passed), full `npm test` (167 files /
+2,640 tests, 3 skipped), and `git diff --check` passed.
+
+**Next:** obtain independent review on the exact committed head, then wait for
+green PR CI before any merge decision. No deployment or unrelated repository
+mutation occurred.
+
 ## 2026-08-01 — #339 managed checkout / pi-harness binding hardening
 
 - Branch `codex/issue-339-worktree-binding` now fails closed before any managed

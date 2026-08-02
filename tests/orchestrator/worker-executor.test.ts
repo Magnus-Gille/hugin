@@ -2234,6 +2234,35 @@ describe("PiHarnessExecutor — external AbortSignal (issue #110)", () => {
     expect(spawnCalls.length).toBe(0);
   });
 
+  it("does not spawn the pi harness when the signal aborts during launch cwd resolution", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: `${PI_EXPECTED_REVISION}\n` },
+      { exitCode: 0, stdout: "", delayMs: 100 },
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS },
+    ];
+    const controller = new AbortController();
+
+    const executor = new PiHarnessExecutor();
+    const pending = executor.run(
+      makeTrustedPiRequest({
+        prompt: "hi",
+        timeoutMs: 60000,
+        signal: controller.signal,
+      }),
+    );
+
+    await new Promise((r) => setTimeout(r, 20));
+    controller.abort();
+    const result = await pending;
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/abort/i);
+    expect(spawnCalls.some((call) => call.cmd === "pi")).toBe(false);
+  });
+
   it("kills the child when the signal fires mid-run", async () => {
     // Child would run for 500ms; we abort well before that.
     spawnBehaviors = [
