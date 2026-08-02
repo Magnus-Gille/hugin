@@ -1481,20 +1481,23 @@ async function resolveManagedCheckoutTarget(
   const rawLooksManaged = trimmedWorkingDir === normalizedReposRoot ||
     trimmedWorkingDir.startsWith(`${normalizedReposRoot}${path.sep}`);
   const normalizedLooksManaged = isPathWithinRoot(normalizedWorkingDir, normalizedReposRoot);
-  if (!rawLooksManaged && !normalizedLooksManaged) {
-    return { state: "skipped" };
-  }
+  const lexicallyManaged = rawLooksManaged || normalizedLooksManaged;
 
   const managedRoot = await canonicalizeExistingPath(normalizedReposRoot, "managed repos root");
   if (!managedRoot.ok) {
-    return { state: "refused", reason: managedRoot.reason };
+    return lexicallyManaged
+      ? { state: "refused", reason: managedRoot.reason }
+      : { state: "skipped" };
   }
 
   const canonicalCwd = await canonicalizeExistingPath(trimmedWorkingDir, "selected worktree path");
   if (!canonicalCwd.ok) {
-    return { state: "refused", reason: canonicalCwd.reason };
+    return lexicallyManaged
+      ? { state: "refused", reason: canonicalCwd.reason }
+      : { state: "skipped" };
   }
   if (!isPathWithinRoot(canonicalCwd.path, managedRoot.path)) {
+    if (!lexicallyManaged) return { state: "skipped" };
     return {
       state: "refused",
       reason:

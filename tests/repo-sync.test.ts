@@ -222,6 +222,26 @@ describe("checkoutTaskBranch", () => {
     expect(spawnCalls).toHaveLength(0);
   });
 
+  it("recognizes a canonical checkout reached through a symlinked configured root", async () => {
+    setRealpath("/home/magnus/hugin-workspace", "/private/hugin-root");
+    spawnBehaviors = [
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 0 },
+    ];
+
+    const result = await checkoutTaskBranch(
+      "/private/hugin-root/grimnir",
+      "task-canonical-root",
+      { fetchRetryDelaysMs: [0, 0], reposRoot: "/home/magnus/hugin-workspace" },
+    );
+
+    expect(result.action).toBe("created");
+    expect(result.branchName).toBe("hugin/task-canonical-root");
+    expect(spawnCalls).toHaveLength(4);
+  });
+
   it("fails closed before any git mutation when the selected worktree path is not already canonical", async () => {
     setRealpath("/home/magnus/hugin-workspace", "/private/hugin-root");
     setRealpath(
