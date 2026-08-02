@@ -57,6 +57,16 @@ export type Egress = "subscription" | "local" | "third-party";
 export type RuntimeFamily = "one-shot" | "harness";
 export type ReasoningLevel = "low" | "medium" | "high";
 
+export const PI_HARNESS_READ_ONLY_SAFE_REGISTRY_FLAGS = [
+  "--no-session",
+  "--provider",
+] as const;
+export const PI_HARNESS_DEFAULT_HARNESS_FLAGS = [
+  "--no-session",
+  "--provider",
+  "openrouter",
+] as const;
+
 export interface RuntimeDefinition {
   id: string;
   dispatcherRuntime: DispatcherRuntime;
@@ -216,7 +226,7 @@ export const RUNTIME_REGISTRY: readonly RuntimeDefinition[] = [
     autoEligible: false,
     family: "harness",
     harnessCmd: "pi",
-    harnessFlags: ["--no-session", "--provider", "openrouter"],
+    harnessFlags: PI_HARNESS_DEFAULT_HARNESS_FLAGS,
   },
   {
     id: "berget",
@@ -249,6 +259,21 @@ export function getRuntimeMaxSensitivity(trustTier: TrustTier): Sensitivity {
 
 export function getRegistryEntryById(id: string): RuntimeDefinition | undefined {
   return RUNTIME_REGISTRY.find((r) => r.id === id);
+}
+
+export function getDispatcherRuntimeCapabilities(
+  runtime: DispatcherRuntime,
+): readonly RuntimeCapability[] | undefined {
+  const capabilities = new Set<RuntimeCapability>();
+  let matched = false;
+  for (const entry of RUNTIME_REGISTRY) {
+    if (entry.dispatcherRuntime !== runtime) continue;
+    matched = true;
+    for (const capability of entry.capabilities) {
+      capabilities.add(capability);
+    }
+  }
+  return matched ? Array.from(capabilities) : undefined;
 }
 
 /**

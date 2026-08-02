@@ -24,7 +24,10 @@ import type {
 import { extractM5Provenance, sanitizeProviderTokenCount } from "../m5-provenance.js";
 import type { M5DelegationProvenance } from "../m5-provenance.js";
 import { estimateCostUsd } from "../model-pricing.js";
-import { getRegistryEntryById } from "../runtime-registry.js";
+import {
+  PI_HARNESS_READ_ONLY_SAFE_REGISTRY_FLAGS,
+  getRegistryEntryById,
+} from "../runtime-registry.js";
 import {
   DEFAULT_REPOS_ROOT,
   normalizeRoot,
@@ -392,17 +395,22 @@ function isContainedByRoot(candidate: string, root: string): boolean {
 async function canonicalizePiPath(
   rawPath: string | undefined,
   label: string,
-): Promise<{ ok: true; cwd: string } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; cwd: string }
+  | { ok: false; error: string; kind: "invalid" | "missing" | "unsafe" }
+> {
   const trimmed = rawPath?.trim();
   if (!trimmed) {
     return {
       ok: false,
+      kind: "invalid",
       error: `${label} requires an explicit working directory`,
     };
   }
   if (!path.isAbsolute(trimmed)) {
     return {
       ok: false,
+      kind: "invalid",
       error: `${label} ${JSON.stringify(rawPath)} must be absolute`,
     };
   }
@@ -412,14 +420,16 @@ async function canonicalizePiPath(
     return { ok: true, cwd: await fs.realpath(normalized) };
   } catch (err) {
     const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : "";
-    if (code === "ENOENT") {
+    if (code === "ENOENT" || code === "ENOTDIR") {
       return {
         ok: false,
+        kind: "missing",
         error: `${label} ${JSON.stringify(rawPath)} does not exist`,
       };
     }
     return {
       ok: false,
+      kind: "unsafe",
       error:
         `${label} ${JSON.stringify(rawPath)} could not be canonicalized via realpath: ` +
         (err instanceof Error ? err.message : String(err)),
@@ -447,11 +457,21 @@ async function canonicalizePiLaunchDirectory(
   for (const root of allowedRoots) {
     const canonicalRoot = await canonicalizePiPath(root, "pi-harness allowed launch root");
     if (!canonicalRoot.ok) {
+      if (canonicalRoot.kind === "missing") {
+        continue;
+      }
       return canonicalRoot;
     }
     if (!canonicalRoots.includes(canonicalRoot.cwd)) {
       canonicalRoots.push(canonicalRoot.cwd);
     }
+  }
+  if (canonicalRoots.length === 0) {
+    return {
+      ok: false,
+      error:
+        "pi-harness read-only execution could not resolve any allowed read-only roots",
+    };
   }
 
   if (!canonicalRoots.some((root) => isContainedByRoot(canonicalCwd.cwd, root))) {
@@ -1350,6 +1370,7 @@ function buildPiArgs(
 ): { ok: true; args: string[] } | { ok: false; error: string } {
   const flags: string[] = [];
   const registryFlags = registryEntry.harnessFlags ?? [];
+  const safeReadOnlyFlags = new Set<string>(PI_HARNESS_READ_ONLY_SAFE_REGISTRY_FLAGS);
   for (let i = 0; i < registryFlags.length; i++) {
     const flag = registryFlags[i];
     if (permissionProfile !== "read-only") {
@@ -1363,10 +1384,6 @@ function buildPiArgs(
     if (flag.startsWith("--tools=")) {
       continue;
     }
-    if (flag === "--no-session" || flag.startsWith("--provider=")) {
-      flags.push(flag);
-      continue;
-    }
     if (flag === "--provider") {
       const provider = registryFlags[i + 1];
       if (!provider) {
@@ -1377,6 +1394,17 @@ function buildPiArgs(
       }
       flags.push(flag, provider);
       i++;
+      continue;
+    }
+    if (flag.includes("=")) {
+      const [flagName] = flag.split("=", 1);
+      if (safeReadOnlyFlags.has(flagName)) {
+        flags.push(flag);
+        continue;
+      }
+    }
+    if (safeReadOnlyFlags.has(flag)) {
+      flags.push(flag);
       continue;
     }
     return {

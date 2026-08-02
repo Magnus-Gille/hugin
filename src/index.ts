@@ -248,10 +248,11 @@ import {
   type Sensitivity,
   type SensitivityAssessment,
 } from "./sensitivity.js";
-import { parseTaskModelField } from "./task-document-metadata.js";
+import { parseTaskModelField, taskMetadataPrefix } from "./task-document-metadata.js";
 import { routeTask, type RouterDecision } from "./router.js";
 import {
   buildRuntimeCandidates,
+  getDispatcherRuntimeCapabilities,
   isAutoRoutableDispatcherRuntime,
   isLegacyDispatcherRuntime,
   parseActiveSubscriptions,
@@ -844,13 +845,17 @@ interface TaskConfig {
 type DeclaredRuntime = TaskConfig["runtime"] | "pipeline" | "auto";
 
 function parseDeclaredRuntime(content: string): DeclaredRuntime | undefined {
-  return content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|opencode|homeserver|pipeline|auto|orchestrator)/i)?.[1]?.toLowerCase() as
+  return taskMetadataPrefix(content).match(
+    /^[ \t]*(?:-[ \t]*)?\*\*Runtime:\*\*[ \t]*(claude|codex|ollama|opencode|homeserver|pipeline|auto|orchestrator)$/im,
+  )?.[1]?.toLowerCase() as
     | DeclaredRuntime
     | undefined;
 }
 
 function parseSubmittedByField(content: string): string {
-  return content.match(/\*\*Submitted by:\*\*\s*(.+)/i)?.[1]?.trim() || "unknown";
+  return taskMetadataPrefix(content).match(
+    /^[ \t]*(?:-[ \t]*)?\*\*Submitted by:\*\*[ \t]*(.+)$/im,
+  )?.[1]?.trim() || "unknown";
 }
 
 // Accepts an allowlist entry as a match if the submitter equals it
@@ -888,6 +893,7 @@ function parsePipelineSideEffectsField(content: string): PipelineSideEffectId[] 
 }
 
 function parseTask(content: string): TaskConfig | null {
+  const metadataPrefix = taskMetadataPrefix(content);
   const declaredRuntimeRaw = parseDeclaredRuntime(content);
   const isAutoRoute = declaredRuntimeRaw === "auto";
   const runtime = (isAutoRoute ? undefined : declaredRuntimeRaw) as
@@ -898,86 +904,86 @@ function parseTask(content: string): TaskConfig | null {
       | "homeserver"
       | "orchestrator"
       | undefined;
-  const workingDir = content.match(
+  const workingDir = metadataPrefix.match(
     /\*\*Working dir:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const contextRaw = content.match(
+  const contextRaw = metadataPrefix.match(
     /\*\*Context:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const baseBranchOverride = parseBaseBranchOverride(content);
-  const timeoutStr = content.match(/\*\*Timeout:\*\*\s*(\d+)/i)?.[1];
-  const submittedBy = content.match(
+  const baseBranchOverride = parseBaseBranchOverride(metadataPrefix);
+  const timeoutStr = metadataPrefix.match(/\*\*Timeout:\*\*\s*(\d+)/i)?.[1];
+  const submittedBy = metadataPrefix.match(
     /\*\*Submitted by:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const submittedAt = content.match(
+  const submittedAt = metadataPrefix.match(
     /\*\*Submitted at:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const replyTo = content.match(
+  const replyTo = metadataPrefix.match(
     /\*\*Reply-to:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const replyFormat = content.match(
+  const replyFormat = metadataPrefix.match(
     /\*\*Reply-format:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const group = content.match(
+  const group = metadataPrefix.match(
     /\*\*Group:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const sequenceStr = content.match(
+  const sequenceStr = metadataPrefix.match(
     /\*\*Sequence:\*\*\s*(\d+)/i
   )?.[1];
   const modelRaw = parseTaskModelField(content);
-  const ollamaHostRaw = content.match(
+  const ollamaHostRaw = metadataPrefix.match(
     /\*\*Ollama-host:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const reasoningRaw = content.match(
+  const reasoningRaw = metadataPrefix.match(
     /\*\*Reasoning:\*\*\s*(true|false)/i
   )?.[1]?.toLowerCase();
-  const fallbackRaw = content.match(
+  const fallbackRaw = metadataPrefix.match(
     /\*\*Fallback:\*\*\s*(claude|none)/i
   )?.[1]?.toLowerCase() as "claude" | "none" | undefined;
-  const contextRefsRaw = content.match(
+  const contextRefsRaw = metadataPrefix.match(
     /\*\*Context-refs:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const contextBudgetStr = content.match(
+  const contextBudgetStr = metadataPrefix.match(
     /\*\*Context-budget:\*\*\s*(\d+)/i
   )?.[1];
-  const declaredSensitivityRaw = content.match(
+  const declaredSensitivityRaw = metadataPrefix.match(
     /\*\*Sensitivity:\*\*\s*(public|internal|private)/i
   )?.[1]?.trim()?.toLowerCase();
-  const pipelineId = content.match(
+  const pipelineId = metadataPrefix.match(
     /\*\*Pipeline:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const pipelinePhase = content.match(
+  const pipelinePhase = metadataPrefix.match(
     /\*\*Pipeline phase:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const pipelineSubmittedBy = content.match(
+  const pipelineSubmittedBy = metadataPrefix.match(
     /\*\*Pipeline submitted by:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const pipelineSensitivity = content.match(
+  const pipelineSensitivity = metadataPrefix.match(
     /\*\*Pipeline sensitivity:\*\*\s*(public|internal|private)/i
   )?.[1]?.trim()?.toLowerCase() as
     | "public"
     | "internal"
     | "private"
     | undefined;
-  const pipelineAuthority = content.match(
+  const pipelineAuthority = metadataPrefix.match(
     /\*\*Pipeline authority:\*\*\s*(autonomous|gated)/i
   )?.[1]?.trim()?.toLowerCase() as "autonomous" | "gated" | undefined;
-  const pipelineDependencyTaskIdsRaw = content.match(
+  const pipelineDependencyTaskIdsRaw = metadataPrefix.match(
     /\*\*Depends on task ids:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const pipelineDependencyPhasesRaw = content.match(
+  const pipelineDependencyPhasesRaw = metadataPrefix.match(
     /\*\*Depends on phases:\*\*\s*(.+)/i
   )?.[1]?.trim();
 
-  const capabilitiesRaw = content.match(
+  const capabilitiesRaw = metadataPrefix.match(
     /\*\*Capabilities:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const permissionProfileRaw = content.match(
+  const permissionProfileRaw = metadataPrefix.match(
     /\*\*Permission profile:\*\*\s*(.+)/i
   )?.[1]?.trim()?.toLowerCase();
-  const homeserverTaskType = content.match(/\*\*Task type:\*\*\s*(.+)/i)?.[1]?.trim();
-  const homeserverVerifierRaw = content.match(/\*\*Verifier:\*\*\s*(.+)/i)?.[1]?.trim();
-  const homeserverMaxTokensRaw = content.match(/\*\*Max output tokens:\*\*\s*(\d+)/i)?.[1];
+  const homeserverTaskType = metadataPrefix.match(/\*\*Task type:\*\*\s*(.+)/i)?.[1]?.trim();
+  const homeserverVerifierRaw = metadataPrefix.match(/\*\*Verifier:\*\*\s*(.+)/i)?.[1]?.trim();
+  const homeserverMaxTokensRaw = metadataPrefix.match(/\*\*Max output tokens:\*\*\s*(\d+)/i)?.[1];
   const promptMatch = content.match(/###\s*Prompt\s*\n([\s\S]+)$/i);
   const prompt = promptMatch?.[1]?.trim();
   let homeserverVerifier: HomeserverVerifierSpec | undefined;
@@ -1035,6 +1041,12 @@ function parseTask(content: string): TaskConfig | null {
       }
     }
   }
+  const runtimeCapabilities = runtime
+    ? getDispatcherRuntimeCapabilities(runtime)
+    : undefined;
+  const effectiveCapabilities = runtimeCapabilities
+    ? validCapabilities.filter((cap) => runtimeCapabilities.includes(cap))
+    : validCapabilities;
 
   return {
     prompt: canonicalBrokerEnvelope?.prompt ?? prompt!,
@@ -1068,9 +1080,9 @@ function parseTask(content: string): TaskConfig | null {
       : declaredSensitivityRaw
       ? sensitivitySchema.parse(declaredSensitivityRaw)
       : undefined,
-    capabilities: validCapabilities.length > 0 ? validCapabilities : undefined,
+    capabilities: effectiveCapabilities.length > 0 ? effectiveCapabilities : undefined,
     permissionProfile:
-      permissionProfileRaw === "trusted-code" && validCapabilities.includes("code")
+      permissionProfileRaw === "trusted-code" && effectiveCapabilities.includes("code")
         ? "trusted-code"
         : "read-only",
     autoRouted: isAutoRoute || undefined,
@@ -2713,7 +2725,7 @@ function stopCancellationWatch(): void {
 // --- Orphan dispatcher cleanup ---
 // Tasks running in the hugin repo (e.g. npm test, npm run dev) can leave behind
 // node processes that act as rogue dispatchers, racing the real one for tasks.
-// Kill any node dist/index.js processes in our working directory except ourselves.
+// Kill any node dist/main.js processes in our working directory except ourselves.
 
 async function killOrphanDispatchers(): Promise<void> {
   if (os.platform() !== "linux") return; // Only relevant on the Pi
@@ -2722,7 +2734,7 @@ async function killOrphanDispatchers(): Promise<void> {
     const myPid = process.pid;
     const cwd = process.cwd();
     const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-      const child = spawn("pgrep", ["-f", "node dist/index.js"], {
+      const child = spawn("pgrep", ["-f", "node dist/main.js"], {
         stdio: ["ignore", "pipe", "pipe"],
         env: buildTaskSubprocessEnv(),
       });
@@ -7466,7 +7478,7 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 
 // --- Start ---
 
-function startDispatcher(): void {
+export function startDispatcher(): void {
   if (legacyClaudeExecutor && legacyClaudeExecutor !== "sdk") {
     console.error(
       `HUGIN_CLAUDE_EXECUTOR=${legacyClaudeExecutor} is no longer supported; Claude tasks now always use the Agent SDK`,
@@ -7580,8 +7592,4 @@ function startDispatcher(): void {
       process.exit(0);
     });
   });
-}
-
-if (!process.env.VITEST) {
-  startDispatcher();
 }

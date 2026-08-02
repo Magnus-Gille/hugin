@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   ALIAS_MAP_V1,
   ALIAS_MAP_V2,
+  PI_HARNESS_READ_ONLY_SAFE_REGISTRY_FLAGS,
   RUNTIME_REGISTRY,
   buildRuntimeCandidates,
   getAliasMap,
@@ -214,6 +215,14 @@ describe("orchestrator v1 policy fields", () => {
     expect(entry!.harnessFlags).toEqual(["--no-session", "--provider", "openrouter"]);
     expect(entry!.zdrRequired).toBe(true);
     expect(entry!.autoEligible).toBe(false);
+  });
+
+  it("pi-harness live registry flags remain inside the read-only-safe allowlist", () => {
+    const entry = getRegistryEntryById("pi-harness");
+    expect(entry).toBeDefined();
+    expect((entry!.harnessFlags ?? []).filter((token) => token.startsWith("--"))).toEqual(
+      [...PI_HARNESS_READ_ONLY_SAFE_REGISTRY_FLAGS],
+    );
   });
 
   it("opencode-m5 is a local explicit-only harness runtime", () => {

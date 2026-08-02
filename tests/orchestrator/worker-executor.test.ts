@@ -1639,6 +1639,48 @@ describe("PiHarnessExecutor — success path", () => {
     expect(spawnCalls[0]?.options?.cwd).toBe(PI_SCRATCH_CWD);
   });
 
+  it("skips missing optional read-only launch roots when another allowlisted root resolves", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    const result = await new PiHarnessExecutor().run(
+      makeReadOnlyPiRequest({
+        allowedReadOnlyRoots: [PI_WORKSPACE_ROOT, "/home/magnus/missing-readonly-root"],
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]?.options?.cwd).toBe(PI_READ_ONLY_CWD);
+  });
+
+  it("fails closed when every read-only launch root is missing or unresolvable", async () => {
+    const missingRoot = "/home/magnus/missing-readonly-root";
+    const missingError = Object.assign(new Error("missing"), { code: "ENOENT" });
+    setRealpath(missingRoot, missingRoot, missingError);
+
+    const result = await new PiHarnessExecutor().run(
+      makeReadOnlyPiRequest({
+        allowedReadOnlyRoots: [missingRoot],
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("could not resolve any allowed read-only roots");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("does not ignore unsafe read-only launch root validation errors", async () => {
+    const result = await new PiHarnessExecutor().run(
+      makeReadOnlyPiRequest({
+        allowedReadOnlyRoots: [PI_WORKSPACE_ROOT, "relative/readonly-root"],
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("must be absolute");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
   it("does not let registry harnessFlags override the enforced read-only tool allowlist", async () => {
     const original = runtimeRegistry.getRegistryEntryById;
     const piEntry = original("pi-harness");
@@ -1700,6 +1742,18 @@ describe("PiHarnessExecutor — success path", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain("requires complete registry --provider flag pairs");
     expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("keeps the live pi-harness registry flags inside the read-only-safe allowlist", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    const result = await new PiHarnessExecutor().run(makeReadOnlyPiRequest());
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls).toHaveLength(1);
+    expect(
+      spawnCalls[0]?.args.filter((arg) => arg.startsWith("--") && arg !== "--mode" && arg !== "--model" && arg !== "-p"),
+    ).toEqual(["--no-session", "--provider", "--tools"]);
   });
 
   it("does not expose the dispatcher checkpoint secret to the Pi harness", async () => {
