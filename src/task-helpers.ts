@@ -825,20 +825,24 @@ export async function checkoutTaskBranch(
       error: `Invalid base-branch override ${JSON.stringify(options.baseBranchOverride)}`,
     };
   }
-  // Canonicalize both sides before the prefix check: a raw `startsWith` guard
-  // can be bypassed with `..` segments that string-match the isolated root but
-  // resolve (via the OS `cwd`) onto a production checkout — the exact
-  // re-pointing #139 exists to prevent. `path.sep`-anchoring also stops a
-  // sibling dir that merely shares the root's string prefix (e.g.
-  // `<root>-evil`).
-  const reposRoot = path.resolve(normalizeRoot(options.reposRoot ?? DEFAULT_REPOS_ROOT));
-  if (!path.resolve(workingDir).startsWith(`${reposRoot}${path.sep}`)) {
+  const managedCheckoutTarget = await resolveManagedCheckoutTarget(
+    workingDir,
+    options.reposRoot ?? DEFAULT_REPOS_ROOT,
+  );
+  if (managedCheckoutTarget.state === "skipped") {
     return { action: "skipped" };
   }
+  if (managedCheckoutTarget.state === "refused") {
+    return {
+      action: "fetch-failed",
+      error: managedCheckoutTarget.reason,
+    };
+  }
+  const managedWorkingDir = managedCheckoutTarget.workingDir;
 
   const isGit = await new Promise<boolean>((resolve) => {
     const child = spawn("git", ["rev-parse", "--git-dir"], {
-      cwd: workingDir,
+      cwd: managedWorkingDir,
       stdio: "ignore",
       env: buildTaskSubprocessEnv(),
     });
@@ -850,7 +854,7 @@ export async function checkoutTaskBranch(
 
   const hasRemote = await new Promise<boolean>((resolve) => {
     const child = spawn("git", ["remote", "get-url", "origin"], {
-      cwd: workingDir,
+      cwd: managedWorkingDir,
       stdio: "ignore",
       env: buildTaskSubprocessEnv(),
     });
@@ -873,36 +877,36 @@ export async function checkoutTaskBranch(
       await sleep(retryDelaysMs[attempt - 1]);
     }
     const bypass = attempt > 0;
-    const result = await runGitFetch(workingDir, bypass);
+    const result = await runGitFetch(managedWorkingDir, bypass);
     if (result.ok) {
       fetchOk = true;
       if (attempt > 0) {
-        console.log(`Pre-task git fetch succeeded on attempt ${attempt + 1} (bypass=${bypass}) in ${workingDir}`);
+        console.log(`Pre-task git fetch succeeded on attempt ${attempt + 1} (bypass=${bypass}) in ${managedWorkingDir}`);
       }
       break;
     }
     lastOutput = result.output;
     lastExit = result.exitCode;
     console.warn(
-      `Pre-task git fetch failed (attempt ${attempt + 1}/${totalAttempts}, exit ${lastExit}, bypass=${bypass}) in ${workingDir}: ${lastOutput.trim()}`,
+      `Pre-task git fetch failed (attempt ${attempt + 1}/${totalAttempts}, exit ${lastExit}, bypass=${bypass}) in ${managedWorkingDir}: ${lastOutput.trim()}`,
     );
   }
 
   if (!fetchOk && !options.baseBranchOverride) {
     return {
       action: "fetch-failed",
-      error: `git fetch origin failed in ${workingDir} after ${totalAttempts} attempts — proceeding without branch`,
+      error: `git fetch origin failed in ${managedWorkingDir} after ${totalAttempts} attempts — proceeding without branch`,
     };
   }
   if (!fetchOk) {
     console.warn(
-      `Pre-task git fetch failed in ${workingDir}; attempting explicit base branch ` +
+      `Pre-task git fetch failed in ${managedWorkingDir}; attempting explicit base branch ` +
         `${JSON.stringify(options.baseBranchOverride)} from the existing remote-tracking ref`,
     );
   }
 
   const baseResolution = await resolveRepositoryBaseBranch(
-    workingDir,
+    managedWorkingDir,
     options.baseBranchOverride,
   );
   if (!baseResolution.resolved) {
@@ -918,7 +922,7 @@ export async function checkoutTaskBranch(
 
   const checkoutOk = await new Promise<boolean>((resolve) => {
     const child = spawn("git", ["checkout", "-b", branchName, baseRef], {
-      cwd: workingDir,
+      cwd: managedWorkingDir,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
     });
@@ -927,7 +931,7 @@ export async function checkoutTaskBranch(
     child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
     child.on("close", (code) => {
       if (code !== 0) {
-        console.warn(`Pre-task branch creation failed (exit ${code}) in ${workingDir}: ${output.trim()}`);
+        console.warn(`Pre-task branch creation failed (exit ${code}) in ${managedWorkingDir}: ${output.trim()}`);
       }
       resolve(code === 0);
     });
@@ -943,7 +947,7 @@ export async function checkoutTaskBranch(
 
   console.log(
     `Pre-task: checked out branch ${branchName} from ${baseRef} ` +
-      `(resolved via ${source}) in ${workingDir}`,
+      `(resolved via ${source}) in ${managedWorkingDir}`,
   );
   return {
     action: "created",
@@ -1459,6 +1463,78 @@ function isPathWithinRoot(candidate: string, root: string): boolean {
   return candidate.startsWith(`${root}${path.sep}`);
 }
 
+async function resolveManagedCheckoutTarget(
+  workingDir: string,
+  reposRoot: string,
+): Promise<
+  | { state: "skipped" }
+  | { state: "refused"; reason: string }
+  | { state: "ok"; workingDir: string }
+> {
+  const trimmedWorkingDir = workingDir.trim();
+  if (!trimmedWorkingDir || !path.isAbsolute(trimmedWorkingDir)) {
+    return { state: "skipped" };
+  }
+
+  const normalizedReposRoot = path.resolve(normalizeRoot(reposRoot || DEFAULT_REPOS_ROOT));
+  const normalizedWorkingDir = path.resolve(trimmedWorkingDir);
+  const rawLooksManaged = trimmedWorkingDir === normalizedReposRoot ||
+    trimmedWorkingDir.startsWith(`${normalizedReposRoot}${path.sep}`);
+  const normalizedLooksManaged = isPathWithinRoot(normalizedWorkingDir, normalizedReposRoot);
+  if (!rawLooksManaged && !normalizedLooksManaged) {
+    return { state: "skipped" };
+  }
+
+  const managedRoot = await canonicalizeExistingPath(normalizedReposRoot, "managed repos root");
+  if (!managedRoot.ok) {
+    return { state: "refused", reason: managedRoot.reason };
+  }
+
+  const canonicalCwd = await canonicalizeExistingPath(trimmedWorkingDir, "selected worktree path");
+  if (!canonicalCwd.ok) {
+    return { state: "refused", reason: canonicalCwd.reason };
+  }
+  if (!isPathWithinRoot(canonicalCwd.path, managedRoot.path)) {
+    return {
+      state: "refused",
+      reason:
+        `selected worktree path ${JSON.stringify(workingDir)} must resolve beneath the configured managed repos root ` +
+        `${JSON.stringify(managedRoot.path)}`,
+    };
+  }
+  if (canonicalCwd.path !== trimmedWorkingDir) {
+    return {
+      state: "refused",
+      reason:
+        `selected worktree path ${JSON.stringify(workingDir)} must already be canonical; ` +
+        `realpath resolved it to ${JSON.stringify(canonicalCwd.path)}`,
+    };
+  }
+
+  const topLevel = await runGitText(
+    canonicalCwd.path,
+    ["rev-parse", "--show-toplevel"],
+    "git rev-parse --show-toplevel",
+  );
+  if (!topLevel.ok) {
+    return { state: "skipped" };
+  }
+  const canonicalTopLevel = await canonicalizeExistingPath(topLevel.output, "selected git toplevel");
+  if (!canonicalTopLevel.ok) {
+    return { state: "refused", reason: canonicalTopLevel.reason };
+  }
+  if (canonicalTopLevel.path !== canonicalCwd.path) {
+    return {
+      state: "refused",
+      reason:
+        `selected worktree path ${JSON.stringify(workingDir)} must be the exact git toplevel selected for this task; ` +
+        `git toplevel is ${JSON.stringify(canonicalTopLevel.path)}`,
+    };
+  }
+
+  return { state: "ok", workingDir: canonicalCwd.path };
+}
+
 async function canonicalizeExistingPath(
   rawPath: string,
   label: string,
@@ -1580,9 +1656,7 @@ export async function buildManagedTaskWorktreeBinding(
     };
   }
 
-  const verification = await verifyCleanCheckout(canonicalCwd.path, normalizedExpected, {
-    includeIgnored: false,
-  });
+  const verification = await verifyCleanCheckout(canonicalCwd.path, normalizedExpected);
   if (!verification.clean) {
     return {
       ok: false,

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EventEmitter } from "node:events";
+import * as path from "node:path";
 
 // Mock child_process.spawn before importing the module — same style as
 // repo-sync.test.ts (#217/#225), but with NO auto-resolution shortcuts: every
@@ -8,6 +9,8 @@ import { EventEmitter } from "node:events";
 const spawnCalls: Array<{ cmd: string; args: string[]; opts: Record<string, unknown> }> = [];
 let spawnBehaviors: Array<{ exitCode: number; stdout?: string; stderr?: string }> = [];
 let spawnCallIndex = 0;
+let autoResolveShowTopLevel = true;
+const realpathResults = new Map<string, { value?: string; error?: Error & { code?: string } }>();
 
 class MockChildProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -17,15 +20,32 @@ class MockChildProcess extends EventEmitter {
 vi.mock("node:child_process", () => ({
   spawn: (cmd: string, args: string[], opts: Record<string, unknown>) => {
     const child = new MockChildProcess();
-    spawnCalls.push({ cmd, args, opts });
-    const behavior = spawnBehaviors[spawnCallIndex] ?? { exitCode: 0 };
-    spawnCallIndex++;
+    const autoBehavior = autoResolveShowTopLevel &&
+      cmd === "git" &&
+      args[0] === "rev-parse" &&
+      args[1] === "--show-toplevel"
+      ? { exitCode: 0, stdout: `${String(opts.cwd ?? "")}\n` }
+      : null;
+    const behavior = autoBehavior ?? spawnBehaviors[spawnCallIndex] ?? { exitCode: 0 };
+    if (!autoBehavior) {
+      spawnCalls.push({ cmd, args, opts });
+      spawnCallIndex++;
+    }
     setImmediate(() => {
       if (behavior.stdout) child.stdout.emit("data", Buffer.from(behavior.stdout));
       if (behavior.stderr) child.stderr.emit("data", Buffer.from(behavior.stderr));
       child.emit("close", behavior.exitCode);
     });
     return child;
+  },
+}));
+
+vi.mock("node:fs/promises", () => ({
+  realpath: async (input: string) => {
+    const key = path.resolve(input);
+    const entry = realpathResults.get(key);
+    if (entry?.error) throw entry.error;
+    return entry?.value ?? key;
   },
 }));
 
@@ -42,6 +62,8 @@ beforeEach(() => {
   spawnCalls.length = 0;
   spawnBehaviors = [];
   spawnCallIndex = 0;
+  autoResolveShowTopLevel = true;
+  realpathResults.clear();
 });
 
 const WORKDIR = "/home/magnus/repos/demo";

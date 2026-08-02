@@ -1,5 +1,26 @@
 # Hugin — Status
 
+## 2026-08-01 — #339 managed checkout / pi-harness binding hardening
+
+- Branch `codex/issue-339-worktree-binding` now fails closed before any managed
+  checkout mutation when the selected repo path is non-canonical, escapes the
+  canonical managed root, or is only a subdirectory of the git toplevel.
+- First-turn writable binding verification now includes ignored leftovers, so
+  pre-existing `.env`, `node_modules`, and similar ignored state cannot be
+  admitted into a fresh bound orchestrator run.
+- Pi-harness dirty continuation now requires a successful prior turn on the
+  same bound worktree; any failed or aborted turn taints that binding for the
+  rest of the run. Trusted-code pi-harness workers on scratch/files/non-managed
+  workspaces are refused instead of silently downgraded, and post-gate
+  admission refusals now preserve `repositoryOutcome: checkout-contaminated`.
+
+**Verification:** focused binding/admission/dispatcher/worker suites (198
+tests), full `npm test` (166 files / 2,625 tests, 3 skipped), `npm run build`,
+and `git diff --check` passed.
+
+**Next:** obtain independent review on the exact committed head before any
+merge decision. No deployment, network mutation, or cross-repo change occurred.
+
 ## 2026-07-28 — #336 W5 roster provenance verification (draft PR #337)
 
 - Branch `codex/issue-336-roster-producer` restores W4 receipt verification

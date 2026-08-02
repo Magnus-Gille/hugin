@@ -255,6 +255,26 @@ describe("buildManagedTaskWorktreeBinding", () => {
     expect(result.reason).toContain("tracked or untracked leftover state");
     expect(spawnCalls).toHaveLength(3);
   });
+
+  it("rejects ignored leftovers when establishing the first writable binding", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${WORKTREE}\n` },
+      { exitCode: 0, stdout: `${BRANCH_NAME}\n` },
+      { exitCode: 0, stdout: "!! node_modules/\n" },
+    ];
+
+    const result = await taskHelpers.buildManagedTaskWorktreeBinding(
+      WORKTREE,
+      MANAGED_ROOT,
+      BRANCH_NAME,
+      EXPECTED_REVISION,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("ignored leftover state");
+    expect(spawnCalls).toHaveLength(3);
+    expect(spawnCalls[2]?.args).toEqual(["status", "--porcelain", "--ignored=matching"]);
+  });
 });
 
 describe("preparePiHarnessWorktreeBinding", () => {
@@ -368,7 +388,7 @@ describe("preparePiHarnessWorktreeBinding", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it("degrades trusted-code pi-harness workers on scratch/files into read-only admission when no managed binding exists", async () => {
+  it("refuses trusted-code pi-harness workers on scratch/files when no managed binding exists", async () => {
     const spy = vi.spyOn(taskHelpers, "buildManagedTaskWorktreeBinding");
 
     const result = await admission.preparePiHarnessWorktreeBinding({
@@ -385,8 +405,11 @@ describe("preparePiHarnessWorktreeBinding", () => {
     });
 
     expect(result).toEqual({
-      ok: true,
-      effectiveWorkerPermissionProfile: "read-only",
+      ok: false,
+      reason:
+        "pi-harness worker requires a managed task-branch checkout with a pinned base commit; " +
+        "binding unavailable",
+      effectiveWorkerPermissionProfile: "trusted-code",
     });
     expect(spy).not.toHaveBeenCalled();
   });

@@ -6005,10 +6005,15 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       orchLogStream.end();
       currentOrchestratorAbort = null;
       piHarnessAdmissionFailureReason = piHarnessBinding.reason;
+      // Issue #339: a writable pi-harness worker refusal after the dispatcher
+      // clean-checkout gate still means the managed checkout/binding contract
+      // could not be trusted for mutation. Preserve that as checkout-
+      // contaminated repository evidence instead of the ambiguous
+      // "not-finalized" fallback.
       repositoryOutcome = deriveRepositoryOutcome(
         branchResult,
         undefined,
-        Boolean(checkoutGateRefusalReason || checkoutGateDegraded),
+        true,
       );
       exitCode = 1;
       output = piHarnessBinding.reason;

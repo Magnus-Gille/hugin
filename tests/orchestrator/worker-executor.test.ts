@@ -1814,6 +1814,39 @@ describe("PiHarnessExecutor — success path", () => {
     expect(spawnCalls[5]?.cmd).toBe("pi");
   });
 
+  it("refuses a dirty follow-on worker turn when the prior turn failed after writing", async () => {
+    const binding = makePiBinding();
+    spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
+      { exitCode: 1, stderr: "partial write left behind" },
+    ];
+
+    const executor = new PiHarnessExecutor();
+    const first = await executor.run(makeTrustedPiRequest({ prompt: "start", worktree: binding }));
+    expect(first.ok).toBe(false);
+    expect(first.error).toContain("Process exited with code 1");
+
+    spawnCalls.length = 0;
+    spawnCallIndex = 0;
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
+      { exitCode: 0, stdout: "M src/worker.ts\n" },
+      { exitCode: 0, stdout: `${PI_EXPECTED_REVISION}\n` },
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS },
+    ];
+
+    const second = await executor.run(
+      makeTrustedPiRequest({ prompt: "continue the task", worktree: binding }),
+    );
+
+    expect(second.ok).toBe(false);
+    expect(second.error).toContain("tainted by a failed or aborted prior worker turn");
+    expect(spawnCalls).toHaveLength(0);
+    expect(spawnCalls.some((call) => call.cmd === "pi")).toBe(false);
+  });
+
   it("allows a legitimate follow-on worker turn after HEAD advances on the same task branch", async () => {
     const advancedHead = "b".repeat(40);
     const binding = makePiBinding();

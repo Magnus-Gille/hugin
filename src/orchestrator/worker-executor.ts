@@ -77,7 +77,32 @@ export const DEFAULT_BUSY_RETRY_BASE_DELAY_MS = 1_000;
 /** Cap any single busy wait (Retry-After or backoff step) to this. */
 const MAX_BUSY_WAIT_MS = 30_000;
 const PI_READ_ONLY_TOOLS = "read,grep,find,ls";
-const verifiedInitialPiBindings = new WeakSet<WorkerWorktreeBinding>();
+interface PiBindingTurnState {
+  successfulTurns: number;
+  tainted: boolean;
+}
+
+const piBindingTurnStates = new WeakMap<WorkerWorktreeBinding, PiBindingTurnState>();
+
+function readPiBindingTurnState(binding: WorkerWorktreeBinding): PiBindingTurnState {
+  return piBindingTurnStates.get(binding) ?? { successfulTurns: 0, tainted: false };
+}
+
+function markPiBindingSuccessfulTurn(binding: WorkerWorktreeBinding): void {
+  const state = readPiBindingTurnState(binding);
+  piBindingTurnStates.set(binding, {
+    successfulTurns: state.successfulTurns + 1,
+    tainted: state.tainted,
+  });
+}
+
+function markPiBindingFailedTurn(binding: WorkerWorktreeBinding): void {
+  const state = readPiBindingTurnState(binding);
+  piBindingTurnStates.set(binding, {
+    successfulTurns: state.successfulTurns,
+    tainted: true,
+  });
+}
 
 interface BusyRetryPolicy {
   maxRetries: number;
@@ -324,7 +349,20 @@ async function verifyPiWorktreeBinding(
       error: "pi-harness trusted-code execution requires the configured managed repos root",
     };
   }
-  const allowDirtyTaskBranch = binding ? verifiedInitialPiBindings.has(binding) : false;
+  if (binding) {
+    const turnState = readPiBindingTurnState(binding);
+    if (turnState.tainted) {
+      return {
+        ok: false,
+        error:
+          `selected worktree ${binding.cwd} is tainted by a failed or aborted prior worker turn ` +
+          "in this orchestrator run",
+      };
+    }
+  }
+  const allowDirtyTaskBranch = binding
+    ? readPiBindingTurnState(binding).successfulTurns > 0
+    : false;
   const verification = await verifyManagedTaskWorktreeBinding(
     binding,
     {
@@ -338,7 +376,6 @@ async function verifyPiWorktreeBinding(
       error: verification.reason ?? "selected worktree binding verification failed",
     };
   }
-  if (binding) verifiedInitialPiBindings.add(binding);
   return { ok: true, cwd: verification.cwd };
 }
 
@@ -1157,6 +1194,7 @@ export class PiHarnessExecutor implements WorkerExecutor {
     return new Promise<WorkerResult>((resolve) => {
       let stdout = "";
       let stderr = "";
+      const boundWorktree = req.worktree;
       // Residual TOCTOU: the executor realpaths and re-verifies the selected
       // task branch immediately before spawn, but a local actor could still
       // race the path between those checks and `spawn()`. Closing that last
@@ -1211,6 +1249,9 @@ export class PiHarnessExecutor implements WorkerExecutor {
       child.on("error", (err) => {
         clearTimeout(killTimer);
         req.signal?.removeEventListener("abort", onExternalAbort);
+        if (boundWorktree) {
+          markPiBindingFailedTurn(boundWorktree);
+        }
         resolve({
           ok: false,
           output: "",
@@ -1229,6 +1270,9 @@ export class PiHarnessExecutor implements WorkerExecutor {
         req.signal?.removeEventListener("abort", onExternalAbort);
 
         if (killReason !== null) {
+          if (boundWorktree) {
+            markPiBindingFailedTurn(boundWorktree);
+          }
           resolve({
             ok: false,
             output: "",
@@ -1246,6 +1290,9 @@ export class PiHarnessExecutor implements WorkerExecutor {
         }
 
         if (code !== 0) {
+          if (boundWorktree) {
+            markPiBindingFailedTurn(boundWorktree);
+          }
           resolve({
             ok: false,
             output: "",
@@ -1267,6 +1314,9 @@ export class PiHarnessExecutor implements WorkerExecutor {
             ? estimateCostUsd(req.model, parsed.inputTokens, parsed.outputTokens)
             : null;
 
+        if (boundWorktree) {
+          markPiBindingSuccessfulTurn(boundWorktree);
+        }
         resolve({
           ok: true,
           output: parsed.output.slice(0, maxOutput),
