@@ -303,6 +303,9 @@ The executable deployment contract is `scripts/deploy-pi.sh`,
   It is exhaustive for the docs corpus and groups Hugin entities/components by
   category: core contracts, security/provenance, orchestration/scheduling,
   learning/evaluation, historical validations, and design/research archives.
+  The index names the concrete Hugin entities covered by those categories,
+  including the orchestrator, M5, Harbor, daily exams, task signing, scanners,
+  scheduling, and pipeline phases; it is not a partial topic allowlist.
   Use it only as a routing map: after selecting an entry, open the linked
   source document before relying on or answering with its details. The index
   summaries are not substitutes for source content.
