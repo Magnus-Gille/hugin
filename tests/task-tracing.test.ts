@@ -62,6 +62,34 @@ describe("task tracing", () => {
     expect(context.invalidReason).toBe("malformed-traceparent");
   });
 
+  it("applies a deterministic per-mille cap to roots and sampled parents", () => {
+    const sampled = createInboundTaskTraceContext({
+      traceparent: `00-${"000000f9".padEnd(32, "1")}-1111111111111111-01`,
+      taskClass: "delegation",
+      runtimeLane: "default",
+      retryOrdinal: 0,
+      sampleRatePerMille: 250,
+    });
+    const droppedAtBoundary = createInboundTaskTraceContext({
+      traceparent: `00-${"000000fa".padEnd(32, "1")}-1111111111111111-01`,
+      taskClass: "delegation",
+      runtimeLane: "default",
+      retryOrdinal: 0,
+      sampleRatePerMille: 250,
+    });
+    const disabled = createInboundTaskTraceContext({
+      traceparent: CONTENT_BLIND_TRACEPARENT,
+      taskClass: "delegation",
+      runtimeLane: "default",
+      retryOrdinal: 0,
+      sampleRatePerMille: 0,
+    });
+
+    expect(sampled.traceFlags).toBe("01");
+    expect(droppedAtBoundary.traceFlags).toBe("00");
+    expect(disabled.traceFlags).toBe("00");
+  });
+
   it("round-trips the persisted task trace context section", () => {
     const section = buildTaskTraceContextSection({
       traceparent: CONTENT_BLIND_TRACEPARENT,
@@ -296,6 +324,31 @@ describe("task tracing", () => {
     await expect(endTaskSpan(span, { outcome: "ok" })).resolves.toBeUndefined();
     await runtime.flushExportsForTest();
     expect(runtime.stats.exportFailures).toBe(1);
+  });
+
+  it("clamps future span starts to the observed end boundary", async () => {
+    const runtime = new TaskTraceRuntime({
+      exportEnabled: false,
+      sampleRatePerMille: 1000,
+      release: "git-test",
+      traceIdGenerator: () => "12121212121212121212121212121212",
+      idGenerator: () => "3434343434343434",
+      now: () => new Date("2026-08-01T12:00:00Z"),
+    });
+    const span = runtime.startSpan({
+      name: "task.queue",
+      surface: "task",
+      phase: "queue",
+      startedAt: new Date("2026-08-01T12:05:00Z"),
+    });
+    await endTaskSpan(span, {
+      outcome: "ok",
+      endedAt: new Date("2026-08-01T12:00:00Z"),
+    });
+
+    const serialized = span.serialize();
+    expect(serialized?.started_at).toBe("2026-08-01T12:00:00Z");
+    expect(serialized?.ended_at).toBe("2026-08-01T12:00:00Z");
   });
 
   it("keeps export fail-open and bounded when the sink wedges", async () => {

@@ -55,7 +55,10 @@ import {
 } from "../quality-receipt.js";
 import { structuredTaskResultSchema } from "../task-result-schema.js";
 import { MuninWriteRejectedError } from "../munin-client.js";
-import { createInboundTaskTraceContext } from "../task-tracing.js";
+import {
+  createInboundTaskTraceContext,
+  parseTraceSampleRatePerMille,
+} from "../task-tracing.js";
 
 const brokerFrictionInputSchema = reportFrictionInputSchema.extend({
   event_id: z.string().uuid(),
@@ -248,6 +251,9 @@ export function createSubmitHandler(deps: BrokerHandlerDependencies) {
       taskClass: "delegation",
       runtimeLane: "default",
       retryOrdinal: 0,
+      sampleRatePerMille: parseTraceSampleRatePerMille(
+        process.env.HUGIN_TRACE_SAMPLE_RATE_PER_MILLE,
+      ),
     });
 
     try {

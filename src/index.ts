@@ -1484,9 +1484,14 @@ function ensureLogDir(): void {
   fs.mkdirSync(LOG_DIR, { recursive: true });
 }
 
-function traceDate(value: string | undefined, fallback = new Date()): Date {
+function traceDate(
+  value: string | undefined,
+  fallback = new Date(),
+  ceiling = new Date(),
+): Date {
   const parsed = value ? new Date(value) : new Date(NaN);
-  return Number.isNaN(parsed.getTime()) ? fallback : parsed;
+  if (Number.isNaN(parsed.getTime())) return fallback;
+  return parsed.getTime() > ceiling.getTime() ? ceiling : parsed;
 }
 
 function startTaskLifecycleSpan(
@@ -5092,9 +5097,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   currentTask = taskNs;
   currentClaimTags = [...claimTags];
   currentCancellation = null;
+  const traceNow = new Date();
   const acceptedAtMs = Date.parse(claimAcceptedAt);
   const startedAt = new Date(
-    Number.isNaN(acceptedAtMs) ? Date.now() : Math.max(Date.now(), acceptedAtMs),
+    Number.isNaN(acceptedAtMs)
+      ? traceNow.getTime()
+      : Math.min(traceNow.getTime(), acceptedAtMs),
   ).toISOString();
   const taskId = extractTaskId(taskNs);
   const inboundTaskTraceContext = parseTaskTraceContext(entry.content);
@@ -5102,7 +5110,11 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     inboundTaskTraceContext,
     "task.queue",
     "queue",
-    traceDate(entry.created_at, traceDate(claimAcceptedAt)),
+    traceDate(
+      entry.created_at,
+      traceDate(claimAcceptedAt, traceNow, traceNow),
+      traceNow,
+    ),
   );
   await finishTaskLifecycleSpan(
     queueSpan,
@@ -7121,9 +7133,6 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     if (isCancelled) {
       executionTraceOutcome = "failed";
       executionTraceErrorClass = "cancelled";
-    } else if (publicationFailureTag) {
-      executionTraceOutcome = "degraded";
-      executionTraceErrorClass = "publication-failed";
     } else if (ok) {
       executionTraceOutcome = "ok";
       executionTraceErrorClass = undefined;

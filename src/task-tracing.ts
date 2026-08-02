@@ -234,12 +234,17 @@ function sampledFlags(sampled: boolean): string {
 
 function shouldSample(
   sampleRatePerMille: number,
+  traceId: string,
   traceFlags?: string,
 ): boolean {
-  if (traceFlags) {
-    return (Number.parseInt(traceFlags, 16) & 0x01) === 0x01;
-  }
-  return clampSamplingPerMille(sampleRatePerMille) > 0;
+  const rate = clampSamplingPerMille(sampleRatePerMille);
+  if (rate === 0) return false;
+  if (traceFlags && (Number.parseInt(traceFlags, 16) & 0x01) === 0) return false;
+  if (rate === 1000) return true;
+  // Stable ratio sampling keeps every service on one trace aligned and avoids
+  // a fresh random decision for each child span. The first 32 trace-id bits
+  // are uniformly random for generated W3C IDs.
+  return Number.parseInt(traceId.slice(0, 8), 16) % 1000 < rate;
 }
 
 function normalizeRetryOrdinal(value: number): number {
@@ -306,16 +311,21 @@ export function createInboundTaskTraceContext(input: {
         ? "forbidden-baggage"
         : undefined;
   if (parsed) {
+    const traceFlags = sampledFlags(shouldSample(
+      sampleRatePerMille,
+      parsed.traceId,
+      parsed.traceFlags,
+    ));
     return {
       traceparent: formatTraceparent(
         parsed.traceId,
         parsed.spanId,
-        parsed.traceFlags,
+        traceFlags,
       ),
       traceId: parsed.traceId,
       spanId: parsed.spanId,
       parentSpanId: parsed.spanId,
-      traceFlags: parsed.traceFlags,
+      traceFlags,
       taskClass: input.taskClass,
       runtimeLane: input.runtimeLane,
       retryOrdinal: normalizeRetryOrdinal(input.retryOrdinal),
@@ -324,7 +334,7 @@ export function createInboundTaskTraceContext(input: {
   }
   const traceId = (input.traceIdGenerator ?? defaultTraceId)();
   const spanId = (input.idGenerator ?? defaultSpanId)();
-  const traceFlags = sampledFlags(shouldSample(sampleRatePerMille));
+  const traceFlags = sampledFlags(shouldSample(sampleRatePerMille, traceId));
   return {
     traceparent: formatTraceparent(traceId, spanId, traceFlags),
     traceId,
@@ -501,9 +511,12 @@ export class TaskTraceRuntime {
       ?? inherited?.traceId
       ?? this.traceIdGenerator();
     const parentSpanId = explicitContext?.spanId ?? inherited?.spanId;
-    const traceFlags = explicitContext?.traceFlags
-      ?? inherited?.traceFlags
-      ?? sampledFlags(shouldSample(this.sampleRatePerMille));
+    const inheritedFlags = explicitContext?.traceFlags ?? inherited?.traceFlags;
+    const traceFlags = sampledFlags(shouldSample(
+      this.sampleRatePerMille,
+      traceId,
+      inheritedFlags,
+    ));
     const spanId = this.idGenerator();
     const activeContext: ActiveTaskTraceContext = {
       traceId,
@@ -629,10 +642,7 @@ export class TaskTraceSpan {
       state.spanId,
       state.traceFlags,
     );
-    this.sampled = shouldSample(
-      runtime.sampleRatePerMille,
-      state.traceFlags,
-    );
+    this.sampled = (Number.parseInt(state.traceFlags, 16) & 0x01) === 0x01;
     this.activeContext = state.activeContext;
   }
 
@@ -654,6 +664,9 @@ export class TaskTraceSpan {
 
   serialize(): SerializedTaskTraceSpan | null {
     if (!this.outcome || !this.endedAt || !this.sampled) return null;
+    const startedAt = this.state.startedAt.getTime() > this.endedAt.getTime()
+      ? this.endedAt
+      : this.state.startedAt;
     const attributes: SerializedTaskTraceSpan["attributes"] = {
       task_class: this.state.taskClass,
       runtime_lane: this.state.runtimeLane,
@@ -684,7 +697,7 @@ export class TaskTraceSpan {
         surface: this.state.surface,
         phase: this.state.phase,
       },
-      started_at: formatContractTimestamp(this.state.startedAt),
+      started_at: formatContractTimestamp(startedAt),
       ended_at: formatContractTimestamp(this.endedAt),
       collected_at: formatContractTimestamp(this.endedAt),
       sampled: true,
