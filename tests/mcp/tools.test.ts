@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   ALIAS_MAP_VERSION,
   ENVELOPE_VERSION,
@@ -9,7 +11,46 @@ import {
   BrokerNetworkError,
   type BrokerClient,
 } from "../../src/mcp/broker-client.js";
+import {
+  createHuginMcpServer,
+  discoverBrokerContract,
+} from "../../src/mcp/server-factory.js";
+import { HUGIN_MCP_SERVER_INSTRUCTIONS } from "../../src/mcp/server-instructions.js";
 import { makeExperimentInput, makeObservation } from "../fixtures/learning.js";
+
+const ISSUE_318_WIRE_MODELS_RESPONSE = {
+  alias_map_version: ALIAS_MAP_VERSION,
+  effective_at: "2026-07-28T00:00:00.000Z",
+  aliases: [{
+    alias: "m5",
+    runtime_row_id: "homeserver-m5",
+  }],
+  runtime_rows: [{
+    id: "homeserver-m5",
+    runtime: "homeserver",
+    provider: "m5",
+    egress: "loopback-only",
+    family: "one-shot",
+    auto_eligible: false,
+    zdr_required: true,
+  }],
+  policy_version: "zdr-v1+rlv-v1",
+} as const;
+// Reproducible discovery gate:
+// `byteLength(client.getInstructions()) + byteLength(JSON.stringify(await client.listTools()))`
+// measured through the production `discoverBrokerContract()` + `createHuginMcpServer()` path.
+// Parent `20f2cef` measured 30_361 bytes through its equivalent inline server construction.
+// This source tree measures 28_632 bytes,
+// so the ratchet allows only a 96-byte slack to 28_728 bytes.
+const ISSUE_318_PARENT_DISCOVERY_BYTES = 30_361;
+const ISSUE_318_CURRENT_DISCOVERY_BYTES = 28_632;
+const ISSUE_318_DISCOVERY_SLACK_BYTES = 96;
+const ISSUE_318_DISCOVERY_CEILING_BYTES =
+  ISSUE_318_CURRENT_DISCOVERY_BYTES + ISSUE_318_DISCOVERY_SLACK_BYTES;
+const M5_BOUNDARY_PHRASE =
+  "M5 owns model/capability evidence; Hugin owns durable task, delivery, and review state.";
+const M5_BOUNDED_LEAF_PHRASE =
+  "Each `hugin_submit` is one bounded M5 `/delegate` leaf.";
 
 function fakeBroker(overrides: Partial<BrokerClient> = {}): BrokerClient {
   const noop = vi.fn(async () => ({}));
@@ -32,6 +73,356 @@ function fakeBroker(overrides: Partial<BrokerClient> = {}): BrokerClient {
 function parseResult(result: { content: { text: string }[]; isError?: boolean }): unknown {
   return JSON.parse(result.content[0]!.text);
 }
+
+async function connectWireClient(
+  overrides: Partial<BrokerClient> = {},
+): Promise<{
+  client: Client;
+  models: ReturnType<typeof vi.fn>;
+  close: () => Promise<void>;
+}> {
+  const models = "models" in overrides && overrides.models
+    ? overrides.models as ReturnType<typeof vi.fn>
+    : vi.fn(async () => ISSUE_318_WIRE_MODELS_RESPONSE);
+  const broker = fakeBroker({
+    models,
+    ...overrides,
+  });
+  const brokerContract = await discoverBrokerContract(broker);
+  const server = createHuginMcpServer({
+    broker,
+    sessionId: "sess",
+    submitter: "claude-code",
+    brokerContract,
+  });
+
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "wire-test", version: "0.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  return {
+    client,
+    models,
+    close: async () => {
+      await client.close();
+    },
+  };
+}
+
+async function readWireDiscovery(client: Client): Promise<{
+  instructions: string;
+  listToolsResult: Awaited<ReturnType<Client["listTools"]>>;
+  instructionsBytes: number;
+  listResultBytes: number;
+  combinedBytes: number;
+}> {
+  const listToolsResult = await client.listTools();
+  const instructions = client.getInstructions() ?? "";
+  const instructionsBytes = Buffer.byteLength(instructions, "utf8");
+  const listResultBytes = Buffer.byteLength(JSON.stringify(listToolsResult), "utf8");
+  return {
+    instructions,
+    listToolsResult,
+    instructionsBytes,
+    listResultBytes,
+    combinedBytes: instructionsBytes + listResultBytes,
+  };
+}
+
+function schemaPath(
+  value: unknown,
+  path: ReadonlyArray<string | number>,
+): unknown {
+  return path.reduce<unknown>((current, segment) => {
+    if (current === null || current === undefined) return undefined;
+    if (typeof segment === "number") {
+      return Array.isArray(current) ? current[segment] : undefined;
+    }
+    return typeof current === "object" ? (current as Record<string, unknown>)[segment] : undefined;
+  }, value);
+}
+
+function findToolDefinition(
+  listToolsResult: Awaited<ReturnType<Client["listTools"]>>,
+  name: string,
+): Record<string, unknown> {
+  const tool = listToolsResult.tools.find((candidate) => candidate.name === name);
+  if (!tool) throw new Error(`missing tool ${name}`);
+  return tool as Record<string, unknown>;
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+describe("hugin-mcp discovery wire surface", () => {
+  it("emits InitializeResult.instructions and closed vocabularies through the real MCP client", async () => {
+    const harness = await connectWireClient();
+    try {
+      const discovery = await readWireDiscovery(harness.client);
+      const submitSchema = schemaPath(
+        findToolDefinition(discovery.listToolsResult, "hugin_submit"),
+        ["inputSchema"],
+      );
+      const rateSchema = schemaPath(
+        findToolDefinition(discovery.listToolsResult, "hugin_rate"),
+        ["inputSchema"],
+      );
+      const listSchema = schemaPath(
+        findToolDefinition(discovery.listToolsResult, "hugin_list"),
+        ["inputSchema"],
+      );
+      const createSchema = schemaPath(
+        findToolDefinition(discovery.listToolsResult, "hugin_experiment_create"),
+        ["inputSchema"],
+      );
+      const observeSchema = schemaPath(
+        findToolDefinition(discovery.listToolsResult, "hugin_experiment_observe"),
+        ["inputSchema"],
+      );
+      const experimentRateSchema = schemaPath(
+        findToolDefinition(discovery.listToolsResult, "hugin_experiment_rate"),
+        ["inputSchema"],
+      );
+
+      expect(harness.models).toHaveBeenCalledTimes(1);
+      expect(discovery.instructions).toBe(HUGIN_MCP_SERVER_INSTRUCTIONS);
+      expect(schemaPath(submitSchema, ["properties", "task_type", "enum"])).toEqual([
+        "draft",
+        "code-implement",
+        "code-edit",
+        "code-review",
+        "unit-test-gen",
+        "summarize",
+        "extract",
+        "classify",
+        "data-transform",
+        "regex",
+        "sql",
+        "reason-math",
+        "reason-hard",
+        "rewrite",
+        "translate",
+        "plan-decompose",
+        "qa-factual",
+        "triage",
+        "memory-decision",
+        "research-plan",
+        "source-distill",
+        "claim-verify",
+        "gap-check",
+        "synthesis",
+        "conversation",
+        "other",
+      ]);
+      expect(schemaPath(submitSchema, ["properties", "alias_requested", "enum"])).toEqual(["m5"]);
+      expect(schemaPath(submitSchema, ["properties", "acceptance", "oneOf", 0, "properties", "mode", "const"])).toBe("l1_review");
+      expect(schemaPath(submitSchema, ["properties", "acceptance", "oneOf", 1, "properties", "mode", "const"])).toBe("verifier");
+
+      expect(schemaPath(rateSchema, ["properties", "rating", "enum"])).toEqual([
+        "pass",
+        "partial",
+        "redo",
+        "wrong",
+      ]);
+      expect(schemaPath(rateSchema, ["properties", "verification_outcome", "enum"])).toEqual([
+        "accepted_unchanged",
+        "minor_edit",
+        "major_rewrite",
+        "discarded",
+        "escalated_to_claude",
+      ]);
+      expect(schemaPath(rateSchema, ["properties", "reviewer_role", "enum"])).toEqual([
+        "independent",
+        "self",
+      ]);
+
+      expect(schemaPath(listSchema, ["properties", "outcome", "enum"])).toEqual([
+        "completed",
+        "failed",
+        "running",
+        "any",
+      ]);
+      expect(schemaPath(createSchema, ["properties", "change_axis", "enum"])).toEqual([
+        "logging",
+        "test-harness",
+        "agent-prompt",
+        "agent-harness",
+        "model",
+        "model-config",
+        "routing",
+      ]);
+      expect(schemaPath(createSchema, ["properties", "gates", "properties", "primaryMetric", "enum"])).toEqual([
+        "quality-rate",
+        "useful-rate",
+        "rescue-rate",
+        "latency-ms",
+        "cost-usd",
+        "human-review-seconds",
+        "edit-start-ms",
+        "observability-coverage",
+        "verifier-score",
+      ]);
+      expect(schemaPath(createSchema, ["properties", "champion", "properties", "model", "properties", "config", "properties", "reasoning", "enum"])).toEqual([
+        "off",
+        "low",
+        "medium",
+        "high",
+      ]);
+      expect(schemaPath(observeSchema, ["properties", "arm", "enum"])).toEqual([
+        "champion",
+        "challenger",
+      ]);
+      expect(schemaPath(observeSchema, ["properties", "quality_outcome", "enum"])).toEqual([
+        "pass",
+        "fail",
+        "unverified",
+        "infra-error",
+      ]);
+      expect(schemaPath(observeSchema, ["properties", "product_outcome", "enum"])).toEqual([
+        "accepted-unchanged",
+        "minor-edit",
+        "major-rewrite",
+        "discarded",
+        "unrated",
+      ]);
+      expect(schemaPath(observeSchema, ["properties", "verifier", "properties", "kind", "enum"])).toEqual([
+        "mechanical",
+        "human",
+        "judge",
+        "none",
+      ]);
+      expect(schemaPath(observeSchema, ["properties", "agent_checks", "properties", "state", "enum"])).toEqual([
+        "none",
+        "attempted",
+        "unobservable",
+        "partial",
+      ]);
+      expect(schemaPath(observeSchema, ["properties", "agent_checks", "properties", "attempts", "items", "properties", "kind", "enum"])).toEqual([
+        "typescript",
+        "test",
+        "lint",
+        "build",
+        "validation",
+      ]);
+      expect(schemaPath(observeSchema, ["properties", "agent_checks", "properties", "attempts", "items", "properties", "status", "enum"])).toEqual([
+        "passed",
+        "failed",
+        "execution-error",
+      ]);
+      expect(schemaPath(experimentRateSchema, ["properties", "product_outcome", "enum"])).toEqual([
+        "accepted-unchanged",
+        "minor-edit",
+        "major-rewrite",
+        "discarded",
+      ]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("records the current discovery payload and ratchets it below the parent with small slack", async () => {
+    const harness = await connectWireClient();
+    try {
+      const discovery = await readWireDiscovery(harness.client);
+      expect(discovery.combinedBytes).toBe(ISSUE_318_CURRENT_DISCOVERY_BYTES);
+      expect(discovery.combinedBytes).toBeLessThan(ISSUE_318_PARENT_DISCOVERY_BYTES);
+      expect(discovery.combinedBytes).toBeLessThanOrEqual(ISSUE_318_DISCOVERY_CEILING_BYTES);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("preserves the M5/Hugin boundary exactly once and keeps await polling semantics discoverable", async () => {
+    const harness = await connectWireClient();
+    try {
+      const discovery = await readWireDiscovery(harness.client);
+      const awaitDescription = findToolDefinition(
+        discovery.listToolsResult,
+        "hugin_await",
+      ).description;
+      const toolDescriptions = discovery.listToolsResult.tools
+        .map((tool) => tool.description)
+        .filter((description): description is string => typeof description === "string");
+
+      expect(discovery.instructions).toContain(M5_BOUNDED_LEAF_PHRASE);
+      expect(discovery.instructions).toContain(M5_BOUNDARY_PHRASE);
+      expect(countOccurrences(discovery.instructions, M5_BOUNDED_LEAF_PHRASE)).toBe(1);
+      expect(countOccurrences(discovery.instructions, M5_BOUNDARY_PHRASE)).toBe(1);
+      expect(toolDescriptions.filter((description) => description.includes(M5_BOUNDED_LEAF_PHRASE))).toEqual([]);
+      expect(toolDescriptions.filter((description) => description.includes(M5_BOUNDARY_PHRASE))).toEqual([]);
+      expect(awaitDescription).toContain("Returns immediately");
+      expect(awaitDescription).toContain("safe to poll");
+      expect(awaitDescription).toContain("`running` / `completed` / `failed`");
+      expect(awaitDescription).toContain("`orphan_suspected`");
+      expect(awaitDescription).toContain("once the lease has expired without completion");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("supports a naive schema-only caller submit and await sequence", async () => {
+    const models = vi.fn(async () => ({
+      ...ISSUE_318_WIRE_MODELS_RESPONSE,
+      alias_map_version: 7,
+    }));
+    const submit = vi.fn(async () => ({ task_id: "t-wire", state: "pending" }));
+    const await_ = vi.fn(async () => ({
+      status: "completed",
+      result: {
+        outcome: "completed",
+        exitCode: 0,
+        bodyText: "done",
+      },
+    }));
+    const harness = await connectWireClient({ models, submit, await_ });
+    try {
+      const discovery = await readWireDiscovery(harness.client);
+      const aliasRequested = schemaPath(
+        findToolDefinition(discovery.listToolsResult, "hugin_submit"),
+        ["inputSchema", "properties", "alias_requested", "enum", 0],
+      );
+
+      const submitResult = await harness.client.callTool({
+        name: "hugin_submit",
+        arguments: {
+          task_type: "summarize",
+          prompt: "Summarize this.",
+          alias_requested: aliasRequested,
+        },
+      });
+      const submitPayload = parseResult(submitResult);
+      expect(submitPayload).toMatchObject({
+        task_id: "t-wire",
+      });
+      expect(submit).toHaveBeenCalledWith(expect.objectContaining({
+        alias_map_version: 7,
+        alias_requested: "m5",
+      }));
+
+      const awaitResult = await harness.client.callTool({
+        name: "hugin_await",
+        arguments: {
+          task_id: "t-wire",
+          verbosity: "summary",
+        },
+      });
+      expect(parseResult(awaitResult)).toEqual({
+        task_id: "t-wire",
+        status: "completed",
+        outcome: "completed",
+        exitCode: 0,
+        bodyText: "done",
+        refs: {
+          status: { namespace: "tasks/t-wire", key: "status" },
+          fullResult: { namespace: "tasks/t-wire", key: "result-structured" },
+        },
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+});
 
 describe("buildTools — hugin_submit", () => {
   it.each(["draft", "conversation"] as const)(

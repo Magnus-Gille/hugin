@@ -94,14 +94,11 @@ export interface ToolDeps {
 
 export const submitInputShape = {
   task_type: taskTypeSchema.describe(
-    "Canonical M5 task type. The gateway uses it for capability routing and ledger evidence.",
+    "Canonical M5 task type for routing and ledger evidence.",
   ),
-  prompt: z
-    .string()
-    .min(1)
-    .describe("The full task prompt to hand to the runtime."),
+  prompt: z.string().min(1),
   alias_requested: aliasSchema.describe(
-    "Logical alias. The live executable set is discovered from `hugin_models` when the MCP starts.",
+    "Executable alias. Live set comes from `hugin_models` at MCP startup.",
   ),
   worktree: worktreeSpecSchema
     .optional()
@@ -126,42 +123,40 @@ export const submitInputShape = {
   acceptance: z.discriminatedUnion("mode", [
     z.object({ mode: z.literal("l1_review") }).strict(),
     z.object({ mode: z.literal("verifier"), verifier: verifierSpecSchema }).strict(),
-  ]).optional().describe("Acceptance contract. Defaults to explicit L1 review."),
-  parent_task_id: z.string().min(1).optional().describe("Optional L1 parent-task correlation id."),
+  ]).optional().describe("Defaults to `l1_review`."),
+  parent_task_id: z.string().min(1).optional().describe("Optional parent-task correlation id."),
   idempotency_key: z
     .string()
     .uuid()
     .optional()
-    .describe(
-      "Override the auto-generated idempotency key. Useful when the caller knows the request is a retry of an earlier one.",
-    ),
+    .describe("Retry-key override. Reuse only for the same logical request."),
 };
 const submitInputSchema = z.object(submitInputShape);
 
 export const awaitInputShape = {
   task_id: z.string().min(1).describe("Task id returned by `hugin_submit`."),
   verbosity: z.enum(["full", "summary"]).optional().describe(
-    "Response detail. Omit or use `full` for the canonical durable result; use `summary` for a compact projection with refs to the full result.",
+    "Use `summary` for a compact result with refs to the full record.",
   ),
 };
 const awaitInputSchema = z.object(awaitInputShape);
 
 export const rateInputShape = {
   task_id: z.string().min(1),
-  rating: ratingSchema.describe("`pass` / `partial` / `redo` / `wrong`."),
+  rating: ratingSchema,
   rating_reason: z.string().min(1),
   verification_outcome: verificationOutcomeSchema,
   retries_count: z.number().int().nonnegative().optional(),
   reviewer_role: z.enum(["independent", "self"]).optional()
-    .describe("Authenticated reviewer attestation. Same-task owners cannot claim independent."),
+    .describe("Reviewer attestation. Same-task owners cannot claim `independent`."),
   correction: qualityCorrectionRequestSchema.optional().describe(
-    "Append-only native v2 correction shape. Names the predecessor and carries content-blind rubric, failure, configuration, and successor provenance. The Broker derives the attempt only from accepted authoritative LearningTask evidence in the exact structured result; callers cannot provide or infer it.",
+    "Append-only v2 correction. Broker derives the attempt from accepted LearningTask evidence; callers cannot supply it.",
   ),
   expected_binding: z.object({
     task_document_sha256: z.string().regex(/^[0-9a-f]{64}$/),
     structured_result_sha256: z.string().regex(/^[0-9a-f]{64}$/),
     repository_diff_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
-  }).strict().optional().describe("Optional exact hashes reviewed by the caller; stale hashes are rejected."),
+  }).strict().optional().describe("Optional reviewed hashes; stale bindings are rejected."),
 };
 const rateInputSchema = z.object(rateInputShape);
 
@@ -343,8 +338,8 @@ export function buildTools(deps: ToolDeps): {
     ...submitInputShape,
     alias_requested: executableAliasInput.describe(
       executableAliases.length > 0
-        ? `Executable logical alias. Live set: ${executableAliases.join(", ")}.`
-        : "No Broker alias currently has an enabled executor; submission is disabled.",
+        ? `Executable alias. Live set: ${executableAliases.join(", ")}.`
+        : "Submission disabled: no Broker alias has a live executor.",
     ),
   };
   const activeSubmitInputSchema = z.object(activeSubmitInputShape);
@@ -353,7 +348,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_submit",
     title: "Submit a delegation task to Hugin",
     description:
-      "Persist one bounded task in Hugin's durable lifecycle and execute it as one M5 `/delegate` leaf. M5 chooses the model and owns capability evidence; Hugin owns lifecycle and delivery. Returns the task_id and idempotency_key — reuse that key only to retry the same logical request. For judgment-flavored task_type values (classify, qa-factual, triage, memory-decision, claim-verify) submitted with the default `l1_review` acceptance and a prompt with no rubric, the response carries a non-blocking `warnings` array — the task still runs, but attach a mechanical `acceptance.verifier` or add a rubric/grading-criteria section to the prompt for stronger capability evidence.",
+      "Submit one task. Returns durable `task_id` + `idempotency_key`; reuse the key only for the same logical retry. Judgment-style tasks without a rubric or `acceptance.verifier` may return non-blocking `warnings`.",
     inputShape: activeSubmitInputShape,
     handler: async (rawInput) => {
       let idempotencyKey: string | undefined;
@@ -396,7 +391,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_await",
     title: "Read the current state of a delegated task",
     description:
-      "Idempotent read of a task's status: `running` / `completed` / `failed`. Returns immediately. While `running`, the response also carries lease info and an `orphan_suspected` flag (true once the lease has expired without completion). Use `verbosity: summary` to avoid inlining full terminal provenance; the summary includes a namespace/key ref to it. Safe to poll.",
+      "Idempotent read of current task state: `running` / `completed` / `failed`. Returns immediately and is safe to poll. While active, includes lease info and `orphan_suspected` (true once the lease has expired without completion). Use `verbosity: summary` for a compact result with refs to the full terminal record.",
     inputShape: awaitInputShape,
     handler: async (rawInput) => {
       try {
@@ -423,7 +418,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_rate",
     title: "Record an exact-bound task quality review",
     description:
-      "Append an authenticated quality receipt for a terminal Hugin task, bound to its current task/result/repository evidence. This does not directly modify M5's capability ledger.",
+      "Append an authenticated quality receipt bound to the current terminal task/result/repository evidence.",
     inputShape: rateInputShape,
     handler: async (rawInput) => {
       try {
@@ -440,7 +435,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_list",
     title: "List recent delegated tasks",
     description:
-      "List this authenticated principal's recent canonical Munin tasks, plus its read-only historical orch-v1 rows. A true truncated field means a Munin query hit its result cap and may have omitted tasks, so total is only a lower bound.",
+      "List recent tasks for this authenticated principal. If `truncated` is true, the query hit its cap and `total` is only a lower bound.",
     inputShape: listInputShape,
     handler: async (rawInput) => {
       try {
@@ -457,7 +452,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_models",
     title: "Read the active alias map and runtime registry",
     description:
-      "Returns only aliases with a live Broker executor and the runtime rows they can actually dispatch to.",
+      "Read aliases with a live Broker executor and the runtime rows they can dispatch to.",
     inputShape: modelsInputShape,
     handler: async () => {
       try {
@@ -473,7 +468,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_report_friction",
     title: "Report friction encountered while solving a task",
     description:
-      "Persist one concrete capability, environment, or specification friction event in Hugin's shared signals/friction corpus. Use task_id when the event came from a Hugin task. This is operational evidence, not a semantic task rating.",
+      "Persist one concrete capability, environment, or spec friction event. Use `task_id` when applicable; this is operational evidence, not a semantic rating.",
     inputShape: frictionInputShape,
     handler: async (rawInput) => {
       try {
@@ -489,7 +484,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_experiment_create",
     title: "Create a versioned learning experiment",
     description:
-      "Create or idempotently reopen one content-blind champion/challenger experiment. Exactly one logging, test-harness, prompt, harness, model, model-config, or routing axis may differ. Prompts and fixtures stay in their owning repos; only versions and SHA-256 fingerprints are stored.",
+      "Create or reopen one content-blind experiment where exactly one axis differs. Hugin stores versions and SHA-256 fingerprints, not prompts or fixtures.",
     inputShape: experimentCreateInputShape,
     handler: async (rawInput) => {
       try {
@@ -505,7 +500,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_experiment_observe",
     title: "Record one experiment-arm observation",
     description:
-      "Append idempotent evidence for one champion or challenger run. Matching uses sample_id; promotion is evaluated only from matched pairs, requires holdout and independent verification coverage, and automatically rejects measured regressions.",
+      "Append idempotent evidence for one champion or challenger run. Promotion uses matched pairs plus holdout and independent verification coverage, and rejects measured regressions.",
     inputShape: experimentObserveInputShape,
     handler: async (rawInput) => {
       try {
@@ -521,7 +516,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_experiment_rate",
     title: "Add a product rating to an experiment run",
     description:
-      "Enrich one already-recorded unrated run with its human/downstream usefulness outcome and optional review time. The transition is one-way and idempotent; an existing rating can never be overwritten.",
+      "Add a one-way product rating to an already-recorded run, with optional review time.",
     inputShape: learningExperimentRateInputShape,
     handler: async (rawInput) => {
       try {
@@ -537,7 +532,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_experiment_status",
     title: "Read a learning experiment and its promotion gate",
     description:
-      "Read the durable experiment state, matched-pair metrics, guard failures, dominant failure signals, and next action. A promotion-ready state is evidence for operator review, never an uncontrolled production mutation.",
+      "Read experiment state, matched-pair metrics, gate failures, dominant failure signals, and next action.",
     inputShape: experimentStatusInputShape,
     handler: async (rawInput) => {
       try {
@@ -553,7 +548,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_experiment_promote",
     title: "Record reviewed promotion of a winning challenger",
     description:
-      "After the owning configuration repository has applied and reviewed a promotion-ready challenger, advance the scope's durable champion pointer. Requires the exact evaluated fingerprint and an applied commit/config reference. Future experiments for the scope must start from this champion.",
+      "After the owning config repo has applied a reviewed winner, advance the scope's durable champion pointer using the exact evaluated fingerprint.",
     inputShape: experimentPromoteInputShape,
     handler: async (rawInput) => {
       try {
