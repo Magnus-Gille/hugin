@@ -2337,6 +2337,63 @@ export interface TaskCompletionResult {
   statusCasLost?: boolean;
 }
 
+export const STRUCTURED_RESULT_TRACE_ERROR_CLASS = "structured-result-write-failed" as const;
+export const STATUS_CAS_LOST_TRACE_ERROR_CLASS = "status-cas-lost" as const;
+export const RESULT_RECORDING_TRACE_ERROR_CLASS = "result-recording-error" as const;
+export const EXECUTION_ERROR_TRACE_ERROR_CLASS = "execution-error" as const;
+
+export function deriveReportedTaskStartedAt(
+  claimAcceptedAt: string | undefined,
+  observedStartedAt: Date,
+): string {
+  const claimAcceptedMs = claimAcceptedAt ? Date.parse(claimAcceptedAt) : Number.NaN;
+  const observedStartedMs = observedStartedAt.getTime();
+  if (Number.isNaN(claimAcceptedMs)) {
+    return observedStartedAt.toISOString();
+  }
+  return new Date(Math.max(observedStartedMs, claimAcceptedMs)).toISOString();
+}
+
+export function deriveResultRecordingTraceOutcome(
+  input: Pick<TaskCompletionResult, "structuredResultOk" | "structuredResultError" | "statusCasLost">,
+): {
+  outcome: "ok" | "degraded" | "stale";
+  errorClass?: typeof STRUCTURED_RESULT_TRACE_ERROR_CLASS | typeof STATUS_CAS_LOST_TRACE_ERROR_CLASS;
+} {
+  if (input.statusCasLost) {
+    return {
+      outcome: "stale",
+      errorClass: STATUS_CAS_LOST_TRACE_ERROR_CLASS,
+    };
+  }
+  if (input.structuredResultOk) {
+    return { outcome: "ok" };
+  }
+  return {
+    outcome: "degraded",
+    errorClass: STRUCTURED_RESULT_TRACE_ERROR_CLASS,
+  };
+}
+
+export function finalizeExecutionTraceOutcome(input: {
+  outcome: "ok" | "degraded" | "failed" | "stale" | "unknown";
+  errorClass?: string;
+}): {
+  outcome: "ok" | "degraded" | "failed" | "stale";
+  errorClass?: string;
+} {
+  if (input.outcome !== "unknown") {
+    return {
+      outcome: input.outcome,
+      errorClass: input.errorClass,
+    };
+  }
+  return {
+    outcome: "failed",
+    errorClass: input.errorClass ?? EXECUTION_ERROR_TRACE_ERROR_CLASS,
+  };
+}
+
 /**
  * Atomically finalize a task by writing the terminal status FIRST (guaranteed),
  * then the structured result in a try/catch (non-fatal), then the log entry.

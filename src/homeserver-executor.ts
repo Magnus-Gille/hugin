@@ -40,6 +40,12 @@ import {
   type LearningTaskPreparation,
   type LearningTaskRequestContext,
 } from "./learning-task-handshake.js";
+import {
+  endTaskSpan,
+  type TaskTraceContext,
+  type TaskTraceRuntime,
+  type TaskTraceSpan,
+} from "./task-tracing.js";
 
 // --- Types ---
 
@@ -171,6 +177,10 @@ export interface HomeserverExecutorResult {
 
 export interface HomeserverExecutorOptions {
   abortController?: AbortController;
+  tracing?: {
+    runtime: TaskTraceRuntime;
+    taskContext: TaskTraceContext;
+  };
   /**
    * Storage-aware, success-only probe for a stamped request whose admission is
    * ambiguous. Implementations must return null unless exact recovery proves
@@ -454,6 +464,16 @@ export async function executeHomeserverTask(
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (task.apiKey) headers.Authorization = `Bearer ${task.apiKey}`;
+  let gatewaySpan: TaskTraceSpan | null = null;
+  let gatewaySpanEnded = false;
+  const finishGatewaySpan = async (
+    outcome: "ok" | "degraded" | "failed",
+    errorClass?: string,
+  ): Promise<void> => {
+    if (!gatewaySpan || gatewaySpanEnded) return;
+    gatewaySpanEnded = true;
+    await endTaskSpan(gatewaySpan, { outcome, errorClass });
+  };
 
   const recoverAmbiguousLearningTask = async (): Promise<void> => {
     const original = result.learningTask;
@@ -558,6 +578,15 @@ export async function executeHomeserverTask(
       task.path === "delegate"
         ? `${task.gatewayBaseUrl}/delegate`
         : `${task.gatewayBaseUrl}/v1/chat/completions`;
+    gatewaySpan = options?.tracing?.runtime.startSpan({
+      name: `gateway.${task.path}`,
+      surface: "gateway",
+      phase: "execution",
+      taskContext: options.tracing.taskContext,
+    }) ?? null;
+    if (gatewaySpan) {
+      headers.traceparent = gatewaySpan.traceparent;
+    }
 
     const res = await fetch(url, {
       method: "POST",
@@ -578,6 +607,7 @@ export async function executeHomeserverTask(
       appendOutput(
         `[Gateway ${res.status} ${result.backpressure}${result.retryAfterS !== null ? `, retry ${result.retryAfterS}s` : ""}] ${detail}\n`,
       );
+      await finishGatewaySpan("degraded", "gateway-backpressure");
       return finish();
     }
 
@@ -614,6 +644,7 @@ export async function executeHomeserverTask(
       } else {
         appendOutput(`[Gateway HTTP ${res.status}] ${errText}\n`);
       }
+      await finishGatewaySpan("failed", "gateway-http-error");
       return finish();
     }
 
@@ -638,6 +669,7 @@ export async function executeHomeserverTask(
         });
         appendOutput(`[LearningTaskContract join rejected: ${reason}]\n`);
         result.exitCode = 1;
+        await finishGatewaySpan("failed", "gateway-echo-invalid");
         return finish();
       }
       if (task.learningTask?.kind === "ready") {
@@ -659,6 +691,7 @@ export async function executeHomeserverTask(
           });
           appendOutput(`[LearningTaskContract join rejected: ${reason}]\n`);
           result.exitCode = 1;
+          await finishGatewaySpan("failed", "gateway-echo-invalid");
           return finish();
         }
         result.learningTask = learningTaskExecutionEvidenceSchema.parse({
@@ -710,12 +743,17 @@ export async function executeHomeserverTask(
       // A well-formed 200 DelegationOutcome can still report failure; don't mask fail/error
       // as a successful Hugin execution (that would suppress retry/escalation downstream).
       result.exitCode = provenance.outcome === "fail" || provenance.outcome === "error" ? 1 : 0;
+      await finishGatewaySpan(
+        result.exitCode === 0 ? "ok" : "failed",
+        result.exitCode === 0 ? undefined : "gateway-delegate-failed",
+      );
       return finish();
     }
 
     // Chat path: stream the OpenAI-compatible SSE body.
     if (!res.body) {
       appendOutput("[Gateway error: no response body]\n");
+      await finishGatewaySpan("failed", "gateway-http-error");
       return finish();
     }
     const reader = res.body.getReader();
@@ -767,9 +805,11 @@ export async function executeHomeserverTask(
     if (timedOut) {
       result.exitCode = "TIMEOUT";
       appendOutput("\n[Gateway streaming timed out]\n");
+      await finishGatewaySpan("failed", "timeout");
     } else {
       result.exitCode = 0;
       result.resultText = output.trim() || null;
+      await finishGatewaySpan("ok");
     }
     return finish();
   } catch (err) {
@@ -786,9 +826,11 @@ export async function executeHomeserverTask(
     if (err instanceof Error && err.name === "AbortError") {
       result.exitCode = "TIMEOUT";
       appendOutput(`\n[Gateway request aborted after ${Math.round((Date.now() - startMs) / 1000)}s]\n`);
+      await finishGatewaySpan("failed", "timeout");
     } else {
       result.exitCode = 1;
       appendOutput(`\n[Gateway error: ${err instanceof Error ? err.message : String(err)}]\n`);
+      await finishGatewaySpan("failed", "gateway-transport-error");
     }
     return finish();
   } finally {

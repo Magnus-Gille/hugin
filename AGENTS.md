@@ -298,15 +298,19 @@ The executable deployment contract is `scripts/deploy-pi.sh`,
 ## Focused references
 
 - Operator overview and submission example: `README.md`.
-- Artifact recovery: `docs/testing/delivery-recovery-e2e.md`.
-- Task signing and authenticated provenance: `docs/security/task-signing.md`.
-- Context provenance and scanners: `docs/security/`.
-- Durable M5 Broker lifecycle and authority: `docs/mcp-durable-m5-lifecycle.md`.
-- Orchestrator behavior: `docs/orchestrator-redesign.md`,
-  `docs/orchestrator-verdict-layer.md`, and `docs/orchestrator-savings-tracker.md`.
-- Daily candidate factory: `docs/daily-exam-factory.md`.
-- Friction taxonomy and submission surfaces: `docs/friction-reporting.md`.
 - Current execution state: `STATUS.md`.
+- Lookup/reference docs under `docs/` start at `docs/index.md`.
+  It is exhaustive for the docs corpus and groups Hugin entities/components by
+  category: core contracts, security/provenance, orchestration/scheduling,
+  learning/evaluation, historical validations, and design/research archives.
+  The index names the concrete Hugin entities covered by those categories,
+  including the orchestrator, M5, Harbor, daily exams, task signing, scanners,
+  scheduling, and pipeline phases; it is not a partial topic allowlist.
+  For every lookup/reference question whose answer may be recorded under
+  `docs/`, always open `docs/index.md`, select the matching entry, and open the
+  linked source document before searching implementation or answering. Source
+  code alone does not satisfy this documented-contract lookup rule. The index
+  summaries are routing aids, not substitutes for source content.
 
 Environment defaults belong with their parser, service unit, and focused operating
 document. Do not regrow a copied environment-variable catalogue here.

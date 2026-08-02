@@ -49,6 +49,10 @@ import {
   type NativeQualityReceipt,
 } from "../quality-receipt.js";
 import { buildBrokerTaskTypeTags } from "./task-type-metadata.js";
+import {
+  buildTaskTraceContextSection,
+  type TaskTraceContext,
+} from "../task-tracing.js";
 
 export { MUNIN_QUERY_MAX } from "../munin-pagination.js";
 
@@ -176,6 +180,7 @@ export function namespaceForTaskId(taskId: string): string {
 
 export interface SubmitTaskParams {
   envelope: DelegationEnvelope;
+  traceContext?: TaskTraceContext;
 }
 
 export class BrokerTaskStore {
@@ -196,7 +201,11 @@ export class BrokerTaskStore {
     const attestation = secret
       ? createBrokerAttestation(params.envelope, secret)
       : undefined;
-    const content = serializeEnvelope(params.envelope, attestation);
+    const content = serializeEnvelope(
+      params.envelope,
+      attestation,
+      params.traceContext,
+    );
     const result = await this.munin.write(
       ns,
       STATUS_KEY,
@@ -701,6 +710,7 @@ export function flipLifecycleTags(
 export function serializeEnvelope(
   envelope: DelegationEnvelope,
   attestation?: BrokerAttestation,
+  traceContext?: TaskTraceContext,
 ): string {
   const verifier = envelope.acceptance.mode === "verifier"
     ? JSON.stringify(envelope.acceptance.verifier)
@@ -727,6 +737,9 @@ export function serializeEnvelope(
     `- **Sensitivity:** ${envelope.sensitivity ?? "internal"}`,
     `- **Idempotency payload SHA256:** ${stableRequestHash(envelope)}`,
     "",
+    ...(traceContext
+      ? [buildTaskTraceContextSection(traceContext), ""]
+      : []),
     "### Broker envelope",
     "```json",
     JSON.stringify(envelope, null, 2),

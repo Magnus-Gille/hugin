@@ -7,13 +7,19 @@ import {
   buildHomeserverDelegateTaskConfig,
   executeHomeserverTask,
   loadHomeserverGatewayConfig,
+  type HomeserverExecutorOptions,
   type HomeserverTaskConfig,
 } from "../src/homeserver-executor.js";
 import { recoverPreparedLearningTaskDispatch } from "../src/learning-task-handshake.js";
+import { TaskTraceRuntime } from "../src/task-tracing.js";
 import {
   withLearningTaskContext,
   withLearningTaskGatewayEcho,
 } from "./helpers/learning-task.js";
+import {
+  CONTENT_BLIND_TRACE_JOIN_FIXTURE,
+  CONTENT_BLIND_TRACEPARENT,
+} from "./helpers/task-tracing-fixtures.js";
 
 function makeTaskConfig(overrides?: Partial<HomeserverTaskConfig>): HomeserverTaskConfig {
   return {
@@ -69,6 +75,27 @@ function immediateRecoveryOptions(task: HomeserverTaskConfig) {
       return recovered.state === "m5-admitted" && recovered.evidenceAccepted
         ? recovered
         : null;
+    },
+  };
+}
+
+function tracingOptions(): Pick<HomeserverExecutorOptions, "tracing"> {
+  return {
+    tracing: {
+      runtime: new TaskTraceRuntime({
+        exportEnabled: false,
+        sampleRatePerMille: 1000,
+        release: "git-test",
+        traceIdGenerator: () => CONTENT_BLIND_TRACE_JOIN_FIXTURE.traceId,
+        idGenerator: () => CONTENT_BLIND_TRACE_JOIN_FIXTURE.gatewayCallSpanId,
+        now: () => new Date("2026-08-01T12:00:00Z"),
+      }),
+      taskContext: {
+        traceparent: CONTENT_BLIND_TRACEPARENT,
+        taskClass: CONTENT_BLIND_TRACE_JOIN_FIXTURE.taskClass,
+        runtimeLane: CONTENT_BLIND_TRACE_JOIN_FIXTURE.runtimeLane,
+        retryOrdinal: CONTENT_BLIND_TRACE_JOIN_FIXTURE.retryOrdinal,
+      },
     },
   };
 }
@@ -323,6 +350,33 @@ describe("executeHomeserverTask — delegate path", () => {
     expect(body.delegatorModelId).toBe("anthropic/claude-sonnet-4-5");
     expect(body.premiumBaselineModelId).toBe("anthropic/claude-opus-4-5");
     expect(body.learningTaskStamp.raw_fingerprint).toEqual(body.huginTaskIdentity.rawTaskFingerprint);
+  });
+
+  it("propagates the fixed W3C traceparent to the gateway call", async () => {
+    const task = withLearningTaskContext(makeTaskConfig({
+      path: "delegate",
+      taskType: "extract",
+      modelId: "qwen3-coder",
+    }), "delegate-traced");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse(withLearningTaskGatewayEcho(task, "delegate-traced", {
+        output: "1998",
+      })),
+    );
+
+    await executeHomeserverTask(
+      task,
+      "delegate-traced",
+      tmpLogDir,
+      tracingOptions(),
+    );
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers.traceparent).toBe(
+      `00-${CONTENT_BLIND_TRACE_JOIN_FIXTURE.traceId}-${CONTENT_BLIND_TRACE_JOIN_FIXTURE.gatewayCallSpanId}-01`,
+    );
+    expect(headers.baggage).toBeUndefined();
   });
 
   // Issue #163: the direct path already carried the flat delegation fields, but
