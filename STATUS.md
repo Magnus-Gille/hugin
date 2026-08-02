@@ -1,5 +1,46 @@
 # Hugin — Status
 
+## 2026-08-02 — #339 pi-harness pre-spawn abort gap fixed
+
+- Branch `codex/issue-339-worktree-binding` now re-checks `req.signal.aborted`
+  immediately before the final `pi` spawn, after async launch-CWD / worktree
+  binding verification and argument construction. An abort that fires during
+  pre-spawn binding verification now returns a no-spend `Process aborted before
+  it started` result instead of launching the harness after the signal already
+  fired.
+- `tests/orchestrator/worker-executor.test.ts` now covers the reproduced abort
+  window directly: the signal fires while launch-CWD resolution is still in
+  progress, and the regression asserts that no `pi` child is spawned.
+
+**Verification:** red/green focused `npm test -- tests/orchestrator/worker-executor.test.ts`
+(103 tests, reproduced failure first, then passed), full `npm test` (167 files /
+2,640 tests, 3 skipped), and `git diff --check` passed.
+
+**Next:** obtain independent review on the exact committed head, then wait for
+green PR CI before any merge decision. No deployment or unrelated repository
+mutation occurred.
+
+## 2026-08-01 — #339 managed checkout / pi-harness binding hardening
+
+- Branch `codex/issue-339-worktree-binding` now fails closed before any managed
+  checkout mutation when the selected repo path is non-canonical, escapes the
+  canonical managed root, or is only a subdirectory of the git toplevel.
+- First-turn writable binding verification now includes ignored leftovers, so
+  pre-existing `.env`, `node_modules`, and similar ignored state cannot be
+  admitted into a fresh bound orchestrator run.
+- Pi-harness dirty continuation now requires a successful prior turn on the
+  same bound worktree; any failed or aborted turn taints that binding for the
+  rest of the run. Trusted-code pi-harness workers on scratch/files/non-managed
+  workspaces are refused instead of silently downgraded, and post-gate
+  admission refusals now preserve `repositoryOutcome: checkout-contaminated`.
+
+**Verification:** focused binding/admission/dispatcher/worker suites (198
+tests), full `npm test` (166 files / 2,625 tests, 3 skipped), `npm run build`,
+and `git diff --check` passed.
+
+**Next:** obtain independent review on the exact committed head before any
+merge decision. No deployment, network mutation, or cross-repo change occurred.
+
 ## 2026-08-01 — #340 content-blind tracing propagation (local issue branch)
 
 - Branch `codex/issue-340-content-blind-tracing` in

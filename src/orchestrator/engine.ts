@@ -349,11 +349,16 @@ export async function runOrchestration(
   // -------------------------------------------------------------------------
   // 2. Fan-out workers
   // -------------------------------------------------------------------------
-  // Homeserver-bound workers get a tighter fanout cap (issue #157): the M5's
-  // serial GPU admits ~1-2 concurrent requests and 503s the rest, so queueing
-  // here beats slamming the gateway and burning the busy-retry budget.
+  // Pi-harness workers are forced fully serial: they share one mutable task
+  // branch/worktree, so parallel fanout would let sibling subtasks race the
+  // same checkout. Homeserver-bound workers get a tighter fanout cap
+  // (issue #157): the M5's serial GPU admits ~1-2 concurrent requests and
+  // 503s the rest, so queueing here beats slamming the gateway and burning the
+  // busy-retry budget.
   const workerConcurrency =
-    cfg.roles.worker.provider === "homeserver"
+    cfg.roles.worker.provider === "pi-harness"
+      ? 1
+      : cfg.roles.worker.provider === "homeserver"
       ? Math.min(cfg.maxConcurrency, cfg.homeserverMaxConcurrency)
       : cfg.maxConcurrency;
   const outcomes: SubtaskOutcome[] = await mapWithConcurrency(

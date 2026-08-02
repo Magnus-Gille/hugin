@@ -8,6 +8,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
+import * as path from "node:path";
+type WorkerRequest = import("../../src/orchestrator/worker-executor.js").WorkerRequest;
 
 // ---------------------------------------------------------------------------
 // Mock node:child_process before importing the module
@@ -26,10 +28,11 @@ interface SpawnBehavior {
 const spawnCalls: Array<{
   cmd: string;
   args: string[];
-  options?: { env?: NodeJS.ProcessEnv };
+  options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: unknown };
 }> = [];
 let spawnBehaviors: SpawnBehavior[] = [];
 let spawnCallIndex = 0;
+const realpathResults = new Map<string, { value?: string; error?: Error & { code?: string } }>();
 
 class MockChildProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -73,6 +76,15 @@ vi.mock("node:child_process", () => ({
   },
 }));
 
+vi.mock("node:fs/promises", () => ({
+  realpath: async (input: string) => {
+    const key = path.resolve(input);
+    const entry = realpathResults.get(key);
+    if (entry?.error) throw entry.error;
+    return entry?.value ?? key;
+  },
+}));
+
 // Import AFTER mocking so the mock is in place when the module loads
 const {
   createWorkerExecutor,
@@ -82,6 +94,7 @@ const {
   DEFAULT_MAX_OUTPUT_CHARS,
   DEFAULT_MAX_TOKENS,
 } = await import("../../src/orchestrator/worker-executor.js");
+const runtimeRegistry = await import("../../src/runtime-registry.js");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -113,6 +126,8 @@ beforeEach(() => {
   spawnCalls.length = 0;
   spawnBehaviors = [];
   spawnCallIndex = 0;
+  realpathResults.clear();
+  primeDefaultRealpaths();
   vi.unstubAllEnvs();
 });
 
@@ -1469,18 +1484,99 @@ const PI_JSONL_SUCCESS = [
   JSON.stringify({ type: "assistant", content: "the answer" }),
   JSON.stringify({ type: "usage", usage: { input_tokens: 50, output_tokens: 30 } }),
 ].join("\n") + "\n";
+const PI_MANAGED_ROOT = "/home/magnus/repos";
+const PI_WORKSPACE_ROOT = "/home/magnus/workspace";
+const PI_SCRATCH_ROOT = "/home/magnus/scratch";
+const PI_FILES_ROOT = "/home/magnus/mimir";
+const PI_WORKTREE_PATH = `${PI_MANAGED_ROOT}/hugin-worktree`;
+const PI_WORKTREE_SUBDIR = `${PI_WORKTREE_PATH}/src`;
+const PI_READ_ONLY_CWD = `${PI_WORKSPACE_ROOT}/readonly-hugin`;
+const PI_SCRATCH_CWD = `${PI_SCRATCH_ROOT}/readonly-hugin`;
+const PI_BRANCH_NAME = "hugin/task-339";
+const PI_EXPECTED_REVISION = "a".repeat(40);
+const PI_ALLOWED_READ_ONLY_ROOTS = [
+  PI_MANAGED_ROOT,
+  PI_WORKSPACE_ROOT,
+  PI_SCRATCH_ROOT,
+  PI_FILES_ROOT,
+];
+
+function cleanPiWorktreeBehaviors() {
+  return [
+    { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+    { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
+    { exitCode: 0, stdout: "" },
+    { exitCode: 0, stdout: `${PI_EXPECTED_REVISION}\n` },
+    { exitCode: 0, stdout: "" },
+  ];
+}
+
+function setRealpath(
+  rawPath: string,
+  value: string = rawPath,
+  error?: Error & { code?: string },
+) {
+  realpathResults.set(path.resolve(rawPath), error ? { error } : { value });
+}
+
+function primeDefaultRealpaths() {
+  setRealpath(PI_MANAGED_ROOT);
+  setRealpath(PI_WORKSPACE_ROOT);
+  setRealpath(PI_SCRATCH_ROOT);
+  setRealpath(PI_FILES_ROOT);
+  setRealpath(PI_WORKTREE_PATH);
+  setRealpath(PI_WORKTREE_SUBDIR);
+  setRealpath(PI_READ_ONLY_CWD);
+  setRealpath(PI_SCRATCH_CWD);
+}
+
+function makePiBinding(
+  overrides: Partial<{
+    cwd: string;
+    expectedRevision: string;
+    branchName: string;
+    managedRoot: string;
+  }> = {},
+) {
+  return {
+    cwd: PI_WORKTREE_PATH,
+    expectedRevision: PI_EXPECTED_REVISION,
+    branchName: PI_BRANCH_NAME,
+    managedRoot: PI_MANAGED_ROOT,
+    ...overrides,
+  };
+}
+
+function makeReadOnlyPiRequest(overrides: Partial<WorkerRequest> = {}): WorkerRequest {
+  return {
+    provider: "pi-harness",
+    model: "qwen/qwen3-coder-next",
+    prompt: "hello",
+    timeoutMs: 5000,
+    cwd: PI_READ_ONLY_CWD,
+    permissionProfile: "read-only",
+    allowedReadOnlyRoots: PI_ALLOWED_READ_ONLY_ROOTS,
+    ...overrides,
+  };
+}
+
+function makeTrustedPiRequest(overrides: Partial<WorkerRequest> = {}): WorkerRequest {
+  return {
+    ...makeReadOnlyPiRequest(),
+    permissionProfile: "trusted-code",
+    worktree: makePiBinding(),
+    configuredManagedRoot: PI_MANAGED_ROOT,
+    cwd: undefined,
+    ...overrides,
+  };
+}
 
 describe("PiHarnessExecutor — success path", () => {
   it("parses JSONL output and returns ok=true with content and token counts", async () => {
-    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+    spawnBehaviors = [...cleanPiWorktreeBehaviors(), { exitCode: 0, stdout: PI_JSONL_SUCCESS }];
 
     const executor = new PiHarnessExecutor();
-    const result = await executor.run({
-      provider: "pi-harness",
-      model: "qwen/qwen3-coder-next",
-      prompt: "write a function",
-      timeoutMs: 5000,
-    });
+    const result = await executor.run(makeTrustedPiRequest({ prompt: "write a function" }));
 
     expect(result.ok).toBe(true);
     expect(result.output).toBe("the answer");
@@ -1494,18 +1590,13 @@ describe("PiHarnessExecutor — success path", () => {
   });
 
   it("builds args from registry (harnessFlags + mode + model + prompt)", async () => {
-    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+    spawnBehaviors = [...cleanPiWorktreeBehaviors(), { exitCode: 0, stdout: PI_JSONL_SUCCESS }];
 
     const executor = new PiHarnessExecutor();
-    await executor.run({
-      provider: "pi-harness",
-      model: "qwen/qwen3-coder-next",
-      prompt: "hello",
-      timeoutMs: 5000,
-    });
+    await executor.run(makeTrustedPiRequest());
 
-    expect(spawnCalls).toHaveLength(1);
-    const { cmd, args } = spawnCalls[0];
+    expect(spawnCalls).toHaveLength(6);
+    const { cmd, args } = spawnCalls[5];
     // harnessCmd from registry
     expect(cmd).toBe("pi");
     // harnessFlags present
@@ -1520,6 +1611,149 @@ describe("PiHarnessExecutor — success path", () => {
     // prompt flag
     expect(args).toContain("-p");
     expect(args).toContain("hello");
+    expect(args).not.toContain("--tools");
+  });
+
+  it("uses an explicit local cwd plus read-only tools when no writable task binding is selected", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    await new PiHarnessExecutor().run(makeReadOnlyPiRequest({ prompt: "review this" }));
+
+    expect(spawnCalls).toHaveLength(1);
+    const { cmd, args, options } = spawnCalls[0];
+    expect(cmd).toBe("pi");
+    expect(args).toContain("--tools");
+    expect(args).toContain("read,grep,find,ls");
+    expect(options?.cwd).toBe(PI_READ_ONLY_CWD);
+  });
+
+  it("allows read-only pi-harness launches within scratch/files roots when explicitly allowlisted", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    const result = await new PiHarnessExecutor().run(
+      makeReadOnlyPiRequest({ cwd: PI_SCRATCH_CWD, prompt: "inspect scratch state" }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]?.options?.cwd).toBe(PI_SCRATCH_CWD);
+  });
+
+  it("skips missing optional read-only launch roots when another allowlisted root resolves", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    const result = await new PiHarnessExecutor().run(
+      makeReadOnlyPiRequest({
+        allowedReadOnlyRoots: [PI_WORKSPACE_ROOT, "/home/magnus/missing-readonly-root"],
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]?.options?.cwd).toBe(PI_READ_ONLY_CWD);
+  });
+
+  it("fails closed when every read-only launch root is missing or unresolvable", async () => {
+    const missingRoot = "/home/magnus/missing-readonly-root";
+    const missingError = Object.assign(new Error("missing"), { code: "ENOENT" });
+    setRealpath(missingRoot, missingRoot, missingError);
+
+    const result = await new PiHarnessExecutor().run(
+      makeReadOnlyPiRequest({
+        allowedReadOnlyRoots: [missingRoot],
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("could not resolve any allowed read-only roots");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("does not ignore unsafe read-only launch root validation errors", async () => {
+    const result = await new PiHarnessExecutor().run(
+      makeReadOnlyPiRequest({
+        allowedReadOnlyRoots: [PI_WORKSPACE_ROOT, "relative/readonly-root"],
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("must be absolute");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("does not let registry harnessFlags override the enforced read-only tool allowlist", async () => {
+    const original = runtimeRegistry.getRegistryEntryById;
+    const piEntry = original("pi-harness");
+    if (!piEntry) throw new Error("pi-harness registry entry missing in test");
+    vi.spyOn(runtimeRegistry, "getRegistryEntryById").mockImplementation((id) =>
+      id === "pi-harness"
+        ? {
+            ...piEntry,
+            harnessFlags: ["--tools", "write,edit", "--no-session", "--provider", "openrouter"],
+          }
+        : original(id),
+    );
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    await new PiHarnessExecutor().run(makeReadOnlyPiRequest());
+
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]?.args).not.toContain("write,edit");
+    expect(spawnCalls[0]?.args.filter((arg) => arg === "--tools")).toHaveLength(1);
+    expect(spawnCalls[0]?.args).toContain("read,grep,find,ls");
+  });
+
+  it("fails closed on unsupported registry harness flags in read-only mode", async () => {
+    const original = runtimeRegistry.getRegistryEntryById;
+    const piEntry = original("pi-harness");
+    if (!piEntry) throw new Error("pi-harness registry entry missing in test");
+    vi.spyOn(runtimeRegistry, "getRegistryEntryById").mockImplementation((id) =>
+      id === "pi-harness"
+        ? {
+            ...piEntry,
+            harnessFlags: ["--no-session", "--dangerous-write"],
+          }
+        : original(id),
+    );
+
+    const result = await new PiHarnessExecutor().run(makeReadOnlyPiRequest());
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("refuses unsupported registry flag");
+    expect(result.error).toContain("--dangerous-write");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed on incomplete read-only provider flag pairs from the registry", async () => {
+    const original = runtimeRegistry.getRegistryEntryById;
+    const piEntry = original("pi-harness");
+    if (!piEntry) throw new Error("pi-harness registry entry missing in test");
+    vi.spyOn(runtimeRegistry, "getRegistryEntryById").mockImplementation((id) =>
+      id === "pi-harness"
+        ? {
+            ...piEntry,
+            harnessFlags: ["--no-session", "--provider"],
+          }
+        : original(id),
+    );
+
+    const result = await new PiHarnessExecutor().run(makeReadOnlyPiRequest());
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("requires complete registry --provider flag pairs");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("keeps the live pi-harness registry flags inside the read-only-safe allowlist", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    const result = await new PiHarnessExecutor().run(makeReadOnlyPiRequest());
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls).toHaveLength(1);
+    expect(
+      spawnCalls[0]?.args.filter((arg) => arg.startsWith("--") && arg !== "--mode" && arg !== "--model" && arg !== "-p"),
+    ).toEqual(["--no-session", "--provider", "--tools"]);
   });
 
   it("does not expose the dispatcher checkpoint secret to the Pi harness", async () => {
@@ -1527,12 +1761,7 @@ describe("PiHarnessExecutor — success path", () => {
     vi.stubEnv("HUGIN_ORDINARY_CHILD_VALUE", "preserved");
     spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
 
-    await new PiHarnessExecutor().run({
-      provider: "pi-harness",
-      model: "qwen/qwen3-coder-next",
-      prompt: "hello",
-      timeoutMs: 5000,
-    });
+    await new PiHarnessExecutor().run(makeReadOnlyPiRequest());
 
     expect(spawnCalls[0]?.options?.env).not.toHaveProperty(
       "HUGIN_SENSITIVITY_CHECKPOINT_SECRET",
@@ -1547,31 +1776,270 @@ describe("PiHarnessExecutor — success path", () => {
     spawnBehaviors = [{ exitCode: 0, stdout: jsonl }];
 
     const executor = new PiHarnessExecutor();
-    const result = await executor.run({
-      provider: "pi-harness",
-      model: "qwen/qwen3-coder-next",
-      prompt: "hi",
-      timeoutMs: 5000,
-    });
+    const result = await executor.run(makeReadOnlyPiRequest({ prompt: "hi" }));
 
     expect(result.ok).toBe(true);
     expect(result.output).toBe("text field result");
   });
+
+  it("verifies the selected revision and spawns Pi in the selected worktree cwd (issue #339)", async () => {
+    spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS },
+    ];
+
+    const executor = new PiHarnessExecutor();
+    const result = await executor.run(makeTrustedPiRequest());
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls).toHaveLength(6);
+    expect(spawnCalls[0]).toMatchObject({
+      cmd: "git",
+      args: ["rev-parse", "--show-toplevel"],
+      options: { cwd: PI_WORKTREE_PATH },
+    });
+    expect(spawnCalls[1]).toMatchObject({
+      cmd: "git",
+      args: ["symbolic-ref", "--quiet", "--short", "HEAD"],
+      options: { cwd: PI_WORKTREE_PATH },
+    });
+    expect(spawnCalls[2]).toMatchObject({
+      cmd: "git",
+      args: ["status", "--porcelain"],
+      options: { cwd: PI_WORKTREE_PATH },
+    });
+    expect(spawnCalls[3]).toMatchObject({
+      cmd: "git",
+      args: ["rev-parse", "HEAD"],
+      options: { cwd: PI_WORKTREE_PATH },
+    });
+    expect(spawnCalls[4]).toMatchObject({
+      cmd: "git",
+      args: ["merge-base", "--is-ancestor", PI_EXPECTED_REVISION, PI_EXPECTED_REVISION],
+      options: { cwd: PI_WORKTREE_PATH },
+    });
+    expect(spawnCalls[5]?.cmd).toBe("pi");
+    expect(spawnCalls[5]?.options?.cwd).toBe(PI_WORKTREE_PATH);
+  });
+
+  it("fails closed on the first worker turn when the selected task branch is already dirty", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
+      { exitCode: 0, stdout: "M src/worker.ts\n" },
+      { exitCode: 0, stdout: `${PI_EXPECTED_REVISION}\n` },
+      { exitCode: 0, stdout: "" },
+    ];
+
+    const result = await new PiHarnessExecutor().run(makeTrustedPiRequest());
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("initial clean binding");
+    expect(spawnCalls).toHaveLength(5);
+  });
+
+  it("allows a legitimate follow-on worker turn on the same task branch after local edits", async () => {
+    const binding = makePiBinding();
+    spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS },
+    ];
+
+    const executor = new PiHarnessExecutor();
+    const first = await executor.run(makeTrustedPiRequest({ prompt: "start", worktree: binding }));
+    expect(first.ok).toBe(true);
+
+    spawnCalls.length = 0;
+    spawnCallIndex = 0;
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
+      { exitCode: 0, stdout: "M src/worker.ts\n" },
+      { exitCode: 0, stdout: `${PI_EXPECTED_REVISION}\n` },
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS },
+    ];
+
+    const second = await executor.run(
+      makeTrustedPiRequest({ prompt: "continue the task", worktree: binding }),
+    );
+
+    expect(second.ok).toBe(true);
+    expect(spawnCalls[5]?.cmd).toBe("pi");
+  });
+
+  it("refuses a dirty follow-on worker turn when the prior turn failed after writing", async () => {
+    const binding = makePiBinding();
+    spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
+      { exitCode: 1, stderr: "partial write left behind" },
+    ];
+
+    const executor = new PiHarnessExecutor();
+    const first = await executor.run(makeTrustedPiRequest({ prompt: "start", worktree: binding }));
+    expect(first.ok).toBe(false);
+    expect(first.error).toContain("Process exited with code 1");
+
+    spawnCalls.length = 0;
+    spawnCallIndex = 0;
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
+      { exitCode: 0, stdout: "M src/worker.ts\n" },
+      { exitCode: 0, stdout: `${PI_EXPECTED_REVISION}\n` },
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS },
+    ];
+
+    const second = await executor.run(
+      makeTrustedPiRequest({ prompt: "continue the task", worktree: binding }),
+    );
+
+    expect(second.ok).toBe(false);
+    expect(second.error).toContain("tainted by a failed or aborted prior worker turn");
+    expect(spawnCalls).toHaveLength(0);
+    expect(spawnCalls.some((call) => call.cmd === "pi")).toBe(false);
+  });
+
+  it("allows a legitimate follow-on worker turn after HEAD advances on the same task branch", async () => {
+    const advancedHead = "b".repeat(40);
+    const binding = makePiBinding();
+    spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS },
+    ];
+
+    const executor = new PiHarnessExecutor();
+    const first = await executor.run(makeTrustedPiRequest({ prompt: "start", worktree: binding }));
+    expect(first.ok).toBe(true);
+
+    spawnCalls.length = 0;
+    spawnCallIndex = 0;
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: `${advancedHead}\n` },
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS },
+    ];
+
+    const result = await executor.run(
+      makeTrustedPiRequest({ prompt: "continue after a commit", worktree: binding }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls[4]?.args).toEqual([
+      "merge-base",
+      "--is-ancestor",
+      PI_EXPECTED_REVISION,
+      advancedHead,
+    ]);
+  });
+
+  it("prefers the explicit configured managed root over process.env when verifying the selected binding", async () => {
+    vi.stubEnv("HUGIN_REPOS_ROOT", "/home/magnus/other-root");
+    setRealpath("/home/magnus/other-root");
+    spawnBehaviors = [...cleanPiWorktreeBehaviors(), { exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    const result = await new PiHarnessExecutor().run(makeTrustedPiRequest({ prompt: "edit safely" }));
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls).toHaveLength(6);
+    expect(spawnCalls[5]?.cmd).toBe("pi");
+  });
 });
 
 describe("PiHarnessExecutor — non-zero exit path", () => {
+  it("fails closed when the request omits both a writable binding and an explicit local cwd", async () => {
+    const result = await new PiHarnessExecutor().run({
+      provider: "pi-harness",
+      model: "qwen/qwen3-coder-next",
+      prompt: "hello",
+      timeoutMs: 5000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("requires an explicit working directory");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when trusted-code pi-harness execution lacks a selected task-branch binding", async () => {
+    const result = await new PiHarnessExecutor().run(
+      makeReadOnlyPiRequest({ permissionProfile: "trusted-code" }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("trusted-code execution requires a selected worktree binding");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when read-only execution lacks an explicit allowlist of launch roots", async () => {
+    const result = await new PiHarnessExecutor().run(
+      makeReadOnlyPiRequest({ allowedReadOnlyRoots: [] }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("requires an explicit allowlist of launch roots");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when a read-only launch cwd escapes the configured allowlist", async () => {
+    const outside = "/tmp/pi-readonly";
+    setRealpath(outside);
+
+    const result = await new PiHarnessExecutor().run(
+      makeReadOnlyPiRequest({ cwd: outside }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("must stay within an allowed read-only root");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when a duplicate cwd conflicts with the selected worktree binding", async () => {
+    const result = await new PiHarnessExecutor().run(
+      makeTrustedPiRequest({ cwd: PI_READ_ONLY_CWD }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("conflicting cwd");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("allows an identical duplicate cwd when it matches the selected worktree binding exactly", async () => {
+    spawnBehaviors = [...cleanPiWorktreeBehaviors(), { exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    const result = await new PiHarnessExecutor().run(
+      makeTrustedPiRequest({ cwd: PI_WORKTREE_PATH }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls).toHaveLength(6);
+    expect(spawnCalls[5]?.options?.cwd).toBe(PI_WORKTREE_PATH);
+  });
+
+  it("fails closed when the explicit configured managed root disagrees with the bound worktree", async () => {
+    const otherRoot = "/home/magnus/other-root";
+    setRealpath(otherRoot);
+
+    const result = await new PiHarnessExecutor().run(
+      makeTrustedPiRequest({ configuredManagedRoot: otherRoot }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("configured managed repos root");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
   it("returns ok=false with stderr in error, does not throw", async () => {
     spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
       { exitCode: 1, stdout: "", stderr: "model not found" },
     ];
 
     const executor = new PiHarnessExecutor();
-    const result = await executor.run({
-      provider: "pi-harness",
-      model: "qwen/qwen3-coder-next",
-      prompt: "hi",
-      timeoutMs: 5000,
-    });
+    const result = await executor.run(makeTrustedPiRequest({ prompt: "hi" }));
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/code 1/);
@@ -1581,34 +2049,169 @@ describe("PiHarnessExecutor — non-zero exit path", () => {
 
   it("returns ok=false on spawn error", async () => {
     spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
       { exitCode: 1, spawnError: "ENOENT: pi not found" },
     ];
 
     const executor = new PiHarnessExecutor();
-    const result = await executor.run({
-      provider: "pi-harness",
-      model: "qwen/qwen3-coder-next",
-      prompt: "hi",
-      timeoutMs: 5000,
-    });
+    const result = await executor.run(makeTrustedPiRequest({ prompt: "hi" }));
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/pi not found/);
+  });
+
+  it("fails closed before spawning Pi when the selected worktree revision is stale (issue #339)", async () => {
+    const actualRevision = "b".repeat(40);
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: `${actualRevision}\n` },
+      { exitCode: 1, stderr: "not ancestor" },
+    ];
+
+    const executor = new PiHarnessExecutor();
+    const result = await executor.run(makeTrustedPiRequest());
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain(actualRevision);
+    expect(result.error).toContain(PI_EXPECTED_REVISION);
+    expect(spawnCalls).toHaveLength(5);
+    expect(spawnCalls.every((call) => call.cmd === "git")).toBe(true);
+  });
+
+  it("surfaces merge-base execution errors instead of mislabeling them as stale ancestry", async () => {
+    const actualRevision = "b".repeat(40);
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: `${actualRevision}\n` },
+      { exitCode: 128, stderr: "fatal: bad object" },
+    ];
+
+    const result = await new PiHarnessExecutor().run(makeTrustedPiRequest());
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("merge-base --is-ancestor failed");
+    expect(result.error).toContain("bad object");
+    expect(result.error).not.toContain("not descended");
+    expect(spawnCalls).toHaveLength(5);
+  });
+
+  it("fails closed when the selected path is relative", async () => {
+    const result = await new PiHarnessExecutor().run(
+      makeTrustedPiRequest({ worktree: makePiBinding({ cwd: "relative/worktree" }) }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("must be absolute");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when the selected path resolves outside the managed repos root", async () => {
+    const outside = "/home/magnus/workspace/hugin";
+    setRealpath(outside);
+
+    const result = await new PiHarnessExecutor().run(
+      makeTrustedPiRequest({ worktree: makePiBinding({ cwd: outside }) }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("beneath the configured managed repos root");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when a traversal-looking path resolves outside the managed repos root", async () => {
+    const traversal = `${PI_MANAGED_ROOT}/../workspace/hugin`;
+    setRealpath(traversal, "/home/magnus/workspace/hugin");
+
+    const result = await new PiHarnessExecutor().run(
+      makeTrustedPiRequest({ worktree: makePiBinding({ cwd: traversal }) }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("must already be canonical");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when the selected path is non-canonical or symlinked", async () => {
+    const symlinkPath = `${PI_MANAGED_ROOT}/symlinked-worktree`;
+    const targetPath = `${PI_MANAGED_ROOT}/real-worktree`;
+    setRealpath(symlinkPath, targetPath);
+
+    const result = await new PiHarnessExecutor().run(
+      makeTrustedPiRequest({ worktree: makePiBinding({ cwd: symlinkPath }) }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("must already be canonical");
+    expect(result.error).toContain(targetPath);
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when the selected path does not exist", async () => {
+    const missing = `${PI_MANAGED_ROOT}/missing-worktree`;
+    const err = new Error("ENOENT") as Error & { code?: string };
+    err.code = "ENOENT";
+    setRealpath(missing, missing, err);
+
+    const result = await new PiHarnessExecutor().run(
+      makeTrustedPiRequest({ worktree: makePiBinding({ cwd: missing }) }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("does not exist");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed when the selected path is only a subdirectory of the bound worktree", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` }];
+
+    const result = await new PiHarnessExecutor().run(
+      makeTrustedPiRequest({ worktree: makePiBinding({ cwd: PI_WORKTREE_SUBDIR }) }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("exact git toplevel selected for this task");
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  it("fails closed when the bound task branch identity no longer matches", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: "main\n" },
+    ];
+
+    const result = await new PiHarnessExecutor().run(makeTrustedPiRequest());
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("bound task branch");
+    expect(result.error).toContain(PI_BRANCH_NAME);
+    expect(spawnCalls).toHaveLength(2);
+  });
+
+  it("fails closed when the expected revision is not a full SHA", async () => {
+    const result = await new PiHarnessExecutor().run(
+      makeTrustedPiRequest({ worktree: makePiBinding({ expectedRevision: "abc123" }) }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("not a full commit id");
+    expect(spawnCalls).toHaveLength(0);
   });
 });
 
 describe("PiHarnessExecutor — timeout path", () => {
   it("kills the child and returns ok=false with timeout error", async () => {
     // delayMs > timeoutMs so the kill fires first
-    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS, delayMs: 500 }];
+    spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS, delayMs: 500 },
+    ];
 
     const executor = new PiHarnessExecutor();
-    const result = await executor.run({
-      provider: "pi-harness",
-      model: "qwen/qwen3-coder-next",
-      prompt: "hi",
-      timeoutMs: 10, // very short
-    });
+    const result = await executor.run(makeTrustedPiRequest({ prompt: "hi", timeoutMs: 10 }));
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/timed out/i);
@@ -1622,32 +2225,60 @@ describe("PiHarnessExecutor — external AbortSignal (issue #110)", () => {
     controller.abort();
 
     const executor = new PiHarnessExecutor();
-    const result = await executor.run({
-      provider: "pi-harness",
-      model: "qwen/qwen3-coder-next",
-      prompt: "hi",
-      timeoutMs: 5000,
-      signal: controller.signal,
-    });
+    const result = await executor.run(
+      makeReadOnlyPiRequest({ prompt: "hi", signal: controller.signal }),
+    );
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/abort/i);
     expect(spawnCalls.length).toBe(0);
   });
 
-  it("kills the child when the signal fires mid-run", async () => {
-    // Child would run for 500ms; we abort well before that.
-    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS, delayMs: 500 }];
+  it("does not spawn the pi harness when the signal aborts during launch cwd resolution", async () => {
+    spawnBehaviors = [
+      { exitCode: 0, stdout: `${PI_WORKTREE_PATH}\n` },
+      { exitCode: 0, stdout: `${PI_BRANCH_NAME}\n` },
+      { exitCode: 0, stdout: "" },
+      { exitCode: 0, stdout: `${PI_EXPECTED_REVISION}\n` },
+      { exitCode: 0, stdout: "", delayMs: 100 },
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS },
+    ];
     const controller = new AbortController();
 
     const executor = new PiHarnessExecutor();
-    const pending = executor.run({
-      provider: "pi-harness",
-      model: "qwen/qwen3-coder-next",
-      prompt: "hi",
-      timeoutMs: 60000, // long — the abort, not the timeout, must end it
-      signal: controller.signal,
-    });
+    const pending = executor.run(
+      makeTrustedPiRequest({
+        prompt: "hi",
+        timeoutMs: 60000,
+        signal: controller.signal,
+      }),
+    );
+
+    await new Promise((r) => setTimeout(r, 20));
+    controller.abort();
+    const result = await pending;
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/abort/i);
+    expect(spawnCalls.some((call) => call.cmd === "pi")).toBe(false);
+  });
+
+  it("kills the child when the signal fires mid-run", async () => {
+    // Child would run for 500ms; we abort well before that.
+    spawnBehaviors = [
+      ...cleanPiWorktreeBehaviors(),
+      { exitCode: 0, stdout: PI_JSONL_SUCCESS, delayMs: 500 },
+    ];
+    const controller = new AbortController();
+
+    const executor = new PiHarnessExecutor();
+    const pending = executor.run(
+      makeTrustedPiRequest({
+        prompt: "hi",
+        timeoutMs: 60000, // long — the abort, not the timeout, must end it
+        signal: controller.signal,
+      }),
+    );
 
     // Let the spawn happen, then abort.
     await new Promise((r) => setTimeout(r, 20));
@@ -1656,7 +2287,7 @@ describe("PiHarnessExecutor — external AbortSignal (issue #110)", () => {
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/abort/i);
-    expect(spawnCalls.length).toBe(1);
+    expect(spawnCalls.length).toBe(6);
   });
 });
 
@@ -1683,12 +2314,7 @@ describe("PiHarnessExecutor — pi v3 event schema", () => {
     spawnBehaviors = [{ exitCode: 0, stdout: PI_V3_JSONL }];
 
     const executor = new PiHarnessExecutor();
-    const result = await executor.run({
-      provider: "pi-harness",
-      model: "qwen/qwen3-coder-next",
-      prompt: "ping",
-      timeoutMs: 5000,
-    });
+    const result = await executor.run(makeReadOnlyPiRequest({ prompt: "ping" }));
 
     expect(result.ok).toBe(true);
     expect(result.output).toBe("pong");

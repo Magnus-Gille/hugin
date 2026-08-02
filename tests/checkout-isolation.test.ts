@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EventEmitter } from "node:events";
+import * as path from "node:path";
 
 // Mock child_process.spawn before importing the module — same style as
 // repo-sync.test.ts (#217/#225), but with NO auto-resolution shortcuts: every
@@ -8,6 +9,8 @@ import { EventEmitter } from "node:events";
 const spawnCalls: Array<{ cmd: string; args: string[]; opts: Record<string, unknown> }> = [];
 let spawnBehaviors: Array<{ exitCode: number; stdout?: string; stderr?: string }> = [];
 let spawnCallIndex = 0;
+let autoResolveShowTopLevel = true;
+const realpathResults = new Map<string, { value?: string; error?: Error & { code?: string } }>();
 
 class MockChildProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -17,15 +20,32 @@ class MockChildProcess extends EventEmitter {
 vi.mock("node:child_process", () => ({
   spawn: (cmd: string, args: string[], opts: Record<string, unknown>) => {
     const child = new MockChildProcess();
-    spawnCalls.push({ cmd, args, opts });
-    const behavior = spawnBehaviors[spawnCallIndex] ?? { exitCode: 0 };
-    spawnCallIndex++;
+    const autoBehavior = autoResolveShowTopLevel &&
+      cmd === "git" &&
+      args[0] === "rev-parse" &&
+      args[1] === "--show-toplevel"
+      ? { exitCode: 0, stdout: `${String(opts.cwd ?? "")}\n` }
+      : null;
+    const behavior = autoBehavior ?? spawnBehaviors[spawnCallIndex] ?? { exitCode: 0 };
+    if (!autoBehavior) {
+      spawnCalls.push({ cmd, args, opts });
+      spawnCallIndex++;
+    }
     setImmediate(() => {
       if (behavior.stdout) child.stdout.emit("data", Buffer.from(behavior.stdout));
       if (behavior.stderr) child.stderr.emit("data", Buffer.from(behavior.stderr));
       child.emit("close", behavior.exitCode);
     });
     return child;
+  },
+}));
+
+vi.mock("node:fs/promises", () => ({
+  realpath: async (input: string) => {
+    const key = path.resolve(input);
+    const entry = realpathResults.get(key);
+    if (entry?.error) throw entry.error;
+    return entry?.value ?? key;
   },
 }));
 
@@ -42,6 +62,8 @@ beforeEach(() => {
   spawnCalls.length = 0;
   spawnBehaviors = [];
   spawnCallIndex = 0;
+  autoResolveShowTopLevel = true;
+  realpathResults.clear();
 });
 
 const WORKDIR = "/home/magnus/repos/demo";
@@ -122,10 +144,28 @@ describe("verifyCleanCheckout", () => {
     spawnBehaviors = [{ exitCode: 0, stdout: "M leftover.txt\n" }];
     const result = await verifyCleanCheckout(WORKDIR, commit);
     expect(result.clean).toBe(false);
-    expect(result.reason).toContain("uncommitted, untracked, or ignored");
+    expect(result.reason).toContain("tracked or untracked leftover state");
     // Never bothers checking HEAD once dirtiness is already proven.
     expect(spawnCalls).toHaveLength(1);
-    expect(spawnCalls[0].args).toEqual(["status", "--porcelain", "--ignored"]);
+    expect(spawnCalls[0].args).toEqual(["status", "--porcelain", "--ignored=matching"]);
+  });
+
+  it("fails when the working tree only differs by ignored leftovers", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: "!! node_modules/\n" }];
+    const result = await verifyCleanCheckout(WORKDIR, commit);
+    expect(result.clean).toBe(false);
+    expect(result.reason).toContain("ignored leftover state");
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0].args).toEqual(["status", "--porcelain", "--ignored=matching"]);
+  });
+
+  it("reports mixed tracked and ignored leftovers without collapsing them into the wrong category", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: "M src/index.ts\n!! node_modules/\n" }];
+    const result = await verifyCleanCheckout(WORKDIR, commit);
+    expect(result.clean).toBe(false);
+    expect(result.reason).toContain("tracked/untracked and ignored leftover state");
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0].args).toEqual(["status", "--porcelain", "--ignored=matching"]);
   });
 
   it("fails when HEAD does not match the expected commit even though the tree is clean", async () => {
@@ -339,10 +379,10 @@ describe("prepareManagedCheckout — the #236 pre-execution isolation/verificati
     spawnBehaviors = [{ exitCode: 0, stdout: `${markCall.args[3]}\n` }];
     const marker = await readCheckoutContamination(WORKDIR);
     expect(marker?.taskId).toBe("task-recover-fail");
-    expect(marker?.reason).toContain("uncommitted, untracked, or ignored");
+    expect(marker?.reason).toContain("tracked or untracked leftover state");
   });
 
-  it("treats gitignored leftover state as NOT clean (M5-review fix): `--ignored` catches what plain `--porcelain` would miss", async () => {
+  it("includes ignored leftovers in the global checkout gate, so stale caches/env/dependencies trigger recovery", async () => {
     const commit = "3".repeat(40);
     spawnBehaviors = [
       { exitCode: 0 },
@@ -351,14 +391,13 @@ describe("prepareManagedCheckout — the #236 pre-execution isolation/verificati
       { exitCode: 0, stdout: `${commit}\n` },
       { exitCode: 0 },
       { exitCode: 1 }, // readCheckoutContamination: not set
-      // status --porcelain --ignored: nothing tracked/untracked is dirty, but
-      // an ignored leftover (e.g. a stale .env from a crashed prior task) is
-      // still present — `!!` is git's ignored-file marker.
-      { exitCode: 0, stdout: "!! .env\n" },
+      // The issue #236 gate must include ignored leftovers so stale env files,
+      // caches, or dependency directories cannot bleed across managed tasks.
+      { exitCode: 0, stdout: "!! node_modules/\n" },
       { exitCode: 0 }, // markCheckoutContaminated
       { exitCode: 0 }, // reset --hard
-      { exitCode: 0 }, // clean -fdx (removes the ignored file, -x)
-      { exitCode: 0, stdout: "" }, // re-verify: now genuinely clean
+      { exitCode: 0 }, // clean -fdx
+      { exitCode: 0, stdout: "" }, // re-verify clean
       { exitCode: 0, stdout: `${commit}\n` },
       { exitCode: 0 }, // clearCheckoutContamination
     ];
@@ -368,8 +407,9 @@ describe("prepareManagedCheckout — the #236 pre-execution isolation/verificati
       baseBranchOverride: "main",
     });
     expect(result.recovered).toBe(true);
+    expect(result.refusalReason).toBeUndefined();
     const statusCall = spawnCalls[6];
-    expect(statusCall.args).toEqual(["status", "--porcelain", "--ignored"]);
+    expect(statusCall.args).toEqual(["status", "--porcelain", "--ignored=matching"]);
   });
 
   it("marks contamination for a read-only task when the checkout is dirty, but never attempts recovery (no reset/clean calls)", async () => {

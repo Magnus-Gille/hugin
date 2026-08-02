@@ -33,7 +33,36 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, listEligibleTasks, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, prepareManagedCheckout, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, deriveReportedTaskStartedAt, deriveResultRecordingTraceOutcome, finalizeExecutionTraceOutcome, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, RESULT_RECORDING_TRACE_ERROR_CLASS, parseBoundedPositiveInt, PUBLICATION_FAILED_TAG } from "./task-helpers.js";
+import {
+  getFoundBatchEntry,
+  extractTaskId,
+  pickEarliestTask,
+  listEligibleTasks,
+  buildCheckoutGateFrictionEvent,
+  checkoutGateFailureClassification,
+  checkoutTaskBranch,
+  finalizeTaskBranch,
+  deriveRepositoryOutcome,
+  prepareManagedCheckout,
+  shouldReapExpiredLease,
+  decideStartupRecovery,
+  decideDeliveryRetry,
+  finalizeTaskCompletion,
+  deriveReportedTaskStartedAt,
+  deriveResultRecordingTraceOutcome,
+  finalizeExecutionTraceOutcome,
+  resolveTaskWorkingDirectory,
+  normalizeRoot,
+  parseBaseBranchOverride,
+  DEFAULT_FILES,
+  DEFAULT_REPOS_ROOT,
+  DEFAULT_SCRATCH,
+  MAX_TASK_OUTPUT_TOKENS,
+  MAX_TASK_TIMEOUT_MS,
+  RESULT_RECORDING_TRACE_ERROR_CLASS,
+  parseBoundedPositiveInt,
+  PUBLICATION_FAILED_TAG,
+} from "./task-helpers.js";
 import { persistPublicationFailure } from "./publication-recovery.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
 import {
@@ -57,6 +86,14 @@ import {
   probeCodexSandbox,
   type CodexSandboxProbeResult,
 } from "./codex-sandbox.js";
+import type { FailureClassification } from "./failure-classification.js";
+import {
+  buildFrictionContent,
+  buildFrictionKey,
+  buildFrictionNamespace,
+  buildFrictionTags,
+} from "./friction/munin-key.js";
+import type { ReportFrictionInput } from "./friction/schema.js";
 import {
   buildTaskSubprocessEnv,
   SENSITIVITY_CHECKPOINT_SECRET_ENV,
@@ -256,10 +293,11 @@ import {
   type Sensitivity,
   type SensitivityAssessment,
 } from "./sensitivity.js";
-import { parseTaskModelField } from "./task-document-metadata.js";
+import { parseTaskModelField, taskMetadataPrefix } from "./task-document-metadata.js";
 import { routeTask, type RouterDecision } from "./router.js";
 import {
   buildRuntimeCandidates,
+  getDispatcherRuntimeCapabilities,
   isAutoRoutableDispatcherRuntime,
   isLegacyDispatcherRuntime,
   parseActiveSubscriptions,
@@ -299,6 +337,7 @@ import {
   isVerdictStoreEnabled,
   isSavingsEnabled,
 } from "./orchestrator/config.js";
+import { preparePiHarnessWorktreeBinding } from "./orchestrator/pi-harness-admission.js";
 import { isSovereignGatewayHost } from "./orchestrator/provider-config.js";
 import { createModelInvoker } from "./orchestrator/model-invoker.js";
 import { runOrchestratorTask } from "./orchestrator/orchestrator-executor.js";
@@ -569,6 +608,12 @@ const config = {
 };
 
 const brokerEnv = readBrokerEnv(process.env);
+const piReadOnlyAllowedRoots = Array.from(new Set([
+  path.resolve(config.reposRoot),
+  path.resolve(config.workspace),
+  path.resolve(DEFAULT_SCRATCH),
+  path.resolve(DEFAULT_FILES),
+]));
 
 if (config.signingPolicy !== "off") {
   const keyIds = Object.keys(config.submitterKeys);
@@ -590,17 +635,6 @@ if (config.sensitivityCheckpointSecret.length < 32) {
 }
 
 const legacyClaudeExecutor = process.env.HUGIN_CLAUDE_EXECUTOR?.trim().toLowerCase();
-if (legacyClaudeExecutor && legacyClaudeExecutor !== "sdk") {
-  console.error(
-    `HUGIN_CLAUDE_EXECUTOR=${legacyClaudeExecutor} is no longer supported; Claude tasks now always use the Agent SDK`,
-  );
-  process.exit(1);
-}
-
-if (!config.muninApiKey) {
-  console.error("MUNIN_API_KEY is required");
-  process.exit(1);
-}
 
 // --- Worker identity ---
 
@@ -878,13 +912,17 @@ interface TaskConfig {
 type DeclaredRuntime = TaskConfig["runtime"] | "pipeline" | "auto";
 
 function parseDeclaredRuntime(content: string): DeclaredRuntime | undefined {
-  return content.match(/\*\*Runtime:\*\*\s*(claude|codex|ollama|opencode|homeserver|pipeline|auto|orchestrator)/i)?.[1]?.toLowerCase() as
+  return taskMetadataPrefix(content).match(
+    /^[ \t]*(?:-[ \t]*)?\*\*Runtime:\*\*[ \t]*(claude|codex|ollama|opencode|homeserver|pipeline|auto|orchestrator)$/im,
+  )?.[1]?.toLowerCase() as
     | DeclaredRuntime
     | undefined;
 }
 
 function parseSubmittedByField(content: string): string {
-  return content.match(/\*\*Submitted by:\*\*\s*(.+)/i)?.[1]?.trim() || "unknown";
+  return taskMetadataPrefix(content).match(
+    /^[ \t]*(?:-[ \t]*)?\*\*Submitted by:\*\*[ \t]*(.+)$/im,
+  )?.[1]?.trim() || "unknown";
 }
 
 // Accepts an allowlist entry as a match if the submitter equals it
@@ -922,6 +960,7 @@ function parsePipelineSideEffectsField(content: string): PipelineSideEffectId[] 
 }
 
 function parseTask(content: string): TaskConfig | null {
+  const metadataPrefix = taskMetadataPrefix(content);
   const declaredRuntimeRaw = parseDeclaredRuntime(content);
   const isAutoRoute = declaredRuntimeRaw === "auto";
   const runtime = (isAutoRoute ? undefined : declaredRuntimeRaw) as
@@ -932,86 +971,86 @@ function parseTask(content: string): TaskConfig | null {
       | "homeserver"
       | "orchestrator"
       | undefined;
-  const workingDir = content.match(
+  const workingDir = metadataPrefix.match(
     /\*\*Working dir:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const contextRaw = content.match(
+  const contextRaw = metadataPrefix.match(
     /\*\*Context:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const baseBranchOverride = parseBaseBranchOverride(content);
-  const timeoutStr = content.match(/\*\*Timeout:\*\*\s*(\d+)/i)?.[1];
-  const submittedBy = content.match(
+  const baseBranchOverride = parseBaseBranchOverride(metadataPrefix);
+  const timeoutStr = metadataPrefix.match(/\*\*Timeout:\*\*\s*(\d+)/i)?.[1];
+  const submittedBy = metadataPrefix.match(
     /\*\*Submitted by:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const submittedAt = content.match(
+  const submittedAt = metadataPrefix.match(
     /\*\*Submitted at:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const replyTo = content.match(
+  const replyTo = metadataPrefix.match(
     /\*\*Reply-to:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const replyFormat = content.match(
+  const replyFormat = metadataPrefix.match(
     /\*\*Reply-format:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const group = content.match(
+  const group = metadataPrefix.match(
     /\*\*Group:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const sequenceStr = content.match(
+  const sequenceStr = metadataPrefix.match(
     /\*\*Sequence:\*\*\s*(\d+)/i
   )?.[1];
   const modelRaw = parseTaskModelField(content);
-  const ollamaHostRaw = content.match(
+  const ollamaHostRaw = metadataPrefix.match(
     /\*\*Ollama-host:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const reasoningRaw = content.match(
+  const reasoningRaw = metadataPrefix.match(
     /\*\*Reasoning:\*\*\s*(true|false)/i
   )?.[1]?.toLowerCase();
-  const fallbackRaw = content.match(
+  const fallbackRaw = metadataPrefix.match(
     /\*\*Fallback:\*\*\s*(claude|none)/i
   )?.[1]?.toLowerCase() as "claude" | "none" | undefined;
-  const contextRefsRaw = content.match(
+  const contextRefsRaw = metadataPrefix.match(
     /\*\*Context-refs:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const contextBudgetStr = content.match(
+  const contextBudgetStr = metadataPrefix.match(
     /\*\*Context-budget:\*\*\s*(\d+)/i
   )?.[1];
-  const declaredSensitivityRaw = content.match(
+  const declaredSensitivityRaw = metadataPrefix.match(
     /\*\*Sensitivity:\*\*\s*(public|internal|private)/i
   )?.[1]?.trim()?.toLowerCase();
-  const pipelineId = content.match(
+  const pipelineId = metadataPrefix.match(
     /\*\*Pipeline:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const pipelinePhase = content.match(
+  const pipelinePhase = metadataPrefix.match(
     /\*\*Pipeline phase:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const pipelineSubmittedBy = content.match(
+  const pipelineSubmittedBy = metadataPrefix.match(
     /\*\*Pipeline submitted by:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const pipelineSensitivity = content.match(
+  const pipelineSensitivity = metadataPrefix.match(
     /\*\*Pipeline sensitivity:\*\*\s*(public|internal|private)/i
   )?.[1]?.trim()?.toLowerCase() as
     | "public"
     | "internal"
     | "private"
     | undefined;
-  const pipelineAuthority = content.match(
+  const pipelineAuthority = metadataPrefix.match(
     /\*\*Pipeline authority:\*\*\s*(autonomous|gated)/i
   )?.[1]?.trim()?.toLowerCase() as "autonomous" | "gated" | undefined;
-  const pipelineDependencyTaskIdsRaw = content.match(
+  const pipelineDependencyTaskIdsRaw = metadataPrefix.match(
     /\*\*Depends on task ids:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const pipelineDependencyPhasesRaw = content.match(
+  const pipelineDependencyPhasesRaw = metadataPrefix.match(
     /\*\*Depends on phases:\*\*\s*(.+)/i
   )?.[1]?.trim();
 
-  const capabilitiesRaw = content.match(
+  const capabilitiesRaw = metadataPrefix.match(
     /\*\*Capabilities:\*\*\s*(.+)/i
   )?.[1]?.trim();
-  const permissionProfileRaw = content.match(
+  const permissionProfileRaw = metadataPrefix.match(
     /\*\*Permission profile:\*\*\s*(.+)/i
   )?.[1]?.trim()?.toLowerCase();
-  const homeserverTaskType = content.match(/\*\*Task type:\*\*\s*(.+)/i)?.[1]?.trim();
-  const homeserverVerifierRaw = content.match(/\*\*Verifier:\*\*\s*(.+)/i)?.[1]?.trim();
-  const homeserverMaxTokensRaw = content.match(/\*\*Max output tokens:\*\*\s*(\d+)/i)?.[1];
+  const homeserverTaskType = metadataPrefix.match(/\*\*Task type:\*\*\s*(.+)/i)?.[1]?.trim();
+  const homeserverVerifierRaw = metadataPrefix.match(/\*\*Verifier:\*\*\s*(.+)/i)?.[1]?.trim();
+  const homeserverMaxTokensRaw = metadataPrefix.match(/\*\*Max output tokens:\*\*\s*(\d+)/i)?.[1];
   const promptMatch = content.match(/###\s*Prompt\s*\n([\s\S]+)$/i);
   const prompt = promptMatch?.[1]?.trim();
   let homeserverVerifier: HomeserverVerifierSpec | undefined;
@@ -1069,6 +1108,12 @@ function parseTask(content: string): TaskConfig | null {
       }
     }
   }
+  const runtimeCapabilities = runtime
+    ? getDispatcherRuntimeCapabilities(runtime)
+    : undefined;
+  const effectiveCapabilities = runtimeCapabilities
+    ? validCapabilities.filter((cap) => runtimeCapabilities.includes(cap))
+    : validCapabilities;
 
   return {
     prompt: canonicalBrokerEnvelope?.prompt ?? prompt!,
@@ -1102,9 +1147,9 @@ function parseTask(content: string): TaskConfig | null {
       : declaredSensitivityRaw
       ? sensitivitySchema.parse(declaredSensitivityRaw)
       : undefined,
-    capabilities: validCapabilities.length > 0 ? validCapabilities : undefined,
+    capabilities: effectiveCapabilities.length > 0 ? effectiveCapabilities : undefined,
     permissionProfile:
-      permissionProfileRaw === "trusted-code" && validCapabilities.includes("code")
+      permissionProfileRaw === "trusted-code" && effectiveCapabilities.includes("code")
         ? "trusted-code"
         : "read-only",
     autoRouted: isAutoRoute || undefined,
@@ -2319,6 +2364,65 @@ interface SpawnRuntimeResult {
   preflightFailureReason?: string;
 }
 
+const PI_HARNESS_ADMISSION_FAILURE_KIND = "PI_HARNESS_ADMISSION_REFUSED";
+const PI_HARNESS_ADMISSION_FAILURE_TAG = "failure:infra";
+
+function piHarnessAdmissionFailureClassification(reason: string): FailureClassification {
+  return {
+    kind: PI_HARNESS_ADMISSION_FAILURE_KIND,
+    tag: PI_HARNESS_ADMISSION_FAILURE_TAG,
+    reason,
+  };
+}
+
+function buildPiHarnessAdmissionFrictionEvent(args: {
+  taskId: string;
+  modelId?: string;
+  reason: string;
+  recordedAt: Date;
+}): {
+  namespace: string;
+  key: string;
+  content: string;
+  tags: string[];
+} {
+  const input: ReportFrictionInput = {
+    event_id: randomUUID(),
+    friction_type: "tool_failure",
+    severity: "blocking",
+    summary: "Pi-harness admission failed before orchestrator execution",
+    detail: args.reason.slice(0, 8_000),
+    task_id: args.taskId,
+    model_id: args.modelId?.trim() || "orchestrator",
+    tool_name: "pi-harness-admission",
+    tags: ["runtime:orchestrator", `failure-kind:${PI_HARNESS_ADMISSION_FAILURE_KIND}`],
+  };
+  const modelId = input.model_id || "orchestrator";
+  const tags = buildFrictionTags({
+    input,
+    modelId,
+    resolvedTaskId: args.taskId,
+  }).filter((tag) => tag !== "source:model-self-report");
+  tags.push("source:hugin-preflight");
+  const baseContent = JSON.parse(buildFrictionContent({
+    input,
+    modelId,
+    resolvedTaskId: args.taskId,
+    recordedAt: args.recordedAt,
+  })) as Record<string, unknown>;
+
+  return {
+    namespace: buildFrictionNamespace(),
+    key: buildFrictionKey(args.taskId, args.recordedAt),
+    content: JSON.stringify({
+      ...baseContent,
+      reporter: "hugin-preflight",
+      failure_kind: PI_HARNESS_ADMISSION_FAILURE_KIND,
+    }, null, 2),
+    tags,
+  };
+}
+
 let codexSandboxStatus: CodexSandboxProbeResult | null = null;
 
 async function refreshCodexSandboxStatus(): Promise<CodexSandboxProbeResult> {
@@ -2723,7 +2827,7 @@ function stopCancellationWatch(): void {
 // --- Orphan dispatcher cleanup ---
 // Tasks running in the hugin repo (e.g. npm test, npm run dev) can leave behind
 // node processes that act as rogue dispatchers, racing the real one for tasks.
-// Kill any node dist/index.js processes in our working directory except ourselves.
+// Kill any node dist/main.js processes in our working directory except ourselves.
 
 async function killOrphanDispatchers(): Promise<void> {
   if (os.platform() !== "linux") return; // Only relevant on the Pi
@@ -2732,7 +2836,7 @@ async function killOrphanDispatchers(): Promise<void> {
     const myPid = process.pid;
     const cwd = process.cwd();
     const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-      const child = spawn("pgrep", ["-f", "node dist/index.js"], {
+      const child = spawn("pgrep", ["-f", "node dist/main.js"], {
         stdio: ["ignore", "pipe", "pipe"],
         env: buildTaskSubprocessEnv(),
       });
@@ -5366,6 +5470,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // regex-sniff synthetic output.
     let sdkPreflightFailureKind: typeof AUTH_FAILURE_KIND | typeof DEPS_DRIFT_FAILURE_KIND | undefined;
     let codexPreflightFailureReason: string | undefined;
+    let piHarnessAdmissionFailureReason: string | undefined;
     let fallbackTriggered = false;
     let fallbackReason: string | null = null;
 
@@ -6071,40 +6176,77 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // Guarded config: runOrchestratorTask's sensitivity guard judges THIS
     // (post-Model:-override) config — see effectiveOrchestratorConfig's doc.
     const orchConfig = effectiveOrchestratorConfig(process.env, task.model);
-    const orchInvoker = createModelInvoker(orchConfig.roles, {
-      timeoutMs: orchConfig.perCallTimeoutMs,
-      maxOutputChars: config.maxOutputChars,
-      maxTokens: orchConfig.maxTokens,
+    const piHarnessBinding = await preparePiHarnessWorktreeBinding({
+      roles: orchConfig.roles,
+      capabilities: task.capabilities,
+      permissionProfile: task.permissionProfile,
+      branchResult,
+      workingDir: task.workingDir,
+      reposRoot: config.reposRoot,
+      allowedReadOnlyRoots: piReadOnlyAllowedRoots,
+      checkoutGateRefusalReason,
+      checkoutGateDegraded,
     });
-    const orchResult = await runOrchestratorTask(
-      {
-        prompt: task.prompt,
-        sensitivity: task.effectiveSensitivity || "internal",
-        timeoutMs: task.timeoutMs,
+    if (!piHarnessBinding.ok) {
+      console.error(`Orchestrator admission refused for ${taskNs}: ${piHarnessBinding.reason}`);
+      orchLogStream.write(`${piHarnessBinding.reason}\n`);
+      orchLogStream.end();
+      currentOrchestratorAbort = null;
+      piHarnessAdmissionFailureReason = piHarnessBinding.reason;
+      // Issue #339: a writable pi-harness worker refusal after the dispatcher
+      // clean-checkout gate still means the managed checkout/binding contract
+      // could not be trusted for mutation. Preserve that as checkout-
+      // contaminated repository evidence instead of the ambiguous
+      // "not-finalized" fallback.
+      repositoryOutcome = deriveRepositoryOutcome(
+        branchResult,
+        undefined,
+        true,
+      );
+      exitCode = 1;
+      output = piHarnessBinding.reason;
+      resultText = null;
+    } else {
+      const orchInvoker = createModelInvoker(orchConfig.roles, {
+        timeoutMs: orchConfig.perCallTimeoutMs,
         maxOutputChars: config.maxOutputChars,
-        injectedContext: task.contextResolution?.content || undefined,
-      },
-      orchConfig,
-      {
-        invoker: orchInvoker,
-        onLog: (line) => {
-          console.log(`[orch:${taskId}] ${line}`);
-          orchLogStream.write(`${line}\n`);
+        maxTokens: orchConfig.maxTokens,
+        workingDirectory: task.workingDir,
+        permissionProfile: piHarnessBinding.effectiveWorkerPermissionProfile,
+        workerWorktree: piHarnessBinding.binding,
+        configuredManagedRoot: config.reposRoot,
+        allowedReadOnlyRoots: piReadOnlyAllowedRoots,
+      });
+      const orchResult = await runOrchestratorTask(
+        {
+          prompt: task.prompt,
+          sensitivity: task.effectiveSensitivity || "internal",
+          timeoutMs: task.timeoutMs,
+          maxOutputChars: config.maxOutputChars,
+          injectedContext: task.contextResolution?.content || undefined,
         },
-        signal: orchAbort.signal,
-        verdictStore: orchVerdictStore,
-        ledgerClient: orchLedgerClient,
-        savingsStore: orchSavingsStore,
-      },
-    );
-    orchLogStream.end();
-    currentOrchestratorAbort = null;
-    exitCode = orchResult.exitCode;
-    output = orchResult.output;
-    resultText = orchResult.resultText;
-    costUsd = orchResult.costUsd;
-    orchOutcomes = orchResult.outcomes;
-    orchSavings = orchResult.savings;
+        orchConfig,
+        {
+          invoker: orchInvoker,
+          onLog: (line) => {
+            console.log(`[orch:${taskId}] ${line}`);
+            orchLogStream.write(`${line}\n`);
+          },
+          signal: orchAbort.signal,
+          verdictStore: orchVerdictStore,
+          ledgerClient: orchLedgerClient,
+          savingsStore: orchSavingsStore,
+        },
+      );
+      orchLogStream.end();
+      currentOrchestratorAbort = null;
+      exitCode = orchResult.exitCode;
+      output = orchResult.output;
+      resultText = orchResult.resultText;
+      costUsd = orchResult.costUsd;
+      orchOutcomes = orchResult.outcomes;
+      orchSavings = orchResult.savings;
+    }
     } else {
       const executeCodexOneShot = async (): Promise<LaneAttemptOutcome> => {
         const spawnContext = { taskNs, muninClient: munin };
@@ -6188,17 +6330,23 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // the task finalizes as `cancelled`, not as a spurious DELIVERY_FAILED.
     let isCancelled = cancellation !== null;
 
-    // Distinct failure classification: a Claude SDK run (direct or via
+    // Distinct failure classification: a pre-spend refusal (managed checkout
+    // gate or Codex sandbox), or a Claude SDK run (direct or via
     // ollama→claude fallback) that failed to authenticate (401 / expired Pi
     // credential, issue #129) or was refused by the version-drift pre-flight
-    // check (issue #123) is tagged + surfaced distinctly from a generic
+    // check (issue #123), is tagged + surfaced distinctly from a generic
     // task-logic failure, so the cause is legible in Munin instead of buried
     // in the raw log. A pre-flight short-circuit already carries a trusted
-    // discriminator (sdkPreflightFailureKind) — only a REAL SDK run (no
-    // discriminator) falls back to regex-classifying its output (Codex
-    // review, #123: DEPS_DRIFT is never inferred from output text).
+    // discriminator (checkoutGateRefusalReason, sdkPreflightFailureKind) —
+    // only a REAL SDK run (no discriminator) falls back to regex-
+    // classifying its output (Codex review, #123: DEPS_DRIFT is never
+    // inferred from output text).
     const failureClassification = !ok && !isTimeout && !isCancelled
-      ? isCodex && codexPreflightFailureReason
+      ? piHarnessAdmissionFailureReason
+        ? piHarnessAdmissionFailureClassification(piHarnessAdmissionFailureReason)
+        : checkoutGateRefusalReason
+        ? checkoutGateFailureClassification(checkoutGateRefusalReason)
+        : isCodex && codexPreflightFailureReason
         ? codexSandboxFailureClassification(codexPreflightFailureReason)
         : isClaude || fallbackTriggered
           ? sdkPreflightFailureKind === DEPS_DRIFT_FAILURE_KIND
@@ -6212,25 +6360,42 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         `Task failed (${failureClassification.kind}): ${failureClassification.reason}`,
       );
     }
-    if (failureClassification?.kind === CODEX_SANDBOX_FAILURE_KIND) {
-      const friction = buildCodexSandboxFrictionEvent({
-        taskId,
-        modelId: task.model,
-        reason: failureClassification.reason,
-        recordedAt: new Date(),
-      });
+    const preflightFriction = piHarnessAdmissionFailureReason
+      ? buildPiHarnessAdmissionFrictionEvent({
+          taskId,
+          modelId: task.model,
+          reason: failureClassification?.reason ?? piHarnessAdmissionFailureReason,
+          recordedAt: new Date(),
+        })
+      : checkoutGateRefusalReason
+      ? buildCheckoutGateFrictionEvent({
+          taskId,
+          runtime: task.runtime,
+          modelId: task.model,
+          reason: failureClassification?.reason ?? checkoutGateRefusalReason,
+          recordedAt: new Date(),
+        })
+      : failureClassification?.kind === CODEX_SANDBOX_FAILURE_KIND
+        ? buildCodexSandboxFrictionEvent({
+            taskId,
+            modelId: task.model,
+            reason: failureClassification.reason,
+            recordedAt: new Date(),
+          })
+        : null;
+    if (preflightFriction) {
       try {
         await munin.write(
-          friction.namespace,
-          friction.key,
-          friction.content,
-          friction.tags,
+          preflightFriction.namespace,
+          preflightFriction.key,
+          preflightFriction.content,
+          preflightFriction.tags,
           undefined,
           taskClassification,
         );
       } catch (err) {
         console.error(
-          `[codex-sandbox] failed to persist infrastructure friction for ${taskNs}:`,
+          `[preflight] failed to persist infrastructure friction for ${taskNs}:`,
           err,
         );
       }
@@ -7411,6 +7576,28 @@ const stopHeimdallPanelReporter = startHeimdallPanelReporter(() =>
   ]
 );
 
+export const __test__ = {
+  parseTask,
+  parseDeclaredRuntime,
+  parseSubmittedByField,
+  isSubmitterAllowed,
+  pollOnce,
+  inspectState: () => ({
+    currentTask,
+    currentTaskConfig,
+    lastPendingQueueSnapshot,
+  }),
+  resetState: () => {
+    shuttingDown = false;
+    currentTask = null;
+    currentClaimTags = null;
+    currentTaskConfig = null;
+    currentCancellation = null;
+    lastPendingQueueSnapshot = snapshotPendingQueue([], false);
+    lastQueueTruncationWarningAtMs = null;
+  },
+};
+
 // --- Graceful shutdown ---
 
 async function shutdown(signal: string): Promise<void> {
@@ -7567,123 +7754,133 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 
 // --- Start ---
 
-// Ensure log directory exists
-ensureLogDir();
-console.log(`Worker ID: ${workerId} (instance: ${processInstanceId})`);
-console.log(`Log directory: ${LOG_DIR}`);
-
-// Configure ollama hosts
-configureHosts({
-  piUrl: config.ollamaPiUrl,
-  laptopUrl: config.ollamaLaptopUrl,
-  orinUrl: config.ollamaOrinUrl,
-});
-if (config.ollamaPiUrl) {
-  console.log(`Ollama Pi: ${config.ollamaPiUrl}`);
-}
-if (config.ollamaLaptopUrl) {
-  console.log(`Ollama Laptop: ${config.ollamaLaptopUrl}`);
-}
-if (config.ollamaOrinUrl) {
-  console.log(`Ollama Orin: ${config.ollamaOrinUrl}`);
-}
-console.log(`Ollama default model: ${config.ollamaDefaultModel}`);
-
-server = app.listen(config.port, config.host, () => {
-  console.log(`Hugin health endpoint: http://${config.host}:${config.port}/health`);
-  console.log(`Munin: ${config.muninUrl}`);
-  console.log(`Workspace: ${config.workspace}`);
-  console.log("Claude executor: agent-sdk");
-  console.log(`Allowed submitters: ${config.allowedSubmitters.includes("*") ? "* (all)" : config.allowedSubmitters.join(", ")}`);
-  console.log(`Egress policy: allowlist (${egressPolicy.allowedHosts.join(", ")})`);
-});
-
-server.on("error", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EADDRINUSE") {
-    console.error(`Port ${config.port} already in use — another Hugin instance is running. Exiting.`);
-  } else {
-    console.error(`Server error: ${err.message}`);
+export function startDispatcher(): void {
+  if (legacyClaudeExecutor && legacyClaudeExecutor !== "sdk") {
+    console.error(
+      `HUGIN_CLAUDE_EXECUTOR=${legacyClaudeExecutor} is no longer supported; Claude tasks now always use the Agent SDK`,
+    );
+    process.exit(1);
   }
-  process.exit(1);
-});
+  if (!config.muninApiKey) {
+    console.error("MUNIN_API_KEY is required");
+    process.exit(1);
+  }
 
-// Optional orchestrator-v1 broker (separate port; opt-in via HUGIN_BROKER_KEYS).
-if (brokerEnv.enabled) {
-  const brokerHome = path.join(HUGIN_HOME, "delegation-events.jsonl");
-  const journal = new DelegationJournal({ path: brokerHome });
-  const taskStore = new BrokerTaskStore(munin, { attestationSecret: config.muninApiKey });
-  const learningStore = new LearningExperimentStore(learningExperimentMunin);
-  const idempotency = new IdempotencyIndex();
-  const homeserverReady = loadHomeserverGatewayConfig(process.env) !== null;
-  const executorCapabilities = brokerExecutorCapabilities({
-    homeserverEnabled: homeserverReady,
+  // Ensure log directory exists
+  ensureLogDir();
+  console.log(`Worker ID: ${workerId} (instance: ${processInstanceId})`);
+  console.log(`Log directory: ${LOG_DIR}`);
+
+  // Configure ollama hosts
+  configureHosts({
+    piUrl: config.ollamaPiUrl,
+    laptopUrl: config.ollamaLaptopUrl,
+    orinUrl: config.ollamaOrinUrl,
   });
-  // Bounded-retry bind (issue #252): a not-yet-assigned tailnet IP
-  // (HUGIN_BROKER_HOST) at boot fails EADDRNOTAVAIL until tailscaled
-  // assigns it — retry transient failures with backoff rather than
-  // degrading to "dispatcher without broker" on the first attempt.
-  // Permanent errors (EADDRINUSE/EACCES) fail fast without retrying.
-  // brokerBindStatus is updated on every transition so /health reflects
-  // the live state instead of only learning about success after the fact.
-  brokerBindAbort = new AbortController();
-  startBrokerWithRetry(
-    {
-      host: brokerEnv.host,
-      port: brokerEnv.port,
-      keys: brokerEnv.keys,
-      learningStore,
-      deps: {
-        taskStore,
-        journal,
-        idempotency,
-        executorCapabilities,
-        traceIngressCounter: brokerTraceIngressCounter,
-      },
-    },
-    {
-      signal: brokerBindAbort.signal,
-      onStatus: (status) => {
-        brokerBindStatus = status;
-      },
-      onLog: (level, message) => {
-        if (level === "error") console.error(`[broker] ${message}`);
-        else if (level === "warn") console.warn(`[broker] ${message}`);
-        else console.log(`[broker] ${message}`);
-      },
-    },
-  ).then((rb) => {
-    if (!rb) return; // permanently failed, retries exhausted, or cancelled — already logged/reported
-    if (shuttingDown) {
-      // Bound while shutdown was already in progress (retry sleep raced the
-      // shutdown signal): don't leak an open listener into a dying process.
-      rb.close().catch(() => {});
-      return;
+  if (config.ollamaPiUrl) {
+    console.log(`Ollama Pi: ${config.ollamaPiUrl}`);
+  }
+  if (config.ollamaLaptopUrl) {
+    console.log(`Ollama Laptop: ${config.ollamaLaptopUrl}`);
+  }
+  if (config.ollamaOrinUrl) {
+    console.log(`Ollama Orin: ${config.ollamaOrinUrl}`);
+  }
+  console.log(`Ollama default model: ${config.ollamaDefaultModel}`);
+
+  server = app.listen(config.port, config.host, () => {
+    console.log(`Hugin health endpoint: http://${config.host}:${config.port}/health`);
+    console.log(`Munin: ${config.muninUrl}`);
+    console.log(`Workspace: ${config.workspace}`);
+    console.log("Claude executor: agent-sdk");
+    console.log(`Allowed submitters: ${config.allowedSubmitters.includes("*") ? "* (all)" : config.allowedSubmitters.join(", ")}`);
+    console.log(`Egress policy: allowlist (${egressPolicy.allowedHosts.join(", ")})`);
+  });
+
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`Port ${config.port} already in use — another Hugin instance is running. Exiting.`);
+    } else {
+      console.error(`Server error: ${err.message}`);
     }
-    runningBroker = rb;
-    console.log(
-      `Broker endpoint: http://${brokerEnv.host}:${brokerEnv.port}/v1/delegate/* (principals: ${Object.keys(brokerEnv.keys).join(", ")})`,
-    );
-    console.log(
-      `Broker canonical lifecycle: Munin dispatcher (legacy journal read-only: ${brokerHome})`,
-    );
-    console.log(`Broker M5 delegate executor: ${homeserverReady ? "enabled" : "disabled"}`);
+    process.exit(1);
   });
-} else {
-  brokerBindStatus = null;
-  console.log("Broker: disabled (set HUGIN_BROKER_KEYS to enable)");
-}
 
-// Check Munin and the zero-token Codex sandbox concurrently before polling.
-// The HTTP server is already listening so deploy acceptance can observe the
-// probe's transient `checking` state, then its definitive result.
-Promise.all([munin.health(), refreshCodexSandboxStatus()]).then(([ok]) => {
-  if (!ok) {
-    console.warn("WARNING: Munin health check failed — will retry on first poll");
+  // Optional orchestrator-v1 broker (separate port; opt-in via HUGIN_BROKER_KEYS).
+  if (brokerEnv.enabled) {
+    const brokerHome = path.join(HUGIN_HOME, "delegation-events.jsonl");
+    const journal = new DelegationJournal({ path: brokerHome });
+    const taskStore = new BrokerTaskStore(munin, { attestationSecret: config.muninApiKey });
+    const learningStore = new LearningExperimentStore(learningExperimentMunin);
+    const idempotency = new IdempotencyIndex();
+    const homeserverReady = loadHomeserverGatewayConfig(process.env) !== null;
+    const executorCapabilities = brokerExecutorCapabilities({
+      homeserverEnabled: homeserverReady,
+    });
+    // Bounded-retry bind (issue #252): a not-yet-assigned tailnet IP
+    // (HUGIN_BROKER_HOST) at boot fails EADDRNOTAVAIL until tailscaled
+    // assigns it — retry transient failures with backoff rather than
+    // degrading to "dispatcher without broker" on the first attempt.
+    // Permanent errors (EADDRINUSE/EACCES) fail fast without retrying.
+    // brokerBindStatus is updated on every transition so /health reflects
+    // the live state instead of only learning about success after the fact.
+    brokerBindAbort = new AbortController();
+    startBrokerWithRetry(
+      {
+        host: brokerEnv.host,
+        port: brokerEnv.port,
+        keys: brokerEnv.keys,
+        learningStore,
+        deps: {
+          taskStore,
+          journal,
+          idempotency,
+          executorCapabilities,
+          traceIngressCounter: brokerTraceIngressCounter,
+        },
+      },
+      {
+        signal: brokerBindAbort.signal,
+        onStatus: (status) => {
+          brokerBindStatus = status;
+        },
+        onLog: (level, message) => {
+          if (level === "error") console.error(`[broker] ${message}`);
+          else if (level === "warn") console.warn(`[broker] ${message}`);
+          else console.log(`[broker] ${message}`);
+        },
+      },
+    ).then((rb) => {
+      if (!rb) return; // permanently failed, retries exhausted, or cancelled — already logged/reported
+      if (shuttingDown) {
+        // Bound while shutdown was already in progress (retry sleep raced the
+        // shutdown signal): don't leak an open listener into a dying process.
+        rb.close().catch(() => {});
+        return;
+      }
+      runningBroker = rb;
+      console.log(
+        `Broker endpoint: http://${brokerEnv.host}:${brokerEnv.port}/v1/delegate/* (principals: ${Object.keys(brokerEnv.keys).join(", ")})`,
+      );
+      console.log(
+        `Broker canonical lifecycle: Munin dispatcher (legacy journal read-only: ${brokerHome})`,
+      );
+      console.log(`Broker M5 delegate executor: ${homeserverReady ? "enabled" : "disabled"}`);
+    });
   } else {
-    console.log("Munin health check: ok");
+    brokerBindStatus = null;
+    console.log("Broker: disabled (set HUGIN_BROKER_KEYS to enable)");
   }
-  pollLoop().then(() => {
-    server.close();
-    process.exit(0);
+
+  Promise.all([munin.health(), refreshCodexSandboxStatus()]).then(([ok]) => {
+    if (!ok) {
+      console.warn("WARNING: Munin health check failed — will retry on first poll");
+    } else {
+      console.log("Munin health check: ok");
+    }
+    pollLoop().then(() => {
+      server.close();
+      process.exit(0);
+    });
   });
-});
+}

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import * as path from "node:path";
 
 // Mock child_process.spawn before importing the module
 const spawnCalls: Array<{ cmd: string; args: string[]; opts: Record<string, unknown> }> = [];
@@ -11,6 +12,8 @@ let spawnBehaviors: Array<{
 }> = [];
 let spawnCallIndex = 0;
 let autoResolveMain = true;
+let autoResolveShowTopLevel = true;
+const realpathResults = new Map<string, { value?: string; error?: Error & { code?: string } }>();
 
 class MockChildProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -20,10 +23,12 @@ class MockChildProcess extends EventEmitter {
 vi.mock("node:child_process", () => ({
   spawn: (cmd: string, args: string[], opts: Record<string, unknown>) => {
     const child = new MockChildProcess();
-    const autoBehavior = autoResolveMain && cmd === "git"
-      ? args[0] === "symbolic-ref"
+    const autoBehavior = cmd === "git"
+      ? autoResolveShowTopLevel && args[0] === "rev-parse" && args[1] === "--show-toplevel"
+        ? { exitCode: 0, stdout: `${String(opts.cwd ?? "")}\n` }
+        : autoResolveMain && args[0] === "symbolic-ref"
         ? { exitCode: 0, stdout: "origin/main\n" }
-        : args[0] === "rev-parse" && args.includes("refs/remotes/origin/main^{commit}")
+        : autoResolveMain && args[0] === "rev-parse" && args.includes("refs/remotes/origin/main^{commit}")
           ? { exitCode: 0, stdout: `${"a".repeat(40)}\n` }
           : null
       : null;
@@ -48,6 +53,15 @@ vi.mock("node:child_process", () => ({
   },
 }));
 
+vi.mock("node:fs/promises", () => ({
+  realpath: async (input: string) => {
+    const key = path.resolve(input);
+    const entry = realpathResults.get(key);
+    if (entry?.error) throw entry.error;
+    return entry?.value ?? key;
+  },
+}));
+
 // Import after mocking
 const {
   checkoutTaskBranch,
@@ -65,7 +79,17 @@ beforeEach(() => {
   spawnBehaviors = [];
   spawnCallIndex = 0;
   autoResolveMain = true;
+  autoResolveShowTopLevel = true;
+  realpathResults.clear();
 });
+
+function setRealpath(
+  rawPath: string,
+  value: string = rawPath,
+  error?: Error & { code?: string },
+) {
+  realpathResults.set(path.resolve(rawPath), error ? { error } : { value });
+}
 
 describe("deriveRepositoryOutcome", () => {
   const managed = {
@@ -107,13 +131,14 @@ describe("checkoutTaskBranch", () => {
   });
 
   it("skips if not a git repo", async () => {
+    autoResolveShowTopLevel = false;
     spawnBehaviors = [
-      { exitCode: 128 }, // git rev-parse --git-dir fails
+      { exitCode: 128 }, // git rev-parse --show-toplevel fails
     ];
     const result = await checkoutTaskBranch("/home/magnus/repos/some-dir", "test-id");
     expect(result.action).toBe("skipped");
     expect(spawnCalls).toHaveLength(1);
-    expect(spawnCalls[0].args).toContain("--git-dir");
+    expect(spawnCalls[0].args).toEqual(["rev-parse", "--show-toplevel"]);
   });
 
   it("skips if no remote origin", async () => {
@@ -197,30 +222,96 @@ describe("checkoutTaskBranch", () => {
     expect(spawnCalls).toHaveLength(0);
   });
 
-  it("canonicalizes workingDir: rejects a ../ path that string-matches but escapes the reposRoot (#139)", async () => {
-    // A raw `startsWith` guard would pass this (it string-prefixes the isolated
-    // root), but the OS resolves the cwd to the production checkout under
-    // /home/magnus/repos — exactly the re-pointing #139 must prevent. All spawn
-    // behaviors default to exitCode 0, so a bypass would proceed to "created".
+  it("recognizes a canonical checkout reached through a symlinked configured root", async () => {
+    setRealpath("/home/magnus/hugin-workspace", "/private/hugin-root");
+    spawnBehaviors = [
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 0 },
+      { exitCode: 0 },
+    ];
+
     const result = await checkoutTaskBranch(
-      "/home/magnus/hugin-workspace/../repos/grimnir",
-      "task-escape",
+      "/private/hugin-root/grimnir",
+      "task-canonical-root",
+      { fetchRetryDelaysMs: [0, 0], reposRoot: "/home/magnus/hugin-workspace" },
+    );
+
+    expect(result.action).toBe("created");
+    expect(result.branchName).toBe("hugin/task-canonical-root");
+    expect(spawnCalls).toHaveLength(4);
+  });
+
+  it("fails closed before any git mutation when the selected worktree path is not already canonical", async () => {
+    setRealpath("/home/magnus/hugin-workspace", "/private/hugin-root");
+    setRealpath(
+      "/home/magnus/hugin-workspace/link/grimnir",
+      "/private/hugin-root/grimnir",
+    );
+
+    const result = await checkoutTaskBranch(
+      "/home/magnus/hugin-workspace/link/grimnir",
+      "task-alias",
       { reposRoot: "/home/magnus/hugin-workspace" },
     );
-    expect(result.action).toBe("skipped");
+
+    expect(result.action).toBe("fetch-failed");
+    expect(result.error).toContain("must already be canonical");
     expect(spawnCalls).toHaveLength(0);
   });
 
-  it("canonicalizes workingDir: rejects a sibling dir that shares the root's string prefix (#139)", async () => {
-    // /home/magnus/hugin-workspace-evil string-prefixes "hugin-workspace" but is
-    // not under "hugin-workspace/". The path.sep-anchored guard must reject it.
+  it("fails closed before any git mutation when the selected worktree resolves outside the canonical managed root", async () => {
+    setRealpath("/home/magnus/hugin-workspace", "/private/hugin-root");
+    setRealpath(
+      "/home/magnus/hugin-workspace/linked-prod/grimnir",
+      "/home/magnus/repos/grimnir",
+    );
+
     const result = await checkoutTaskBranch(
-      "/home/magnus/hugin-workspace-evil/grimnir",
-      "task-sibling",
+      "/home/magnus/hugin-workspace/linked-prod/grimnir",
+      "task-escape",
       { reposRoot: "/home/magnus/hugin-workspace" },
     );
-    expect(result.action).toBe("skipped");
+
+    expect(result.action).toBe("fetch-failed");
+    expect(result.error).toContain("must resolve beneath the configured managed repos root");
     expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed before any git mutation when a ../ path string-matches but escapes the reposRoot (#139)", async () => {
+    setRealpath("/home/magnus/hugin-workspace", "/private/hugin-root");
+    setRealpath(
+      "/home/magnus/hugin-workspace/../repos/grimnir",
+      "/home/magnus/repos/grimnir",
+    );
+
+    const result = await checkoutTaskBranch(
+      "/home/magnus/hugin-workspace/../repos/grimnir",
+      "task-dotdot",
+      { reposRoot: "/home/magnus/hugin-workspace" },
+    );
+
+    expect(result.action).toBe("fetch-failed");
+    expect(result.error).toContain("must resolve beneath the configured managed repos root");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("fails closed before any git mutation when the selected worktree is only a subdirectory of the repo", async () => {
+    autoResolveShowTopLevel = false;
+    spawnBehaviors = [{ exitCode: 0, stdout: "/home/magnus/repos/grimnir\n" }];
+
+    const result = await checkoutTaskBranch(
+      "/home/magnus/repos/grimnir/src",
+      "task-subdir",
+      { reposRoot: "/home/magnus/repos" },
+    );
+
+    expect(result.action).toBe("fetch-failed");
+    expect(result.error).toContain("exact git toplevel selected for this task");
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]?.args).toEqual(["rev-parse", "--show-toplevel"]);
+    expect(spawnCalls.some((call) => call.args[0] === "fetch")).toBe(false);
+    expect(spawnCalls.some((call) => call.args[0] === "checkout")).toBe(false);
   });
 
   it("tolerates a trailing slash on the configured reposRoot (#139)", async () => {

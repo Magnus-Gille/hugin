@@ -1,7 +1,17 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { FailureClassification } from "./failure-classification.js";
+import {
+  buildFrictionContent,
+  buildFrictionKey,
+  buildFrictionNamespace,
+  buildFrictionTags,
+} from "./friction/munin-key.js";
+import type { ReportFrictionInput } from "./friction/schema.js";
 import type { MuninEntry, MuninQueryResult, MuninReadResult } from "./munin-client.js";
+import type { WorkerWorktreeBinding } from "./orchestrator/pi-harness-types.js";
 import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
 
 /**
@@ -18,6 +28,8 @@ import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
  */
 export const DEFAULT_REPOS_ROOT = "/home/magnus/repos";
 export const DEFAULT_WORKSPACE = "/home/magnus/workspace";
+export const DEFAULT_SCRATCH = "/home/magnus/scratch";
+export const DEFAULT_FILES = "/home/magnus/mimir";
 
 export interface WorkspaceRoots {
   /** Root for `repo:<name>` resolution. Defaults to {@link DEFAULT_REPOS_ROOT}. */
@@ -61,8 +73,8 @@ export function resolveContext(raw: string, roots: WorkspaceRoots = {}): string 
     return resolved;
   }
   switch (trimmed) {
-    case "scratch": return "/home/magnus/scratch";
-    case "files": return "/home/magnus/mimir";
+    case "scratch": return DEFAULT_SCRATCH;
+    case "files": return DEFAULT_FILES;
     default: {
       // Normalize before checking the prefix. A lexical prefix check alone
       // accepts `/home/magnus/../../etc`, which later filesystem calls resolve
@@ -517,6 +529,68 @@ export function deriveRepositoryOutcome(
   return { state: "not-finalized", ...base };
 }
 
+export const CHECKOUT_GATE_FAILURE_KIND = "CHECKOUT_CONTAMINATED";
+export const CHECKOUT_GATE_FAILURE_TAG = "failure:infra";
+
+export function checkoutGateFailureClassification(reason: string): FailureClassification {
+  return {
+    kind: CHECKOUT_GATE_FAILURE_KIND,
+    tag: CHECKOUT_GATE_FAILURE_TAG,
+    reason,
+  };
+}
+
+export interface CheckoutGateFrictionEvent {
+  namespace: string;
+  key: string;
+  content: string;
+  tags: string[];
+}
+
+export function buildCheckoutGateFrictionEvent(args: {
+  taskId: string;
+  runtime: string;
+  modelId?: string;
+  reason: string;
+  recordedAt: Date;
+}): CheckoutGateFrictionEvent {
+  const input: ReportFrictionInput = {
+    event_id: randomUUID(),
+    friction_type: "tool_failure",
+    severity: "blocking",
+    summary: "Managed checkout admission failed before task execution",
+    detail: args.reason.slice(0, 8_000),
+    task_id: args.taskId,
+    model_id: args.modelId?.trim() || args.runtime,
+    tool_name: "managed-checkout-gate",
+    tags: [`runtime:${args.runtime}`, `failure-kind:${CHECKOUT_GATE_FAILURE_KIND}`],
+  };
+  const modelId = input.model_id || args.runtime;
+  const tags = buildFrictionTags({
+    input,
+    modelId,
+    resolvedTaskId: args.taskId,
+  }).filter((tag) => tag !== "source:model-self-report");
+  tags.push("source:hugin-preflight");
+  const baseContent = JSON.parse(buildFrictionContent({
+    input,
+    modelId,
+    resolvedTaskId: args.taskId,
+    recordedAt: args.recordedAt,
+  })) as Record<string, unknown>;
+
+  return {
+    namespace: buildFrictionNamespace(),
+    key: buildFrictionKey(args.taskId, args.recordedAt),
+    content: JSON.stringify({
+      ...baseContent,
+      reporter: "hugin-preflight",
+      failure_kind: CHECKOUT_GATE_FAILURE_KIND,
+    }, null, 2),
+    tags,
+  };
+}
+
 /**
  * Content-blind binding for turning a completed managed-repository task into a
  * reproducible evaluation candidate. The task prompt/result remain in Munin;
@@ -751,20 +825,24 @@ export async function checkoutTaskBranch(
       error: `Invalid base-branch override ${JSON.stringify(options.baseBranchOverride)}`,
     };
   }
-  // Canonicalize both sides before the prefix check: a raw `startsWith` guard
-  // can be bypassed with `..` segments that string-match the isolated root but
-  // resolve (via the OS `cwd`) onto a production checkout — the exact
-  // re-pointing #139 exists to prevent. `path.sep`-anchoring also stops a
-  // sibling dir that merely shares the root's string prefix (e.g.
-  // `<root>-evil`).
-  const reposRoot = path.resolve(normalizeRoot(options.reposRoot ?? DEFAULT_REPOS_ROOT));
-  if (!path.resolve(workingDir).startsWith(`${reposRoot}${path.sep}`)) {
+  const managedCheckoutTarget = await resolveManagedCheckoutTarget(
+    workingDir,
+    options.reposRoot ?? DEFAULT_REPOS_ROOT,
+  );
+  if (managedCheckoutTarget.state === "skipped") {
     return { action: "skipped" };
   }
+  if (managedCheckoutTarget.state === "refused") {
+    return {
+      action: "fetch-failed",
+      error: managedCheckoutTarget.reason,
+    };
+  }
+  const managedWorkingDir = managedCheckoutTarget.workingDir;
 
   const isGit = await new Promise<boolean>((resolve) => {
     const child = spawn("git", ["rev-parse", "--git-dir"], {
-      cwd: workingDir,
+      cwd: managedWorkingDir,
       stdio: "ignore",
       env: buildTaskSubprocessEnv(),
     });
@@ -776,7 +854,7 @@ export async function checkoutTaskBranch(
 
   const hasRemote = await new Promise<boolean>((resolve) => {
     const child = spawn("git", ["remote", "get-url", "origin"], {
-      cwd: workingDir,
+      cwd: managedWorkingDir,
       stdio: "ignore",
       env: buildTaskSubprocessEnv(),
     });
@@ -799,36 +877,36 @@ export async function checkoutTaskBranch(
       await sleep(retryDelaysMs[attempt - 1]);
     }
     const bypass = attempt > 0;
-    const result = await runGitFetch(workingDir, bypass);
+    const result = await runGitFetch(managedWorkingDir, bypass);
     if (result.ok) {
       fetchOk = true;
       if (attempt > 0) {
-        console.log(`Pre-task git fetch succeeded on attempt ${attempt + 1} (bypass=${bypass}) in ${workingDir}`);
+        console.log(`Pre-task git fetch succeeded on attempt ${attempt + 1} (bypass=${bypass}) in ${managedWorkingDir}`);
       }
       break;
     }
     lastOutput = result.output;
     lastExit = result.exitCode;
     console.warn(
-      `Pre-task git fetch failed (attempt ${attempt + 1}/${totalAttempts}, exit ${lastExit}, bypass=${bypass}) in ${workingDir}: ${lastOutput.trim()}`,
+      `Pre-task git fetch failed (attempt ${attempt + 1}/${totalAttempts}, exit ${lastExit}, bypass=${bypass}) in ${managedWorkingDir}: ${lastOutput.trim()}`,
     );
   }
 
   if (!fetchOk && !options.baseBranchOverride) {
     return {
       action: "fetch-failed",
-      error: `git fetch origin failed in ${workingDir} after ${totalAttempts} attempts — proceeding without branch`,
+      error: `git fetch origin failed in ${managedWorkingDir} after ${totalAttempts} attempts — proceeding without branch`,
     };
   }
   if (!fetchOk) {
     console.warn(
-      `Pre-task git fetch failed in ${workingDir}; attempting explicit base branch ` +
+      `Pre-task git fetch failed in ${managedWorkingDir}; attempting explicit base branch ` +
         `${JSON.stringify(options.baseBranchOverride)} from the existing remote-tracking ref`,
     );
   }
 
   const baseResolution = await resolveRepositoryBaseBranch(
-    workingDir,
+    managedWorkingDir,
     options.baseBranchOverride,
   );
   if (!baseResolution.resolved) {
@@ -844,7 +922,7 @@ export async function checkoutTaskBranch(
 
   const checkoutOk = await new Promise<boolean>((resolve) => {
     const child = spawn("git", ["checkout", "-b", branchName, baseRef], {
-      cwd: workingDir,
+      cwd: managedWorkingDir,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...buildTaskSubprocessEnv(), HOME: "/home/magnus" },
     });
@@ -853,7 +931,7 @@ export async function checkoutTaskBranch(
     child.stderr?.on("data", (d: Buffer) => (output += d.toString()));
     child.on("close", (code) => {
       if (code !== 0) {
-        console.warn(`Pre-task branch creation failed (exit ${code}) in ${workingDir}: ${output.trim()}`);
+        console.warn(`Pre-task branch creation failed (exit ${code}) in ${managedWorkingDir}: ${output.trim()}`);
       }
       resolve(code === 0);
     });
@@ -869,7 +947,7 @@ export async function checkoutTaskBranch(
 
   console.log(
     `Pre-task: checked out branch ${branchName} from ${baseRef} ` +
-      `(resolved via ${source}) in ${workingDir}`,
+      `(resolved via ${source}) in ${managedWorkingDir}`,
   );
   return {
     action: "created",
@@ -1091,7 +1169,7 @@ export async function finalizeTaskBranch(
 async function runGitCapture(
   workingDir: string,
   args: string[],
-): Promise<{ ok: boolean; stdout: Buffer; stderr: string }> {
+): Promise<{ ok: boolean; exitCode: number | null; stdout: Buffer; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn("git", args, {
       cwd: workingDir,
@@ -1104,11 +1182,13 @@ async function runGitCapture(
     child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
     child.on("close", (code) => resolve({
       ok: code === 0,
+      exitCode: code,
       stdout: Buffer.concat(stdout),
       stderr: stderr.trim(),
     }));
     child.on("error", (err) => resolve({
       ok: false,
+      exitCode: null,
       stdout: Buffer.alloc(0),
       stderr: err.message,
     }));
@@ -1339,6 +1419,424 @@ export interface CleanCheckoutVerification {
   headCommit?: string;
 }
 
+export interface ManagedTaskWorktreeBindingVerification {
+  ok: boolean;
+  cwd?: string;
+  headCommit?: string;
+  state?: "initial-clean" | "task-branch";
+  reason?: string;
+}
+
+export interface ManagedTaskWorktreeBindingVerificationOptions {
+  allowDirtyTaskBranch?: boolean;
+  configuredManagedRoot?: string;
+}
+
+// Use `--ignored=matching`, not bare `--ignored`: the clean-checkout gate
+// only needs a stable signal that ignored leftovers exist. `matching` reports
+// the ignored path itself (for example `!! node_modules/`) instead of
+// recursively exploding a whole ignored tree into noisy child entries.
+const CLEAN_CHECKOUT_STATUS_ARGS_WITH_IGNORED = [
+  "status",
+  "--porcelain",
+  "--ignored=matching",
+] as const;
+
+function describeCheckoutLeftovers(porcelain: string): string {
+  const lines = porcelain
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const hasIgnored = lines.some((line) => line.startsWith("!!"));
+  const hasVisible = lines.some((line) => !line.startsWith("!!"));
+
+  if (hasIgnored && hasVisible) {
+    return "working tree has tracked/untracked and ignored leftover state";
+  }
+  if (hasIgnored) {
+    return "working tree has ignored leftover state";
+  }
+  return "working tree has tracked or untracked leftover state";
+}
+
+function isPathWithinRoot(candidate: string, root: string): boolean {
+  return candidate.startsWith(`${root}${path.sep}`);
+}
+
+async function resolveManagedCheckoutTarget(
+  workingDir: string,
+  reposRoot: string,
+): Promise<
+  | { state: "skipped" }
+  | { state: "refused"; reason: string }
+  | { state: "ok"; workingDir: string }
+> {
+  const trimmedWorkingDir = workingDir.trim();
+  if (!trimmedWorkingDir || !path.isAbsolute(trimmedWorkingDir)) {
+    return { state: "skipped" };
+  }
+
+  const normalizedReposRoot = path.resolve(normalizeRoot(reposRoot || DEFAULT_REPOS_ROOT));
+  const normalizedWorkingDir = path.resolve(trimmedWorkingDir);
+  const rawLooksManaged = trimmedWorkingDir === normalizedReposRoot ||
+    trimmedWorkingDir.startsWith(`${normalizedReposRoot}${path.sep}`);
+  const normalizedLooksManaged = isPathWithinRoot(normalizedWorkingDir, normalizedReposRoot);
+  const lexicallyManaged = rawLooksManaged || normalizedLooksManaged;
+
+  const managedRoot = await canonicalizeExistingPath(normalizedReposRoot, "managed repos root");
+  if (!managedRoot.ok) {
+    return lexicallyManaged
+      ? { state: "refused", reason: managedRoot.reason }
+      : { state: "skipped" };
+  }
+
+  const canonicalCwd = await canonicalizeExistingPath(trimmedWorkingDir, "selected worktree path");
+  if (!canonicalCwd.ok) {
+    return lexicallyManaged
+      ? { state: "refused", reason: canonicalCwd.reason }
+      : { state: "skipped" };
+  }
+  if (!isPathWithinRoot(canonicalCwd.path, managedRoot.path)) {
+    if (!lexicallyManaged) return { state: "skipped" };
+    return {
+      state: "refused",
+      reason:
+        `selected worktree path ${JSON.stringify(workingDir)} must resolve beneath the configured managed repos root ` +
+        `${JSON.stringify(managedRoot.path)}`,
+    };
+  }
+  if (canonicalCwd.path !== trimmedWorkingDir) {
+    return {
+      state: "refused",
+      reason:
+        `selected worktree path ${JSON.stringify(workingDir)} must already be canonical; ` +
+        `realpath resolved it to ${JSON.stringify(canonicalCwd.path)}`,
+    };
+  }
+
+  const topLevel = await runGitText(
+    canonicalCwd.path,
+    ["rev-parse", "--show-toplevel"],
+    "git rev-parse --show-toplevel",
+  );
+  if (!topLevel.ok) {
+    return { state: "skipped" };
+  }
+  const canonicalTopLevel = await canonicalizeExistingPath(topLevel.output, "selected git toplevel");
+  if (!canonicalTopLevel.ok) {
+    return { state: "refused", reason: canonicalTopLevel.reason };
+  }
+  if (canonicalTopLevel.path !== canonicalCwd.path) {
+    return {
+      state: "refused",
+      reason:
+        `selected worktree path ${JSON.stringify(workingDir)} must be the exact git toplevel selected for this task; ` +
+        `git toplevel is ${JSON.stringify(canonicalTopLevel.path)}`,
+    };
+  }
+
+  return { state: "ok", workingDir: canonicalCwd.path };
+}
+
+async function canonicalizeExistingPath(
+  rawPath: string,
+  label: string,
+): Promise<{ ok: true; path: string } | { ok: false; reason: string }> {
+  const trimmed = rawPath.trim();
+  if (!trimmed) {
+    return { ok: false, reason: `${label} must be non-empty` };
+  }
+  if (!path.isAbsolute(trimmed)) {
+    return {
+      ok: false,
+      reason: `${label} ${JSON.stringify(rawPath)} must be absolute`,
+    };
+  }
+
+  const normalized = path.resolve(trimmed);
+  try {
+    return { ok: true, path: await fs.realpath(normalized) };
+  } catch (err) {
+    const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : "";
+    if (code === "ENOENT") {
+      return {
+        ok: false,
+        reason: `${label} ${JSON.stringify(rawPath)} does not exist`,
+      };
+    }
+    return {
+      ok: false,
+      reason:
+        `${label} ${JSON.stringify(rawPath)} could not be canonicalized via realpath: ` +
+        (err instanceof Error ? err.message : String(err)),
+    };
+  }
+}
+
+async function runGitText(
+  workingDir: string,
+  args: string[],
+  label: string,
+): Promise<{ ok: true; output: string } | { ok: false; reason: string }> {
+  const result = await runGitCapture(workingDir, args);
+  if (!result.ok) {
+    return {
+      ok: false,
+      reason: `${label} failed: ${result.stderr || "unknown error"}`,
+    };
+  }
+  return { ok: true, output: result.stdout.toString("utf8").trim() };
+}
+
+export async function buildManagedTaskWorktreeBinding(
+  workingDir: string,
+  reposRoot: string,
+  branchName: string,
+  expectedRevision: string,
+): Promise<{ ok: true; binding: WorkerWorktreeBinding } | { ok: false; reason: string }> {
+  const normalizedExpected = expectedRevision.trim().toLowerCase();
+  if (!GIT_COMMIT_ID.test(normalizedExpected)) {
+    return {
+      ok: false,
+      reason: `expected revision ${JSON.stringify(expectedRevision)} is not a full commit id`,
+    };
+  }
+
+  const trimmedBranch = branchName.trim();
+  if (!trimmedBranch) {
+    return { ok: false, reason: "task branch name must be non-empty" };
+  }
+
+  const managedRoot = await canonicalizeExistingPath(
+    path.resolve(normalizeRoot(reposRoot || DEFAULT_REPOS_ROOT)),
+    "managed repos root",
+  );
+  if (!managedRoot.ok) return managedRoot;
+
+  const canonicalCwd = await canonicalizeExistingPath(workingDir, "selected worktree path");
+  if (!canonicalCwd.ok) return canonicalCwd;
+  if (!isPathWithinRoot(canonicalCwd.path, managedRoot.path)) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree path ${JSON.stringify(workingDir)} must resolve beneath the configured managed repos root ` +
+        `${JSON.stringify(managedRoot.path)}`,
+    };
+  }
+
+  const topLevel = await runGitText(
+    canonicalCwd.path,
+    ["rev-parse", "--show-toplevel"],
+    "git rev-parse --show-toplevel",
+  );
+  if (!topLevel.ok) return topLevel;
+  const canonicalTopLevel = await canonicalizeExistingPath(
+    topLevel.output,
+    "selected git toplevel",
+  );
+  if (!canonicalTopLevel.ok) return canonicalTopLevel;
+  if (canonicalTopLevel.path !== canonicalCwd.path) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree path ${JSON.stringify(workingDir)} must be the exact git toplevel selected for this task; ` +
+        `resolved to ${JSON.stringify(canonicalCwd.path)} but git toplevel is ${JSON.stringify(canonicalTopLevel.path)}`,
+    };
+  }
+
+  const currentBranch = await runGitText(
+    canonicalCwd.path,
+    ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    "git symbolic-ref --short HEAD",
+  );
+  if (!currentBranch.ok) return currentBranch;
+  if (currentBranch.output !== trimmedBranch) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree ${canonicalCwd.path} is on branch ${JSON.stringify(currentBranch.output)} ` +
+        `instead of the task branch ${JSON.stringify(trimmedBranch)}`,
+    };
+  }
+
+  const verification = await verifyCleanCheckout(canonicalCwd.path, normalizedExpected);
+  if (!verification.clean) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree ${canonicalCwd.path} could not be verified clean at ${normalizedExpected}: ` +
+        (verification.reason ?? "unknown verification failure"),
+    };
+  }
+
+  return {
+    ok: true,
+    binding: {
+      cwd: canonicalCwd.path,
+      expectedRevision: normalizedExpected,
+      branchName: trimmedBranch,
+      managedRoot: managedRoot.path,
+    },
+  };
+}
+
+export async function verifyManagedTaskWorktreeBinding(
+  binding: WorkerWorktreeBinding | undefined,
+  options: ManagedTaskWorktreeBindingVerificationOptions = {},
+): Promise<ManagedTaskWorktreeBindingVerification> {
+  if (!binding) {
+    return { ok: false, reason: "pi-harness requires a selected worktree binding" };
+  }
+
+  const normalizedExpected = binding.expectedRevision.trim().toLowerCase();
+  if (!GIT_COMMIT_ID.test(normalizedExpected)) {
+    return {
+      ok: false,
+      reason: `expected revision ${JSON.stringify(binding.expectedRevision)} is not a full commit id`,
+    };
+  }
+
+  const trimmedBranch = binding.branchName.trim();
+  if (!trimmedBranch) {
+    return { ok: false, reason: "pi-harness requires a non-empty task branch name" };
+  }
+
+  const managedRoot = await canonicalizeExistingPath(binding.managedRoot, "managed repos root");
+  if (!managedRoot.ok) return { ok: false, reason: managedRoot.reason };
+  if (options.configuredManagedRoot) {
+    const configuredRoot = await canonicalizeExistingPath(
+      options.configuredManagedRoot,
+      "configured managed repos root",
+    );
+    if (!configuredRoot.ok) return { ok: false, reason: configuredRoot.reason };
+    if (configuredRoot.path !== managedRoot.path) {
+      return {
+        ok: false,
+        reason:
+          `selected worktree binding root ${JSON.stringify(managedRoot.path)} does not match the ` +
+          `configured managed repos root ${JSON.stringify(configuredRoot.path)}`,
+      };
+    }
+  }
+
+  const canonicalCwd = await canonicalizeExistingPath(binding.cwd, "selected worktree path");
+  if (!canonicalCwd.ok) return { ok: false, reason: canonicalCwd.reason };
+  if (canonicalCwd.path !== binding.cwd) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree path ${JSON.stringify(binding.cwd)} must already be canonical; ` +
+        `realpath resolved it to ${JSON.stringify(canonicalCwd.path)}`,
+    };
+  }
+  if (!isPathWithinRoot(canonicalCwd.path, managedRoot.path)) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree path ${JSON.stringify(binding.cwd)} must resolve beneath the configured managed repos root ` +
+        `${JSON.stringify(managedRoot.path)}`,
+    };
+  }
+
+  const topLevel = await runGitText(
+    canonicalCwd.path,
+    ["rev-parse", "--show-toplevel"],
+    "git rev-parse --show-toplevel",
+  );
+  if (!topLevel.ok) return { ok: false, reason: topLevel.reason };
+  const canonicalTopLevel = await canonicalizeExistingPath(topLevel.output, "selected git toplevel");
+  if (!canonicalTopLevel.ok) return { ok: false, reason: canonicalTopLevel.reason };
+  if (canonicalTopLevel.path !== canonicalCwd.path) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree path ${JSON.stringify(binding.cwd)} must be the exact git toplevel selected for this task; ` +
+        `git toplevel is ${JSON.stringify(canonicalTopLevel.path)}`,
+    };
+  }
+
+  const currentBranch = await runGitText(
+    canonicalCwd.path,
+    ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    "git symbolic-ref --short HEAD",
+  );
+  if (!currentBranch.ok) return { ok: false, reason: currentBranch.reason };
+  if (currentBranch.output !== trimmedBranch) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree ${canonicalCwd.path} is on branch ${JSON.stringify(currentBranch.output)} ` +
+        `instead of the bound task branch ${JSON.stringify(trimmedBranch)}`,
+    };
+  }
+
+  const status = await runGitCapture(canonicalCwd.path, ["status", "--porcelain"]);
+  if (!status.ok) {
+    return {
+      ok: false,
+      reason: `git status failed: ${status.stderr || "unknown error"}`,
+    };
+  }
+  const dirty = status.stdout.toString("utf8").trim().length > 0;
+
+  const head = await runGitText(canonicalCwd.path, ["rev-parse", "HEAD"], "git rev-parse HEAD");
+  if (!head.ok) return { ok: false, reason: head.reason };
+  const headCommit = head.output.toLowerCase();
+  if (!GIT_COMMIT_ID.test(headCommit)) {
+    return {
+      ok: false,
+      reason: `git rev-parse HEAD returned an invalid commit id ${JSON.stringify(head.output)}`,
+    };
+  }
+
+  const ancestry = await runGitCapture(canonicalCwd.path, [
+    "merge-base",
+    "--is-ancestor",
+    normalizedExpected,
+    headCommit,
+  ]);
+  if (!ancestry.ok) {
+    if (ancestry.exitCode !== 1) {
+      return {
+        ok: false,
+        reason:
+          `selected worktree ${canonicalCwd.path} merge-base --is-ancestor failed ` +
+          `for ${normalizedExpected}..${headCommit}: ${ancestry.stderr || "unknown error"}`,
+      };
+    }
+    return {
+      ok: false,
+      reason:
+        `selected worktree ${canonicalCwd.path} moved off the bound task branch ancestry: ` +
+        `${headCommit} is not descended from ${normalizedExpected}`,
+    };
+  }
+
+  if (!dirty && headCommit === normalizedExpected) {
+    return {
+      ok: true,
+      cwd: canonicalCwd.path,
+      headCommit,
+      state: "initial-clean",
+    };
+  }
+
+  if (!options.allowDirtyTaskBranch) {
+    return {
+      ok: false,
+      reason:
+        `selected worktree ${canonicalCwd.path} is no longer the initial clean binding at ${normalizedExpected}`,
+    };
+  }
+
+  return {
+    ok: true,
+    cwd: canonicalCwd.path,
+    headCommit,
+    state: "task-branch",
+  };
+}
+
 /**
  * Verify the working tree has no dirty/untracked state and HEAD matches the
  * expected commit. Run immediately after `checkoutTaskBranch` succeeds and
@@ -1349,6 +1847,7 @@ export interface CleanCheckoutVerification {
 export async function verifyCleanCheckout(
   workingDir: string,
   expectedCommit: string,
+  options: { includeIgnored?: boolean } = {},
 ): Promise<CleanCheckoutVerification> {
   const normalizedExpected = expectedCommit.trim().toLowerCase();
   if (!GIT_COMMIT_ID.test(normalizedExpected)) {
@@ -1357,18 +1856,18 @@ export async function verifyCleanCheckout(
       reason: `expected commit ${JSON.stringify(expectedCommit)} is not a valid commit id`,
     };
   }
-  // `--ignored` is deliberate (M5 review, #236): plain `--porcelain` never
-  // reports gitignored paths, so a prior task's leftover ignored garbage
-  // (e.g. a stale `.env`, build cache, or partial `node_modules`) would
-  // otherwise verify as "clean" and never trigger `recoverCleanCheckout`
-  // (whose `git clean -fdx` DOES remove ignored files) — silently leaving
-  // untracked-but-invisible state for the next task to inherit.
-  const status = await runGitCapture(workingDir, ["status", "--porcelain", "--ignored"]);
+  const status = await runGitCapture(
+    workingDir,
+    options.includeIgnored === false
+      ? ["status", "--porcelain"]
+      : [...CLEAN_CHECKOUT_STATUS_ARGS_WITH_IGNORED],
+  );
   if (!status.ok) {
     return { clean: false, reason: `git status failed: ${status.stderr || "unknown error"}` };
   }
-  if (status.stdout.toString("utf8").trim().length > 0) {
-    return { clean: false, reason: "working tree has uncommitted, untracked, or ignored leftover state" };
+  const statusOutput = status.stdout.toString("utf8").trim();
+  if (statusOutput.length > 0) {
+    return { clean: false, reason: describeCheckoutLeftovers(statusOutput) };
   }
   const head = await runGitCapture(workingDir, ["rev-parse", "HEAD"]);
   if (!head.ok) {

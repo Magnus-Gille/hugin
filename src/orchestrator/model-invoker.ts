@@ -3,7 +3,11 @@ import type {
   HomeserverResponseFormat,
   HomeserverVerifierSpec,
 } from "../homeserver-executor.js";
-import type { WorkerExecutor, WorkerResult } from "./worker-executor.js";
+import type {
+  WorkerExecutor,
+  WorkerResult,
+} from "./worker-executor.js";
+import type { WorkerWorktreeBinding } from "./pi-harness-types.js";
 import { createWorkerExecutor } from "./worker-executor.js";
 import type { OrinWorkerRoute } from "./orin-macro-route.js";
 
@@ -54,7 +58,16 @@ export interface ModelInvoker {
  */
 export function createModelInvoker(
   roles: Record<OrchestratorRole, RoleBinding>,
-  defaults: { timeoutMs: number; maxOutputChars?: number; maxTokens?: number },
+  defaults: {
+    timeoutMs: number;
+    maxOutputChars?: number;
+    maxTokens?: number;
+    workingDirectory?: string;
+    permissionProfile?: "read-only" | "trusted-code";
+    workerWorktree?: WorkerWorktreeBinding;
+    configuredManagedRoot?: string;
+    allowedReadOnlyRoots?: string[];
+  },
   executorFactory?: (provider: string, opts?: { role?: OrchestratorRole }) => WorkerExecutor,
 ): ModelInvoker {
   const factory = executorFactory ?? createWorkerExecutor;
@@ -89,6 +102,32 @@ export function createModelInvoker(
                 : {}),
             }
           : {};
+      const piHarnessMetadata =
+        binding.provider === "pi-harness"
+          ? (() => {
+              const permissionProfile =
+                role === "worker" ? defaults.permissionProfile ?? "read-only" : "read-only";
+              const readOnlyLaunch = {
+                cwd: defaults.workingDirectory,
+                allowedReadOnlyRoots: defaults.allowedReadOnlyRoots,
+              };
+              if (
+                role === "worker" &&
+                permissionProfile === "trusted-code" &&
+                defaults.workerWorktree
+              ) {
+                return {
+                  permissionProfile,
+                  worktree: defaults.workerWorktree,
+                  configuredManagedRoot: defaults.configuredManagedRoot,
+                };
+              }
+              return {
+                permissionProfile,
+                ...readOnlyLaunch,
+              };
+            })()
+          : {};
       return executor.run({
         provider: binding.provider,
         model: workerRoute?.modelId ?? binding.model,
@@ -98,6 +137,7 @@ export function createModelInvoker(
         maxOutputChars: defaults.maxOutputChars,
         maxTokens: binding.maxTokens ?? defaults.maxTokens,
         signal: opts?.signal,
+        ...piHarnessMetadata,
         ...delegateMetadata,
       });
     },

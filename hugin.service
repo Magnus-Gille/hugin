@@ -13,7 +13,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/home/magnus/repos/hugin
-ExecStart=/usr/bin/node dist/index.js
+ExecStart=/usr/bin/node dist/main.js
 Restart=always
 RestartSec=10
 EnvironmentFile=/home/magnus/repos/hugin/.env

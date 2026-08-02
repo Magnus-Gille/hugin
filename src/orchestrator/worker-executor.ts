@@ -15,6 +15,8 @@
  */
 
 import { spawn } from "node:child_process";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import type {
   HomeserverResponseFormat,
   HomeserverVerifierSpec,
@@ -22,7 +24,15 @@ import type {
 import { extractM5Provenance, sanitizeProviderTokenCount } from "../m5-provenance.js";
 import type { M5DelegationProvenance } from "../m5-provenance.js";
 import { estimateCostUsd } from "../model-pricing.js";
-import { getRegistryEntryById } from "../runtime-registry.js";
+import {
+  PI_HARNESS_READ_ONLY_SAFE_REGISTRY_FLAGS,
+  getRegistryEntryById,
+} from "../runtime-registry.js";
+import {
+  DEFAULT_REPOS_ROOT,
+  normalizeRoot,
+  verifyManagedTaskWorktreeBinding,
+} from "../task-helpers.js";
 import { buildTaskSubprocessEnv } from "../task-subprocess-env.js";
 import {
   getProviderConfig,
@@ -30,6 +40,11 @@ import {
   resolveProviderBaseUrl,
 } from "./provider-config.js";
 import type { OrchestratorRole } from "./plan.js";
+import type {
+  PiHarnessPermissionProfile,
+  WorkerWorktreeBinding,
+} from "./pi-harness-types.js";
+export type { WorkerWorktreeBinding } from "./pi-harness-types.js";
 
 /** Default maximum output characters when not specified in the request. */
 export const DEFAULT_MAX_OUTPUT_CHARS = 50_000;
@@ -64,6 +79,33 @@ export const DEFAULT_BUSY_RETRY_BUDGET_MS = 240_000;
 export const DEFAULT_BUSY_RETRY_BASE_DELAY_MS = 1_000;
 /** Cap any single busy wait (Retry-After or backoff step) to this. */
 const MAX_BUSY_WAIT_MS = 30_000;
+const PI_READ_ONLY_TOOLS = "read,grep,find,ls";
+interface PiBindingTurnState {
+  successfulTurns: number;
+  tainted: boolean;
+}
+
+const piBindingTurnStates = new WeakMap<WorkerWorktreeBinding, PiBindingTurnState>();
+
+function readPiBindingTurnState(binding: WorkerWorktreeBinding): PiBindingTurnState {
+  return piBindingTurnStates.get(binding) ?? { successfulTurns: 0, tainted: false };
+}
+
+function markPiBindingSuccessfulTurn(binding: WorkerWorktreeBinding): void {
+  const state = readPiBindingTurnState(binding);
+  piBindingTurnStates.set(binding, {
+    successfulTurns: state.successfulTurns + 1,
+    tainted: state.tainted,
+  });
+}
+
+function markPiBindingFailedTurn(binding: WorkerWorktreeBinding): void {
+  const state = readPiBindingTurnState(binding);
+  piBindingTurnStates.set(binding, {
+    successfulTurns: state.successfulTurns,
+    tainted: true,
+  });
+}
 
 interface BusyRetryPolicy {
   maxRetries: number;
@@ -220,6 +262,26 @@ export interface WorkerRequest {
   nodeId?: string;
   /** Model to use for the one bounded M5 fallback after an Orin failure. */
   fallbackModel?: string;
+  /**
+   * Explicit local cwd admission target for pi-harness.
+   *
+   * This is an integrity control for where Pi is allowed to start, not a
+   * filesystem sandbox confinement boundary. Pi still runs with the process's
+   * ambient OS privileges.
+   */
+  cwd?: string;
+  /** Effective pi-harness permission profile for this invocation. */
+  permissionProfile?: PiHarnessPermissionProfile;
+  /** Selected worktree binding for providers that must execute inside a checkout. */
+  worktree?: WorkerWorktreeBinding;
+  /** Dispatcher-configured managed root to cross-check against the selected binding. */
+  configuredManagedRoot?: string;
+  /**
+   * Canonical roots a read-only pi-harness launch may start within.
+   *
+   * This is an admission allowlist, not a filesystem sandbox.
+   */
+  allowedReadOnlyRoots?: string[];
 }
 
 export interface WorkerResult {
@@ -278,6 +340,188 @@ export function createWorkerExecutor(
     return new HomeserverDelegateWorkerExecutor();
   }
   return new DirectModelExecutor();
+}
+
+async function verifyPiWorktreeBinding(
+  binding: WorkerWorktreeBinding | undefined,
+  configuredManagedRoot: string | undefined,
+): Promise<{ ok: true; cwd: string } | { ok: false; error: string }> {
+  if (!configuredManagedRoot?.trim()) {
+    return {
+      ok: false,
+      error: "pi-harness trusted-code execution requires the configured managed repos root",
+    };
+  }
+  if (binding) {
+    const turnState = readPiBindingTurnState(binding);
+    if (turnState.tainted) {
+      return {
+        ok: false,
+        error:
+          `selected worktree ${binding.cwd} is tainted by a failed or aborted prior worker turn ` +
+          "in this orchestrator run",
+      };
+    }
+  }
+  const allowDirtyTaskBranch = binding
+    ? readPiBindingTurnState(binding).successfulTurns > 0
+    : false;
+  const verification = await verifyManagedTaskWorktreeBinding(
+    binding,
+    {
+      allowDirtyTaskBranch,
+      configuredManagedRoot: path.resolve(normalizeRoot(configuredManagedRoot)),
+    },
+  );
+  if (!verification.ok || !verification.cwd) {
+    return {
+      ok: false,
+      error: verification.reason ?? "selected worktree binding verification failed",
+    };
+  }
+  return { ok: true, cwd: verification.cwd };
+}
+
+function effectivePiPermissionProfile(
+  req: WorkerRequest,
+): PiHarnessPermissionProfile {
+  return req.permissionProfile ?? (req.worktree ? "trusted-code" : "read-only");
+}
+
+function isContainedByRoot(candidate: string, root: string): boolean {
+  return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+}
+
+async function canonicalizePiPath(
+  rawPath: string | undefined,
+  label: string,
+): Promise<
+  | { ok: true; cwd: string }
+  | { ok: false; error: string; kind: "invalid" | "missing" | "unsafe" }
+> {
+  const trimmed = rawPath?.trim();
+  if (!trimmed) {
+    return {
+      ok: false,
+      kind: "invalid",
+      error: `${label} requires an explicit working directory`,
+    };
+  }
+  if (!path.isAbsolute(trimmed)) {
+    return {
+      ok: false,
+      kind: "invalid",
+      error: `${label} ${JSON.stringify(rawPath)} must be absolute`,
+    };
+  }
+
+  const normalized = path.resolve(trimmed);
+  try {
+    return { ok: true, cwd: await fs.realpath(normalized) };
+  } catch (err) {
+    const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : "";
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return {
+        ok: false,
+        kind: "missing",
+        error: `${label} ${JSON.stringify(rawPath)} does not exist`,
+      };
+    }
+    return {
+      ok: false,
+      kind: "unsafe",
+      error:
+        `${label} ${JSON.stringify(rawPath)} could not be canonicalized via realpath: ` +
+        (err instanceof Error ? err.message : String(err)),
+    };
+  }
+}
+
+async function canonicalizePiLaunchDirectory(
+  cwd: string | undefined,
+  allowedRoots: string[] | undefined,
+): Promise<{ ok: true; cwd: string } | { ok: false; error: string }> {
+  const canonicalCwd = await canonicalizePiPath(cwd, "pi-harness working directory");
+  if (!canonicalCwd.ok) {
+    return canonicalCwd;
+  }
+  if (!allowedRoots || allowedRoots.length === 0) {
+    return {
+      ok: false,
+      error:
+        "pi-harness read-only execution requires an explicit allowlist of launch roots",
+    };
+  }
+
+  const canonicalRoots: string[] = [];
+  for (const root of allowedRoots) {
+    const canonicalRoot = await canonicalizePiPath(root, "pi-harness allowed launch root");
+    if (!canonicalRoot.ok) {
+      if (canonicalRoot.kind === "missing") {
+        continue;
+      }
+      return canonicalRoot;
+    }
+    if (!canonicalRoots.includes(canonicalRoot.cwd)) {
+      canonicalRoots.push(canonicalRoot.cwd);
+    }
+  }
+  if (canonicalRoots.length === 0) {
+    return {
+      ok: false,
+      error:
+        "pi-harness read-only execution could not resolve any allowed read-only roots",
+    };
+  }
+
+  if (!canonicalRoots.some((root) => isContainedByRoot(canonicalCwd.cwd, root))) {
+    return {
+      ok: false,
+      error:
+        `pi-harness working directory ${JSON.stringify(cwd)} must stay within an allowed read-only root`,
+    };
+  }
+  return canonicalCwd;
+}
+
+async function assertDuplicatePiLaunchDirectoryMatchesBinding(
+  req: WorkerRequest,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!req.worktree || req.cwd === undefined) return { ok: true };
+  const canonicalDuplicate = await canonicalizePiPath(
+    req.cwd,
+    "pi-harness duplicate working directory",
+  );
+  if (!canonicalDuplicate.ok) {
+    return canonicalDuplicate;
+  }
+  if (canonicalDuplicate.cwd !== req.worktree.cwd) {
+    return {
+      ok: false,
+      error:
+        `pi-harness request supplied conflicting cwd ${JSON.stringify(req.cwd)} for bound worktree ` +
+        `${JSON.stringify(req.worktree.cwd)}`,
+    };
+  }
+  return { ok: true };
+}
+
+async function resolvePiHarnessLaunchCwd(
+  req: WorkerRequest,
+): Promise<{ ok: true; cwd: string } | { ok: false; error: string }> {
+  const permissionProfile = effectivePiPermissionProfile(req);
+  const duplicateCheck = await assertDuplicatePiLaunchDirectoryMatchesBinding(req);
+  if (!duplicateCheck.ok) return duplicateCheck;
+  if (req.worktree) {
+    return verifyPiWorktreeBinding(req.worktree, req.configuredManagedRoot);
+  }
+  if (permissionProfile === "trusted-code") {
+    return {
+      ok: false,
+      error: "pi-harness trusted-code execution requires a selected worktree binding",
+    };
+  }
+  return canonicalizePiLaunchDirectory(req.cwd, req.allowedReadOnlyRoots);
 }
 
 // ---------------------------------------------------------------------------
@@ -905,6 +1149,18 @@ export class PiHarnessExecutor implements WorkerExecutor {
   async run(req: WorkerRequest): Promise<WorkerResult> {
     const start = Date.now();
     const maxOutput = req.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
+    const permissionProfile = effectivePiPermissionProfile(req);
+    const abortedBeforeStart = (): WorkerResult => ({
+      ok: false,
+      output: "",
+      provider: req.provider,
+      model: req.model,
+      inputTokens: null,
+      outputTokens: null,
+      costUsd: null,
+      latencyMs: Date.now() - start,
+      error: "Process aborted before it started",
+    });
 
     const entry = getRegistryEntryById("pi-harness");
     if (!entry) {
@@ -923,6 +1179,11 @@ export class PiHarnessExecutor implements WorkerExecutor {
 
     // Short-circuit an already-cancelled call before spawning (issue #110).
     if (req.signal?.aborted) {
+      return abortedBeforeStart();
+    }
+
+    const launchCwd = await resolvePiHarnessLaunchCwd(req);
+    if (!launchCwd.ok) {
       return {
         ok: false,
         output: "",
@@ -932,15 +1193,41 @@ export class PiHarnessExecutor implements WorkerExecutor {
         outputTokens: null,
         costUsd: null,
         latencyMs: Date.now() - start,
-        error: "Process aborted before it started",
+        error: launchCwd.error,
       };
     }
 
-    const args = buildPiArgs(req, entry);
+    const args = buildPiArgs(req, entry, permissionProfile);
+    if (!args.ok) {
+      return {
+        ok: false,
+        output: "",
+        provider: req.provider,
+        model: req.model,
+        inputTokens: null,
+        outputTokens: null,
+        costUsd: null,
+        latencyMs: Date.now() - start,
+        error: args.error,
+      };
+    }
+
+    // Re-check after async launch-cwd verification so a pre-spawn abort cannot
+    // slip through and launch pi after the signal has already fired.
+    if (req.signal?.aborted) {
+      return abortedBeforeStart();
+    }
 
     return new Promise<WorkerResult>((resolve) => {
       let stdout = "";
       let stderr = "";
+      const boundWorktree = req.worktree;
+      // Residual TOCTOU: the executor realpaths and re-verifies the selected
+      // task branch immediately before spawn, but a local actor could still
+      // race the path between those checks and `spawn()`. Closing that last
+      // gap would require descriptor-bound exec semantics the current Node/Git
+      // stack does not expose; this contract narrows the window and keeps the
+      // branch identity pinned instead of eliminating it entirely.
       // First-writer-wins kill reason (issue #110): whichever of the per-call
       // timeout or the external abort fires first owns the reported reason, so a
       // later kill of the other kind can't mislabel it before `close` arrives.
@@ -948,7 +1235,8 @@ export class PiHarnessExecutor implements WorkerExecutor {
 
       let child: ReturnType<typeof spawn>;
       try {
-        child = spawn(entry.harnessCmd ?? "pi", args, {
+        child = spawn(entry.harnessCmd ?? "pi", args.args, {
+          cwd: launchCwd.cwd,
           stdio: ["ignore", "pipe", "pipe"],
           env: buildTaskSubprocessEnv(),
         });
@@ -988,6 +1276,9 @@ export class PiHarnessExecutor implements WorkerExecutor {
       child.on("error", (err) => {
         clearTimeout(killTimer);
         req.signal?.removeEventListener("abort", onExternalAbort);
+        if (boundWorktree) {
+          markPiBindingFailedTurn(boundWorktree);
+        }
         resolve({
           ok: false,
           output: "",
@@ -1006,6 +1297,9 @@ export class PiHarnessExecutor implements WorkerExecutor {
         req.signal?.removeEventListener("abort", onExternalAbort);
 
         if (killReason !== null) {
+          if (boundWorktree) {
+            markPiBindingFailedTurn(boundWorktree);
+          }
           resolve({
             ok: false,
             output: "",
@@ -1023,6 +1317,9 @@ export class PiHarnessExecutor implements WorkerExecutor {
         }
 
         if (code !== 0) {
+          if (boundWorktree) {
+            markPiBindingFailedTurn(boundWorktree);
+          }
           resolve({
             ok: false,
             output: "",
@@ -1044,6 +1341,9 @@ export class PiHarnessExecutor implements WorkerExecutor {
             ? estimateCostUsd(req.model, parsed.inputTokens, parsed.outputTokens)
             : null;
 
+        if (boundWorktree) {
+          markPiBindingSuccessfulTurn(boundWorktree);
+        }
         resolve({
           ok: true,
           output: parsed.output.slice(0, maxOutput),
@@ -1073,12 +1373,60 @@ export class PiHarnessExecutor implements WorkerExecutor {
 function buildPiArgs(
   req: WorkerRequest,
   registryEntry: ReturnType<typeof getRegistryEntryById> & {},
-): string[] {
-  const flags: string[] = [...(registryEntry.harnessFlags ?? [])];
+  permissionProfile: PiHarnessPermissionProfile,
+): { ok: true; args: string[] } | { ok: false; error: string } {
+  const flags: string[] = [];
+  const registryFlags = registryEntry.harnessFlags ?? [];
+  const safeReadOnlyFlags = new Set<string>(PI_HARNESS_READ_ONLY_SAFE_REGISTRY_FLAGS);
+  for (let i = 0; i < registryFlags.length; i++) {
+    const flag = registryFlags[i];
+    if (permissionProfile !== "read-only") {
+      flags.push(flag);
+      continue;
+    }
+    if (flag === "--tools") {
+      i++;
+      continue;
+    }
+    if (flag.startsWith("--tools=")) {
+      continue;
+    }
+    if (flag === "--provider") {
+      const provider = registryFlags[i + 1];
+      if (!provider) {
+        return {
+          ok: false,
+          error: "pi-harness read-only mode requires complete registry --provider flag pairs",
+        };
+      }
+      flags.push(flag, provider);
+      i++;
+      continue;
+    }
+    if (flag.includes("=")) {
+      const [flagName] = flag.split("=", 1);
+      if (safeReadOnlyFlags.has(flagName)) {
+        flags.push(flag);
+        continue;
+      }
+    }
+    if (safeReadOnlyFlags.has(flag)) {
+      flags.push(flag);
+      continue;
+    }
+    return {
+      ok: false,
+      error:
+        `pi-harness read-only mode refuses unsupported registry flag ${JSON.stringify(flag)}`,
+    };
+  }
+  if (permissionProfile === "read-only") {
+    flags.push("--tools", PI_READ_ONLY_TOOLS);
+  }
   flags.push("--mode", "json");
   flags.push("--model", req.model);
   flags.push("-p", req.prompt);
-  return flags;
+  return { ok: true, args: flags };
 }
 
 /**

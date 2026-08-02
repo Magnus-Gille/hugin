@@ -10,8 +10,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
     "start:mcp": "node dist/mcp-server.js",
     "start:friction-mcp": "node dist/friction-mcp.js",
     "friction-report": "node scripts/friction-report.mjs",

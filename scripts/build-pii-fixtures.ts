@@ -435,7 +435,7 @@ const clean: LabelledExample[] = [
     "grimnir_clean_04",
     [
       "[Unit]\nDescription=Hugin task dispatcher\n[Service]\n" +
-        "Environment=MUNIN_URL=http://localhost:3030\nExecStart=/usr/bin/node dist/index.js\n" +
+        "Environment=MUNIN_URL=http://localhost:3030\nExecStart=/usr/bin/node dist/main.js\n" +
         "Restart=on-failure",
     ],
     { lang: "en", category: "config" },

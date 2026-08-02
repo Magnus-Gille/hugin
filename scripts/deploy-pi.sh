@@ -218,7 +218,7 @@ ssh "$REMOTE" "mkdir -p /home/$DEPLOY_USER/workspace"
 
 echo "==> Killing orphan Hugin processes..."
 ssh "$REMOTE" "SYSPID=\$(XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show hugin.service --property=MainPID --value 2>/dev/null || echo 0)
-for pid in \$(pgrep -f 'node dist/index.js'); do
+for pid in \$(pgrep -f 'node dist/main.js'); do
   if [ \"\$pid\" = \"\$SYSPID\" ]; then continue; fi
   CWD=\$(readlink /proc/\$pid/cwd 2>/dev/null || echo '')
   if [ \"\$CWD\" = '$REMOTE_DIR' ]; then
