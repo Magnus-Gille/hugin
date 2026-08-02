@@ -7,16 +7,18 @@ import { describe, expect, test } from "vitest";
 const REPO_ROOT = process.cwd();
 const DOCS_DIR = path.join(REPO_ROOT, "docs");
 const INDEX_PATH = path.join(DOCS_DIR, "index.md");
+const AGENTS_PATH = path.join(REPO_ROOT, "AGENTS.md");
 const PROBES_PATH = path.join(REPO_ROOT, "tests/fixtures/instruction-probes/probes.json");
-const PROBES_SHA256 = "921559344beee6320d6553f9a626ff23b6156ac36e54aff8edf08b7a072ef075";
+const PROBES_SHA256 = "7a409db8f2b13523ba22f647d90a69866f558ccaf426c6d82b68f64efc8701ba";
 const CONTROL_PROBE_ID = "private-orchestrator-CONTROL";
 const CONTROL_PROBE = {
   id: CONTROL_PROBE_ID,
   kind: "control",
   prompt: "The prompt is private. Can Runtime: orchestrator still fan out to the usual cloud roles by default?",
   target: "AGENTS.md",
-  assert_regex:
-    "(?i)(must be rejected|reject(ed)? before any model call|unless every configured role uses a sovereign/local provider|default cloud fan-out must never receive private data)",
+  assert_pattern:
+    "(must be rejected|reject(ed)? before any model call|unless every configured role uses a sovereign/local provider|default cloud fan-out must never receive private data)",
+  assert_flags: "i",
   assert_note:
     "CONTROL PROBE. This targets inline runtime-permission rules that stay in AGENTS.md in both arms. If it changes, the harness is measuring unrelated drift rather than the docs-index split.",
 } as const;
@@ -26,7 +28,8 @@ interface InstructionProbe {
   kind: string;
   prompt: string;
   target: string;
-  assert_regex?: string;
+  assert_pattern?: string;
+  assert_flags?: string;
   assert_note?: string;
 }
 
@@ -225,7 +228,29 @@ function loadInstructionProbes(): {
   return { bytes, digest, fixture };
 }
 
+function compileInstructionProbePattern(probe: InstructionProbe): RegExp | null {
+  if (probe.assert_pattern === undefined) {
+    expect(probe.assert_flags).toBeUndefined();
+    return null;
+  }
+
+  expect(typeof probe.assert_pattern).toBe("string");
+  expect(probe.assert_pattern.length).toBeGreaterThan(0);
+  expect(typeof probe.assert_flags === "string" || probe.assert_flags === undefined).toBe(true);
+
+  return new RegExp(probe.assert_pattern, probe.assert_flags);
+}
+
 describe("docs/index.md coverage", () => {
+  test("AGENTS.md retains the docs index routing pointer", () => {
+    const markdown = readFileSync(AGENTS_PATH, "utf8");
+
+    expect(markdown).toContain("Lookup/reference docs under `docs/` start at `docs/index.md`.");
+    expect(markdown).toMatch(
+      /For every lookup\/reference question[\s\S]+always open `docs\/index\.md`, select the matching entry, and open the/,
+    );
+  });
+
   test("tracks duplicate indexed markdown docs across titled and angle-bracket links", () => {
     const markdown = [
       '- [Daily exams](daily-exam-factory.md "overview")',
@@ -341,10 +366,16 @@ describe("instruction probes fixture", () => {
       if (probe.id === CONTROL_PROBE_ID) {
         expect(probe.kind).toBe("control");
         expect(probe.target).toBe("AGENTS.md");
+        const assertionPattern = compileInstructionProbePattern(probe);
+        expect(assertionPattern).not.toBeNull();
+        const targetContent = readFileSync(absoluteTarget, "utf8");
+        expect(targetContent).toMatch(assertionPattern!);
         continue;
       }
 
       expect(probe.kind).toBe("retrieval");
+      expect(probe.assert_pattern).toBeUndefined();
+      expect(probe.assert_flags).toBeUndefined();
       expect(probe.target.startsWith("docs/"), `${probe.id} target must live under docs/: ${probe.target}`).toBe(true);
 
       const relativeToDocs = path.relative(DOCS_DIR, absoluteTarget);

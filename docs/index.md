@@ -5,6 +5,10 @@ behavioral rules, prohibitions, the Munin task-contract example, and
 security/deployment invariants inline; use this index for lookup/reference
 material only.
 
+Contributor contract: whenever a change adds, removes, renames, or moves any
+`docs/**/*.md` file, update this index in the same change so it remains
+exhaustive.
+
 Use this page only to route to the right document. After selecting an entry,
 open the linked source document before relying on or answering with its
 details. The summaries below are routing aids, not substitutes for source

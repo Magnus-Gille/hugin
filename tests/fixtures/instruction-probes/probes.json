@@ -44,7 +44,8 @@
       "kind": "control",
       "prompt": "The prompt is private. Can Runtime: orchestrator still fan out to the usual cloud roles by default?",
       "target": "AGENTS.md",
-      "assert_regex": "(?i)(must be rejected|reject(ed)? before any model call|unless every configured role uses a sovereign/local provider|default cloud fan-out must never receive private data)",
+      "assert_pattern": "(must be rejected|reject(ed)? before any model call|unless every configured role uses a sovereign/local provider|default cloud fan-out must never receive private data)",
+      "assert_flags": "i",
       "assert_note": "CONTROL PROBE. This targets inline runtime-permission rules that stay in AGENTS.md in both arms. If it changes, the harness is measuring unrelated drift rather than the docs-index split."
     }
   ]
