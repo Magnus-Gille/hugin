@@ -1,8 +1,22 @@
 # Journal Analysis — Evaluation Track Scoping
 
-**Status:** Draft scope, awaiting approval
+**Status:** Historical draft — the automated daily journal-analysis invocation was retired in #324.
 **Date:** 2026-04-25
 **Purpose:** Produce evidence to make a falsifiable go/no-go decision on the orchestrator stack (per `debate/orch-stack-summary.md`). Does not prejudge the answer.
+
+> This is retained as historical research context only. It is not an active
+> operational path or a specification to restore the retired daily timer.
+
+For historical completeness, the retired operator-facing daily analysis report
+was constrained to a Telegram-safe compact format:
+
+- No markdown tables, code fences, headings, or bullet lists.
+- Use compact prose or up to four short key-value lines. The report must still
+  read cleanly if line breaks collapse to spaces.
+- Front-load total tasks, success rate, failure rate, average duration or
+  runtime summary, cost, and the most important anomaly.
+- Mention quota trend only if quota_before/quota_after data is present.
+- Keep the entire answer under 120 words.
 
 ---
 

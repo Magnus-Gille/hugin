@@ -7,29 +7,20 @@ function readRepoFile(relativePath: string): string {
 }
 
 describe("submit-daily-analysis prompt contract", () => {
-  it("pins a Telegram-safe compact output format within the 192-token budget", () => {
-    const script = readRepoFile("scripts/submit-daily-analysis.sh");
+  it("preserves the retired Telegram-safe output contract in historical documentation", () => {
+    const scopingDoc = readRepoFile("docs/research/journal-analysis-scoping.md");
 
-    expect(script).toContain("- **Max output tokens:** 192");
-    expect(script).not.toContain("Use markdown tables where appropriate.");
-    expect(script).toMatch(/No markdown tables/i);
-    expect(script).toMatch(/compact prose|key-value lines/i);
-    expect(script).toMatch(/read cleanly if line breaks collapse to spaces/i);
-    expect(script).toContain(
-      "Front-load total tasks, success rate, failure rate, average duration or runtime summary, cost, and the most important anomaly.",
+    expect(scopingDoc).toContain("Historical draft");
+    expect(scopingDoc).toMatch(
+      /not an active[\s>]+operational path or a specification to restore the retired daily timer\./i,
     );
-    expect(script).toMatch(/quota trend/i);
-    expect(script).not.toContain("Keep the entire answer under 160 words.");
-    expect(script).toContain("Keep the entire answer under 120 words.");
-  });
-
-  it("documents the actual repository timer as 07:00 local time", () => {
-    const script = readRepoFile("scripts/submit-daily-analysis.sh");
-    const timer = readRepoFile("systemd/hugin-daily-analysis.timer");
-
-    expect(timer).toContain("OnCalendar=*-*-* 07:00:00");
-    expect(script).toContain(
-      "# Intended to run via systemd timer at 07:00 local time daily.",
+    expect(scopingDoc).toMatch(/No markdown tables/i);
+    expect(scopingDoc).toMatch(/compact prose|key-value lines/i);
+    expect(scopingDoc).toMatch(/read cleanly if line breaks collapse to spaces/i);
+    expect(scopingDoc).toMatch(
+      /Front-load total tasks, success rate, failure rate, average duration or[\s-]+runtime summary, cost, and the most important anomaly\./,
     );
+    expect(scopingDoc).toMatch(/quota trend/i);
+    expect(scopingDoc).toContain("Keep the entire answer under 120 words.");
   });
 });
