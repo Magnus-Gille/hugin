@@ -5,6 +5,11 @@ behavioral rules, prohibitions, the Munin task-contract example, and
 security/deployment invariants inline; use this index for lookup/reference
 material only.
 
+Use this page only to route to the right document. After selecting an entry,
+open the linked source document before relying on or answering with its
+details. The summaries below are routing aids, not substitutes for source
+content.
+
 Descriptions name concrete Hugin entities and subsystems where that improves
 retrieval: orchestrator, M5, Harbor, daily exams, task signing, scanners,
 scheduling, and pipeline phases.

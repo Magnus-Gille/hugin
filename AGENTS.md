@@ -303,6 +303,9 @@ The executable deployment contract is `scripts/deploy-pi.sh`,
   It is exhaustive for the docs corpus and groups Hugin entities/components by
   category: core contracts, security/provenance, orchestration/scheduling,
   learning/evaluation, historical validations, and design/research archives.
+  Use it only as a routing map: after selecting an entry, open the linked
+  source document before relying on or answering with its details. The index
+  summaries are not substitutes for source content.
 
 Environment defaults belong with their parser, service unit, and focused operating
 document. Do not regrow a copied environment-variable catalogue here.
