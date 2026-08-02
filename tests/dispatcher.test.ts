@@ -6,9 +6,14 @@ import { describe, it, expect } from "vitest";
 // --- resolveContext unit tests ---
 
 import {
+  EXECUTION_ERROR_TRACE_ERROR_CLASS,
   MAX_TASK_TIMEOUT_MS,
+  RESULT_RECORDING_TRACE_ERROR_CLASS,
+  STATUS_CAS_LOST_TRACE_ERROR_CLASS,
   STRUCTURED_RESULT_TRACE_ERROR_CLASS,
+  deriveReportedTaskStartedAt,
   deriveResultRecordingTraceOutcome,
+  finalizeExecutionTraceOutcome,
   parseBoundedPositiveInt,
   resolveContext,
   resolveTaskWorkingDirectory,
@@ -510,6 +515,15 @@ Do something`;
 });
 
 describe("result recording trace classification", () => {
+  it("keeps the reported start at or after the accepted claim timestamp", () => {
+    const startedAt = deriveReportedTaskStartedAt(
+      "2026-08-01T12:00:05.000Z",
+      new Date("2026-08-01T12:00:00.000Z"),
+    );
+
+    expect(startedAt).toBe("2026-08-01T12:00:05.000Z");
+  });
+
   it("degrades structured-result write failures without propagating exception text", () => {
     const secret = new Error("zod failed for https://private.example/path?token=secret");
     const outcome = deriveResultRecordingTraceOutcome({
@@ -523,6 +537,39 @@ describe("result recording trace classification", () => {
     });
     expect(JSON.stringify(outcome)).not.toContain("private.example");
     expect(JSON.stringify(outcome)).not.toContain("token=secret");
+  });
+
+  it("marks terminal status CAS loss as stale with a bounded class", () => {
+    expect(deriveResultRecordingTraceOutcome({
+      structuredResultOk: false,
+      statusCasLost: true,
+    })).toEqual({
+      outcome: "stale",
+      errorClass: STATUS_CAS_LOST_TRACE_ERROR_CLASS,
+    });
+  });
+
+  it("preserves delivery-pending execution traces and bounds unknown finalization errors", () => {
+    expect(finalizeExecutionTraceOutcome({
+      outcome: "degraded",
+      errorClass: "delivery-pending",
+    })).toEqual({
+      outcome: "degraded",
+      errorClass: "delivery-pending",
+    });
+    expect(finalizeExecutionTraceOutcome({
+      outcome: "unknown",
+      errorClass: RESULT_RECORDING_TRACE_ERROR_CLASS,
+    })).toEqual({
+      outcome: "failed",
+      errorClass: RESULT_RECORDING_TRACE_ERROR_CLASS,
+    });
+    expect(finalizeExecutionTraceOutcome({
+      outcome: "unknown",
+    })).toEqual({
+      outcome: "failed",
+      errorClass: EXECUTION_ERROR_TRACE_ERROR_CLASS,
+    });
   });
 });
 

@@ -53,10 +53,21 @@ export function buildBrokerApp(config: BrokerServerConfig): Express {
   app.use(express.json({ limit: "2mb" }));
 
   app.get("/health", (_req, res) => {
+    const traceIngress = config.deps.traceIngressCounter?.snapshot();
     res.json({
       status: "ok",
       service: "hugin-broker",
       principals: Object.keys(config.keys),
+      ...(traceIngress
+        ? {
+            trace_ingress: {
+              invalid_reasons: {
+                forbidden_baggage: traceIngress.invalidReasons.forbiddenBaggage,
+                malformed_traceparent: traceIngress.invalidReasons.malformedTraceparent,
+              },
+            },
+          }
+        : {}),
     });
   });
 

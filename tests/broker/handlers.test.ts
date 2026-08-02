@@ -18,7 +18,10 @@ import {
   learningTaskExecutionEvidenceSchema,
 } from "../../src/learning-task-handshake.js";
 import { buildHomeserverRequestBody } from "../../src/homeserver-executor.js";
-import { parseTaskTraceContext } from "../../src/task-tracing.js";
+import {
+  TaskTraceIngressCounter,
+  parseTaskTraceContext,
+} from "../../src/task-tracing.js";
 import {
   withLearningTaskContext,
   withLearningTaskGatewayEcho,
@@ -96,6 +99,7 @@ interface Harness {
   munin: FakeMunin;
   journal: DelegationJournal;
   idempotency: IdempotencyIndex;
+  traceIngressCounter: TaskTraceIngressCounter;
   url: string;
   tmpDir: string;
   clock: { value: Date | null };
@@ -109,6 +113,7 @@ beforeEach(async () => {
   const journal = new DelegationJournal({ path: path.join(tmpDir, "events.jsonl") });
   const idempotency = new IdempotencyIndex();
   const taskStore = new BrokerTaskStore(munin as unknown as MuninClient);
+  const traceIngressCounter = new TaskTraceIngressCounter();
   const clock = { value: null as Date | null };
   const broker = await startBroker({
     host: "127.0.0.1",
@@ -124,6 +129,7 @@ beforeEach(async () => {
       journal,
       idempotency,
       executorCapabilities: brokerExecutorCapabilities({ homeserverEnabled: true }),
+      traceIngressCounter,
       now: () => clock.value ?? new Date(),
     },
   });
@@ -133,6 +139,7 @@ beforeEach(async () => {
     munin,
     journal,
     idempotency,
+    traceIngressCounter,
     tmpDir,
     url: `http://127.0.0.1:${addr.port}`,
     clock,
@@ -400,6 +407,10 @@ describe("POST /v1/delegate/submit", () => {
     });
 
     expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.warnings).toEqual([
+      "trace context sanitized: baggage header ignored",
+    ]);
     const stored = harness.munin.writes[0]?.content;
     expect(stored).toBeDefined();
     expect(parseTaskTraceContext(stored!)).toEqual({
@@ -410,6 +421,50 @@ describe("POST /v1/delegate/submit", () => {
     });
     expect(stored).not.toContain("tenant.id");
     expect(stored).not.toContain("unsafe=value");
+  });
+
+  it("derives persisted trace facts from the resolved broker task metadata", async () => {
+    const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest({ task_type: "reason-hard" })),
+    });
+
+    expect(res.status).toBe(202);
+    const stored = harness.munin.writes[0]?.content;
+    expect(parseTaskTraceContext(stored!)).toEqual({
+      traceparent: expect.stringMatching(
+        /^00-[a-f0-9]{32}-[a-f0-9]{16}-0[01]$/,
+      ),
+      taskClass: "delegation",
+      runtimeLane: "reason-hard",
+      retryOrdinal: 0,
+    });
+  });
+
+  it("surfaces malformed trace headers as bounded warnings and counters", async () => {
+    const res = await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: {
+        ...authHeader(),
+        traceparent: "00-not-a-traceparent",
+      },
+      body: JSON.stringify(validRequest()),
+    });
+
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.warnings).toEqual([
+      "trace context replaced: malformed traceparent header",
+    ]);
+    const health = await fetch(`${harness.url}/health`).then((value) => value.json());
+    expect(health.trace_ingress).toEqual({
+      invalid_reasons: {
+        forbidden_baggage: 0,
+        malformed_traceparent: 1,
+      },
+    });
+    expect(harness.munin.writes[0]?.content).not.toContain("not-a-traceparent");
   });
 
   it("persists a fresh submit atomically without a preflight Munin read", async () => {

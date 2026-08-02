@@ -13,6 +13,8 @@ export const TRACE_DEFAULT_RELEASE = "0.1.0" as const;
 export const TRACE_DEFAULT_MAX_ATTRIBUTES = 12;
 export const TRACE_DEFAULT_MAX_STRING_LENGTH = 64;
 export const TRACE_DEFAULT_MAX_PENDING_EXPORTS = 256;
+export const TRACE_DEFAULT_EXPORT_MAX_BYTES = 8 * 1024 * 1024;
+export const TRACE_DEFAULT_EXPORT_MAX_FILES = 4;
 
 const TRACEPARENT_RE =
   /^00-([a-f0-9]{32})-([a-f0-9]{16})-([a-f0-9]{2})$/;
@@ -70,6 +72,10 @@ export type TaskTraceInvalidReason =
   | "forbidden-baggage"
   | "malformed-traceparent";
 
+export type TaskTraceSamplingPolicy =
+  | "operator"
+  | "trusted-inbound";
+
 export interface ParsedTraceparent {
   traceId: string;
   spanId: string;
@@ -78,9 +84,9 @@ export interface ParsedTraceparent {
 
 export interface TaskTraceContext {
   traceparent: string;
-  taskClass: TaskTraceClass;
-  runtimeLane: TaskTraceRuntimeLane;
-  retryOrdinal: number;
+  taskClass?: TaskTraceClass;
+  runtimeLane?: TaskTraceRuntimeLane;
+  retryOrdinal?: number;
 }
 
 export interface InboundTaskTraceContext extends TaskTraceContext {
@@ -118,6 +124,12 @@ export interface TaskTraceRuntimeStats {
   exportDropped: number;
 }
 
+export interface TaskTraceRuntimeHealth extends TaskTraceRuntimeStats {
+  exportEnabled: boolean;
+  pendingExports: number;
+  sampleRatePerMille: number;
+}
+
 export interface SerializedTaskTraceSpan {
   kind: "trace-span";
   contract_version: typeof TRACEPOLICY_VERSION;
@@ -144,9 +156,9 @@ export interface SerializedTaskTraceSpan {
   sampled: true;
   outcome: TaskTraceOutcome;
   attributes: {
-    task_class: TaskTraceClass;
-    runtime_lane: TaskTraceRuntimeLane;
-    retry_ordinal: number;
+    task_class?: TaskTraceClass;
+    runtime_lane?: TaskTraceRuntimeLane;
+    retry_ordinal?: number;
     error_class?: string;
   };
   diagnostic_ref: string;
@@ -157,9 +169,9 @@ interface ActiveTaskTraceContext {
   traceId: string;
   spanId: string;
   traceFlags: string;
-  taskClass: TaskTraceClass;
-  runtimeLane: TaskTraceRuntimeLane;
-  retryOrdinal: number;
+  taskClass?: TaskTraceClass;
+  runtimeLane?: TaskTraceRuntimeLane;
+  retryOrdinal?: number;
 }
 
 export interface TaskTraceSpanOptions {
@@ -176,6 +188,48 @@ export interface EndTaskTraceSpanOptions {
   errorClass?: string;
   error?: unknown;
   endedAt?: Date;
+}
+
+export interface FileTaskTraceExporterOptions {
+  maxBytes?: number;
+  maxFiles?: number;
+}
+
+export interface TaskTraceIngressHealth {
+  invalidReasons: {
+    forbiddenBaggage: number;
+    malformedTraceparent: number;
+  };
+}
+
+export class TaskTraceIngressCounter {
+  private readonly counts: TaskTraceIngressHealth["invalidReasons"] = {
+    forbiddenBaggage: 0,
+    malformedTraceparent: 0,
+  };
+
+  noteInvalidReason(reason: TaskTraceInvalidReason): void {
+    if (reason === "forbidden-baggage") {
+      this.counts.forbiddenBaggage = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        this.counts.forbiddenBaggage + 1,
+      );
+      return;
+    }
+    this.counts.malformedTraceparent = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      this.counts.malformedTraceparent + 1,
+    );
+  }
+
+  snapshot(): TaskTraceIngressHealth {
+    return {
+      invalidReasons: {
+        forbiddenBaggage: this.counts.forbiddenBaggage,
+        malformedTraceparent: this.counts.malformedTraceparent,
+      },
+    };
+  }
 }
 
 function randomHex(bytes: number): string {
@@ -252,6 +306,20 @@ function normalizeRetryOrdinal(value: number): number {
   return Math.max(0, Math.min(10, Math.trunc(value)));
 }
 
+function normalizeTaskTraceFacts(input: {
+  taskClass?: TaskTraceClass;
+  runtimeLane?: TaskTraceRuntimeLane;
+  retryOrdinal?: number;
+}): Pick<TaskTraceContext, "taskClass" | "runtimeLane" | "retryOrdinal"> {
+  return {
+    ...(input.taskClass ? { taskClass: input.taskClass } : {}),
+    ...(input.runtimeLane ? { runtimeLane: input.runtimeLane } : {}),
+    ...(input.retryOrdinal !== undefined
+      ? { retryOrdinal: normalizeRetryOrdinal(input.retryOrdinal) }
+      : {}),
+  };
+}
+
 export function parseTraceSampleRatePerMille(
   value: string | number | undefined,
   fallback = 1000,
@@ -289,17 +357,19 @@ function diagnosticRef(serviceId: string, spanId: string): string {
 export function createInboundTaskTraceContext(input: {
   traceparent?: string;
   baggage?: string;
-  taskClass: TaskTraceClass;
-  runtimeLane: TaskTraceRuntimeLane;
-  retryOrdinal: number;
+  taskClass?: TaskTraceClass;
+  runtimeLane?: TaskTraceRuntimeLane;
+  retryOrdinal?: number;
   traceIdGenerator?: () => string;
   idGenerator?: () => string;
   sampleRatePerMille?: number;
+  samplingPolicy?: TaskTraceSamplingPolicy;
 }): InboundTaskTraceContext {
   const parsed = parseTraceparent(input.traceparent);
   const sampleRatePerMille = clampSamplingPerMille(
     input.sampleRatePerMille ?? 1000,
   );
+  const samplingPolicy = input.samplingPolicy ?? "operator";
   const baggage = input.baggage?.trim();
   const invalidReason: TaskTraceInvalidReason | undefined = parsed
     ? baggage
@@ -310,11 +380,15 @@ export function createInboundTaskTraceContext(input: {
       : baggage
         ? "forbidden-baggage"
         : undefined;
+  const facts = normalizeTaskTraceFacts(input);
   if (parsed) {
+    const sampleTraceId = samplingPolicy === "trusted-inbound"
+      ? parsed.traceId
+      : (input.traceIdGenerator ?? defaultTraceId)();
     const traceFlags = sampledFlags(shouldSample(
       sampleRatePerMille,
-      parsed.traceId,
-      parsed.traceFlags,
+      sampleTraceId,
+      samplingPolicy === "trusted-inbound" ? parsed.traceFlags : undefined,
     ));
     return {
       traceparent: formatTraceparent(
@@ -326,9 +400,7 @@ export function createInboundTaskTraceContext(input: {
       spanId: parsed.spanId,
       parentSpanId: parsed.spanId,
       traceFlags,
-      taskClass: input.taskClass,
-      runtimeLane: input.runtimeLane,
-      retryOrdinal: normalizeRetryOrdinal(input.retryOrdinal),
+      ...facts,
       ...(invalidReason ? { invalidReason } : {}),
     };
   }
@@ -340,9 +412,7 @@ export function createInboundTaskTraceContext(input: {
     traceId,
     spanId,
     traceFlags,
-    taskClass: input.taskClass,
-    runtimeLane: input.runtimeLane,
-    retryOrdinal: normalizeRetryOrdinal(input.retryOrdinal),
+    ...facts,
     ...(invalidReason ? { invalidReason } : {}),
   };
 }
@@ -350,14 +420,17 @@ export function createInboundTaskTraceContext(input: {
 export function buildTaskTraceContextSection(
   context: TaskTraceContext,
 ): string {
+  const facts = normalizeTaskTraceFacts(context);
   return [
     "### Trace context",
     "```json",
     JSON.stringify({
       traceparent: context.traceparent,
-      task_class: context.taskClass,
-      runtime_lane: context.runtimeLane,
-      retry_ordinal: normalizeRetryOrdinal(context.retryOrdinal),
+      ...(facts.taskClass ? { task_class: facts.taskClass } : {}),
+      ...(facts.runtimeLane ? { runtime_lane: facts.runtimeLane } : {}),
+      ...(facts.retryOrdinal !== undefined
+        ? { retry_ordinal: facts.retryOrdinal }
+        : {}),
     }, null, 2),
     "```",
   ].join("\n");
@@ -369,15 +442,14 @@ export function buildChildTaskTraceContext(
 ): TaskTraceContext | null {
   const parsed = parseTraceparent(traceparent);
   if (!parsed) return null;
+  const facts = normalizeTaskTraceFacts(context);
   return {
     traceparent: formatTraceparent(
       parsed.traceId,
       parsed.spanId,
       parsed.traceFlags,
     ),
-    taskClass: context.taskClass,
-    runtimeLane: context.runtimeLane,
-    retryOrdinal: normalizeRetryOrdinal(context.retryOrdinal),
+    ...facts,
   };
 }
 
@@ -395,16 +467,25 @@ export function parseTaskTraceContext(
     };
     if (typeof parsed.traceparent !== "string") return null;
     if (!parseTraceparent(parsed.traceparent)) return null;
-    if (typeof parsed.task_class !== "string") return null;
-    if (!isTaskTraceClass(parsed.task_class)) return null;
-    if (typeof parsed.runtime_lane !== "string") return null;
-    if (!isTaskTraceRuntimeLane(parsed.runtime_lane)) return null;
-    if (typeof parsed.retry_ordinal !== "number") return null;
+    if (
+      parsed.task_class !== undefined &&
+      (typeof parsed.task_class !== "string" || !isTaskTraceClass(parsed.task_class))
+    ) return null;
+    if (
+      parsed.runtime_lane !== undefined &&
+      (typeof parsed.runtime_lane !== "string" || !isTaskTraceRuntimeLane(parsed.runtime_lane))
+    ) return null;
+    if (
+      parsed.retry_ordinal !== undefined &&
+      typeof parsed.retry_ordinal !== "number"
+    ) return null;
     return {
       traceparent: parsed.traceparent,
-      taskClass: parsed.task_class,
-      runtimeLane: parsed.runtime_lane,
-      retryOrdinal: normalizeRetryOrdinal(parsed.retry_ordinal),
+      ...(parsed.task_class ? { taskClass: parsed.task_class } : {}),
+      ...(parsed.runtime_lane ? { runtimeLane: parsed.runtime_lane } : {}),
+      ...(parsed.retry_ordinal !== undefined
+        ? { retryOrdinal: normalizeRetryOrdinal(parsed.retry_ordinal) }
+        : {}),
     };
   } catch {
     return null;
@@ -414,22 +495,61 @@ export function parseTaskTraceContext(
 async function appendJsonLine(
   exportPath: string,
   value: SerializedTaskTraceSpan,
+  options: FileTaskTraceExporterOptions,
 ): Promise<void> {
+  const maxBytes = Math.max(
+    1,
+    Math.min(
+      1024 * 1024 * 1024,
+      Math.trunc(options.maxBytes ?? TRACE_DEFAULT_EXPORT_MAX_BYTES),
+    ),
+  );
+  const maxFiles = Math.max(
+    1,
+    Math.min(16, Math.trunc(options.maxFiles ?? TRACE_DEFAULT_EXPORT_MAX_FILES)),
+  );
+  const line = `${JSON.stringify(value)}\n`;
   await fs.mkdir(path.dirname(exportPath), { recursive: true });
+  const lineBytes = Buffer.byteLength(line, "utf8");
+  let currentSize = 0;
+  try {
+    currentSize = (await fs.stat(exportPath)).size;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") throw err;
+  }
+  if (currentSize > 0 && currentSize + lineBytes > maxBytes) {
+    const archiveCount = maxFiles - 1;
+    if (archiveCount <= 0) {
+      await fs.rm(exportPath, { force: true });
+    } else {
+      await fs.rm(`${exportPath}.${archiveCount}`, { force: true });
+      for (let index = archiveCount - 1; index >= 1; index -= 1) {
+        try {
+          await fs.rename(`${exportPath}.${index}`, `${exportPath}.${index + 1}`);
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code !== "ENOENT") throw err;
+        }
+      }
+      await fs.rename(exportPath, `${exportPath}.1`);
+    }
+  }
   await fs.appendFile(
     exportPath,
-    `${JSON.stringify(value)}\n`,
+    line,
     "utf8",
   );
 }
 
 export function createFileTaskTraceExporter(
   exportPath: string | undefined,
+  options: FileTaskTraceExporterOptions = {},
 ): TaskTraceExporter | undefined {
   const trimmed = exportPath?.trim();
   if (!trimmed) return undefined;
   return {
-    exportSpan: async (span) => appendJsonLine(trimmed, span),
+    exportSpan: async (span) => appendJsonLine(trimmed, span, options),
   };
 }
 
@@ -492,20 +612,30 @@ export class TaskTraceRuntime {
     this.now = options.now ?? (() => new Date());
   }
 
+  getHealth(): TaskTraceRuntimeHealth {
+    return {
+      exportEnabled: this.exportEnabled,
+      sampleRatePerMille: this.sampleRatePerMille,
+      exportFailures: this.stats.exportFailures,
+      exportDropped: this.stats.exportDropped,
+      pendingExports: this.exportQueue.length,
+    };
+  }
+
   startSpan(options: TaskTraceSpanOptions): TaskTraceSpan {
     const inherited = this.context.getStore();
     const explicitContext = options.taskContext
       ? parseTraceparent(options.taskContext.traceparent)
       : null;
     const taskClass = options.taskContext?.taskClass
-      ?? inherited?.taskClass
-      ?? "read_only";
+      ?? inherited?.taskClass;
     const runtimeLane = options.taskContext?.runtimeLane
-      ?? inherited?.runtimeLane
-      ?? "default";
-    const retryOrdinal = normalizeRetryOrdinal(
-      options.taskContext?.retryOrdinal ?? inherited?.retryOrdinal ?? 0,
-    );
+      ?? inherited?.runtimeLane;
+    const retryOrdinalSource =
+      options.taskContext?.retryOrdinal ?? inherited?.retryOrdinal;
+    const retryOrdinal = retryOrdinalSource !== undefined
+      ? normalizeRetryOrdinal(retryOrdinalSource)
+      : undefined;
 
     const traceId = explicitContext?.traceId
       ?? inherited?.traceId
@@ -522,9 +652,9 @@ export class TaskTraceRuntime {
       traceId,
       spanId,
       traceFlags,
-      taskClass,
-      runtimeLane,
-      retryOrdinal,
+      ...(taskClass ? { taskClass } : {}),
+      ...(runtimeLane ? { runtimeLane } : {}),
+      ...(retryOrdinal !== undefined ? { retryOrdinal } : {}),
     };
     return new TaskTraceSpan(this, {
       name: options.name,
@@ -534,9 +664,9 @@ export class TaskTraceRuntime {
       spanId,
       parentSpanId,
       traceFlags,
-      taskClass,
-      runtimeLane,
-      retryOrdinal,
+      ...(taskClass ? { taskClass } : {}),
+      ...(runtimeLane ? { runtimeLane } : {}),
+      ...(retryOrdinal !== undefined ? { retryOrdinal } : {}),
       activeContext,
       startedAt: options.startedAt ?? this.now(),
     });
@@ -630,9 +760,9 @@ export class TaskTraceSpan {
       spanId: string;
       parentSpanId?: string;
       traceFlags: string;
-      taskClass: TaskTraceClass;
-      runtimeLane: TaskTraceRuntimeLane;
-      retryOrdinal: number;
+      taskClass?: TaskTraceClass;
+      runtimeLane?: TaskTraceRuntimeLane;
+      retryOrdinal?: number;
       activeContext: ActiveTaskTraceContext;
       startedAt: Date;
     },
@@ -668,9 +798,11 @@ export class TaskTraceSpan {
       ? this.endedAt
       : this.state.startedAt;
     const attributes: SerializedTaskTraceSpan["attributes"] = {
-      task_class: this.state.taskClass,
-      runtime_lane: this.state.runtimeLane,
-      retry_ordinal: this.state.retryOrdinal,
+      ...(this.state.taskClass ? { task_class: this.state.taskClass } : {}),
+      ...(this.state.runtimeLane ? { runtime_lane: this.state.runtimeLane } : {}),
+      ...(this.state.retryOrdinal !== undefined
+        ? { retry_ordinal: this.state.retryOrdinal }
+        : {}),
     };
     if (this.errorClass) {
       attributes.error_class = this.errorClass;

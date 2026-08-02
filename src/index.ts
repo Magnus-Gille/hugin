@@ -14,6 +14,7 @@ import {
 import { startHeimdallPanelReporter } from "./heimdall-report.js";
 import {
   TaskTraceRuntime,
+  TaskTraceIngressCounter,
   buildChildTaskTraceContext,
   createFileTaskTraceExporter,
   endTaskSpan,
@@ -32,7 +33,7 @@ import {
   type MuninClientConfig,
   type MuninReadResult,
 } from "./munin-client.js";
-import { getFoundBatchEntry, extractTaskId, pickEarliestTask, listEligibleTasks, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, prepareManagedCheckout, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, deriveResultRecordingTraceOutcome, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, parseBoundedPositiveInt, PUBLICATION_FAILED_TAG } from "./task-helpers.js";
+import { getFoundBatchEntry, extractTaskId, pickEarliestTask, listEligibleTasks, checkoutTaskBranch, finalizeTaskBranch, deriveRepositoryOutcome, prepareManagedCheckout, shouldReapExpiredLease, decideStartupRecovery, decideDeliveryRetry, finalizeTaskCompletion, deriveReportedTaskStartedAt, deriveResultRecordingTraceOutcome, finalizeExecutionTraceOutcome, resolveTaskWorkingDirectory, normalizeRoot, parseBaseBranchOverride, DEFAULT_REPOS_ROOT, MAX_TASK_OUTPUT_TOKENS, MAX_TASK_TIMEOUT_MS, RESULT_RECORDING_TRACE_ERROR_CLASS, parseBoundedPositiveInt, PUBLICATION_FAILED_TAG } from "./task-helpers.js";
 import { persistPublicationFailure } from "./publication-recovery.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
 import {
@@ -624,15 +625,28 @@ const LEASE_REAPER_INTERVAL_MS = 60_000; // scan for expired foreign leases ever
 // in-flight tasks immediately. The PID is retained separately for observability.
 const workerId = `hugin-${os.hostname()}`;
 const processInstanceId = `${workerId}-${process.pid}`;
+const taskTraceExportPath = process.env.HUGIN_TRACE_EXPORT_PATH?.trim();
 const taskTraceRuntime = new TaskTraceRuntime({
-  exportEnabled: Boolean(process.env.HUGIN_TRACE_EXPORT_PATH?.trim()),
+  exportEnabled: Boolean(taskTraceExportPath),
   sampleRatePerMille: parseTraceSampleRatePerMille(
     process.env.HUGIN_TRACE_SAMPLE_RATE_PER_MILLE,
   ),
   release: HEIMDALL_DESCRIPTOR.version,
   instanceId: workerId,
-  exporter: createFileTaskTraceExporter(process.env.HUGIN_TRACE_EXPORT_PATH),
+  exporter: createFileTaskTraceExporter(taskTraceExportPath, {
+    maxBytes: parseBoundedPositiveInt(
+      process.env.HUGIN_TRACE_EXPORT_MAX_BYTES,
+      8 * 1024 * 1024,
+      256 * 1024 * 1024,
+    ),
+    maxFiles: parseBoundedPositiveInt(
+      process.env.HUGIN_TRACE_EXPORT_MAX_FILES,
+      4,
+      16,
+    ),
+  }),
 });
+const brokerTraceIngressCounter = new TaskTraceIngressCounter();
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -5117,12 +5131,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   // Execution begins only after queue handling has completed. Use a fresh
   // local observation rather than the (possibly skewed) persisted claim time,
   // so queue and execution remain distinct latency categories.
-  const startedAt = new Date().toISOString();
+  const executionStartedAtObserved = new Date();
+  const startedAt = deriveReportedTaskStartedAt(
+    claimAcceptedAt,
+    executionStartedAtObserved,
+  );
   const executionSpan = startTaskLifecycleSpan(
     inboundTaskTraceContext,
     "task.execution",
     "execution",
-    traceDate(startedAt),
+    executionStartedAtObserved,
   );
   const executionTraceContext = executionSpan && inboundTaskTraceContext
     ? buildChildTaskTraceContext(executionSpan.traceparent, inboundTaskTraceContext)
@@ -6898,6 +6916,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         terminalStructuredResultOk = cancelledFinalize.structuredResultOk;
       } catch (err) {
         await finishTaskLifecycleSpan(resultRecordingSpan, "failed", "result-recording-error");
+        executionTraceOutcome = "failed";
+        executionTraceErrorClass = RESULT_RECORDING_TRACE_ERROR_CLASS;
         throw err;
       }
     } else {
@@ -7013,6 +7033,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         terminalStructuredResultOk = finalizeOutcome.structuredResultOk;
       } catch (err) {
         await finishTaskLifecycleSpan(resultRecordingSpan, "failed", "result-recording-error");
+        executionTraceOutcome = "failed";
+        executionTraceErrorClass = RESULT_RECORDING_TRACE_ERROR_CLASS;
         throw err;
       }
     }
@@ -7147,12 +7169,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     return { hadTask: true, queueDepth };
   } finally {
     if (executionSpan) {
+      const finalizedExecutionTrace = finalizeExecutionTraceOutcome({
+        outcome: executionTraceOutcome,
+        errorClass: executionTraceErrorClass,
+      });
       await finishTaskLifecycleSpan(
         executionSpan,
-        executionTraceOutcome === "unknown" ? "failed" : executionTraceOutcome,
-        executionTraceOutcome === "unknown"
-          ? executionTraceErrorClass ?? "execution-error"
-          : executionTraceErrorClass,
+        finalizedExecutionTrace.outcome,
+        finalizedExecutionTrace.errorClass,
       );
     }
     stopLeaseRenewal();
@@ -7306,6 +7330,7 @@ async function pollLoop(): Promise<void> {
 const app = express();
 
 app.get("/health", (_req, res) => {
+  const traceHealth = taskTraceRuntime.getHealth();
   res.json({
     status: "ok",
     service: "hugin",
@@ -7319,6 +7344,15 @@ app.get("/health", (_req, res) => {
     egress_policy: {
       enabled: egressPolicy.enabled,
       allowed_hosts: egressPolicy.allowedHosts,
+    },
+    tracing: {
+      export_enabled: traceHealth.exportEnabled,
+      sample_rate_per_mille: traceHealth.sampleRatePerMille,
+      export: {
+        failures: traceHealth.exportFailures,
+        dropped: traceHealth.exportDropped,
+        pending: traceHealth.pendingExports,
+      },
     },
     codex_sandbox: codexSandboxStatus
       ? {
@@ -7598,7 +7632,13 @@ if (brokerEnv.enabled) {
       port: brokerEnv.port,
       keys: brokerEnv.keys,
       learningStore,
-      deps: { taskStore, journal, idempotency, executorCapabilities },
+      deps: {
+        taskStore,
+        journal,
+        idempotency,
+        executorCapabilities,
+        traceIngressCounter: brokerTraceIngressCounter,
+      },
     },
     {
       signal: brokerBindAbort.signal,

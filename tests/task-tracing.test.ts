@@ -1,3 +1,7 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -8,6 +12,7 @@ import {
   TaskTraceRuntime,
   buildChildTaskTraceContext,
   buildTaskTraceContextSection,
+  createFileTaskTraceExporter,
   createInboundTaskTraceContext,
   endTaskSpan,
   parseTaskTraceContext,
@@ -62,13 +67,14 @@ describe("task tracing", () => {
     expect(context.invalidReason).toBe("malformed-traceparent");
   });
 
-  it("applies a deterministic per-mille cap to roots and sampled parents", () => {
+  it("applies a deterministic per-mille cap to roots and trusted inbound parents", () => {
     const sampled = createInboundTaskTraceContext({
       traceparent: `00-${"000000f9".padEnd(32, "1")}-1111111111111111-01`,
       taskClass: "delegation",
       runtimeLane: "default",
       retryOrdinal: 0,
       sampleRatePerMille: 250,
+      samplingPolicy: "trusted-inbound",
     });
     const droppedAtBoundary = createInboundTaskTraceContext({
       traceparent: `00-${"000000fa".padEnd(32, "1")}-1111111111111111-01`,
@@ -76,6 +82,7 @@ describe("task tracing", () => {
       runtimeLane: "default",
       retryOrdinal: 0,
       sampleRatePerMille: 250,
+      samplingPolicy: "trusted-inbound",
     });
     const disabled = createInboundTaskTraceContext({
       traceparent: CONTENT_BLIND_TRACEPARENT,
@@ -88,6 +95,22 @@ describe("task tracing", () => {
     expect(sampled.traceFlags).toBe("01");
     expect(droppedAtBoundary.traceFlags).toBe("00");
     expect(disabled.traceFlags).toBe("00");
+  });
+
+  it("enforces operator sampling instead of trusting inbound flags or trace-id steering", () => {
+    const forcedOn = createInboundTaskTraceContext({
+      traceparent: `00-${"ffffffff".padEnd(32, "f")}-1111111111111111-00`,
+      sampleRatePerMille: 250,
+      traceIdGenerator: () => "000000f9".padEnd(32, "1"),
+    });
+    const steeredOff = createInboundTaskTraceContext({
+      traceparent: `00-${"000000fa".padEnd(32, "1")}-2222222222222222-01`,
+      sampleRatePerMille: 250,
+      traceIdGenerator: () => "000000f9".padEnd(32, "1"),
+    });
+
+    expect(forcedOn.traceFlags).toBe("01");
+    expect(steeredOff.traceFlags).toBe("01");
   });
 
   it("round-trips the persisted task trace context section", () => {
@@ -104,6 +127,17 @@ describe("task tracing", () => {
       taskClass: "delegation",
       runtimeLane: "default",
       retryOrdinal: 2,
+    });
+  });
+
+  it("round-trips the persisted task trace context section when task facts are unavailable", () => {
+    const section = buildTaskTraceContextSection({
+      traceparent: CONTENT_BLIND_TRACEPARENT,
+    });
+    const content = taskWithTraceContext(section);
+
+    expect(parseTaskTraceContext(content)).toEqual({
+      traceparent: CONTENT_BLIND_TRACEPARENT,
     });
   });
 
@@ -324,6 +358,13 @@ describe("task tracing", () => {
     await expect(endTaskSpan(span, { outcome: "ok" })).resolves.toBeUndefined();
     await runtime.flushExportsForTest();
     expect(runtime.stats.exportFailures).toBe(1);
+    expect(runtime.getHealth()).toMatchObject({
+      exportEnabled: true,
+      sampleRatePerMille: 1000,
+      exportFailures: 1,
+      exportDropped: 0,
+      pendingExports: 0,
+    });
   });
 
   it("clamps future span starts to the observed end boundary", async () => {
@@ -401,6 +442,92 @@ describe("task tracing", () => {
     expect(await completion(makeSpan())).toBe("done");
     expect(exporter.exportSpan).toHaveBeenCalledTimes(1);
     expect(runtime.stats.exportDropped).toBe(1);
+    expect(runtime.getHealth()).toMatchObject({
+      exportDropped: 1,
+      pendingExports: 2,
+    });
+  });
+
+  it("omits unresolved task facts instead of hardcoding defaults", async () => {
+    const runtime = new TaskTraceRuntime({
+      exportEnabled: false,
+      sampleRatePerMille: 1000,
+      release: "git-test",
+      traceIdGenerator: () => "56565656565656565656565656565656",
+      idGenerator: () => "7878787878787878",
+      now: () => new Date("2026-08-01T12:00:00Z"),
+    });
+    const span = runtime.startSpan({
+      name: "task.execution",
+      surface: "task",
+      phase: "execution",
+      taskContext: {
+        traceparent: CONTENT_BLIND_TRACEPARENT,
+      },
+    });
+
+    await endTaskSpan(span, { outcome: "ok" });
+    expect(span.serialize()?.attributes).toEqual({});
+  });
+
+  it("rotates file exports and bounds on-disk growth", async () => {
+    const tmpPath = await mkdtemp(path.join(tmpdir(), "hugin-trace-export-"));
+    const exportPath = path.join(tmpPath, "trace.jsonl");
+
+    try {
+      const baseSpan = {
+        kind: "trace-span" as const,
+        contract_version: "v1.0" as const,
+        policy_id: "trace-policy-hugin" as const,
+        source: {
+          source_kind: "service_internal" as const,
+          producer: "hugin",
+          producer_version: "git-test",
+        },
+        service: {
+          service_id: "hugin",
+          instance_id: "huginmunin",
+        },
+        trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
+        operation: {
+          surface: "task" as const,
+          phase: "execution" as const,
+        },
+        started_at: "2026-08-01T12:00:00Z",
+        ended_at: "2026-08-01T12:00:01Z",
+        collected_at: "2026-08-01T12:00:01Z",
+        sampled: true as const,
+        outcome: "ok" as const,
+        attributes: {
+          task_class: "delegation" as const,
+          runtime_lane: "default" as const,
+          retry_ordinal: 0,
+        },
+        diagnostic_ref: "ref:hugin-trace-test",
+        extensions: [] as [],
+      };
+      const maxBytes = Buffer.byteLength(
+        `${JSON.stringify({ ...baseSpan, span_id: "1111111111111111" })}\n`,
+        "utf8",
+      ) + 16;
+      const exporter = createFileTaskTraceExporter(exportPath, {
+        maxBytes,
+        maxFiles: 3,
+      });
+      expect(exporter).toBeDefined();
+
+      await exporter!.exportSpan({ ...baseSpan, span_id: "1111111111111111" });
+      await exporter!.exportSpan({ ...baseSpan, span_id: "2222222222222222" });
+      await exporter!.exportSpan({ ...baseSpan, span_id: "3333333333333333" });
+      await exporter!.exportSpan({ ...baseSpan, span_id: "4444444444444444" });
+
+      expect(await readFile(exportPath, "utf8")).toContain("\"span_id\":\"4444444444444444\"");
+      expect(await readFile(`${exportPath}.1`, "utf8")).toContain("\"span_id\":\"3333333333333333\"");
+      expect(await readFile(`${exportPath}.2`, "utf8")).toContain("\"span_id\":\"2222222222222222\"");
+      await expect(readFile(`${exportPath}.3`, "utf8")).rejects.toThrow();
+    } finally {
+      await rm(tmpPath, { recursive: true, force: true });
+    }
   });
 
   it("flushes queued exports deterministically in tests", async () => {
