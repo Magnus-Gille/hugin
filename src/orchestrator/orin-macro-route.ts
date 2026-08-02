@@ -7,6 +7,7 @@
  */
 
 import type { Sensitivity } from "../sensitivity.js";
+import { selectHuginMacroRoute } from "../autonomy/hugin-config-adapter.js";
 
 export const ORIN_NODE_ID = "orin";
 export const ORIN_MODEL_ID = "qwen2.5-coder:3b";
@@ -15,8 +16,6 @@ export interface OrinWorkerRoute {
   nodeId: typeof ORIN_NODE_ID;
   modelId: typeof ORIN_MODEL_ID;
 }
-
-const REVIEWED_TASK_TYPES = new Set(["classify", "extract"]);
 
 /**
  * Return the explicit gateway node pin for a reviewed small leaf, or null to
@@ -29,8 +28,5 @@ export function selectOrinMacroRoute(input: {
   taskType: string;
   sensitivity: Sensitivity;
 }): OrinWorkerRoute | null {
-  if (input.workerProvider !== "homeserver") return null;
-  if (input.sensitivity === "private") return null;
-  if (!REVIEWED_TASK_TYPES.has(input.taskType)) return null;
-  return { nodeId: ORIN_NODE_ID, modelId: ORIN_MODEL_ID };
+  return selectHuginMacroRoute(input);
 }

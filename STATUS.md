@@ -1,5 +1,37 @@
 # Hugin — Status
 
+## 2026-07-28 — #336 W5 roster provenance verification (draft PR #337)
+
+- Branch `codex/issue-336-roster-producer` restores W4 receipt verification
+  before Hugin emits an outer Ed25519 provenance signature. The trusted W4
+  key store, protected combined-Gille base provider, and protected clock are
+  composition-owned dependencies; caller content cannot provide or substitute
+  verifier authority.
+- The producer fails closed for missing/invalid dependencies, invalid HMAC,
+  expiry, invalid clocks, stale bases, and evidence mismatches. The current
+  base remains bound with the combined baseline, candidate/evidence,
+  policy/constitution, principal, and complete proposal content.
+- Regenerated fixture-only positive, adversarial, and public-key artifacts are
+  byte-pinned. No actuator, deployment, trust-root configuration, arming, or
+  live canary occurred.
+
+**Verification:** focused roster producer suite (23 tests), `npm run build`,
+and full `npm test` (162 files / 2,535 tests) passed. `git diff --check` passed.
+
+**Next:** commit and push the verified draft-PR head, then obtain independent
+review and green GitHub CI before any merge decision.
+
+## 2026-07-26 — #324 legacy daily journal analysis retired (pending merge/deploy)
+
+- Branch `codex/retire-daily-journal-analysis` removes the legacy system timer,
+  service, submission shell script, bounded input builder, and their dedicated
+  tests. A systemd-unit regression test now guards against restoring any of those
+  executable artifacts. The generic dispatcher `Group: daily-analysis` parser is
+  unrelated and intentionally remains.
+- Post-merge host action remains required: disable and stop
+  `hugin-daily-analysis.timer`, then verify both `is-enabled` and `is-active`
+  report inactive/disabled. This branch does not mutate the control host.
+
 **Latest session:** 2026-07-15 (Codex) — **Quality Receipt v1 merged,
 deployed, and live**
 **Production feature tree:** `935a10abb6adc00d1fbf6715569295f335d2245d`
