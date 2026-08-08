@@ -170,6 +170,9 @@ scheduling, and pipeline phases.
   Planned path from security-scan results to autonomous dependency PRs.
 - [OpenAI privacy filter eval design](design/openai-privacy-filter-eval.md):
   Evaluation plan for local PII redaction using an OpenAI privacy-filter lane.
+- [Quality-efficient agent orchestration plan](design/quality-efficient-agent-orchestration-plan.md):
+  Evaluation and implementation plan for evidence-gated routing across
+  conductor, worker, verifier, and reviewer roles.
 - [Skill distillation implementation spec](design/skill-distillation-implementation.md):
   Planned RouteBinding/TaskClassifier implementation for eval-gated skill
   distillation.
@@ -199,3 +202,6 @@ scheduling, and pipeline phases.
   Historical scope doc superseded by the v1 data-model contract.
 - [Orchestrator sweep](research/orchestrator-sweep.md): Adopt-vs-DIY research
   on multi-host placement for Hugin.
+- [Quality-efficient agent orchestration](research/quality-efficient-agent-orchestration-2026-08.md):
+  Dated research and adversarial debate on allocating differently constrained
+  model capacity for quality with limited human intervention.
