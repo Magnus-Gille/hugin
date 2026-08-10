@@ -32,6 +32,7 @@ import { createGilleOutcomeExportClient } from "./learning/experiment-outcome-ex
 import { createCandidatePoolAssembler } from "./learning/candidate-pool-assembler.js";
 import { createGilleOutcomeEvidenceResolver } from "./learning/gille-outcome-evidence-resolver.js";
 import { runExperimentCadenceTick, type CadenceTickResult } from "./learning/experiment-cadence.js";
+import { waitForMuninReadiness } from "./experiment-cadence-readiness.js";
 
 export const DEFAULT_CADENCE_PRINCIPAL = "service:hugin-experiment-cadence";
 
@@ -115,6 +116,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     baseUrl: process.env.MUNIN_URL?.trim() || "http://localhost:3030",
     apiKey,
   });
+
+  // systemd can start this timer while Munin is still completing boot. Keep
+  // the bounded startup retry on the experiment cadence path only; the daily
+  // exam factory has a separate service and lifecycle.
+  await waitForMuninReadiness(munin);
 
   const registry = new LearningRegistryStore(munin);
   const experimentStore = new LearningExperimentStore(munin);

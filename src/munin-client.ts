@@ -47,6 +47,10 @@ export interface MuninRequestOptions {
   maxRetries?: number;
 }
 
+export interface MuninHealthOptions {
+  requestTimeoutMs?: number;
+}
+
 export type MuninReadResult =
   | (MuninEntry & { found: true })
   | { namespace: string; key: string; found: false };
@@ -504,9 +508,12 @@ export class MuninClient {
     await this.callTool("memory_log", args);
   }
 
-  async health(): Promise<boolean> {
+  async health(options: MuninHealthOptions = {}): Promise<boolean> {
+    const timeoutMs = options.requestTimeoutMs ?? this.requestTimeoutMs;
     try {
-      const res = await fetch(`${this.baseUrl}/health`);
+      const res = await fetch(`${this.baseUrl}/health`, {
+        signal: AbortSignal.timeout(timeoutMs),
+      });
       return res.ok;
     } catch {
       return false;
