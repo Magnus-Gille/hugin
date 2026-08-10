@@ -32,6 +32,50 @@ interface CliOptions {
   output?: string;
 }
 
+export interface MuninStartupReadinessOptions {
+  /** Total number of full harvest attempts, including the first call. */
+  maxAttempts?: number;
+  /** Fixed delay between attempts; kept deterministic and bounded for oneshot use. */
+  retryDelayMs?: number;
+  sleep?: (delayMs: number) => Promise<void>;
+}
+
+const DAILY_EXAM_MUNIN_STARTUP_MAX_ATTEMPTS = 3;
+const DAILY_EXAM_MUNIN_STARTUP_RETRY_DELAY_MS = 1_000;
+
+/**
+ * Munin's service unit can be started before its HTTP endpoint accepts work.
+ * Retry the complete read-only harvest a small, explicit number of times so a
+ * boot-time race does not leave the daily manifest stale, while still letting
+ * persistent failures reach systemd's oneshot failure handling.
+ */
+export async function runWithMuninStartupReadiness<T>(
+  operation: () => Promise<T>,
+  options: MuninStartupReadinessOptions = {},
+): Promise<T> {
+  const maxAttempts = options.maxAttempts ?? DAILY_EXAM_MUNIN_STARTUP_MAX_ATTEMPTS;
+  const retryDelayMs = options.retryDelayMs ?? DAILY_EXAM_MUNIN_STARTUP_RETRY_DELAY_MS;
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error("Munin startup readiness maxAttempts must be a positive integer");
+  }
+  if (!Number.isInteger(retryDelayMs) || retryDelayMs < 0) {
+    throw new Error("Munin startup readiness retryDelayMs must be a non-negative integer");
+  }
+  const sleep = options.sleep ?? ((delayMs: number) => new Promise<void>((resolve) => {
+    setTimeout(resolve, delayMs);
+  }));
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt === maxAttempts) throw error;
+      await sleep(retryDelayMs);
+    }
+  }
+  throw new Error("Munin startup readiness exhausted without an attempt");
+}
+
 function usage(): string {
   return [
     "Usage: npm run harvest:daily-exams -- [options]",
@@ -185,7 +229,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     baseUrl: process.env.MUNIN_URL?.trim() || "http://localhost:3030",
     apiKey,
   });
-  const loaded = await loadSources(munin, options);
+  const loaded = await runWithMuninStartupReadiness(() => loadSources(munin, options));
   const generatedAt = new Date().toISOString();
   const provisionalManifest = buildDailyExamManifest({
     generatedAt,

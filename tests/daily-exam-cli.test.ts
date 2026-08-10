@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   parseArgs,
+  runWithMuninStartupReadiness,
   taskExposureFingerprintsForLookup,
   writeManifestFile,
 } from "../src/daily-exam-harvest-cli.js";
@@ -47,6 +48,48 @@ describe("daily exam factory CLI", () => {
   it("rejects unbounded or unknown options", () => {
     expect(() => parseArgs(["--limit", "10001"])).toThrow("--limit");
     expect(() => parseArgs(["--publish", "yes"])).toThrow("unknown option");
+  });
+
+  it("retries a boot-time Munin timeout until the endpoint is ready", async () => {
+    let attempts = 0;
+    const delays: number[] = [];
+
+    await expect(runWithMuninStartupReadiness(
+      async () => {
+        attempts += 1;
+        if (attempts < 3) throw new Error("Munin request timed out after 10000ms");
+        return "ready";
+      },
+      {
+        maxAttempts: 3,
+        retryDelayMs: 25,
+        sleep: async (delayMs) => { delays.push(delayMs); },
+      },
+    )).resolves.toBe("ready");
+
+    expect(attempts).toBe(3);
+    expect(delays).toEqual([25, 25]);
+  });
+
+  it("fails closed after the bounded Munin readiness budget", async () => {
+    const failure = new Error("Munin request timed out after 10000ms");
+    let attempts = 0;
+    const delays: number[] = [];
+
+    await expect(runWithMuninStartupReadiness(
+      async () => {
+        attempts += 1;
+        throw failure;
+      },
+      {
+        maxAttempts: 2,
+        retryDelayMs: 25,
+        sleep: async (delayMs) => { delays.push(delayMs); },
+      },
+    )).rejects.toBe(failure);
+
+    expect(attempts).toBe(2);
+    expect(delays).toEqual([25]);
   });
 
   it("queries only unique provisional fingerprints and smokes an empty eligible day", () => {
