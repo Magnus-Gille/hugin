@@ -603,4 +603,24 @@ describe("MuninClient", () => {
     await first;
     await second;
   });
+
+  it("bounds unauthenticated health probes with the requested timeout", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const signal = (init as RequestInit).signal!;
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) resolve();
+        else signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      throw signal.reason;
+    });
+    const client = new MuninClient({
+      baseUrl: "http://munin.test",
+      apiKey: "test-key",
+      minRequestSpacingMs: 0,
+    });
+
+    await expect(client.health({ requestTimeoutMs: 1 })).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
+  });
 });
