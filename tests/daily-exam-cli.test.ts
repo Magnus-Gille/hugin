@@ -51,13 +51,17 @@ describe("daily exam factory CLI", () => {
   });
 
   it("retries a boot-time Munin timeout until the endpoint is ready", async () => {
-    let attempts = 0;
+    let probeAttempts = 0;
+    let harvestAttempts = 0;
     const delays: number[] = [];
 
     await expect(runWithMuninStartupReadiness(
       async () => {
-        attempts += 1;
-        if (attempts < 3) throw new Error("Munin request timed out after 10000ms");
+        probeAttempts += 1;
+        return probeAttempts >= 3;
+      },
+      async () => {
+        harvestAttempts += 1;
         return "ready";
       },
       {
@@ -67,20 +71,22 @@ describe("daily exam factory CLI", () => {
       },
     )).resolves.toBe("ready");
 
-    expect(attempts).toBe(3);
+    expect(probeAttempts).toBe(3);
+    expect(harvestAttempts).toBe(1);
     expect(delays).toEqual([25, 25]);
   });
 
   it("fails closed after the bounded Munin readiness budget", async () => {
     const failure = new Error("Munin request timed out after 10000ms");
-    let attempts = 0;
+    let probeAttempts = 0;
     const delays: number[] = [];
 
     await expect(runWithMuninStartupReadiness(
       async () => {
-        attempts += 1;
+        probeAttempts += 1;
         throw failure;
       },
+      async () => "unreachable",
       {
         maxAttempts: 2,
         retryDelayMs: 25,
@@ -88,8 +94,29 @@ describe("daily exam factory CLI", () => {
       },
     )).rejects.toBe(failure);
 
-    expect(attempts).toBe(2);
+    expect(probeAttempts).toBe(2);
     expect(delays).toEqual([25]);
+  });
+
+  it("does not restart a harvest while its first in-flight work remains", async () => {
+    const failure = new Error("Munin harvest branch failed");
+    let harvestStarts = 0;
+    let releaseInFlight!: () => void;
+    const inFlight = new Promise<void>((resolve) => { releaseInFlight = resolve; });
+
+    await expect(runWithMuninStartupReadiness(
+      async () => true,
+      async () => {
+        harvestStarts += 1;
+        void inFlight;
+        throw failure;
+      },
+      { maxAttempts: 3, retryDelayMs: 25, sleep: async () => {} },
+    )).rejects.toBe(failure);
+
+    expect(harvestStarts).toBe(1);
+    releaseInFlight();
+    await inFlight;
   });
 
   it("queries only unique provisional fingerprints and smokes an empty eligible day", () => {
