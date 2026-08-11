@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   parseArgs,
+  runWithMuninStartupReadiness,
   taskExposureFingerprintsForLookup,
   writeManifestFile,
 } from "../src/daily-exam-harvest-cli.js";
@@ -47,6 +48,75 @@ describe("daily exam factory CLI", () => {
   it("rejects unbounded or unknown options", () => {
     expect(() => parseArgs(["--limit", "10001"])).toThrow("--limit");
     expect(() => parseArgs(["--publish", "yes"])).toThrow("unknown option");
+  });
+
+  it("retries a boot-time Munin timeout until the endpoint is ready", async () => {
+    let probeAttempts = 0;
+    let harvestAttempts = 0;
+    const delays: number[] = [];
+
+    await expect(runWithMuninStartupReadiness(
+      async () => {
+        probeAttempts += 1;
+        return probeAttempts >= 3;
+      },
+      async () => {
+        harvestAttempts += 1;
+        return "ready";
+      },
+      {
+        maxAttempts: 3,
+        retryDelayMs: 25,
+        sleep: async (delayMs) => { delays.push(delayMs); },
+      },
+    )).resolves.toBe("ready");
+
+    expect(probeAttempts).toBe(3);
+    expect(harvestAttempts).toBe(1);
+    expect(delays).toEqual([25, 25]);
+  });
+
+  it("fails closed after the bounded Munin readiness budget", async () => {
+    const failure = new Error("Munin request timed out after 10000ms");
+    let probeAttempts = 0;
+    const delays: number[] = [];
+
+    await expect(runWithMuninStartupReadiness(
+      async () => {
+        probeAttempts += 1;
+        throw failure;
+      },
+      async () => "unreachable",
+      {
+        maxAttempts: 2,
+        retryDelayMs: 25,
+        sleep: async (delayMs) => { delays.push(delayMs); },
+      },
+    )).rejects.toBe(failure);
+
+    expect(probeAttempts).toBe(2);
+    expect(delays).toEqual([25]);
+  });
+
+  it("does not restart a harvest while its first in-flight work remains", async () => {
+    const failure = new Error("Munin harvest branch failed");
+    let harvestStarts = 0;
+    let releaseInFlight!: () => void;
+    const inFlight = new Promise<void>((resolve) => { releaseInFlight = resolve; });
+
+    await expect(runWithMuninStartupReadiness(
+      async () => true,
+      async () => {
+        harvestStarts += 1;
+        void inFlight;
+        throw failure;
+      },
+      { maxAttempts: 3, retryDelayMs: 25, sleep: async () => {} },
+    )).rejects.toBe(failure);
+
+    expect(harvestStarts).toBe(1);
+    releaseInFlight();
+    await inFlight;
   });
 
   it("queries only unique provisional fingerprints and smokes an empty eligible day", () => {
