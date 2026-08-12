@@ -435,7 +435,7 @@ export function buildTools(deps: ToolDeps): {
     name: "hugin_list",
     title: "List recent delegated tasks",
     description:
-      "List recent tasks for this authenticated principal. If `truncated` is true, the query hit its cap and `total` is only a lower bound.",
+      "List recent tasks for this authenticated principal. `truncated` means a cap or unavailable legacy history; `historical_complete` says whether that history was read.",
     inputShape: listInputShape,
     handler: async (rawInput) => {
       try {

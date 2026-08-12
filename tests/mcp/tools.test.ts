@@ -40,10 +40,10 @@ const ISSUE_318_WIRE_MODELS_RESPONSE = {
 // `byteLength(client.getInstructions()) + byteLength(JSON.stringify(await client.listTools()))`
 // measured through the production `discoverBrokerContract()` + `createHuginMcpServer()` path.
 // Parent `20f2cef` measured 30_361 bytes through its equivalent inline server construction.
-// This source tree measures 28_632 bytes,
-// so the ratchet allows only a 96-byte slack to 28_728 bytes.
+// This source tree measures 28_664 bytes,
+// so the ratchet allows only a 96-byte slack to 28_760 bytes.
 const ISSUE_318_PARENT_DISCOVERY_BYTES = 30_361;
-const ISSUE_318_CURRENT_DISCOVERY_BYTES = 28_632;
+const ISSUE_318_CURRENT_DISCOVERY_BYTES = 28_664;
 const ISSUE_318_DISCOVERY_SLACK_BYTES = 96;
 const ISSUE_318_DISCOVERY_CEILING_BYTES =
   ISSUE_318_CURRENT_DISCOVERY_BYTES + ISSUE_318_DISCOVERY_SLACK_BYTES;

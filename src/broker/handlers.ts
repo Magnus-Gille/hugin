@@ -78,6 +78,48 @@ export interface BrokerHandlerDependencies {
   now?: () => Date;
 }
 
+// Canonical task state is the authority for the active broker. The journal is
+// retained solely to surface legacy orch-v1 rows, so it must not turn a status
+// request into an unbounded read while a worker is busy or a journal is slow.
+const LIST_HISTORY_READ_BUDGET_MS = 1_000;
+
+type HistoricalListResult =
+  | { complete: true; rows: Array<Record<string, any>> }
+  | { complete: false; rows: [] };
+
+async function readHistoricalListRows(
+  journal: DelegationJournal,
+  principal: string,
+): Promise<HistoricalListResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const controller = new AbortController();
+  try {
+    const result = await Promise.race([
+      journal.readAll(controller.signal).then(
+        (events) => ({ kind: "events" as const, events }),
+        () => ({ kind: "unavailable" as const }),
+      ),
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          resolve({ kind: "timeout" });
+        }, LIST_HISTORY_READ_BUDGET_MS);
+      }),
+    ]);
+    if (result.kind !== "events") return { complete: false, rows: [] };
+    return {
+      complete: true,
+      rows: Array.from(projectDelegations(result.events).values())
+        .filter((row) => row.envelope?.broker_principal === principal),
+    };
+  } catch (err) {
+    console.warn(`[broker] historical list projection unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    return { complete: false, rows: [] };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function nowFn(deps: BrokerHandlerDependencies): () => Date {
   return deps.now ?? (() => new Date());
 }
@@ -827,12 +869,11 @@ export function createListHandler(deps: BrokerHandlerDependencies) {
       return;
     }
     const canonical = await deps.taskStore.listCanonical(principal, parsed.since_ts);
-    const historical = Array.from(projectDelegations(await deps.journal.readAll()).values())
-      .filter((row) => row.envelope?.broker_principal === principal);
+    const historical = await readHistoricalListRows(deps.journal, principal);
     const canonicalIds = new Set(canonical.rows.map((row) => row.task_id));
     const combined: Array<Record<string, any>> = [
       ...canonical.rows,
-      ...historical.filter((row) => !canonicalIds.has(row.task_id)),
+      ...historical.rows.filter((row) => !canonicalIds.has(row.task_id)),
     ];
     const rows = combined.filter((row) => {
       if (parsed.outcome === "completed" && row.outcome !== "completed") return false;
@@ -852,7 +893,8 @@ export function createListHandler(deps: BrokerHandlerDependencies) {
     res.status(200).json({
       rows: rows.slice(0, parsed.limit ?? 50),
       total: rows.length,
-      truncated: canonical.truncated,
+      truncated: canonical.truncated || !historical.complete,
+      historical_complete: historical.complete,
     });
   };
 }
