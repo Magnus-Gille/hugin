@@ -1341,6 +1341,29 @@ export class PiHarnessExecutor implements WorkerExecutor {
             ? estimateCostUsd(req.model, parsed.inputTokens, parsed.outputTokens)
             : null;
 
+        // Pi's JSONL protocol reports provider/tool failures in turn_end while
+        // the CLI may still exit 0. Treat that semantic failure exactly like a
+        // non-zero process exit: preserve the partial response and usage for
+        // diagnostics, but taint the binding so a later turn cannot mutate a
+        // worktree after an untrusted/failed turn (#361).
+        if (parsed.error) {
+          if (boundWorktree) {
+            markPiBindingFailedTurn(boundWorktree);
+          }
+          resolve({
+            ok: false,
+            output: parsed.output.slice(0, maxOutput),
+            provider: req.provider,
+            model: req.model,
+            inputTokens: parsed.inputTokens,
+            outputTokens: parsed.outputTokens,
+            costUsd,
+            latencyMs: Date.now() - start,
+            error: parsed.error,
+          });
+          return;
+        }
+
         if (boundWorktree) {
           markPiBindingSuccessfulTurn(boundWorktree);
         }
@@ -1543,6 +1566,8 @@ interface PiParsedOutput {
   output: string;
   inputTokens: number | null;
   outputTokens: number | null;
+  /** Pi can report a failed turn in JSON while exiting zero. */
+  error: string | null;
 }
 
 /**
@@ -1562,6 +1587,7 @@ function parsePiJsonLines(raw: string): PiParsedOutput {
   let output = "";
   let inputTokens: number | null = null;
   let outputTokens: number | null = null;
+  let error: string | null = null;
 
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
@@ -1579,6 +1605,17 @@ function parsePiJsonLines(raw: string): PiParsedOutput {
     const msgTypes = ["message_start", "message_end", "turn_end"];
     if (msgTypes.includes(o["type"] as string)) {
       const msg = o["message"] as Record<string, unknown> | undefined;
+      const stopReason =
+        (typeof msg?.["stopReason"] === "string" ? msg["stopReason"] : undefined) ??
+        (typeof o["stopReason"] === "string" ? o["stopReason"] : undefined);
+      if (o["type"] === "turn_end" && stopReason === "error") {
+        const detail =
+          (typeof msg?.["errorMessage"] === "string" ? msg["errorMessage"] : undefined) ??
+          (typeof msg?.["error"] === "string" ? msg["error"] : undefined) ??
+          (typeof o["errorMessage"] === "string" ? o["errorMessage"] : undefined) ??
+          (typeof o["error"] === "string" ? o["error"] : undefined);
+        error = detail?.trim() ? detail.trim() : "Pi turn ended with stopReason=error";
+      }
       if (msg && msg["role"] === "assistant") {
         // Extract text from content array: [{ type: "text", text: "..." }, ...]
         const contentArr = msg["content"];
@@ -1628,7 +1665,7 @@ function parsePiJsonLines(raw: string): PiParsedOutput {
     }
   }
 
-  return { output, inputTokens, outputTokens };
+  return { output, inputTokens, outputTokens, error };
 }
 
 function isAbortError(err: unknown): boolean {

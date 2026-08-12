@@ -311,6 +311,10 @@ import {
   type ResearchSpikeIndex,
 } from "./research-spike-contract.js";
 import {
+  executeResearchSpike,
+  researchRuntimePreflight,
+} from "./research-spike-executor.js";
+import {
   extractSignatureField,
   buildTaskSubmissionProvenance,
   loadKeyStoreFromEnv,
@@ -706,6 +710,7 @@ let currentSdkAbort: AbortController | null = null;
 let currentOllamaAbort: AbortController | null = null;
 let currentOpencodeAbort: AbortController | null = null;
 let currentOrchestratorAbort: AbortController | null = null;
+let currentResearchAbort: AbortController | null = null;
 // Runtime-owned artefact delivery (issue #68). Aborted by operator cancel /
 // shutdown so a hung `ssh`/`rsync` cannot wedge the single dispatcher slot.
 let currentDeliveryAbort: AbortController | null = null;
@@ -864,7 +869,7 @@ const orchSavingsStore = savingsLayerEnabled
 
 interface TaskConfig {
   prompt: string;
-  runtime: "claude" | "codex" | "ollama" | "opencode" | "homeserver" | "orchestrator";
+  runtime: "claude" | "codex" | "ollama" | "opencode" | "homeserver" | "orchestrator" | "research";
   workingDir: string;
   context?: string;
   baseBranch?: string;
@@ -921,7 +926,7 @@ type DeclaredRuntime = TaskConfig["runtime"] | "pipeline" | "auto";
 
 function parseDeclaredRuntime(content: string): DeclaredRuntime | undefined {
   return taskMetadataPrefix(content).match(
-    /^[ \t]*(?:-[ \t]*)?\*\*Runtime:\*\*[ \t]*(claude|codex|ollama|opencode|homeserver|pipeline|auto|orchestrator)$/im,
+    /^[ \t]*(?:-[ \t]*)?\*\*Runtime:\*\*[ \t]*(claude|codex|ollama|opencode|homeserver|pipeline|auto|orchestrator|research)$/im,
   )?.[1]?.toLowerCase() as
     | DeclaredRuntime
     | undefined;
@@ -1028,6 +1033,7 @@ function parseTask(content: string): TaskConfig | null {
       | "opencode"
       | "homeserver"
       | "orchestrator"
+      | "research"
       | undefined;
   const workingDir = metadataPrefix.match(
     /\*\*Working dir:\*\*\s*(.+)/i
@@ -2829,6 +2835,9 @@ function requestCancellationForCurrentTask(request: CancellationRequest): void {
   }
   if (currentOrchestratorAbort && !currentOrchestratorAbort.signal.aborted) {
     currentOrchestratorAbort.abort(request.reason);
+  }
+  if (currentResearchAbort && !currentResearchAbort.signal.aborted) {
+    currentResearchAbort.abort(request.reason);
   }
   if (currentDeliveryAbort && !currentDeliveryAbort.signal.aborted) {
     currentDeliveryAbort.abort(request.reason);
@@ -5046,6 +5055,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       artifactManifest: parsedTask.artifactManifest,
       deliveryPolicy: config.deliveryPolicy,
       index: parsedTask.researchSpikeIndex,
+      researchRuntimeFailure:
+        parsedTask.runtime === "research" ? await researchRuntimePreflight() : undefined,
     });
     if (researchPreflightFailure) {
       console.warn(`Rejecting research spike ${taskNs}: ${researchPreflightFailure}`);
@@ -5459,6 +5470,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     const isOpencode = task.runtime === "opencode";
     const isHomeserver = task.runtime === "homeserver";
     const isOrchestrator = task.runtime === "orchestrator";
+    const isResearch = task.runtime === "research";
 
     // Mutation-capable per issue #236: whether THIS runtime/permission
     // profile can itself write to the managed working directory, regardless
@@ -5483,7 +5495,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let branchResult: Awaited<ReturnType<typeof checkoutTaskBranch>> = { action: "skipped" };
     let checkoutGateRefusalReason: string | undefined;
     let checkoutGateDegraded = false;
-    if (task.runtime !== "homeserver") {
+    if (task.runtime !== "homeserver" && task.runtime !== "research") {
       const gate = await prepareManagedCheckout(task.workingDir, taskId, {
         reposRoot: config.reposRoot,
         baseBranchOverride: task.baseBranch,
@@ -5552,12 +5564,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
             ? "homeserver-delegate"
             : isOpencode
               ? "opencode"
-              : isOrchestrator
+            : isOrchestrator
                 ? "orchestrator"
+                : isResearch
+                  ? "research-pi-m5"
                 : "spawn";
 
     // Capture quota before task execution (skip for ollama — it's Claude-specific)
-    const quotaBefore = isOllama || isHomeserver ? { q5: null, q7: null } : await fetchQuota();
+    const quotaBefore = isOllama || isHomeserver || isResearch ? { q5: null, q7: null } : await fetchQuota();
 
     await munin.log(
       taskNs,
@@ -5584,6 +5598,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let opencodeResult: OpencodeExecutorResult | null = null;
     let homeserverResult: HomeserverExecutorResult | null = null;
     let effectiveExecutor = executorLabel;
+    let researchEffectiveModel: string | undefined;
     // Trusted failure-kind discriminator from a pre-flight short-circuit
     // (issue #123 Codex review) — set only when executeClaudeSdkWithPreflightChecks
     // refused the task itself, so the classification below never has to
@@ -5762,6 +5777,37 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       } catch {
         /* log is best-effort — never fail the task on a log write */
       }
+    } else if (isResearch) {
+    // Dedicated, explicit research lane.  It is intentionally separate from
+    // pi-harness/orchestrator: only this executor receives the Hugin-owned
+    // web/search/fetch/write tool set and the M5-local provider binding.
+    console.log(`Using dedicated research Pi/M5 executor for task ${taskNs}`);
+    const researchAbort = new AbortController();
+    currentResearchAbort = researchAbort;
+    const researchResult = task.artifactManifest
+      ? await executeResearchSpike({
+          prompt: task.prompt,
+          workingDir: task.workingDir,
+          timeoutMs: task.timeoutMs,
+          maxOutputChars: config.maxOutputChars,
+          artifactManifest: task.artifactManifest,
+          allowedStagingPrefixes: config.deliveryTargets.map((target) => target.localStagingPrefix),
+          signal: researchAbort.signal,
+        })
+      : {
+          exitCode: 1 as const,
+          output: "Research runtime requires an artifact manifest",
+          resultText: null,
+          model: task.model || "research-pi-m5",
+          logFile: path.join(LOG_DIR, `${taskId}.log`),
+        };
+    currentResearchAbort = null;
+    exitCode = researchResult.exitCode;
+    researchEffectiveModel = researchResult.model;
+    output = researchResult.output;
+    resultText = researchResult.resultText;
+    logFile = researchResult.logFile;
+    effectiveExecutor = "research-pi-m5";
     } else if (isOllama) {
     // --- Ollama execution path ---
     const ollamaModel = task.model || config.ollamaDefaultModel;
@@ -6418,6 +6464,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     currentOllamaAbort = null;
     currentOpencodeAbort = null;
     currentOrchestratorAbort = null;
+    currentResearchAbort = null;
 
     const durationMs = Date.now() - startMs;
     const completedAt = new Date().toISOString();
@@ -6632,16 +6679,18 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let rawBodyText: string;
     let structuredBodyKind: TaskExecutionBodyKind;
 
-    if ((isClaude || isOllama || isOrchestrator || isOpencode || isHomeserver || sampledHarnessLane) && resultText) {
+    if ((isClaude || isOllama || isOrchestrator || isOpencode || isHomeserver || isResearch || sampledHarnessLane) && resultText) {
       resultSource = isOpencode || sampledHarnessLane
         ? "opencode-json"
         : isHomeserver
           ? "homeserver-delegate"
+          : isResearch
+            ? "research-pi-m5"
           : effectiveExecutor;
       rawBodyText = resultText;
       structuredBodyKind = "response";
       resultBody = `### Response\n\n${resultText}`;
-    } else if (!isClaude && !isOllama && !isOrchestrator && !isOpencode && !isHomeserver && !sampledHarnessLane) {
+    } else if (!isClaude && !isOllama && !isOrchestrator && !isOpencode && !isHomeserver && !isResearch && !sampledHarnessLane) {
       const hookResult = readHookResult(taskId);
       if (hookResult) {
         resultSource = "hook";
@@ -6975,6 +7024,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         ? {
             ...(task.model ? { requestedModel: task.model } : {}),
             effectiveModel: opencodeResult.model,
+          }
+      : isResearch
+        ? {
+            ...(task.model ? { requestedModel: task.model } : {}),
+            effectiveModel: researchEffectiveModel,
+            effectiveHost: "hugin-pi",
           }
       : isHomeserver && homeserverResult
         ? {
@@ -7870,6 +7925,11 @@ async function shutdown(signal: string): Promise<void> {
   if (currentOpencodeAbort) {
     console.log("Aborting running OpenCode task...");
     currentOpencodeAbort.abort();
+  }
+
+  if (currentResearchAbort) {
+    console.log("Aborting running research Pi task...");
+    currentResearchAbort.abort();
   }
 
   if (currentChild && !currentChild.killed) {

@@ -11,6 +11,7 @@ export type AutoRoutableDispatcherRuntime = "claude" | "codex" | "ollama";
 // never dispatched in-process.
 export type DispatcherRuntime =
   | LegacyDispatcherRuntime
+  | "research"
   | "orchestrator"
   | "openrouter"
   | "pi-harness"
@@ -227,6 +228,23 @@ export const RUNTIME_REGISTRY: readonly RuntimeDefinition[] = [
     family: "harness",
     harnessCmd: "pi",
     harnessFlags: PI_HARNESS_DEFAULT_HARNESS_FLAGS,
+  },
+  {
+    id: "research-pi-m5",
+    dispatcherRuntime: "research",
+    // The model stays local, but its intentionally scoped search/fetch tools
+    // reach public sites. Cap the lane at internal data.
+    trustTier: "semi-trusted",
+    costModel: "free",
+    modelSize: "large",
+    capabilities: ["tools", "structured-output"],
+    provider: "pi-harness",
+    egress: "local",
+    zdrRequired: false,
+    autoEligible: false,
+    family: "harness",
+    defaultModel: "qwen3-coder-next-80b",
+    harnessCmd: "pi",
   },
   {
     id: "berget",

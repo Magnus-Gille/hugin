@@ -28,6 +28,34 @@ describe("research spike preflight (#362)", () => {
     })).toBeNull();
   });
 
+  it("admits only an explicit healthy research runtime", () => {
+    expect(researchSpikePreflightFailure({
+      tags: ["pending", "type:research", "runtime:research"], runtime: "research", permissionProfile: "trusted-code",
+      artifactManifest: manifest, deliveryPolicy: "require", index, researchRuntimeFailure: null,
+    })).toBeNull();
+    expect(researchSpikePreflightFailure({
+      tags: ["pending", "type:research", "runtime:research"], runtime: "research", permissionProfile: "trusted-code",
+      artifactManifest: manifest, deliveryPolicy: "require", index, researchRuntimeFailure: "Pi is unavailable",
+    })).toBe("Pi is unavailable");
+  });
+
+  it("does not let Runtime research bypass the research tag or egress private data", () => {
+    expect(researchSpikePreflightFailure({
+      tags: ["pending", "runtime:research"], runtime: "research", permissionProfile: "trusted-code",
+      artifactManifest: manifest, deliveryPolicy: "require", index, researchRuntimeFailure: null,
+    })).toMatch(/requires the type:research/);
+    expect(researchSpikePreflightFailure({
+      tags: ["pending", "type:research", "runtime:research"], runtime: "research", permissionProfile: "trusted-code",
+      artifactManifest: manifest, deliveryPolicy: "require",
+      index: { ...index, sensitivity: "private" }, researchRuntimeFailure: null,
+    })).toMatch(/cannot accept private sensitivity/);
+  });
+
+  it("parses an explicit research runtime", () => {
+    const task = dispatcherTest.parseTask("## Task: research\n- **Runtime:** research\n- **Sensitivity:** internal\n\n### Prompt\nInvestigate");
+    expect(task?.runtime).toBe("research");
+  });
+
   it("refuses the read-only agent-sdk before it can falsely succeed", () => {
     const failure = researchSpikePreflightFailure({
       tags: ["pending", "type:research", "runtime:claude"], runtime: "claude", permissionProfile: "read-only",
