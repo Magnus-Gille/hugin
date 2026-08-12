@@ -2050,6 +2050,40 @@ describe("GET /v1/delegate/list", () => {
     expect(body.rows[0].envelope.alias_requested).toBe("large-reasoning");
   });
 
+  it("returns canonical running state when historical journal projection exceeds its budget", async () => {
+    await fetch(`${harness.url}/v1/delegate/submit`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify(validRequest()),
+    });
+    const submitted = harness.munin.writes.find((write) => write.key === "status")!;
+    harness.munin.queryReturn = {
+      results: [{ namespace: submitted.namespace, key: "status", tags: submitted.tags }],
+      total: 1,
+    };
+    let aborted = false;
+    harness.journal.readAll = async (signal?: AbortSignal) => new Promise((_, reject) => {
+      signal?.addEventListener("abort", () => {
+        aborted = true;
+        reject(new Error("aborted"));
+      }, { once: true });
+    });
+
+    const startedAt = Date.now();
+    const res = await fetch(`${harness.url}/v1/delegate/list`, {
+      headers: { authorization: `Bearer ${SECRET}` },
+    });
+    const body = await res.json();
+
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(res.status).toBe(200);
+    expect(body.rows).toHaveLength(1);
+    expect(body.rows[0].task_id).toBe(submitted.namespace.split("/")[1]);
+    expect(body.historical_complete).toBe(false);
+    expect(body.truncated).toBe(true);
+    expect(aborted).toBe(true);
+  });
+
   // #181: a task that is visible right after submission must stay visible
   // after a rating event (hugin_rate) is appended, including under an
   // explicit since_ts filter — the acceptance criterion from the issue.

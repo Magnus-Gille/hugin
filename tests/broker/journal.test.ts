@@ -104,6 +104,16 @@ describe("DelegationJournal", () => {
     expect(await j.readAll()).toEqual([]);
   });
 
+  it("aborts a real journal stream without an unhandled stream error", async () => {
+    const file = path.join(tmpDir, "events.jsonl");
+    writeFileSync(file, `${JSON.stringify(submitted("t1"))}\n`.repeat(20_000));
+    const j = new DelegationJournal({ path: file });
+    const controller = new AbortController();
+    const pending = j.readAll(controller.signal);
+    controller.abort();
+    await expect(pending).rejects.toThrow("delegation journal read aborted");
+  });
+
   it("skips events with unsupported event_schema_version (forward-compat)", async () => {
     const file = path.join(tmpDir, "events.jsonl");
     const future = JSON.stringify({

@@ -100,30 +100,55 @@ export class DelegationJournal {
    * forward-compat rule. For v1 there is no streaming consumer; callers are
    * expected to read in full and project.
    */
-  async readAll(): Promise<DelegationEvent[]> {
+  async readAll(signal?: AbortSignal): Promise<DelegationEvent[]> {
     if (!existsSync(this.filePath)) return [];
+    if (signal?.aborted) throw new Error("delegation journal read aborted");
 
     const events: DelegationEvent[] = [];
     const stream = createReadStream(this.filePath, { encoding: "utf-8" });
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    let aborted = false;
+    // readline's async iterator normally observes stream errors. It may close
+    // first on cancellation, though, so retain an error listener until the
+    // underlying stream closes rather than leaving an asynchronous open/read
+    // failure unhandled.
+    const retainStreamErrorListener = () => {};
+    stream.on("error", retainStreamErrorListener);
+    const abort = () => {
+      aborted = true;
+      // Do not destroy with an Error after closing readline: that can emit an
+      // unhandled stream error after the iterator has detached its listener.
+      stream.destroy();
+      rl.close();
+    };
+    signal?.addEventListener("abort", abort, { once: true });
     let lineNumber = 0;
-    for await (const line of rl) {
-      lineNumber++;
-      if (line.trim() === "") continue;
-      try {
-        const parsed = JSON.parse(line) as { event_schema_version?: unknown };
-        if (parsed.event_schema_version !== 1) {
+    try {
+      for await (const line of rl) {
+        lineNumber++;
+        if (line.trim() === "") continue;
+        try {
+          const parsed = JSON.parse(line) as { event_schema_version?: unknown };
+          if (parsed.event_schema_version !== 1) {
+            console.warn(
+              `[delegation-journal] skipping event with unsupported event_schema_version on line ${lineNumber}: ${String(parsed.event_schema_version)}`,
+            );
+            continue;
+          }
+          events.push(parsed as DelegationEvent);
+        } catch (err) {
           console.warn(
-            `[delegation-journal] skipping event with unsupported event_schema_version on line ${lineNumber}: ${String(parsed.event_schema_version)}`,
+            `[delegation-journal] failed to parse line ${lineNumber}: ${err instanceof Error ? err.message : String(err)}`,
           );
-          continue;
         }
-        events.push(parsed as DelegationEvent);
-      } catch (err) {
-        console.warn(
-          `[delegation-journal] failed to parse line ${lineNumber}: ${err instanceof Error ? err.message : String(err)}`,
-        );
       }
+      if (aborted) throw new Error("delegation journal read aborted");
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      if (!stream.closed) {
+        await new Promise<void>((resolve) => stream.once("close", resolve));
+      }
+      stream.removeListener("error", retainStreamErrorListener);
     }
     return events;
   }
