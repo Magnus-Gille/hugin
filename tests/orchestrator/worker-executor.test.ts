@@ -2309,6 +2309,31 @@ const PI_V3_JSONL = [
   }),
 ].join("\n") + "\n";
 
+const PI_V3_ERROR_JSONL = [
+  JSON.stringify({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "partial answer" }],
+      usage: { input: 11, output: 3 },
+    },
+  }),
+  JSON.stringify({
+    type: "turn_end",
+    message: {
+      role: "assistant",
+      stopReason: "error",
+      errorMessage: "M5 provider disconnected",
+      usage: { input: 11, output: 3 },
+    },
+  }),
+].join("\n") + "\n";
+
+const PI_V3_ERROR_WITHOUT_DETAIL_JSONL = JSON.stringify({
+  type: "turn_end",
+  message: { role: "assistant", stopReason: "error" },
+}) + "\n";
+
 describe("PiHarnessExecutor — pi v3 event schema", () => {
   it("extracts output and token counts from message_start/message_end events", async () => {
     spawnBehaviors = [{ exitCode: 0, stdout: PI_V3_JSONL }];
@@ -2320,6 +2345,39 @@ describe("PiHarnessExecutor — pi v3 event schema", () => {
     expect(result.output).toBe("pong");
     expect(result.inputTokens).toBe(9);
     expect(result.outputTokens).toBe(1);
+  });
+
+  it("treats turn_end stopReason=error as failure even when pi exits zero", async () => {
+    const binding = makePiBinding();
+    spawnBehaviors = [...cleanPiWorktreeBehaviors(), { exitCode: 0, stdout: PI_V3_ERROR_JSONL }];
+
+    const executor = new PiHarnessExecutor();
+    const result = await executor.run(makeTrustedPiRequest({ worktree: binding }));
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("M5 provider disconnected");
+    expect(result.output).toBe("partial answer");
+    expect(result.inputTokens).toBe(11);
+    expect(result.outputTokens).toBe(3);
+
+    // A semantically failed turn taints the binding, preventing a follow-on
+    // write-capable turn from treating the failed process as a clean success.
+    spawnCalls.length = 0;
+    spawnCallIndex = 0;
+    spawnBehaviors = [];
+    const followOn = await executor.run(makeTrustedPiRequest({ worktree: binding }));
+    expect(followOn.ok).toBe(false);
+    expect(followOn.error).toContain("tainted");
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("uses a deterministic error when turn_end has no provider detail", async () => {
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_V3_ERROR_WITHOUT_DETAIL_JSONL }];
+
+    const result = await new PiHarnessExecutor().run(makeReadOnlyPiRequest({ prompt: "ping" }));
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("Pi turn ended with stopReason=error");
   });
 });
 
