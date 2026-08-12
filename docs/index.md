@@ -38,6 +38,9 @@ scheduling, and pipeline phases.
 - [Quality receipts](quality-receipts.md): `hugin_rate` /
   `POST /v1/delegate/rate`, exact-bound acceptance evidence, reviewer
   independence, and why `completed` is not the same as accepted.
+- [Research-spike execution contract](research-spike-contract.md): Fail-closed
+  two-artifact delivery and Hugin-owned three-record Munin indexing contract
+  for `type:research` tasks.
 - [Artifact delivery recovery runbook](testing/delivery-recovery-e2e.md):
   End-to-end acceptance/recovery procedure for declared artifacts and the
   `delivery:*` terminal states.
