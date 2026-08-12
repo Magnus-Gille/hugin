@@ -304,6 +304,13 @@ import {
   type RuntimeCapability,
 } from "./runtime-registry.js";
 import {
+  hasResearchSpikeArtifactContract,
+  isResearchSpike,
+  parseResearchSpikeIndex,
+  researchSpikePreflightFailure,
+  type ResearchSpikeIndex,
+} from "./research-spike-contract.js";
+import {
   extractSignatureField,
   buildTaskSubmissionProvenance,
   loadKeyStoreFromEnv,
@@ -898,6 +905,7 @@ interface TaskConfig {
   // HUGIN_DELIVERY_POLICY=off (the manifest would otherwise leak into the
   // agent prompt; Codex review #5).
   artifactManifestGrammarViolation?: boolean;
+  researchSpikeIndex?: ResearchSpikeIndex;
   homeserverTaskType?: string;
   homeserverVerifier?: HomeserverVerifierSpec;
   maxOutputTokens?: number;
@@ -959,6 +967,56 @@ function parsePipelineSideEffectsField(content: string): PipelineSideEffectId[] 
     .map((parsed) => parsed.data);
 }
 
+/**
+ * Publish the three durable research discovery records only after Hugin has
+ * verified delivery.  The executor never receives these write capabilities:
+ * it can produce declared staging files, while Hugin owns the cross-service
+ * commit.  Each awaited write is a postcondition; callers fail the task if
+ * any one is rejected.
+ */
+async function writeResearchSpikeIndexes(
+  client: Pick<MuninClient, "write">,
+  index: ResearchSpikeIndex,
+  manifest: ArtifactManifest,
+  taskId: string,
+  classification: string | undefined,
+): Promise<void> {
+  const remotes = manifest.artifacts
+    .filter((artifact) => artifact.required)
+    .map((artifact) => artifact.remote);
+  const commonTags = [
+    "type:research",
+    `project:${index.project}`,
+    `sensitivity:${index.sensitivity}`,
+    `research-slug:${index.slug}`,
+    "writer:hugin",
+  ];
+  await client.write(
+    `documents/${index.slug}`,
+    "index",
+    `Research spike ${index.slug}. Verified artefacts: ${remotes.join(", ")}`,
+    commonTags,
+    undefined,
+    classification,
+  );
+  await client.write(
+    `reading/${index.slug}`,
+    "entry",
+    `Research reading entry for ${index.slug}. Verified artefacts: ${remotes.join(", ")}`,
+    [...commonTags, "type:summary"],
+    undefined,
+    classification,
+  );
+  await client.write(
+    `projects/${index.project}`,
+    `research-${index.slug}`,
+    `Research spike ${index.slug} completed by Hugin task ${taskId}. Verified artefacts: ${remotes.join(", ")}`,
+    [...commonTags, "type:project-event"],
+    undefined,
+    classification,
+  );
+}
+
 function parseTask(content: string): TaskConfig | null {
   const metadataPrefix = taskMetadataPrefix(content);
   const declaredRuntimeRaw = parseDeclaredRuntime(content);
@@ -1014,7 +1072,7 @@ function parseTask(content: string): TaskConfig | null {
     /\*\*Context-budget:\*\*\s*(\d+)/i
   )?.[1];
   const declaredSensitivityRaw = metadataPrefix.match(
-    /\*\*Sensitivity:\*\*\s*(public|internal|private)/i
+    /\*\*Sensitivity:\*\*\s*(public|internal|private|restricted)/i
   )?.[1]?.trim()?.toLowerCase();
   const pipelineId = metadataPrefix.match(
     /\*\*Pipeline:\*\*\s*(.+)/i
@@ -1145,7 +1203,9 @@ function parseTask(content: string): TaskConfig | null {
     declaredSensitivity: canonicalBrokerEnvelope?.sensitivity
       ? sensitivitySchema.parse(canonicalBrokerEnvelope.sensitivity)
       : declaredSensitivityRaw
-      ? sensitivitySchema.parse(declaredSensitivityRaw)
+      ? sensitivitySchema.parse(
+          declaredSensitivityRaw === "restricted" ? "private" : declaredSensitivityRaw,
+        )
       : undefined,
     capabilities: effectiveCapabilities.length > 0 ? effectiveCapabilities : undefined,
     permissionProfile:
@@ -1157,6 +1217,7 @@ function parseTask(content: string): TaskConfig | null {
     artifactManifestError: artifactManifestResult.error ?? undefined,
     artifactManifestGrammarViolation:
       artifactManifestResult.grammarViolation || undefined,
+    researchSpikeIndex: parseResearchSpikeIndex(content),
     homeserverTaskType: canonicalBrokerEnvelope?.task_type ?? homeserverTaskType ?? undefined,
     homeserverVerifier: canonicalBrokerEnvelope?.acceptance.mode === "verifier"
       ? canonicalBrokerEnvelope.acceptance.verifier
@@ -3128,10 +3189,46 @@ async function reconcileDeliveryPending(
     await client.log(taskNs, `Delivery retry budget exhausted: ${decision.reason}`);
   }
 
+  // A recovered delivery still has to complete the research postconditions.
+  // Otherwise a restart between rsync and indexing could terminalize a
+  // research task as completed with no discovery records.
+  let recoveryResearchIndexTag: string | undefined;
+  let recoveryFailureKind: string | undefined;
+  let recoveryFailureReason: string | undefined;
+  if (ok && delivery.ok && isResearchSpike(entry.tags)) {
+    if (!task?.researchSpikeIndex || !hasResearchSpikeArtifactContract(task.artifactManifest)) {
+      ok = false;
+      recoveryResearchIndexTag = "research-index:failed";
+      recoveryFailureKind = "RESEARCH_CONTRACT_FAILED";
+      recoveryFailureReason = "required Hugin research index and two-artifact contract is missing";
+      baseDoc += `\n\n### Research indexing\n\n- **Indexing:** failed — ${recoveryFailureReason}\n`;
+    } else {
+      try {
+        await writeResearchSpikeIndexes(
+          client,
+          task.researchSpikeIndex,
+          task.artifactManifest,
+          extractTaskId(taskNs),
+          classification,
+        );
+        recoveryResearchIndexTag = "research-index:verified";
+        baseDoc += "\n\n### Research indexing\n\n- **Indexing:** verified (three Hugin-owned Munin writes)\n";
+      } catch (err) {
+        ok = false;
+        recoveryResearchIndexTag = "research-index:failed";
+        const reason = err instanceof Error ? err.message : String(err);
+        recoveryFailureKind = "RESEARCH_INDEX_FAILED";
+        recoveryFailureReason = reason;
+        baseDoc += `\n\n### Research indexing\n\n- **Indexing:** failed — ${reason}\n`;
+        await client.log(taskNs, `Recovered research indexing failed: ${reason}`);
+      }
+    }
+  }
+
   if (!ok) {
     baseDoc = baseDoc.replace(
       /- \*\*Exit code:\*\* 0\b/,
-      "- **Exit code:** 2\n- **Failure kind:** DELIVERY_FAILED",
+      `- **Exit code:** 2\n- **Failure kind:** ${recoveryFailureKind ?? "DELIVERY_FAILED"}`,
     );
   }
   await client.write(
@@ -3155,6 +3252,7 @@ async function reconcileDeliveryPending(
       [
         ...entry.tags.filter((t) => !t.startsWith("delivery:")),
         terminalDeliveryTag,
+        ...(recoveryResearchIndexTag ? [recoveryResearchIndexTag] : []),
       ],
       runtimeTag || `runtime:${runtime}`,
     ),
@@ -3176,7 +3274,7 @@ async function reconcileDeliveryPending(
       completedAt: new Date().toISOString(),
       bodyKind: "response",
       bodyText: "",
-      errorMessage: ok ? undefined : delivery.error ?? "delivery failed",
+      errorMessage: ok ? undefined : recoveryFailureReason ?? delivery.error ?? "delivery failed",
       sensitivity: recoverySensitivity,
       artifactDelivery: {
         ok: delivery.ok,
@@ -4936,6 +5034,28 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       return pendingTaskDeparted();
     }
 
+    // Research spikes have durable, cross-service postconditions.  The
+    // current Agent SDK sandbox is read-only and cannot satisfy them; refuse
+    // before claiming/spending rather than letting tool denials become a false
+    // exit-0 completion (#362).  A future verified research lane is the only
+    // route that may pass this gate.
+    const researchPreflightFailure = researchSpikePreflightFailure({
+      tags: entry.tags,
+      runtime: parsedTask.runtime,
+      permissionProfile: parsedTask.permissionProfile,
+      artifactManifest: parsedTask.artifactManifest,
+      deliveryPolicy: config.deliveryPolicy,
+      index: parsedTask.researchSpikeIndex,
+    });
+    if (researchPreflightFailure) {
+      console.warn(`Rejecting research spike ${taskNs}: ${researchPreflightFailure}`);
+      await failTaskWithMessage(taskNs, entry, researchPreflightFailure);
+      await munin.log(taskNs, `Research spike rejected before execution: ${researchPreflightFailure}`);
+      await promoteDependents(extractTaskId(taskNs));
+      await refreshPipelineSummaryFromContent(entry.content);
+      return pendingTaskDeparted();
+    }
+
     const securityViolation =
       getSecurityViolationForTask(parsedTask, sensitivityAssessment) ||
       getInjectionViolationForTask(parsedTask) ||
@@ -6563,6 +6683,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let deliveryResult: DeliveryResult | undefined;
     let deliveryFailureKind: string | undefined;
     let terminalDeliveryTag: string | undefined;
+    let researchIndexTag: string | undefined;
     // #72: set when a live infra delivery failure under `defer` should leave the
     // task delivery:pending for the retry reaper rather than terminalizing.
     let deferDeliveryPending = false;
@@ -6686,6 +6807,27 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         terminalDeliveryTag = "delivery:failed";
       } else if (deliveryResult.ok) {
         terminalDeliveryTag = "delivery:verified";
+        if (isResearchSpike(entry.tags) && task.researchSpikeIndex) {
+          try {
+            await writeResearchSpikeIndexes(
+              munin,
+              task.researchSpikeIndex,
+              task.artifactManifest,
+              taskId,
+              taskClassification,
+            );
+            researchIndexTag = "research-index:verified";
+            bodyForResult += "\n\n### Research indexing\n\n- **Indexing:** verified (three Hugin-owned Munin writes)\n";
+          } catch (err) {
+            ok = false;
+            exitCode = 2;
+            deliveryFailureKind = "RESEARCH_INDEX_FAILED";
+            researchIndexTag = "research-index:failed";
+            const reason = err instanceof Error ? err.message : String(err);
+            bodyForResult += `\n\n### Research indexing\n\n- **Indexing:** failed — ${reason}\n`;
+            await munin.log(taskNs, `Research indexing failed: ${reason}`);
+          }
+        }
       } else {
         terminalDeliveryTag = "delivery:failed";
         // missing-local / unsafe-local (no trustworthy deliverable) are ALWAYS
@@ -6971,12 +7113,13 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // set so downstream consumers + startup reconciliation see a consistent
     // terminal delivery state. Shared by the cancelled and normal branches —
     // a cancel mid-delivery still set terminalDeliveryTag = "delivery:failed".
-    const deliveryAwareFinalizeTags = terminalDeliveryTag
+    let deliveryAwareFinalizeTags = terminalDeliveryTag
       ? [
           ...entry.tags.filter((t) => !t.startsWith("delivery:")),
           terminalDeliveryTag,
         ]
       : entry.tags;
+    if (researchIndexTag) deliveryAwareFinalizeTags.push(researchIndexTag);
     const learningCapturePending = isHomeserver
       && repositoryOutcome.state === "not-managed"
       && isPotentialAdmittedHomeserverAttempt(
@@ -7146,6 +7289,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
                   ? undefined
                   : failureClassification
                     ? failureClassification.reason
+                    : deliveryFailureKind === "RESEARCH_INDEX_FAILED"
+                      ? "Hugin-owned research indexing failed after verified delivery"
                     : deliveryResult && !deliveryResult.ok
                       ? deliveryResult.error ?? structuredBodyText
                       : structuredBodyText,
@@ -7582,6 +7727,7 @@ export const __test__ = {
   parseSubmittedByField,
   isSubmitterAllowed,
   pollOnce,
+  writeResearchSpikeIndexes,
   inspectState: () => ({
     currentTask,
     currentTaskConfig,
