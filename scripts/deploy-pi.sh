@@ -112,10 +112,16 @@ echo "==> Installing pinned research Pi harness ($RESEARCH_PI_PACKAGE@$RESEARCH_
 ssh "$REMOTE" "
   set -e
   npm install --global --ignore-scripts '$RESEARCH_PI_PACKAGE@$RESEARCH_PI_VERSION'
-  command -v pi >/dev/null
-  test \"\$(pi --version 2>/dev/null)\" = \"$RESEARCH_PI_VERSION\" || {
+  NPM_GLOBAL_PREFIX=\"\$(npm prefix --global)\"
+  case \"\$NPM_GLOBAL_PREFIX\" in
+    /*) ;;
+    *) echo 'npm global prefix is not absolute' >&2; exit 1 ;;
+  esac
+  PI_BIN=\"\$NPM_GLOBAL_PREFIX/bin/pi\"
+  test -x \"\$PI_BIN\" || { echo 'research Pi executable missing from npm global prefix' >&2; exit 1; }
+  test \"\$(\"\$PI_BIN\" --version 2>/dev/null)\" = \"$RESEARCH_PI_VERSION\" || {
     echo 'research Pi version mismatch' >&2
-    pi --version >&2 || true
+    \"\$PI_BIN\" --version >&2 || true
     exit 1
   }
   command -v bwrap >/dev/null || { echo 'bubblewrap (bwrap) is required for Runtime: research' >&2; exit 1; }

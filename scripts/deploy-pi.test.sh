@@ -255,6 +255,8 @@ assert_not_contains "$full_calls" "git fetch origin" "deployment never depends o
 assert_not_contains "$full_calls" "git reset" "deployment never depends on a remote Git checkout"
 assert_contains "$full_calls" "npm ci --omit=dev" "deployment installs the shipped lockfile deterministically"
 assert_not_contains "$full_calls" "npm install --omit=dev" "deployment never rewrites the shipped lockfile with npm install"
+assert_contains "$full_calls" "npm prefix --global" "deployment resolves Pi from npm's user-global prefix"
+assert_contains "$full_calls" 'PI_BIN="$NPM_GLOBAL_PREFIX/bin/pi"' "deployment verifies Pi by absolute installed path"
 assert_contains "$full_calls" "curl -fsS http://127.0.0.1:3032/health" "deployment retains the health acceptance gate"
 assert_contains "$full_calls" "health.codex_sandbox?.available !== true" "deployment health gate requires the live service-context Codex probe"
 assert_contains "$full_calls" "in-service Codex sandbox self-test unavailable after 15 attempts" "deployment waits for a definitive in-service probe result"
