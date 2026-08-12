@@ -232,7 +232,9 @@ export const RUNTIME_REGISTRY: readonly RuntimeDefinition[] = [
   {
     id: "research-pi-m5",
     dispatcherRuntime: "research",
-    trustTier: "trusted",
+    // The model stays local, but its intentionally scoped search/fetch tools
+    // reach public sites. Cap the lane at internal data.
+    trustTier: "semi-trusted",
     costModel: "free",
     modelSize: "large",
     capabilities: ["tools", "structured-output"],

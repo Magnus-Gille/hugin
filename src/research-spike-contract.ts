@@ -79,7 +79,11 @@ export function hasResearchSpikeArtifactContract(
 export function researchSpikePreflightFailure(
   input: ResearchSpikePreflightInput,
 ): string | null {
-  if (!isResearchSpike(input.tags)) return null;
+  if (!isResearchSpike(input.tags)) {
+    return input.runtime === "research"
+      ? "Runtime research requires the type:research task tag and its full artifact/index contract"
+      : null;
+  }
 
   const required = REQUIRED_RESEARCH_CAPABILITIES.join(", ");
   // Report the executor denial first.  This is the actionable P0 condition
@@ -98,6 +102,9 @@ export function researchSpikePreflightFailure(
     return "Research spike requires Hugin-managed artefact delivery; HUGIN_DELIVERY_POLICY=off is incompatible";
   }
   if (input.runtime === "research") {
+    if (input.index.sensitivity === "private") {
+      return "Research runtime cannot accept private sensitivity because its web search/fetch tools egress to public sites";
+    }
     return input.researchRuntimeFailure ?? null;
   }
   return `Research spike cannot run on ${input.runtime}: no dispatcher executor currently declares verified capabilities ${required}. Route it only after the dedicated research lane is verified.`;

@@ -54,5 +54,6 @@ stdout, enforce public-host SSRF policy including redirect/DNS checks, and bound
 response size and time. No helper may receive the dispatcher environment or
 write anything except its stdout.
 
-Use Hugin's canonical `public`, `internal`, or `private` sensitivity values.
-`restricted` is accepted only as a legacy alias and is normalized to `private`.
+Use `public` or `internal` sensitivity for this web-enabled lane. `private`
+(including the legacy `restricted` alias) is rejected because search/fetch
+queries egress to public sites even though model inference stays local on M5.
