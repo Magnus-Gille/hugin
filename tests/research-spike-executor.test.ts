@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -65,8 +65,22 @@ describe("dedicated research Pi/M5 runtime", () => {
     expect(launch.args).toContain("--no-builtin-tools");
     expect(launch.args).toContain("web_search,fetch_content,write_artifact");
     expect(launch.args).toContain("--bind");
-    expect(launch.env).toEqual(expect.objectContaining({ PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/tmp/hugin-research-home" }));
+    expect(launch.env).toEqual(expect.objectContaining({ PATH: "/home/magnus/.npm-global/bin:/usr/local/bin:/usr/bin:/bin", HOME: "/tmp/hugin-research-home" }));
     expect(launch.env).not.toHaveProperty("MUNIN_API_KEY");
+  });
+
+  it("refuses to overwrite an existing staging artifact", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-existing-"));
+    const existing = path.join(root, "report.md");
+    await writeFile(existing, "keep me");
+    try {
+      await expect(__test__.precreateArtifacts({ artifacts: [
+        { id: "report", local: existing, remote: "magnus@nas:/r/report.md", required: true },
+      ] }, [root])).rejects.toThrow();
+      expect(await readFile(existing, "utf8")).toBe("keep me");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("removes legacy agent-owned delivery and remote destinations from the model prompt", () => {

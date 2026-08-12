@@ -182,7 +182,9 @@ async function precreateArtifacts(manifest: ArtifactManifest, allowedStagingPref
     }
     const existing = await fs.lstat(file).catch(() => null);
     if (existing?.isSymbolicLink()) throw new Error(`Research artifact path is a symlink: ${file}`);
-    const handle = await fs.open(file, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0), 0o600);
+    // A task may only create its declared staging outputs. Never truncate an
+    // artifact left by another task or an earlier completed run.
+    const handle = await fs.open(file, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600);
     await handle.close();
     await fs.chmod(file, 0o600);
   }
@@ -248,7 +250,7 @@ export function buildResearchLaunch(
     "--", config.piCommand, ...RESEARCH_PI_FLAGS, "--extension", "/opt/hugin-research-pi-extension.mjs", "--provider", "m5-local", "--model", config.model, "--mode", "json", "-p", buildPiPrompt(request),
   ];
   const env: NodeJS.ProcessEnv = {
-    PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/tmp/hugin-research-home", PI_CODING_AGENT_DIR: "/opt/hugin-research-pi",
+    PATH: "/home/magnus/.npm-global/bin:/usr/local/bin:/usr/bin:/bin", HOME: "/tmp/hugin-research-home", PI_CODING_AGENT_DIR: "/opt/hugin-research-pi",
     HUGIN_RESEARCH_SEARCH_HELPER: config.searchHelper, HUGIN_RESEARCH_FETCH_HELPER: config.fetchHelper,
     HUGIN_RESEARCH_ALLOWED_SEARCH_HOSTS: config.allowedSearchHosts.join(","),
     HUGIN_RESEARCH_ARTIFACTS: JSON.stringify(Object.fromEntries(request.artifactManifest.artifacts.filter((a) => a.required).map((a) => [a.id, a.local]))),
@@ -324,4 +326,4 @@ export async function executeResearchSpike(request: ResearchSpikeRunRequest): Pr
   });
 }
 
-export const __test__ = { privateAddress, parsePiOutput, providerModelsJson, buildPiPrompt };
+export const __test__ = { privateAddress, parsePiOutput, providerModelsJson, buildPiPrompt, precreateArtifacts };
