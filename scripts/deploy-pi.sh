@@ -16,6 +16,10 @@ fi
 DEPLOY_USER="${DEPLOY_USER:-magnus}"
 REMOTE="$DEPLOY_USER@$PI_HOST"
 REMOTE_DIR="/home/$DEPLOY_USER/repos/hugin"
+# Dedicated research lane prerequisites. Keep the CLI exact-pinned: the Pi
+# extension/flag contract is not compatible with arbitrary future releases.
+RESEARCH_PI_PACKAGE="${HUGIN_RESEARCH_PI_PACKAGE:-@earendil-works/pi-coding-agent}"
+RESEARCH_PI_VERSION="${HUGIN_RESEARCH_PI_VERSION:-0.84.1}"
 
 read_clean_deploy_sha() {
   local repo_root source_status source_sha
@@ -103,6 +107,22 @@ fi
 
 echo "==> Installing dependencies on Pi..."
 ssh "$REMOTE" "cd $REMOTE_DIR && npm ci --omit=dev"
+
+echo "==> Installing pinned research Pi harness ($RESEARCH_PI_PACKAGE@$RESEARCH_PI_VERSION)..."
+ssh "$REMOTE" "
+  set -e
+  npm install --global --ignore-scripts '$RESEARCH_PI_PACKAGE@$RESEARCH_PI_VERSION'
+  command -v pi >/dev/null
+  test \"\$(pi --version 2>/dev/null)\" = \"$RESEARCH_PI_VERSION\" || {
+    echo 'research Pi version mismatch' >&2
+    pi --version >&2 || true
+    exit 1
+  }
+  command -v bwrap >/dev/null || { echo 'bubblewrap (bwrap) is required for Runtime: research' >&2; exit 1; }
+  test -f '$REMOTE_DIR/scripts/research-pi-extension.mjs'
+  test -x '$REMOTE_DIR/scripts/research-web-search.mjs'
+  test -x '$REMOTE_DIR/scripts/research-web-fetch.mjs'
+"
 
 echo "==> Removing legacy system-level service (one-time migration, idempotent)..."
 ssh "$REMOTE" "

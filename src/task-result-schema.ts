@@ -44,6 +44,7 @@ export const dispatcherRuntimeSchema = z.enum([
   "ollama",
   "opencode",
   "homeserver",
+  "research",
   "auto",
   "orchestrator",
   "pipeline",

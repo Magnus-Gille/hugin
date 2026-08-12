@@ -27,6 +27,8 @@ export interface ResearchSpikePreflightInput {
   artifactManifest: ArtifactManifest | undefined;
   deliveryPolicy: DeliveryPolicy;
   index: ResearchSpikeIndex | undefined;
+  /** A verified runtime probe result for the dedicated research lane. */
+  researchRuntimeFailure?: string | null;
 }
 
 export interface ResearchSpikeIndex {
@@ -94,6 +96,9 @@ export function researchSpikePreflightFailure(
   }
   if (input.deliveryPolicy === "off") {
     return "Research spike requires Hugin-managed artefact delivery; HUGIN_DELIVERY_POLICY=off is incompatible";
+  }
+  if (input.runtime === "research") {
+    return input.researchRuntimeFailure ?? null;
   }
   return `Research spike cannot run on ${input.runtime}: no dispatcher executor currently declares verified capabilities ${required}. Route it only after the dedicated research lane is verified.`;
 }
