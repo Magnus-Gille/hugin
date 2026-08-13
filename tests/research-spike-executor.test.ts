@@ -489,6 +489,9 @@ describe("dedicated research Pi/M5 runtime", () => {
       module.default({ registerTool(tool: { name: string; execute: (...args: any[]) => Promise<any> }) { registered[tool.name] = tool; } });
       expect((registered.web_search as any).parameters.required).toEqual([]);
       expect((registered.fetch_content as any).parameters.required).toEqual([]);
+      expect((registered.web_search as any).parameters.additionalProperties).toBe(true);
+      expect((registered.fetch_content as any).parameters.additionalProperties).toBe(true);
+      expect((registered.write_artifact as any).parameters.additionalProperties).toBe(false);
       await expect(registered.web_search!.execute("bad-1", {})).rejects.toThrow(/query is required/);
       const terminal = await registered.web_search!.execute("bad-2", {});
       expect(terminal).toMatchObject({ terminate: true, content: [{ text: expect.stringMatching(/consecutive duplicate/) }] });
@@ -521,6 +524,28 @@ describe("dedicated research Pi/M5 runtime", () => {
       for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
       Object.assign(process.env, previous);
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("aborts exactly once when terminal evidence persistence fails", async () => {
+    const registered: Record<string, { execute: (...args: any[]) => Promise<any> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    const previous = { ...process.env };
+    const events: string[] = [];
+    Object.assign(process.env, { HUGIN_RESEARCH_EVIDENCE_FILE: "/dev/null/impossible/grounding.jsonl" });
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (...args: any[]) => Promise<any> }) { registered[tool.name] = tool; } });
+      const ctx = { abort: () => events.push("abort") };
+      await expect(registered.web_search!.execute("bad", { query: "x" }, undefined, undefined, ctx)).rejects.toThrow(/helper failed/);
+      const second = await registered.web_search!.execute("bad", { query: "x" }, undefined, undefined, ctx);
+      expect(second).toMatchObject({ terminate: true });
+      expect(events).toEqual(["abort"]);
+      const repeat = await registered.web_search!.execute("bad", { typo: true }, undefined, undefined, ctx);
+      expect(repeat).toMatchObject({ terminate: true });
+      expect(events).toEqual(["abort"]);
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
     }
   });
 

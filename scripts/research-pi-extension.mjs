@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import net from "node:net";
 
 const schema = (properties, required) => ({ type: "object", properties, required, additionalProperties: false });
+const permissiveSchema = (properties) => ({ type: "object", properties, required: [], additionalProperties: true });
 const string = { type: "string", minLength: 1 };
 
 // These are process-local hard ceilings. Hugin writes the same values into
@@ -136,9 +137,13 @@ export default function registerResearchTools(pi) {
     if (terminationPromise) return terminationPromise;
     // Evidence must be durable before asking Agent Core to abort/shutdown.
     terminationPromise = (async () => {
-      await recordEvidence({ kind: "failure", code: "helper-circuit", diagnostic });
-      if (ctx && typeof ctx.abort === "function") ctx.abort();
-      else if (ctx && typeof ctx.shutdown === "function") ctx.shutdown();
+      try {
+        await recordEvidence({ kind: "failure", code: "helper-circuit", diagnostic });
+      } catch { /* abort remains mandatory even if evidence persistence fails */ }
+      finally {
+        if (ctx && typeof ctx.abort === "function") ctx.abort();
+        else if (ctx && typeof ctx.shutdown === "function") ctx.shutdown();
+      }
       return result(diagnostic, true);
     })();
     return terminationPromise;
@@ -181,7 +186,7 @@ export default function registerResearchTools(pi) {
     executionMode: "sequential",
     // Keep fields optional at Pi's schema gate so malformed calls enter the
     // Hugin-owned meter and terminal policy path instead of bypassing it.
-    parameters: schema({ query: {} }, []),
+    parameters: permissiveSchema({ query: {} }),
     execute: async (_id, params, _signal, _onUpdate, ctx) => {
       const outcome = await helperCall("web_search", params?.query, RESEARCH_TOOL_BUDGET.webSearch, async () => {
         if (typeof params?.query !== "string" || !params.query.trim() || params.query.length > 1_000) throw new Error("web_search query is required");
@@ -201,7 +206,7 @@ export default function registerResearchTools(pi) {
   pi.registerTool({
     name: "fetch_content", label: "fetch_content", description: "Fetch one public web page through the configured Hugin helper.",
     executionMode: "sequential",
-    parameters: schema({ url: {} }, []),
+    parameters: permissiveSchema({ url: {} }),
     execute: async (_id, params, _signal, _onUpdate, ctx) => {
       const outcome = await helperCall("fetch_content", params?.url, RESEARCH_TOOL_BUDGET.fetchContent, async () => {
         if (typeof params?.url !== "string" || !params.url.trim() || params.url.length > 4_096) throw new Error("fetch_content URL is required");
