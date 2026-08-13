@@ -418,15 +418,14 @@ describe("dedicated research Pi/M5 runtime", () => {
         mockPi(JSON.stringify({ results: [{ url: "https://example.com/a" }] }));
         await registered.web_search!.execute("id", { query: `quota-${i}` });
       }
-      await expect(registered.web_search!.execute("id", { query: "quota-7" })).rejects.toThrow(/quota exhausted/);
+      await expect(registered.web_search!.execute("id", { query: "quota-7" })).resolves.toMatchObject({ terminate: true, content: [{ text: expect.stringMatching(/quota exhausted/) }] });
       const duplicateRegistered = registered;
       module.default({ registerTool(tool: { name: string; execute: (id: string, params: Record<string, string>) => Promise<unknown> }) { duplicateRegistered[tool.name] = tool; } });
       mockPi(JSON.stringify({ results: [{ url: "https://example.com/a" }] }));
       await duplicateRegistered.web_search!.execute("id", { query: "duplicate" });
-      await expect(duplicateRegistered.web_search!.execute("id", { query: "duplicate" })).rejects.toThrow(/consecutive duplicate/);
-      // A duplicate is rejected, but a changed query can still make progress.
-      mockPi(JSON.stringify({ results: [{ url: "https://example.com/a" }] }));
-      await expect(duplicateRegistered.web_search!.execute("id", { query: "another" })).resolves.toBeDefined();
+      await expect(duplicateRegistered.web_search!.execute("id", { query: "duplicate" })).resolves.toMatchObject({ terminate: true, content: [{ text: expect.stringMatching(/consecutive duplicate/) }] });
+      // The terminating result prevents any cooperative model follow-up.
+      await expect(duplicateRegistered.web_search!.execute("id", { query: "another" })).resolves.toMatchObject({ terminate: true });
     } finally {
       for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
       Object.assign(process.env, previous);
@@ -450,13 +449,43 @@ describe("dedicated research Pi/M5 runtime", () => {
       mockPi("", "HTTP 403 forbidden", 1);
       await expect(registered.web_search!.execute("id", { query: "failure-2" })).rejects.toThrow(/helper failed.*403/);
       mockPi("", "HTTP 403 forbidden", 1);
-      await expect(registered.web_search!.execute("id", { query: "failure-3" })).rejects.toThrow(/stopped after 3 consecutive helper failures.*403/);
-      await expect(registered.web_search!.execute("id", { query: "failure-4" })).rejects.toThrow(/stopped after 3 consecutive helper failures/);
+      await expect(registered.web_search!.execute("id", { query: "failure-3" })).resolves.toMatchObject({ terminate: true, content: [{ text: expect.stringMatching(/stopped after 3 consecutive helper failures.*403/) }] });
+      await expect(registered.web_search!.execute("id", { query: "failure-4" })).resolves.toMatchObject({ terminate: true });
     } finally {
       for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
       Object.assign(process.env, previous);
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("terminates repeated invalid fetch attempts without spawning a helper", async () => {
+    const registered: Record<string, { execute: (id: string, params: Record<string, string>) => Promise<any> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    const previous = { ...process.env };
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (id: string, params: Record<string, string>) => Promise<any> }) { registered[tool.name] = tool; } });
+      await expect(registered.fetch_content!.execute("id", { url: "http://127.0.0.1/" })).rejects.toThrow(/helper failed.*forbidden/);
+      await expect(registered.fetch_content!.execute("id", { url: "http://10.0.0.1/" })).rejects.toThrow(/helper failed.*forbidden/);
+      const terminal = await registered.fetch_content!.execute("id", { url: "http://192.168.1.1/" });
+      expect(terminal).toMatchObject({ terminate: true, content: [{ text: expect.stringMatching(/stopped after 3 consecutive helper failures/) }] });
+      // A fourth invocation returns the same terminal result and cannot enter
+      // DNS resolution or spawn a helper process.
+      await expect(registered.fetch_content!.execute("id", { url: "http://example.com/" })).resolves.toMatchObject({ terminate: true });
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+    }
+  });
+
+  it("preserves the helper-circuit diagnostic in the Hugin grounding evidence", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-circuit-evidence-"));
+    const evidence = path.join(root, "grounding.jsonl");
+    try {
+      await writeFile(evidence, JSON.stringify({ kind: "failure", code: "helper-circuit", diagnostic: "Research web access stopped after 3 consecutive helper failures: HTTP 403 forbidden" }));
+      const result = await __test__.readGroundingEvidence(evidence, { artifacts: [] });
+      expect(result.failureCode).toBe("helper-circuit");
+      expect(result.failureDiagnostic).toMatch(/HTTP 403 forbidden/);
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it("keeps search and fetch quotas independent", async () => {
@@ -477,7 +506,7 @@ describe("dedicated research Pi/M5 runtime", () => {
         mockPi(JSON.stringify({ results: [{ url: "https://example.com/a" }] }));
         await registered.web_search!.execute("id", { query: `search-${i}` });
       }
-      await expect(registered.web_search!.execute("id", { query: "search-over" })).rejects.toThrow(/web_search quota exhausted/);
+      await expect(registered.web_search!.execute("id", { query: "search-over" })).resolves.toMatchObject({ terminate: true, content: [{ text: expect.stringMatching(/web_search quota exhausted/) }] });
       mockPi(JSON.stringify({ url: "https://93.184.216.34/a", content: "body" }));
       await registered.fetch_content!.execute("id", { url: "https://93.184.216.34/a" });
     } finally {

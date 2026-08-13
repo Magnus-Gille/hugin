@@ -18,6 +18,7 @@ export const researchGroundingFailureCodeSchema = z.enum([
   "artifact-unfetched-url",
   "artifact-not-enough-links",
   "artifact-duplicate-url",
+  "helper-circuit",
 ]);
 export type ResearchGroundingFailureCode = z.infer<typeof researchGroundingFailureCodeSchema>;
 
@@ -154,12 +155,15 @@ export interface ResearchGroundingEvidence {
   uniqueSuccessfulFetches: Array<{ url: string; contentSha256: string }>;
   artifactUrls: Record<string, string[]>;
   failureCode?: ResearchGroundingFailureCode;
+  failureDiagnostic?: string;
 }
 
 export interface ResearchGroundingRecord {
-  kind: "search" | "fetch";
+  kind: "search" | "fetch" | "failure";
   url?: string;
   sha256?: string;
+  code?: string;
+  diagnostic?: string;
 }
 
 export function canonicalResearchUrl(raw: string): string {

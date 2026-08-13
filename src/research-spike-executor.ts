@@ -440,13 +440,14 @@ async function readGroundingEvidence(file: string, artifactManifest: ArtifactMan
   for (const line of raw.split(/\r?\n/).filter(Boolean)) {
     try {
       const value = JSON.parse(line) as ResearchGroundingRecord;
-      if (value.kind === "search" || value.kind === "fetch") records.push(value);
+      if (value.kind === "search" || value.kind === "fetch" || value.kind === "failure") records.push(value);
     } catch { return {
       version: 1, accepted: false, requiredSearches: RESEARCH_REQUIRED_SEARCHES,
       requiredFetches: RESEARCH_REQUIRED_FETCHES, successfulSearches: 0,
       uniqueSuccessfulFetches: [], artifactUrls: {}, failureCode: "evidence-invalid",
     }; }
   }
+  const circuit = records.find((record) => record.kind === "failure" && record.code === "helper-circuit");
   const searches = records.filter((record) => record.kind === "search").length;
   const fetched = new Map<string, { url: string; contentSha256: string }>();
   for (const record of records.filter((value) => value.kind === "fetch")) {
@@ -456,7 +457,8 @@ async function readGroundingEvidence(file: string, artifactManifest: ArtifactMan
   }
   const artifactUrls: Record<string, string[]> = {};
   let failureCode: ResearchGroundingEvidence["failureCode"];
-  if (searches < RESEARCH_REQUIRED_SEARCHES) failureCode = "insufficient-searches";
+  if (circuit) failureCode = "helper-circuit";
+  if (searches < RESEARCH_REQUIRED_SEARCHES) failureCode = failureCode ?? "insufficient-searches";
   if (fetched.size < RESEARCH_REQUIRED_FETCHES) failureCode = failureCode ?? "insufficient-fetches";
   for (const artifact of artifactManifest.artifacts.filter((value) => value.required)) {
     const content = await fs.readFile(artifact.local, "utf8").catch(() => "");
@@ -480,6 +482,7 @@ async function readGroundingEvidence(file: string, artifactManifest: ArtifactMan
     uniqueSuccessfulFetches: [...fetched.values()],
     artifactUrls,
     ...(failureCode ? { failureCode } : {}),
+    ...(circuit?.diagnostic ? { failureDiagnostic: boundText(circuit.diagnostic, MAX_RESEARCH_ERROR_CHARS) } : {}),
   };
   return grounding;
 }
@@ -552,12 +555,18 @@ export async function executeResearchSpike(request: ResearchSpikeRunRequest): Pr
       const parsed = parser.result();
       const semanticError = parsed.error;
       let grounding: ResearchGroundingAttestation | undefined;
+      let groundingFailureDiagnostic: string | undefined;
       if (code === 0 && !semanticError && !timedOut && !killReason) {
         const evidence = await readGroundingEvidence(evidencePath, request.artifactManifest);
+        groundingFailureDiagnostic = evidence.failureDiagnostic;
         grounding = buildResearchGroundingAttestation(evidence);
       }
       await fs.rm(configDir, { recursive: true, force: true }).catch(() => undefined);
-      const groundingError = grounding && !grounding.accepted ? `Research grounding rejected: ${grounding.failureCode}` : undefined;
+      const groundingError = grounding && !grounding.accepted
+        ? grounding.failureCode === "helper-circuit"
+          ? groundingFailureDiagnostic ?? "Research web access stopped after consecutive helper failures"
+          : `Research grounding rejected: ${grounding.failureCode}`
+        : undefined;
       const exitCode = timedOut ? "TIMEOUT" : killReason ? 1 : code === 0 && !semanticError && !groundingError ? 0 : 1;
       const partialOutput = parsed.text || stderrFallback.toString();
       const visibleError = semanticError ?? groundingError;

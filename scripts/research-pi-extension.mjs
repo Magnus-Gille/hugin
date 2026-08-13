@@ -97,7 +97,11 @@ function helper(command, payload) {
   });
 }
 
-const result = (text) => ({ content: [{ type: "text", text }], details: {} });
+const result = (text, terminate = false) => ({
+  content: [{ type: "text", text }],
+  details: {},
+  ...(terminate ? { terminate: true } : {}),
+});
 
 async function recordEvidence(record) {
   const file = process.env.HUGIN_RESEARCH_EVIDENCE_FILE;
@@ -123,21 +127,24 @@ export default function registerResearchTools(pi) {
   let helperFailureStreak = 0;
   let terminalDiagnostic = null;
   const beginCall = (tool, value, quota) => {
-    if (terminalDiagnostic) throw new Error(terminalDiagnostic);
-    if ((tool === "web_search" ? searchCalls : fetchCalls) >= quota) {
-      throw new Error(`Research ${tool} quota exhausted (${quota} calls per run)`);
+    const count = tool === "web_search" ? ++searchCalls : ++fetchCalls;
+    if (terminalDiagnostic) return { terminal: true, diagnostic: terminalDiagnostic };
+    if (count > quota) {
+      terminalDiagnostic = `Research ${tool} quota exhausted (${quota} calls per run)`;
+      return { terminal: true, diagnostic: terminalDiagnostic };
     }
     const normalized = typeof value === "string" ? value.trim().toLowerCase() : JSON.stringify(value);
     const key = `${tool}:${normalized}`;
     if (key === lastCallKey) {
-      throw new Error(`Research ${tool} blocked a consecutive duplicate call`);
+      terminalDiagnostic = `Research ${tool} blocked a consecutive duplicate call`;
+      return { terminal: true, diagnostic: terminalDiagnostic };
     }
     lastCallKey = key;
-    if (tool === "web_search") searchCalls += 1;
-    else fetchCalls += 1;
+    return { terminal: false };
   };
   const helperCall = async (tool, value, quota, fn) => {
-    beginCall(tool, value, quota);
+    const admission = beginCall(tool, value, quota);
+    if (admission.terminal) return admission;
     try {
       const output = await fn();
       helperFailureStreak = 0;
@@ -147,7 +154,7 @@ export default function registerResearchTools(pi) {
       const detail = boundedDiagnostic(error);
       if (helperFailureStreak >= RESEARCH_TOOL_BUDGET.maxConsecutiveHelperFailures) {
         terminalDiagnostic = `Research web access stopped after ${helperFailureStreak} consecutive helper failures: ${detail}`;
-        throw new Error(terminalDiagnostic);
+        return { terminal: true, diagnostic: terminalDiagnostic };
       }
       throw new Error(`${tool} helper failed: ${detail}`);
     }
@@ -156,12 +163,17 @@ export default function registerResearchTools(pi) {
     name: "web_search", label: "web_search", description: "Search the public web through the configured Hugin helper.",
     parameters: schema({ query: string }, ["query"]),
     execute: async (_id, params) => {
-      const { raw, parsed } = await helperCall("web_search", params.query, RESEARCH_TOOL_BUDGET.webSearch, async () => {
+      const outcome = await helperCall("web_search", params.query, RESEARCH_TOOL_BUDGET.webSearch, async () => {
         const raw = await helper(process.env.HUGIN_RESEARCH_SEARCH_HELPER, { query: params.query });
         const parsed = parseHelperJson(raw, "search");
         if (!Array.isArray(parsed.results) || parsed.results.length === 0) throw new Error("search helper returned no results");
         return { raw, parsed };
       });
+      if (outcome.terminal) {
+        await recordEvidence({ kind: "failure", code: "helper-circuit", diagnostic: outcome.diagnostic });
+        return result(outcome.diagnostic, true);
+      }
+      const { raw } = outcome;
       await recordEvidence({ kind: "search" });
       return result(raw);
     },
@@ -170,13 +182,18 @@ export default function registerResearchTools(pi) {
     name: "fetch_content", label: "fetch_content", description: "Fetch one public web page through the configured Hugin helper.",
     parameters: schema({ url: string }, ["url"]),
     execute: async (_id, params) => {
-      const checkedUrl = await resolvePublicUrl(params.url);
-      const { raw, parsed } = await helperCall("fetch_content", checkedUrl, RESEARCH_TOOL_BUDGET.fetchContent, async () => {
+      const outcome = await helperCall("fetch_content", params.url, RESEARCH_TOOL_BUDGET.fetchContent, async () => {
+        const checkedUrl = await resolvePublicUrl(params.url);
         const raw = await helper(process.env.HUGIN_RESEARCH_FETCH_HELPER, { url: checkedUrl });
         const parsed = parseHelperJson(raw, "fetch");
         if (typeof parsed.url !== "string" || typeof parsed.content !== "string" || parsed.content.trim().length === 0) throw new Error("fetch helper returned empty content");
         return { raw, parsed };
       });
+      if (outcome.terminal) {
+        await recordEvidence({ kind: "failure", code: "helper-circuit", diagnostic: outcome.diagnostic });
+        return result(outcome.diagnostic, true);
+      }
+      const { raw, parsed } = outcome;
       const fetchedUrl = await resolvePublicUrl(parsed.url);
       await recordEvidence({
         kind: "fetch",
