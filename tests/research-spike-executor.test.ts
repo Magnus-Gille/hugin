@@ -607,4 +607,21 @@ describe("dedicated research Pi/M5 runtime", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
     expect(child.kill).toHaveBeenCalledWith("SIGKILL");
   });
+
+  it("stops buffering a flooding helper after the oversize boundary", async () => {
+    spawnMock.mockReset();
+    const child = new EventEmitter() as any;
+    child.stdin = { end: vi.fn(), on: vi.fn() };
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    child.kill = vi.fn((signal: string) => {
+      if (signal === "SIGKILL") queueMicrotask(() => child.emit("close", 137));
+    });
+    spawnMock.mockImplementationOnce(() => child);
+    const pending = researchExtension.helper("flooding-helper", {}, 1_000, 5);
+    child.stdout.emit("data", Buffer.alloc(160_001, "x"));
+    child.stdout.emit("data", Buffer.alloc(5_000_000, "y"));
+    await expect(pending).rejects.toThrow(/too much output/);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+  });
 });

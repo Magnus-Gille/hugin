@@ -94,8 +94,10 @@ export function helper(command, payload, timeoutMs = 15_000, graceMs = CHILD_GRA
     };
     const timer = setTimeout(() => stopChild(new Error(`research helper timed out after ${timeoutMs}ms`)), timeoutMs);
     child.stdout.on("data", (chunk) => {
-      if (settled) return;
-      stdout += chunk.toString();
+      if (settled || terminalError) return;
+      const text = chunk.toString();
+      const remaining = MAX_HELPER_STDOUT_CHARS + 1 - stdout.length;
+      stdout += text.slice(0, Math.max(0, remaining));
       if (stdout.length > MAX_HELPER_STDOUT_CHARS) stopChild(new Error("research helper returned too much output"));
     });
     child.stderr.on("data", (chunk) => { if (stderr.length < MAX_HELPER_STDERR_CHARS) stderr += chunk.toString().slice(0, MAX_HELPER_STDERR_CHARS - stderr.length); });
