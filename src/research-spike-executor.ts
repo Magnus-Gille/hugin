@@ -267,38 +267,171 @@ export function buildResearchLaunch(
   return { args, env };
 }
 
-function parsePiOutput(raw: string): { text: string; error?: string } {
-  const lines = raw.split(/\r?\n/).filter(Boolean);
-  const text: string[] = [];
-  let error: string | undefined;
-  for (const line of lines) {
+const RESEARCH_TRUNCATION_MARKER = "[...truncated]";
+const MAX_PI_JSON_LINE_CHARS = 256_000;
+const MAX_PI_DIAGNOSTIC_CHARS = 100_000;
+// Munin caps a document body at 100,000 characters. Keep the persisted
+// research result well below that boundary so wrappers and metadata cannot
+// turn a seemingly valid result into a rejected write.
+const MAX_RESEARCH_RESULT_CHARS = 50_000;
+const MAX_RESEARCH_ERROR_CHARS = 10_000;
+
+class BoundedText {
+  private value = "";
+  private truncated = false;
+
+  constructor(private readonly maxChars: number) {}
+
+  append(text: string): void {
+    if (!text || this.truncated || this.maxChars <= 0) return;
+    const available = this.maxChars - this.value.length;
+    if (text.length <= available) {
+      this.value += text;
+      return;
+    }
+    this.truncated = true;
+    if (available <= RESEARCH_TRUNCATION_MARKER.length) {
+      const marker = RESEARCH_TRUNCATION_MARKER.slice(0, Math.min(this.maxChars, RESEARCH_TRUNCATION_MARKER.length));
+      this.value = this.value.slice(0, Math.max(0, this.maxChars - marker.length)) + marker;
+      return;
+    }
+    this.value += text.slice(0, available - RESEARCH_TRUNCATION_MARKER.length) + RESEARCH_TRUNCATION_MARKER;
+  }
+
+  toString(): string {
+    return this.value;
+  }
+}
+
+function boundText(text: string, maxChars: number): string {
+  const bounded = new BoundedText(maxChars);
+  bounded.append(text);
+  return bounded.toString();
+}
+
+function effectiveResearchResultChars(requested: number): number {
+  return Number.isFinite(requested) ? Math.max(0, Math.min(MAX_RESEARCH_RESULT_CHARS, Math.floor(requested))) : 0;
+}
+
+function composeResearchResult(error: string, partial: string, maxChars: number): string {
+  const combined = new BoundedText(maxChars);
+  combined.append(boundText(error, Math.min(maxChars, MAX_RESEARCH_ERROR_CHARS)));
+  if (partial) {
+    combined.append("\n\n");
+    combined.append(partial);
+  }
+  return combined.toString();
+}
+
+class PiOutputParser {
+  private line = "";
+  private lineTooLong = false;
+  private readonly textOutput: BoundedText;
+  private readonly maxOutputChars: number;
+  private hasText = false;
+  private semanticError: string | undefined;
+
+  constructor(maxOutputChars: number) {
+    this.maxOutputChars = maxOutputChars;
+    this.textOutput = new BoundedText(maxOutputChars);
+  }
+
+  feed(chunk: string): void {
+    let offset = 0;
+    while (offset < chunk.length) {
+      const newline = chunk.indexOf("\n", offset);
+      if (newline < 0) {
+        this.appendLineFragment(chunk.slice(offset));
+        return;
+      }
+      this.appendLineFragment(chunk.slice(offset, newline));
+      this.processLine();
+      this.line = "";
+      this.lineTooLong = false;
+      offset = newline + 1;
+    }
+  }
+
+  finish(): void {
+    if (this.line || this.lineTooLong) this.processLine();
+    this.line = "";
+    this.lineTooLong = false;
+  }
+
+  result(): { text: string; error?: string } {
+    return { text: this.textOutput.toString(), ...(this.semanticError ? { error: this.semanticError } : {}) };
+  }
+
+  private appendLineFragment(fragment: string): void {
+    if (this.lineTooLong || !fragment) return;
+    if (this.line.length + fragment.length > MAX_PI_JSON_LINE_CHARS) {
+      // A malformed/unusually large line must not turn the parser into a
+      // second unbounded stdout buffer. The next JSON line remains visible.
+      this.line = "";
+      this.lineTooLong = true;
+      return;
+    }
+    this.line += fragment;
+  }
+
+  private processLine(): void {
+    if (this.lineTooLong || !this.line.trim()) return;
     try {
-      const event = JSON.parse(line) as Record<string, unknown>;
+      const event = JSON.parse(this.line) as Record<string, unknown>;
       const message = event.message as Record<string, unknown> | undefined;
       const content = message?.content;
+      const appendText = (text: string): void => {
+        if (this.hasText) this.textOutput.append("\n");
+        this.textOutput.append(text);
+        this.hasText = true;
+      };
       if (Array.isArray(content)) {
-        for (const block of content) if (block && typeof block === "object" && typeof (block as Record<string, unknown>).text === "string") text.push((block as Record<string, string>).text);
-      } else if (typeof content === "string") text.push(content);
+        for (const block of content) {
+          if (block && typeof block === "object" && typeof (block as Record<string, unknown>).text === "string") {
+            appendText((block as Record<string, string>).text);
+          }
+        }
+      } else if (typeof content === "string") {
+        appendText(content);
+      }
       const stopReason = message?.stopReason ?? event.stopReason;
-      if (stopReason === "error" || event.type === "error" || event.type === "turn_error") error = typeof message?.errorMessage === "string" ? message.errorMessage : "Pi reported a turn error";
-    } catch { /* non-JSON stderr-like lines are retained only by the caller */ }
+      if (stopReason === "error" || event.type === "error" || event.type === "turn_error") {
+        this.semanticError = boundText(
+          typeof message?.errorMessage === "string" ? message.errorMessage : "Pi reported a turn error",
+          this.maxOutputChars,
+        );
+      }
+    } catch { /* non-JSON stdout-like lines are retained only by diagnostics */ }
   }
-  return { text: text.join("\n"), error };
+}
+
+function parsePiOutput(raw: string, maxOutputChars = Number.MAX_SAFE_INTEGER): { text: string; error?: string } {
+  const parser = new PiOutputParser(maxOutputChars);
+  parser.feed(raw);
+  parser.finish();
+  return parser.result();
 }
 
 export async function executeResearchSpike(request: ResearchSpikeRunRequest): Promise<ResearchSpikeRunResult> {
+  const maxResultChars = effectiveResearchResultChars(request.maxOutputChars);
   const loaded = loadResearchRuntimeConfig(request.env);
   const base = { model: loaded.ok ? loaded.config.model : "unknown", logFile: path.join(os.tmpdir(), `hugin-research-${randomUUID()}.log`) };
-  if (!loaded.ok) return { exitCode: 1, output: loaded.reason, resultText: null, ...base, error: loaded.reason };
+  if (!loaded.ok) {
+    const reason = boundText(loaded.reason, maxResultChars);
+    return { exitCode: 1, output: reason, resultText: null, ...base, error: reason };
+  }
   const preflight = await researchRuntimePreflight(request.env);
-  if (preflight) return { exitCode: 1, output: preflight, resultText: null, ...base, error: preflight };
+  if (preflight) {
+    const reason = boundText(preflight, maxResultChars);
+    return { exitCode: 1, output: reason, resultText: null, ...base, error: reason };
+  }
 
   let artifactPaths: string[];
   try {
     artifactPaths = await precreateArtifacts(request.artifactManifest, request.allowedStagingPrefixes ?? ["/home/magnus/scratch"]);
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    await fs.writeFile(base.logFile, reason, { mode: 0o600 }).catch(() => undefined);
+    const reason = boundText(error instanceof Error ? error.message : String(error), maxResultChars);
+    await fs.writeFile(base.logFile, boundText(reason, MAX_PI_DIAGNOSTIC_CHARS), { mode: 0o600 }).catch(() => undefined);
     return { exitCode: 1, output: reason, resultText: null, ...base, error: reason };
   }
   const configDir = await fs.mkdtemp(path.join(os.tmpdir(), "hugin-research-pi-"));
@@ -307,29 +440,49 @@ export async function executeResearchSpike(request: ResearchSpikeRunRequest): Pr
   const extension = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../scripts/research-pi-extension.mjs");
   try { await fs.access(extension, fsConstants.R_OK); } catch {
     await fs.rm(configDir, { recursive: true, force: true });
-    const reason = `Research runtime unavailable: extension is missing at ${extension}`;
-    await fs.writeFile(base.logFile, reason, { mode: 0o600 }).catch(() => undefined);
+    const reason = boundText(`Research runtime unavailable: extension is missing at ${extension}`, maxResultChars);
+    await fs.writeFile(base.logFile, boundText(reason, MAX_PI_DIAGNOSTIC_CHARS), { mode: 0o600 }).catch(() => undefined);
     return { exitCode: 1, output: reason, resultText: null, ...base, error: reason };
   }
   const launch = buildResearchLaunch(request, loaded.config, configDir, extension, artifactPaths);
   return new Promise((resolve) => {
-    let stdout = ""; let stderr = ""; let timedOut = false; let killReason = false;
+    const parser = new PiOutputParser(maxResultChars);
+    const diagnostic = new BoundedText(MAX_PI_DIAGNOSTIC_CHARS);
+    const stderrFallback = new BoundedText(maxResultChars);
+    let timedOut = false; let killReason = false;
     const child = spawn(loaded.config.bwrapCommand, launch.args, { cwd: request.workingDir, stdio: ["ignore", "pipe", "pipe"], env: launch.env });
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, request.timeoutMs);
     const abort = () => { killReason = true; child.kill("SIGTERM"); };
     request.signal?.addEventListener("abort", abort, { once: true });
-    child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-    child.on("error", async (error) => { clearTimeout(timer); request.signal?.removeEventListener("abort", abort); await fs.rm(configDir, { recursive: true, force: true }).catch(() => undefined); await fs.writeFile(base.logFile, error.message, { mode: 0o600 }).catch(() => undefined); resolve({ exitCode: 1, output: error.message, resultText: null, model: loaded.config.model, logFile: base.logFile, error: error.message }); });
+    child.stdout?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      parser.feed(text);
+      diagnostic.append(text);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderrFallback.append(text);
+      diagnostic.append(text);
+    });
+    child.on("error", async (error) => {
+      clearTimeout(timer);
+      request.signal?.removeEventListener("abort", abort);
+      await fs.rm(configDir, { recursive: true, force: true }).catch(() => undefined);
+      const boundedError = boundText(error.message, maxResultChars);
+      await fs.writeFile(base.logFile, boundedError, { mode: 0o600 }).catch(() => undefined);
+      resolve({ exitCode: 1, output: boundedError.slice(0, maxResultChars), resultText: null, model: loaded.config.model, logFile: base.logFile, error: boundedError });
+    });
     child.on("close", async (code) => {
       clearTimeout(timer); request.signal?.removeEventListener("abort", abort);
       await fs.rm(configDir, { recursive: true, force: true }).catch(() => undefined);
-      const parsed = parsePiOutput(stdout);
+      parser.finish();
+      const parsed = parser.result();
       const semanticError = parsed.error;
       const exitCode = timedOut ? "TIMEOUT" : killReason ? 1 : code === 0 && !semanticError ? 0 : 1;
-      const output = parsed.text || stderr.slice(0, request.maxOutputChars);
-      await fs.writeFile(base.logFile, `${stdout}\n${stderr}`, { mode: 0o600 }).catch(() => undefined);
-      resolve({ exitCode, output: output.slice(0, request.maxOutputChars), resultText: parsed.text || null, model: loaded.config.model, logFile: base.logFile, ...(semanticError ? { error: semanticError } : {}) });
+      const resultText = semanticError ? composeResearchResult(semanticError, parsed.text, maxResultChars) : parsed.text || null;
+      const output = resultText || stderrFallback.toString();
+      await fs.writeFile(base.logFile, diagnostic.toString(), { mode: 0o600 }).catch(() => undefined);
+      resolve({ exitCode, output: output.slice(0, maxResultChars), resultText, model: loaded.config.model, logFile: base.logFile, ...(semanticError ? { error: semanticError } : {}) });
     });
   });
 }
