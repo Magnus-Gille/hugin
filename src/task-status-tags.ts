@@ -29,6 +29,10 @@ const PUBLICATION_PREFIX = "publication:";
 // Durable post-terminal learning capture. `pending` survives restart until
 // the authoritative M5 ledger join and all idempotent registry writes finish.
 const LEARNING_REGISTRY_PREFIX = "learning-registry:";
+// Durable research-spike indexing outcome. Only these two exact markers are
+// trusted; the latest one replaces any stale prior outcome during a rewrite.
+const RESEARCH_INDEX_VERIFIED_TAG = "research-index:verified";
+const RESEARCH_INDEX_FAILED_TAG = "research-index:failed";
 // Dispatcher-owned content-blind scheduler decision pointers. These bind the
 // winning claim to create-only prediction/outcome evidence and therefore must
 // survive every lifecycle rewrite until recovery can finish.
@@ -103,6 +107,11 @@ function collectPersistentStatusTags(
   const deliveryTags = tags.filter((tag) => tag.startsWith(DELIVERY_PREFIX));
   const publicationTags = tags.filter((tag) => tag.startsWith(PUBLICATION_PREFIX));
   const learningRegistryTags = tags.filter((tag) => tag.startsWith(LEARNING_REGISTRY_PREFIX));
+  const researchIndexTag = tags.reduce<string | undefined>((latest, tag) => (
+    tag === RESEARCH_INDEX_VERIFIED_TAG || tag === RESEARCH_INDEX_FAILED_TAG
+      ? tag
+      : latest
+  ), undefined);
   const brokerTags = tags.filter((tag) => tag.startsWith(BROKER_PREFIX));
   const aliasTags = tags.filter((tag) => tag.startsWith(ALIAS_PREFIX));
   const taskTypeTags = tags.filter((tag) => tag.startsWith(TASK_TYPE_PREFIX));
@@ -137,6 +146,7 @@ function collectPersistentStatusTags(
     ...deliveryTags,
     ...publicationTags,
     ...learningRegistryTags,
+    ...(researchIndexTag ? [researchIndexTag] : []),
     ...brokerTags,
     ...aliasTags,
     ...taskTypeTags,
