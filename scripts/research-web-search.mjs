@@ -28,6 +28,10 @@ async function main() {
     if (typeof input.query !== "string" || !input.query.trim() || input.query.length > 1_000) {
       throw new Error("query is required");
     }
+    // Legacy no-secret fallback only. This HTML scraper is intentionally not
+    // presented as the production structured provider; activate a
+    // Hugin-owned credentialed structured provider behind a host-side helper
+    // before relying on broad research search again.
     const url = new URL("https://html.duckduckgo.com/html/");
     url.searchParams.set("q", input.query.trim());
     const result = await requestPublicText(url.toString());

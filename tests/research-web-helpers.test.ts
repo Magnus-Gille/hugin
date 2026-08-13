@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { EventEmitter } from "node:events";
 import { isPublicAddress, requestPublicText, resolvePublicHost } from "../scripts/research-web-common.mjs";
 import { parseDuckDuckGoResults } from "../scripts/research-web-search.mjs";
 
@@ -59,10 +60,27 @@ describe("research web helpers", () => {
     ]);
   });
 
+  it("bounds a stalled HTTPS request with the helper timeout diagnostic", async () => {
+    await expect(requestPublicText("https://example.com", {
+      timeoutMs: 1,
+      lookup: async () => [{ address: "1.1.1.1", family: 4 }],
+      requestImpl: (_url, options, _onResponse) => {
+        const request = new EventEmitter() as EventEmitter & { setTimeout: (delay: number, callback: () => void) => void; end: () => void; destroy: (error: Error) => void };
+        request.setTimeout = (_delay, callback) => setImmediate(callback);
+        request.end = () => undefined;
+        request.destroy = (error) => setImmediate(() => request.emit("error", error));
+        // Exercise the same custom lookup path as a real HTTPS request.
+        options.lookup("example.com", { all: false }, () => undefined);
+        return request;
+      },
+    })).rejects.toThrow(/Research fetch timed out/);
+  });
+
   it("extracts bounded DuckDuckGo result links and unwraps uddg redirects", () => {
     const html = `<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdoc">Example &amp; Docs</a>`;
     expect(parseDuckDuckGoResults(html)).toEqual([
       { title: "Example & Docs", url: "https://example.com/doc" },
     ]);
   });
+
 });

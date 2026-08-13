@@ -3,12 +3,27 @@
  * reader, shell, SSH, rsync, or Munin tool. */
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
-import { promises as dns } from "node:dns";
 import { createHash } from "node:crypto";
 import net from "node:net";
 
 const schema = (properties, required) => ({ type: "object", properties, required, additionalProperties: false });
+const permissiveSchema = (properties) => ({ type: "object", properties, required: [], additionalProperties: true });
 const string = { type: "string", minLength: 1 };
+
+// These are process-local hard ceilings. Hugin writes the same values into
+// the research prompt, but the model cannot alter this state or bypass it.
+export const RESEARCH_TOOL_BUDGET = Object.freeze({
+  webSearch: 6,
+  fetchContent: 12,
+  maxConsecutiveHelperFailures: 3,
+});
+const MAX_DIAGNOSTIC_CHARS = 400;
+// Fetch content is capped at 120k by the helper; leave room for its JSON
+// envelope while keeping the child boundary bounded.
+const MAX_HELPER_STDOUT_CHARS = 160_000;
+const MAX_HELPER_STDERR_CHARS = 2_000;
+const CHILD_GRACE_MS = 250;
+const CHILD_CLOSE_FALLBACK_MS = 1_000;
 
 function allowedUrl(raw) {
   let url;
@@ -50,28 +65,58 @@ function isPublicAddress(address) {
     !/^fe[89ab]/.test(normalized) && !normalized.startsWith("ff");
 }
 
-async function resolvePublicUrl(raw) {
-  const checked = allowedUrl(raw);
-  const host = new URL(checked).hostname;
-  const addresses = await dns.lookup(host, { all: true, verbatim: true });
-  if (addresses.length === 0 || addresses.some(({ address }) => !isPublicAddress(address))) throw new Error("URL DNS resolution returned a forbidden private address");
-  return checked;
-}
+// DNS validation belongs to the killable host-side fetch helper
+// (research-web-common.mjs). Keeping only the syntactic/public-literal gate in
+// the Pi extension avoids uncancellable libuv DNS work in the agent process.
+export function resolvePublicUrl(raw) { return allowedUrl(raw); }
 
-function helper(command, payload) {
+export function helper(command, payload, timeoutMs = 15_000, graceMs = CHILD_GRACE_MS) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, [], { stdio: ["pipe", "pipe", "pipe"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" } });
-    let stdout = ""; let stderr = "";
-    const timer = setTimeout(() => { child.kill("SIGTERM"); reject(new Error("research helper timed out")); }, 15000);
-    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); if (stdout.length > 200000) child.kill("SIGTERM"); });
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-    child.on("error", (error) => { clearTimeout(timer); reject(error); });
-    child.on("close", (code) => { clearTimeout(timer); code === 0 ? resolve(stdout.slice(0, 100000)) : reject(new Error(stderr.slice(0, 1000) || `research helper exited ${code}`)); });
+    let stdout = ""; let stderr = ""; let settled = false;
+    let killTimer; let fallbackTimer; let terminalError;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+      clearTimeout(fallbackTimer);
+      error ? reject(error) : resolve(value);
+    };
+    const stopChild = (error) => {
+      if (terminalError) return;
+      terminalError = error;
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => {
+        child.kill("SIGKILL");
+        fallbackTimer = setTimeout(() => finish(terminalError), CHILD_CLOSE_FALLBACK_MS);
+      }, graceMs);
+    };
+    const timer = setTimeout(() => stopChild(new Error(`research helper timed out after ${timeoutMs}ms`)), timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      if (settled || terminalError) return;
+      const text = chunk.toString();
+      const remaining = MAX_HELPER_STDOUT_CHARS + 1 - stdout.length;
+      stdout += text.slice(0, Math.max(0, remaining));
+      if (stdout.length > MAX_HELPER_STDOUT_CHARS) stopChild(new Error("research helper returned too much output"));
+    });
+    child.stderr.on("data", (chunk) => { if (stderr.length < MAX_HELPER_STDERR_CHARS) stderr += chunk.toString().slice(0, MAX_HELPER_STDERR_CHARS - stderr.length); });
+    child.on("error", (error) => finish(error));
+    child.on("close", (code) => {
+      if (terminalError) return finish(terminalError);
+      if (code === 0) finish(null, stdout.slice(0, MAX_HELPER_STDOUT_CHARS));
+      else finish(new Error(stderr.replace(/[\r\n]+/g, " ").slice(0, MAX_HELPER_STDERR_CHARS) || `research helper exited ${code}`));
+    });
+    if (typeof child.stdin.on === "function") child.stdin.on("error", () => undefined);
     child.stdin.end(JSON.stringify(payload));
   });
 }
 
-const result = (text) => ({ content: [{ type: "text", text }], details: {} });
+const result = (text, terminate = false) => ({
+  content: [{ type: "text", text }],
+  details: {},
+  ...(terminate ? { terminate: true } : {}),
+});
 
 async function recordEvidence(record) {
   const file = process.env.HUGIN_RESEARCH_EVIDENCE_FILE;
@@ -86,25 +131,104 @@ function parseHelperJson(raw, label) {
   return parsed;
 }
 
+function boundedDiagnostic(error) {
+  return (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, " ").slice(0, MAX_DIAGNOSTIC_CHARS);
+}
+
 export default function registerResearchTools(pi) {
+  let searchCalls = 0;
+  let fetchCalls = 0;
+  let lastCallKey = null;
+  let helperFailureStreak = 0;
+  let terminalDiagnostic = null;
+  let terminationPromise;
+  const terminateRun = (ctx, diagnostic) => {
+    if (terminationPromise) return terminationPromise;
+    // Evidence must be durable before asking Agent Core to abort/shutdown.
+    terminationPromise = (async () => {
+      try {
+        await recordEvidence({ kind: "failure", code: "helper-circuit", diagnostic });
+      } catch { /* abort remains mandatory even if evidence persistence fails */ }
+      finally {
+        if (ctx && typeof ctx.abort === "function") ctx.abort();
+        else if (ctx && typeof ctx.shutdown === "function") ctx.shutdown();
+      }
+      return result(diagnostic, true);
+    })();
+    return terminationPromise;
+  };
+  const beginCall = (tool, value, quota) => {
+    const count = tool === "web_search" ? ++searchCalls : ++fetchCalls;
+    if (terminalDiagnostic) return { terminal: true, diagnostic: terminalDiagnostic };
+    if (count > quota) {
+      terminalDiagnostic = `Research ${tool} quota exhausted (${quota} calls per run)`;
+      return { terminal: true, diagnostic: terminalDiagnostic };
+    }
+    const normalized = typeof value === "string" ? value.trim().toLowerCase() : JSON.stringify(value);
+    const key = `${tool}:${normalized}`;
+    if (key === lastCallKey) {
+      terminalDiagnostic = `Research ${tool} blocked a consecutive duplicate call`;
+      return { terminal: true, diagnostic: terminalDiagnostic };
+    }
+    lastCallKey = key;
+    return { terminal: false };
+  };
+  const helperCall = async (tool, value, quota, fn) => {
+    const admission = beginCall(tool, value, quota);
+    if (admission.terminal) return admission;
+    try {
+      const output = await fn();
+      helperFailureStreak = 0;
+      return output;
+    } catch (error) {
+      helperFailureStreak += 1;
+      const detail = boundedDiagnostic(error);
+      if (helperFailureStreak >= RESEARCH_TOOL_BUDGET.maxConsecutiveHelperFailures) {
+        terminalDiagnostic = `Research web access stopped after ${helperFailureStreak} consecutive helper failures: ${detail}`;
+        return { terminal: true, diagnostic: terminalDiagnostic };
+      }
+      throw new Error(`${tool} helper failed: ${detail}`);
+    }
+  };
   pi.registerTool({
     name: "web_search", label: "web_search", description: "Search the public web through the configured Hugin helper.",
-    parameters: schema({ query: string }, ["query"]),
-    execute: async (_id, params) => {
-      const raw = await helper(process.env.HUGIN_RESEARCH_SEARCH_HELPER, { query: params.query });
-      const parsed = parseHelperJson(raw, "search");
-      if (!Array.isArray(parsed.results) || parsed.results.length === 0) throw new Error("search helper returned no results");
+    executionMode: "sequential",
+    // Keep fields optional at Pi's schema gate so malformed calls enter the
+    // Hugin-owned meter and terminal policy path instead of bypassing it.
+    parameters: permissiveSchema({ query: {} }),
+    execute: async (_id, params, _signal, _onUpdate, ctx) => {
+      const outcome = await helperCall("web_search", params?.query, RESEARCH_TOOL_BUDGET.webSearch, async () => {
+        if (typeof params?.query !== "string" || !params.query.trim() || params.query.length > 1_000) throw new Error("web_search query is required");
+        const raw = await helper(process.env.HUGIN_RESEARCH_SEARCH_HELPER, { query: params.query });
+        const parsed = parseHelperJson(raw, "search");
+        if (!Array.isArray(parsed.results) || parsed.results.length === 0) throw new Error("search helper returned no results");
+        return { raw, parsed };
+      });
+      if (outcome.terminal) {
+        return terminateRun(ctx, outcome.diagnostic);
+      }
+      const { raw } = outcome;
       await recordEvidence({ kind: "search" });
       return result(raw);
     },
   });
   pi.registerTool({
     name: "fetch_content", label: "fetch_content", description: "Fetch one public web page through the configured Hugin helper.",
-    parameters: schema({ url: string }, ["url"]),
-    execute: async (_id, params) => {
-      const raw = await helper(process.env.HUGIN_RESEARCH_FETCH_HELPER, { url: await resolvePublicUrl(params.url) });
-      const parsed = parseHelperJson(raw, "fetch");
-      if (typeof parsed.url !== "string" || typeof parsed.content !== "string" || parsed.content.trim().length === 0) throw new Error("fetch helper returned empty content");
+    executionMode: "sequential",
+    parameters: permissiveSchema({ url: {} }),
+    execute: async (_id, params, _signal, _onUpdate, ctx) => {
+      const outcome = await helperCall("fetch_content", params?.url, RESEARCH_TOOL_BUDGET.fetchContent, async () => {
+        if (typeof params?.url !== "string" || !params.url.trim() || params.url.length > 4_096) throw new Error("fetch_content URL is required");
+        const checkedUrl = await resolvePublicUrl(params.url);
+        const raw = await helper(process.env.HUGIN_RESEARCH_FETCH_HELPER, { url: checkedUrl });
+        const parsed = parseHelperJson(raw, "fetch");
+        if (typeof parsed.url !== "string" || typeof parsed.content !== "string" || parsed.content.trim().length === 0) throw new Error("fetch helper returned empty content");
+        return { raw, parsed };
+      });
+      if (outcome.terminal) {
+        return terminateRun(ctx, outcome.diagnostic);
+      }
+      const { raw, parsed } = outcome;
       const fetchedUrl = await resolvePublicUrl(parsed.url);
       await recordEvidence({
         kind: "fetch",
@@ -118,6 +242,7 @@ export default function registerResearchTools(pi) {
     name: "write_artifact", label: "write_artifact", description: "Write a completed research artifact by declared ID.",
     parameters: schema({ id: string, content: string }, ["id", "content"]),
     execute: async (_id, params) => {
+      lastCallKey = null;
       const artifacts = JSON.parse(process.env.HUGIN_RESEARCH_ARTIFACTS || "{}");
       const file = artifacts[params.id];
       if (typeof file !== "string" || !file.startsWith("/")) throw new Error("Unknown artifact ID");

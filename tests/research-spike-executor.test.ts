@@ -10,9 +10,11 @@ import {
   buildResearchLaunch,
   executeResearchSpike,
   loadResearchRuntimeConfig,
+  RESEARCH_TOOL_BUDGET,
   sanitizeResearchPrompt,
   validateResearchUrl,
 } from "../src/research-spike-executor.js";
+const researchExtension = await import("../scripts/research-pi-extension.mjs");
 
 const env = {
   HUGIN_RESEARCH_M5_URL: "http://100.99.119.52:8080",
@@ -153,9 +155,54 @@ describe("dedicated research Pi/M5 runtime", () => {
     expect(sanitized).not.toMatch(/rsync|memory_write|magnus@|mimir-inbox|\/secret\/report/i);
   });
 
+  it("discloses the enforced web-tool budgets in the research prompt", () => {
+    const prompt = __test__.buildPiPrompt({
+      prompt: "Investigate the topic.",
+      workingDir: "/home/magnus/scratch",
+      timeoutMs: 1_000,
+      maxOutputChars: 1_000,
+      artifactManifest: { artifacts: [
+        { id: "report", local: "/home/magnus/scratch/report.md", remote: "magnus@nas:/r/report", required: true },
+      ] },
+    });
+    expect(prompt).toMatch(/at most 6 web_search calls and 12 fetch_content calls/);
+    expect(prompt).toMatch(/Consecutive duplicate calls are blocked/);
+    expect(prompt).toMatch(/3 consecutive helper failures/);
+  });
+
+  it("keeps the prompt budget constants in parity with the Pi extension", async () => {
+    const extension = await import("../scripts/research-pi-extension.mjs");
+    expect(extension.RESEARCH_TOOL_BUDGET).toEqual({
+      webSearch: RESEARCH_TOOL_BUDGET.webSearch,
+      fetchContent: RESEARCH_TOOL_BUDGET.fetchContent,
+      maxConsecutiveHelperFailures: RESEARCH_TOOL_BUDGET.maxConsecutiveHelperFailures,
+    });
+  });
+
   it("turns a semantic Pi turn error into a failed result even with process exit 0", () => {
     expect(__test__.parsePiOutput(JSON.stringify({ type: "turn_end", message: { stopReason: "error", errorMessage: "tool failed" } }))).toMatchObject({ error: "tool failed" });
     expect(__test__.parsePiOutput(JSON.stringify({ type: "message", message: { role: "assistant", content: "done", stopReason: "stop" } }))).toEqual({ text: "done" });
+  });
+
+  it("excludes duplicated toolResult message events from assistant output", () => {
+    const diagnostic = "Research web access stopped after 3 consecutive helper failures: HTTP 403 forbidden";
+    const raw = [
+      JSON.stringify({ type: "message_start", message: { role: "toolResult", content: diagnostic } }),
+      JSON.stringify({ type: "message_end", message: { role: "toolResult", content: diagnostic } }),
+      JSON.stringify({ type: "message_end", message: { role: "assistant", content: "I stopped." } }),
+      JSON.stringify({ type: "turn_end", message: { stopReason: "stop" } }),
+    ].join("\n");
+    const parsed = __test__.parsePiOutput(raw);
+    expect(parsed.text).toBe("I stopped.");
+    expect(parsed.text).not.toContain(diagnostic);
+  });
+
+  it("collects assistant content only from finalized message events", () => {
+    const raw = [
+      JSON.stringify({ type: "message_start", message: { role: "assistant", content: "one copy" } }),
+      JSON.stringify({ type: "message_end", message: { role: "assistant", content: "one copy" } }),
+    ].join("\n");
+    expect(__test__.parsePiOutput(raw).text).toBe("one copy");
   });
 
   it("bounds output and resultText while still detecting a late semantic error", async () => {
@@ -376,5 +423,226 @@ describe("dedicated research Pi/M5 runtime", () => {
       Object.assign(process.env, previous);
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("enforces per-run search quotas and consecutive duplicate blocking", async () => {
+    const registered: Record<string, { execute: (id: string, params: Record<string, string>) => Promise<unknown> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-budget-test-"));
+    const searchHelper = path.join(root, "search.mjs");
+    const previous = { ...process.env };
+    await writeFile(searchHelper, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify({results:[{url:'https://example.com/a'}]})));\n");
+    await chmod(searchHelper, 0o700);
+    Object.assign(process.env, { HUGIN_RESEARCH_SEARCH_HELPER: searchHelper });
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (id: string, params: Record<string, string>) => Promise<unknown> }) { registered[tool.name] = tool; } });
+      for (let i = 0; i < 6; i += 1) {
+        mockPi(JSON.stringify({ results: [{ url: "https://example.com/a" }] }));
+        await registered.web_search!.execute("id", { query: `quota-${i}` });
+      }
+      await expect(registered.web_search!.execute("id", { query: "quota-7" })).resolves.toMatchObject({ terminate: true, content: [{ text: expect.stringMatching(/quota exhausted/) }] });
+      const duplicateRegistered = registered;
+      module.default({ registerTool(tool: { name: string; execute: (id: string, params: Record<string, string>) => Promise<unknown> }) { duplicateRegistered[tool.name] = tool; } });
+      mockPi(JSON.stringify({ results: [{ url: "https://example.com/a" }] }));
+      await duplicateRegistered.web_search!.execute("id", { query: "duplicate" });
+      await expect(duplicateRegistered.web_search!.execute("id", { query: "duplicate" })).resolves.toMatchObject({ terminate: true, content: [{ text: expect.stringMatching(/consecutive duplicate/) }] });
+      // The terminating result prevents any cooperative model follow-up.
+      await expect(duplicateRegistered.web_search!.execute("id", { query: "another" })).resolves.toMatchObject({ terminate: true });
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("opens one bounded diagnostic after repeated helper failures and caps quota", async () => {
+    const registered: Record<string, { execute: (id: string, params: Record<string, string>) => Promise<unknown> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-failure-budget-test-"));
+    const searchHelper = path.join(root, "search.mjs");
+    const previous = { ...process.env };
+    await writeFile(searchHelper, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => { process.stderr.write('HTTP 403 forbidden\\n'); process.exit(1); });\n");
+    await chmod(searchHelper, 0o700);
+    Object.assign(process.env, { HUGIN_RESEARCH_SEARCH_HELPER: searchHelper });
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (id: string, params: Record<string, string>) => Promise<unknown> }) { registered[tool.name] = tool; } });
+      mockPi("", "HTTP 403 forbidden", 1);
+      await expect(registered.web_search!.execute("id", { query: "failure-1" })).rejects.toThrow(/helper failed.*403/);
+      mockPi("", "HTTP 403 forbidden", 1);
+      await expect(registered.web_search!.execute("id", { query: "failure-2" })).rejects.toThrow(/helper failed.*403/);
+      mockPi("", "HTTP 403 forbidden", 1);
+      await expect(registered.web_search!.execute("id", { query: "failure-3" })).resolves.toMatchObject({ terminate: true, content: [{ text: expect.stringMatching(/stopped after 3 consecutive helper failures.*403/) }] });
+      await expect(registered.web_search!.execute("id", { query: "failure-4" })).resolves.toMatchObject({ terminate: true });
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("terminates repeated invalid fetch attempts without spawning a helper", async () => {
+    const registered: Record<string, { execute: (id: string, params: Record<string, string>) => Promise<any> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    const previous = { ...process.env };
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (id: string, params: Record<string, string>) => Promise<any> }) { registered[tool.name] = tool; } });
+      await expect(registered.fetch_content!.execute("id", { url: "http://127.0.0.1/" })).rejects.toThrow(/helper failed.*forbidden/);
+      await expect(registered.fetch_content!.execute("id", { url: "http://10.0.0.1/" })).rejects.toThrow(/helper failed.*forbidden/);
+      const terminal = await registered.fetch_content!.execute("id", { url: "http://192.168.1.1/" });
+      expect(terminal).toMatchObject({ terminate: true, content: [{ text: expect.stringMatching(/stopped after 3 consecutive helper failures/) }] });
+      // A fourth invocation returns the same terminal result and cannot enter
+      // DNS resolution or spawn a helper process.
+      await expect(registered.fetch_content!.execute("id", { url: "http://example.com/" })).resolves.toMatchObject({ terminate: true });
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+    }
+  });
+
+  it("keeps extension URL checks synchronous; DNS stays in the killable helper", async () => {
+    const module = await import("../scripts/research-pi-extension.mjs");
+    expect(module.resolvePublicUrl("https://example.com/")).toBe("https://example.com/");
+    expect(() => module.resolvePublicUrl("http://127.0.0.1/")).toThrow(/forbidden/);
+  });
+
+  it("meters schema-invalid web-tool arguments and terminates the repeated loop", async () => {
+    const registered: Record<string, { execute: (...args: any[]) => Promise<any> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (...args: any[]) => Promise<any> }) { registered[tool.name] = tool; } });
+      expect((registered.web_search as any).parameters.required).toEqual([]);
+      expect((registered.fetch_content as any).parameters.required).toEqual([]);
+      expect((registered.web_search as any).parameters.additionalProperties).toBe(true);
+      expect((registered.fetch_content as any).parameters.additionalProperties).toBe(true);
+      expect((registered.write_artifact as any).parameters.additionalProperties).toBe(false);
+      await expect(registered.web_search!.execute("bad-1", {})).rejects.toThrow(/query is required/);
+      const terminal = await registered.web_search!.execute("bad-2", {});
+      expect(terminal).toMatchObject({ terminate: true, content: [{ text: expect.stringMatching(/consecutive duplicate/) }] });
+    } finally {
+      // No helper process is configured or spawned by either invalid call.
+    }
+  });
+
+  it("stops directly concurrent tool executions once, after recording terminal evidence", async () => {
+    const registered: Record<string, { execute: (...args: any[]) => Promise<any> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-mixed-batch-"));
+    const evidence = path.join(root, "grounding.jsonl");
+    const previous = { ...process.env };
+    const events: string[] = [];
+    const ctx = { abort: () => events.push("abort") };
+    Object.assign(process.env, { HUGIN_RESEARCH_EVIDENCE_FILE: evidence });
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (...args: any[]) => Promise<any> }) { registered[tool.name] = tool; } });
+      mockPi(JSON.stringify({ results: [{ url: "https://example.com/a" }] }));
+      const [successful, terminal] = await Promise.all([
+        registered.web_search!.execute("first", { query: "mixed" }),
+        registered.web_search!.execute("second", { query: "mixed" }, undefined, undefined, ctx),
+      ]);
+      expect(successful).not.toMatchObject({ terminate: true });
+      expect(terminal).toMatchObject({ terminate: true });
+      expect(events).toEqual(["abort"]);
+      expect(await readFile(evidence, "utf8")).toContain('"code":"helper-circuit"');
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("aborts exactly once when terminal evidence persistence fails", async () => {
+    const registered: Record<string, { execute: (...args: any[]) => Promise<any> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    const previous = { ...process.env };
+    const events: string[] = [];
+    Object.assign(process.env, { HUGIN_RESEARCH_EVIDENCE_FILE: "/dev/null/impossible/grounding.jsonl" });
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (...args: any[]) => Promise<any> }) { registered[tool.name] = tool; } });
+      const ctx = { abort: () => events.push("abort") };
+      await expect(registered.web_search!.execute("bad", { query: "x" }, undefined, undefined, ctx)).rejects.toThrow(/helper failed/);
+      const second = await registered.web_search!.execute("bad", { query: "x" }, undefined, undefined, ctx);
+      expect(second).toMatchObject({ terminate: true });
+      expect(events).toEqual(["abort"]);
+      const repeat = await registered.web_search!.execute("bad", { typo: true }, undefined, undefined, ctx);
+      expect(repeat).toMatchObject({ terminate: true });
+      expect(events).toEqual(["abort"]);
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+    }
+  });
+
+  it("preserves the helper-circuit diagnostic in the Hugin grounding evidence", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-circuit-evidence-"));
+    const evidence = path.join(root, "grounding.jsonl");
+    try {
+      await writeFile(evidence, JSON.stringify({ kind: "failure", code: "helper-circuit", diagnostic: "Research web access stopped after 3 consecutive helper failures: HTTP 403 forbidden" }));
+      const report = path.join(root, "report.md");
+      await writeFile(report, "");
+      const result = await __test__.readGroundingEvidence(evidence, { artifacts: [{ id: "report", local: report, remote: "magnus@nas:/report", required: true }] });
+      expect(result.failureCode).toBe("helper-circuit");
+      expect(result.failureDiagnostic).toMatch(/HTTP 403 forbidden/);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("keeps search and fetch quotas independent", async () => {
+    const registered: Record<string, { execute: (id: string, params: Record<string, string>) => Promise<unknown> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-fetch-budget-test-"));
+    const searchHelper = path.join(root, "search.mjs");
+    const fetchHelper = path.join(root, "fetch.mjs");
+    const previous = { ...process.env };
+    await writeFile(searchHelper, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify({results:[{url:'https://example.com/a'}]})));\n");
+    await writeFile(fetchHelper, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify({url:'https://93.184.216.34/a', content:'body'})));\n");
+    await chmod(searchHelper, 0o700); await chmod(fetchHelper, 0o700);
+    Object.assign(process.env, { HUGIN_RESEARCH_SEARCH_HELPER: searchHelper, HUGIN_RESEARCH_FETCH_HELPER: fetchHelper });
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (id: string, params: Record<string, string>) => Promise<unknown> }) { registered[tool.name] = tool; } });
+      // Exhaust only the search budget; fetch remains independently available.
+      for (let i = 0; i < 6; i += 1) {
+        mockPi(JSON.stringify({ results: [{ url: "https://example.com/a" }] }));
+        await registered.web_search!.execute("id", { query: `search-${i}` });
+      }
+      await expect(registered.web_search!.execute("id", { query: "search-over" })).resolves.toMatchObject({ terminate: true, content: [{ text: expect.stringMatching(/web_search quota exhausted/) }] });
+      mockPi(JSON.stringify({ url: "https://93.184.216.34/a", content: "body" }));
+      await registered.fetch_content!.execute("id", { url: "https://93.184.216.34/a" });
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("waits for SIGKILL/close when a helper ignores SIGTERM", async () => {
+    spawnMock.mockReset();
+    const child = new EventEmitter() as any;
+    child.stdin = { end: vi.fn(), on: vi.fn() };
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    child.kill = vi.fn((signal: string) => {
+      if (signal === "SIGKILL") queueMicrotask(() => child.emit("close", 137));
+    });
+    spawnMock.mockImplementationOnce(() => child);
+    const started = Date.now();
+    await expect(researchExtension.helper("ignored-term-helper", {}, 5, 5)).rejects.toThrow(/timed out after 5ms/);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(5);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+  });
+
+  it("stops buffering a flooding helper after the oversize boundary", async () => {
+    spawnMock.mockReset();
+    const child = new EventEmitter() as any;
+    child.stdin = { end: vi.fn(), on: vi.fn() };
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    child.kill = vi.fn((signal: string) => {
+      if (signal === "SIGKILL") queueMicrotask(() => child.emit("close", 137));
+    });
+    spawnMock.mockImplementationOnce(() => child);
+    const pending = researchExtension.helper("flooding-helper", {}, 1_000, 5);
+    child.stdout.emit("data", Buffer.alloc(160_001, "x"));
+    child.stdout.emit("data", Buffer.alloc(5_000_000, "y"));
+    await expect(pending).rejects.toThrow(/too much output/);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
   });
 });
