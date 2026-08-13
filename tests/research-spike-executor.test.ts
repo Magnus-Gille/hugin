@@ -477,12 +477,59 @@ describe("dedicated research Pi/M5 runtime", () => {
     }
   });
 
+  it("bounds DNS resolution before helper execution", async () => {
+    const module = await import("../scripts/research-pi-extension.mjs");
+    await expect(module.resolvePublicUrl("https://example.com/", async () => new Promise(() => undefined), 1)).rejects.toThrow(/DNS lookup timed out/);
+  });
+
+  it("meters schema-invalid web-tool arguments and terminates the repeated loop", async () => {
+    const registered: Record<string, { execute: (...args: any[]) => Promise<any> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (...args: any[]) => Promise<any> }) { registered[tool.name] = tool; } });
+      await expect(registered.web_search!.execute("bad-1", {})).rejects.toThrow(/query is required/);
+      const terminal = await registered.web_search!.execute("bad-2", {});
+      expect(terminal).toMatchObject({ terminate: true, content: [{ text: expect.stringMatching(/consecutive duplicate/) }] });
+    } finally {
+      // No helper process is configured or spawned by either invalid call.
+    }
+  });
+
+  it("stops a mixed parallel tool batch once, after recording the terminal evidence", async () => {
+    const registered: Record<string, { execute: (...args: any[]) => Promise<any> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-mixed-batch-"));
+    const evidence = path.join(root, "grounding.jsonl");
+    const previous = { ...process.env };
+    const events: string[] = [];
+    const ctx = { abort: () => events.push("abort") };
+    Object.assign(process.env, { HUGIN_RESEARCH_EVIDENCE_FILE: evidence });
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (...args: any[]) => Promise<any> }) { registered[tool.name] = tool; } });
+      mockPi(JSON.stringify({ results: [{ url: "https://example.com/a" }] }));
+      const [successful, terminal] = await Promise.all([
+        registered.web_search!.execute("first", { query: "mixed" }),
+        registered.web_search!.execute("second", { query: "mixed" }, undefined, undefined, ctx),
+      ]);
+      expect(successful).not.toMatchObject({ terminate: true });
+      expect(terminal).toMatchObject({ terminate: true });
+      expect(events).toEqual(["abort"]);
+      expect(await readFile(evidence, "utf8")).toContain('"code":"helper-circuit"');
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("preserves the helper-circuit diagnostic in the Hugin grounding evidence", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-circuit-evidence-"));
     const evidence = path.join(root, "grounding.jsonl");
     try {
       await writeFile(evidence, JSON.stringify({ kind: "failure", code: "helper-circuit", diagnostic: "Research web access stopped after 3 consecutive helper failures: HTTP 403 forbidden" }));
-      const result = await __test__.readGroundingEvidence(evidence, { artifacts: [] });
+      const report = path.join(root, "report.md");
+      await writeFile(report, "");
+      const result = await __test__.readGroundingEvidence(evidence, { artifacts: [{ id: "report", local: report, remote: "magnus@nas:/report", required: true }] });
       expect(result.failureCode).toBe("helper-circuit");
       expect(result.failureDiagnostic).toMatch(/HTTP 403 forbidden/);
     } finally { await rm(root, { recursive: true, force: true }); }

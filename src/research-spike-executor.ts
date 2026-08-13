@@ -462,7 +462,7 @@ async function readGroundingEvidence(file: string, artifactManifest: ArtifactMan
   if (fetched.size < RESEARCH_REQUIRED_FETCHES) failureCode = failureCode ?? "insufficient-fetches";
   for (const artifact of artifactManifest.artifacts.filter((value) => value.required)) {
     const content = await fs.readFile(artifact.local, "utf8").catch(() => "");
-    if (!content) { failureCode = "artifact-missing"; continue; }
+    if (!content) { failureCode = failureCode ?? "artifact-missing"; continue; }
     const linked = extractMarkdownLinks(content);
     const allUrls = extractUrls(content);
     if (linked.length === 0) { failureCode = failureCode ?? "artifact-no-links"; continue; }
@@ -556,8 +556,14 @@ export async function executeResearchSpike(request: ResearchSpikeRunRequest): Pr
       const semanticError = parsed.error;
       let grounding: ResearchGroundingAttestation | undefined;
       let groundingFailureDiagnostic: string | undefined;
-      if (code === 0 && !semanticError && !timedOut && !killReason) {
-        const evidence = await readGroundingEvidence(evidencePath, request.artifactManifest);
+      // The extension records a helper-circuit before requesting Agent Core
+      // abort/shutdown. Read it even when that control path yields nonzero so
+      // the parent preserves the precise bounded diagnostic.
+      const evidence = !timedOut && !killReason
+        ? await readGroundingEvidence(evidencePath, request.artifactManifest)
+        : undefined;
+      const hasHelperCircuit = evidence?.failureCode === "helper-circuit";
+      if (evidence && (code === 0 || hasHelperCircuit)) {
         groundingFailureDiagnostic = evidence.failureDiagnostic;
         grounding = buildResearchGroundingAttestation(evidence);
       }
@@ -569,7 +575,9 @@ export async function executeResearchSpike(request: ResearchSpikeRunRequest): Pr
         : undefined;
       const exitCode = timedOut ? "TIMEOUT" : killReason ? 1 : code === 0 && !semanticError && !groundingError ? 0 : 1;
       const partialOutput = parsed.text || stderrFallback.toString();
-      const visibleError = semanticError ?? groundingError;
+      const visibleError = grounding?.failureCode === "helper-circuit"
+        ? groundingError
+        : semanticError ?? groundingError;
       const resultText = visibleError
         ? composeResearchResult(visibleError, partialOutput, maxResultChars)
         : parsed.text || null;

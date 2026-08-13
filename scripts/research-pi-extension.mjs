@@ -22,6 +22,7 @@ const MAX_DIAGNOSTIC_CHARS = 400;
 // envelope while keeping the child boundary bounded.
 const MAX_HELPER_STDOUT_CHARS = 160_000;
 const MAX_HELPER_STDERR_CHARS = 2_000;
+const DNS_TIMEOUT_MS = 5_000;
 
 function allowedUrl(raw) {
   let url;
@@ -63,10 +64,14 @@ function isPublicAddress(address) {
     !/^fe[89ab]/.test(normalized) && !normalized.startsWith("ff");
 }
 
-async function resolvePublicUrl(raw) {
+export async function resolvePublicUrl(raw, lookup = dns.lookup, timeoutMs = DNS_TIMEOUT_MS) {
   const checked = allowedUrl(raw);
   const host = new URL(checked).hostname;
-  const addresses = await dns.lookup(host, { all: true, verbatim: true });
+  let timer;
+  const addresses = await Promise.race([
+    lookup(host, { all: true, verbatim: true }),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Research DNS lookup timed out")), timeoutMs); }),
+  ]).finally(() => clearTimeout(timer));
   if (addresses.length === 0 || addresses.some(({ address }) => !isPublicAddress(address))) throw new Error("URL DNS resolution returned a forbidden private address");
   return checked;
 }
@@ -126,6 +131,18 @@ export default function registerResearchTools(pi) {
   let lastCallKey = null;
   let helperFailureStreak = 0;
   let terminalDiagnostic = null;
+  let terminationPromise;
+  const terminateRun = (ctx, diagnostic) => {
+    if (terminationPromise) return terminationPromise;
+    // Evidence must be durable before asking Agent Core to abort/shutdown.
+    terminationPromise = (async () => {
+      await recordEvidence({ kind: "failure", code: "helper-circuit", diagnostic });
+      if (ctx && typeof ctx.abort === "function") ctx.abort();
+      else if (ctx && typeof ctx.shutdown === "function") ctx.shutdown();
+      return result(diagnostic, true);
+    })();
+    return terminationPromise;
+  };
   const beginCall = (tool, value, quota) => {
     const count = tool === "web_search" ? ++searchCalls : ++fetchCalls;
     if (terminalDiagnostic) return { terminal: true, diagnostic: terminalDiagnostic };
@@ -161,17 +178,18 @@ export default function registerResearchTools(pi) {
   };
   pi.registerTool({
     name: "web_search", label: "web_search", description: "Search the public web through the configured Hugin helper.",
-    parameters: schema({ query: string }, ["query"]),
-    execute: async (_id, params) => {
-      const outcome = await helperCall("web_search", params.query, RESEARCH_TOOL_BUDGET.webSearch, async () => {
+    executionMode: "sequential",
+    parameters: schema({ query: {} }, ["query"]),
+    execute: async (_id, params, _signal, _onUpdate, ctx) => {
+      const outcome = await helperCall("web_search", params?.query, RESEARCH_TOOL_BUDGET.webSearch, async () => {
+        if (typeof params?.query !== "string" || !params.query.trim() || params.query.length > 1_000) throw new Error("web_search query is required");
         const raw = await helper(process.env.HUGIN_RESEARCH_SEARCH_HELPER, { query: params.query });
         const parsed = parseHelperJson(raw, "search");
         if (!Array.isArray(parsed.results) || parsed.results.length === 0) throw new Error("search helper returned no results");
         return { raw, parsed };
       });
       if (outcome.terminal) {
-        await recordEvidence({ kind: "failure", code: "helper-circuit", diagnostic: outcome.diagnostic });
-        return result(outcome.diagnostic, true);
+        return terminateRun(ctx, outcome.diagnostic);
       }
       const { raw } = outcome;
       await recordEvidence({ kind: "search" });
@@ -180,9 +198,11 @@ export default function registerResearchTools(pi) {
   });
   pi.registerTool({
     name: "fetch_content", label: "fetch_content", description: "Fetch one public web page through the configured Hugin helper.",
-    parameters: schema({ url: string }, ["url"]),
-    execute: async (_id, params) => {
-      const outcome = await helperCall("fetch_content", params.url, RESEARCH_TOOL_BUDGET.fetchContent, async () => {
+    executionMode: "sequential",
+    parameters: schema({ url: {} }, ["url"]),
+    execute: async (_id, params, _signal, _onUpdate, ctx) => {
+      const outcome = await helperCall("fetch_content", params?.url, RESEARCH_TOOL_BUDGET.fetchContent, async () => {
+        if (typeof params?.url !== "string" || !params.url.trim() || params.url.length > 4_096) throw new Error("fetch_content URL is required");
         const checkedUrl = await resolvePublicUrl(params.url);
         const raw = await helper(process.env.HUGIN_RESEARCH_FETCH_HELPER, { url: checkedUrl });
         const parsed = parseHelperJson(raw, "fetch");
@@ -190,8 +210,7 @@ export default function registerResearchTools(pi) {
         return { raw, parsed };
       });
       if (outcome.terminal) {
-        await recordEvidence({ kind: "failure", code: "helper-circuit", diagnostic: outcome.diagnostic });
-        return result(outcome.diagnostic, true);
+        return terminateRun(ctx, outcome.diagnostic);
       }
       const { raw, parsed } = outcome;
       const fetchedUrl = await resolvePublicUrl(parsed.url);
