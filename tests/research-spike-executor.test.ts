@@ -1,10 +1,14 @@
-import { describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+const spawnMock = vi.hoisted(() => vi.fn());
+vi.mock("node:child_process", () => ({ spawn: spawnMock }));
 import {
   __test__,
   buildResearchLaunch,
+  executeResearchSpike,
   loadResearchRuntimeConfig,
   sanitizeResearchPrompt,
   validateResearchUrl,
@@ -16,6 +20,47 @@ const env = {
   HUGIN_RESEARCH_SEARCH_HELPER: "/opt/hugin/search-helper",
   HUGIN_RESEARCH_FETCH_HELPER: "/opt/hugin/fetch-helper",
 };
+
+function mockPi(stdout: string, stderr = "", code = 0): void {
+  spawnMock.mockImplementationOnce(() => {
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = vi.fn();
+    queueMicrotask(() => {
+      if (stdout) child.stdout.emit("data", Buffer.from(stdout));
+      if (stderr) child.stderr.emit("data", Buffer.from(stderr));
+      child.emit("close", code);
+    });
+    return child;
+  });
+}
+
+async function researchRequest(root: string, maxOutputChars: number) {
+  const stagingRoot = await realpath(root);
+  return {
+    prompt: "research",
+    workingDir: root,
+    timeoutMs: 10_000,
+    maxOutputChars,
+    env: {
+      ...env,
+      HUGIN_RESEARCH_SEARCH_HELPER: process.execPath,
+      HUGIN_RESEARCH_FETCH_HELPER: process.execPath,
+      HUGIN_RESEARCH_PI_CMD: process.execPath,
+      HUGIN_RESEARCH_BWRAP_CMD: process.execPath,
+    },
+    allowedStagingPrefixes: [stagingRoot],
+    artifactManifest: { artifacts: [
+      { id: "report", local: path.join(root, "report.md"), remote: "magnus@nas:/r/report.md", required: true },
+      { id: "reading", local: path.join(root, "reading.md"), remote: "magnus@nas:/r/reading.md", required: true },
+    ] },
+  } as const;
+}
 
 describe("dedicated research Pi/M5 runtime", () => {
   it("requires explicit local M5 and both helper commands", () => {
@@ -109,6 +154,68 @@ describe("dedicated research Pi/M5 runtime", () => {
   it("turns a semantic Pi turn error into a failed result even with process exit 0", () => {
     expect(__test__.parsePiOutput(JSON.stringify({ type: "turn_end", message: { stopReason: "error", errorMessage: "tool failed" } }))).toMatchObject({ error: "tool failed" });
     expect(__test__.parsePiOutput(JSON.stringify({ type: "message", message: { role: "assistant", content: "done", stopReason: "stop" } }))).toEqual({ text: "done" });
+  });
+
+  it("bounds output and resultText while still detecting a late semantic error", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-output-bound-"));
+    try {
+      const transcript = [
+        JSON.stringify({ type: "message", message: { role: "assistant", content: "x".repeat(120_000) } }),
+        JSON.stringify({ type: "turn_end", message: { stopReason: "error", errorMessage: "late tool failure" } }),
+      ].join("\n");
+      mockPi(transcript);
+      const result = await executeResearchSpike(await researchRequest(root, 1_000));
+      expect(result.exitCode).toBe(1);
+      expect(result.error).toBe("late tool failure");
+      expect(result.output.length).toBeLessThanOrEqual(1_000);
+      expect(result.resultText?.length).toBeLessThanOrEqual(1_000);
+      expect(result.output).toContain("[...truncated]");
+      expect(result.resultText).toContain("[...truncated]");
+      expect(result.output).toContain("late tool failure");
+      expect(result.resultText).toContain("late tool failure");
+      expect(result.output.startsWith("late tool failure")).toBe(true);
+      expect(result.resultText?.startsWith("late tool failure")).toBe(true);
+      expect((await readFile(result.logFile, "utf8")).length).toBeLessThanOrEqual(100_000);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a large configured max below the Munin-safe research result cap", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-munin-bound-"));
+    try {
+      const transcript = [
+        JSON.stringify({ type: "message", message: { role: "assistant", content: "x".repeat(120_000) } }),
+        JSON.stringify({ type: "turn_end", message: { stopReason: "error", errorMessage: "late tool failure" } }),
+      ].join("\n");
+      mockPi(transcript);
+      const result = await executeResearchSpike(await researchRequest(root, 1_000_000));
+      expect(result.exitCode).toBe(1);
+      expect(result.output.length).toBeLessThanOrEqual(50_000);
+      expect(result.resultText?.length).toBeLessThanOrEqual(50_000);
+      expect(result.error?.length).toBeLessThanOrEqual(50_000);
+      expect(result.output).toContain("late tool failure");
+      expect(result.resultText).toContain("late tool failure");
+      expect(result.output).toContain("[...truncated]");
+      expect(result.resultText).toContain("[...truncated]");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses a bounded stderr fallback with an explicit marker", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-stderr-bound-"));
+    try {
+      mockPi("not-json\n", "e".repeat(120_000), 1);
+      const result = await executeResearchSpike(await researchRequest(root, 1_000));
+      expect(result.exitCode).toBe(1);
+      expect(result.resultText).toBeNull();
+      expect(result.output.length).toBeLessThanOrEqual(1_000);
+      expect(result.output).toContain("[...truncated]");
+      expect((await readFile(result.logFile, "utf8")).length).toBeLessThanOrEqual(100_000);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("exposes only the three Hugin tool result shapes and refuses unknown artifact IDs", async () => {
