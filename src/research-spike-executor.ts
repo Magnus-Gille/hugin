@@ -249,7 +249,10 @@ export function buildResearchLaunch(
     "--die-with-parent", "--ro-bind", "/", "/", "--tmpfs", "/tmp", "--dir", "/tmp/hugin-research-home", "--proc", "/proc", "--dev", "/dev",
     // `/` is already read-only. Mount ephemeral runtime inputs under the
     // private `/tmp` tmpfs, whose destination parent Bubblewrap can create.
-    "--chdir", request.workingDir, "--ro-bind", configDir, SANDBOX_PI_CONFIG_DIR,
+    // Pi creates an ephemeral trust.json.lock even in one-shot mode. The host
+    // source is Hugin's fresh auto-deleted temp directory, so bind only that
+    // directory writable; models.json contains an env reference, not the key.
+    "--chdir", request.workingDir, "--bind", configDir, SANDBOX_PI_CONFIG_DIR,
     "--ro-bind", extension, SANDBOX_PI_EXTENSION,
     ...artifactPaths.flatMap((file) => ["--bind", file, file]),
     "--", config.piCommand, ...RESEARCH_PI_FLAGS, "--extension", SANDBOX_PI_EXTENSION, "--provider", "m5-local", "--model", config.model, "--mode", "json", "-p", buildPiPrompt(request),
