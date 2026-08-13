@@ -17,6 +17,7 @@ import {
 } from "./task-signing.js";
 import { huginTaskIdentitySchema } from "./task-identity.js";
 import { learningTaskExecutionEvidenceSchema } from "./learning-task-handshake.js";
+import { researchGroundingSchema } from "./research-grounding.js";
 
 export const taskExecutionOutcomeSchema = z.enum([
   "completed",
@@ -491,6 +492,8 @@ export const structuredTaskResultSchema = z.object({
   approval: taskExecutionApprovalMetadataSchema.optional(),
   sensitivity: taskExecutionSensitivitySchema.optional(),
   artifactDelivery: artifactDeliverySchema.optional(),
+  /** Hugin-owned, content-blind web-grounding acceptance evidence. */
+  researchGrounding: researchGroundingSchema.optional(),
   orchestratorOutcomes: z.array(orchestratorOutcomeSchema).optional(),
   savings: savingsSummarySchema.optional(),
   provenance: taskSubmissionProvenanceSchema.optional(),

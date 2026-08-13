@@ -315,6 +315,11 @@ import {
   researchRuntimePreflight,
 } from "./research-spike-executor.js";
 import {
+  parseResearchGroundingAttestation,
+  validateResearchGroundingAttestation,
+  type ResearchGroundingAttestation,
+} from "./research-grounding.js";
+import {
   extractSignatureField,
   buildTaskSubmissionProvenance,
   loadKeyStoreFromEnv,
@@ -328,6 +333,8 @@ import {
   type TaskSignatureAssessment,
   type TaskSubmissionProvenance,
 } from "./task-signing.js";
+
+const RESEARCH_GROUNDING_KEY = "research-grounding";
 import { consultSkillLane } from "./skill/skill-lane-dispatch.js";
 import { readBrokerEnv, type RunningBroker } from "./broker/server.js";
 import {
@@ -3204,6 +3211,7 @@ async function reconcileDeliveryPending(
   let recoveryResearchIndexTag: string | undefined;
   let recoveryFailureKind: string | undefined;
   let recoveryFailureReason: string | undefined;
+  let recoveryGrounding: StructuredTaskResult["researchGrounding"];
   if (ok && delivery.ok && isResearchSpike(entry.tags)) {
     if (!task?.researchSpikeIndex || !hasResearchSpikeArtifactContract(task.artifactManifest)) {
       ok = false;
@@ -3213,6 +3221,23 @@ async function reconcileDeliveryPending(
       baseDoc += `\n\n### Research indexing\n\n- **Indexing:** failed — ${recoveryFailureReason}\n`;
     } else {
       try {
+        // Recovery may occur after the live worker has already delivered the
+        // files but before indexing. The sidecar is intentionally ephemeral;
+        // the bounded Hugin-owned attestation is the durable proof.
+        const groundingResultEntry = await client.read(taskNs, RESEARCH_GROUNDING_KEY);
+        let groundingAccepted = false;
+        if (groundingResultEntry?.content) {
+          try {
+            const parsed = parseResearchGroundingAttestation(groundingResultEntry.content);
+            const requiredArtifactIds = task.artifactManifest.artifacts.filter((artifact) => artifact.required).map((artifact) => artifact.id);
+            const validated = parsed ? validateResearchGroundingAttestation(parsed, requiredArtifactIds) : null;
+            if (validated?.accepted === true) {
+              groundingAccepted = true;
+              recoveryGrounding = validated;
+            }
+          } catch { groundingAccepted = false; }
+        }
+        if (!groundingAccepted) throw new Error("durable accepted research grounding attestation is missing or invalid");
         await writeResearchSpikeIndexes(
           client,
           task.researchSpikeIndex,
@@ -3297,6 +3322,7 @@ async function reconcileDeliveryPending(
           error: r.error,
         })),
       },
+      researchGrounding: recoveryGrounding,
     }),
     classification,
     client,
@@ -5599,6 +5625,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let homeserverResult: HomeserverExecutorResult | null = null;
     let effectiveExecutor = executorLabel;
     let researchEffectiveModel: string | undefined;
+    let researchGrounding: ResearchGroundingAttestation | undefined;
     // Trusted failure-kind discriminator from a pre-flight short-circuit
     // (issue #123 Codex review) — set only when executeClaudeSdkWithPreflightChecks
     // refused the task itself, so the classification below never has to
@@ -5804,6 +5831,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     currentResearchAbort = null;
     exitCode = researchResult.exitCode;
     researchEffectiveModel = researchResult.model;
+    researchGrounding = researchResult.grounding;
     output = researchResult.output;
     resultText = researchResult.resultText;
     logFile = researchResult.logFile;
@@ -6741,6 +6769,35 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // checkpoint (single-owner model, Codex review #1) cannot be clobbered by
     // this worker's late finalize.
     let deliveryCheckpointUpdatedAt: string | undefined;
+    // Persist the accepted, content-blind grounding attestation before any
+    // delivery checkpoint. Deferred delivery recovery relies on this exact
+    // Hugin-owned key after the ephemeral sidecar has been removed.
+    let researchGroundingFailureReason: string | undefined;
+    if (isResearch && !isCancelled && !isTimeout && exitCode === 0) {
+      const requiredArtifactIds = task.artifactManifest?.artifacts.filter((artifact) => artifact.required).map((artifact) => artifact.id) ?? [];
+      const validatedGrounding = researchGrounding ? validateResearchGroundingAttestation(researchGrounding, requiredArtifactIds) : null;
+      if (!validatedGrounding?.accepted) {
+        ok = false;
+        exitCode = 1;
+        researchGroundingFailureReason = "Hugin-owned research grounding evidence is missing or rejected";
+      } else {
+        try {
+          await munin.write(
+            taskNs,
+            RESEARCH_GROUNDING_KEY,
+            JSON.stringify(validatedGrounding),
+            ["type:research-grounding", "writer:hugin"],
+            undefined,
+            taskClassification,
+          );
+        } catch (error) {
+          ok = false;
+          exitCode = 1;
+          researchGroundingFailureReason = "Hugin-owned research grounding attestation could not be persisted";
+          await munin.log(taskNs, `Research grounding attestation failed: ${error instanceof Error ? error.message : String(error)}`).catch(() => undefined);
+        }
+      }
+    }
     const deliveryEligible =
       config.deliveryPolicy !== "off" &&
       !!task.artifactManifest &&
@@ -7344,6 +7401,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
                   ? undefined
                   : failureClassification
                     ? failureClassification.reason
+                    : researchGroundingFailureReason
+                      ? researchGroundingFailureReason
                     : deliveryFailureKind === "RESEARCH_INDEX_FAILED"
                       ? "Hugin-owned research indexing failed after verified delivery"
                     : deliveryResult && !deliveryResult.ok
@@ -7367,6 +7426,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
                       })),
                     }
                   : undefined,
+                researchGrounding,
                 orchestratorOutcomes,
                 savings: savingsResult,
               }),

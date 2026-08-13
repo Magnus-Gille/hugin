@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 const spawnMock = vi.hoisted(() => vi.fn());
@@ -24,10 +24,12 @@ const env = {
 function mockPi(stdout: string, stderr = "", code = 0): void {
   spawnMock.mockImplementationOnce(() => {
     const child = new EventEmitter() as EventEmitter & {
+      stdin: { end: ReturnType<typeof vi.fn> };
       stdout: EventEmitter;
       stderr: EventEmitter;
       kill: ReturnType<typeof vi.fn>;
     };
+    child.stdin = { end: vi.fn() };
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.kill = vi.fn();
@@ -218,6 +220,74 @@ describe("dedicated research Pi/M5 runtime", () => {
     }
   });
 
+  it("puts grounding rejection code and reason first in visible result text", () => {
+    const result = __test__.composeResearchResult("Research grounding rejected: insufficient-fetches", "partial model answer", 1000);
+    expect(result).toMatch(/^Research grounding rejected: insufficient-fetches/);
+    expect(result).toContain("partial model answer");
+  });
+
+  it("accepts only Hugin-recorded searches, three unique public fetches, and linked fetched sources", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-grounding-"));
+    const evidence = path.join(root, "grounding.jsonl");
+    const detailed = path.join(root, "detailed.md");
+    const popular = path.join(root, "popular.md");
+    const urls = ["https://example.com/one", "https://example.com/two", "https://example.com/three"];
+    try {
+      await writeFile(evidence, [
+        JSON.stringify({ kind: "search" }),
+        ...urls.map((url, index) => JSON.stringify({ kind: "fetch", url, sha256: String(index + 1).repeat(64) })),
+      ].join("\n"));
+      const links = urls.map((url) => `[source](${url})`).join(" ");
+      await writeFile(detailed, links);
+      await writeFile(popular, links);
+      const result = await __test__.readGroundingEvidence(evidence, { artifacts: [
+        { id: "detailed", local: detailed, remote: "magnus@nas:/detailed", required: true },
+        { id: "popular", local: popular, remote: "magnus@nas:/popular", required: true },
+      ] });
+      expect(result.accepted).toBe(true);
+      expect(result.successfulSearches).toBe(1);
+      expect(result.uniqueSuccessfulFetches).toHaveLength(3);
+      expect(JSON.stringify(result)).not.toContain("body");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    ["missing search", [{ kind: "fetch", url: "https://example.com/one", sha256: "1".repeat(64) }], "insufficient-searches"],
+    ["duplicate fetches", [
+      { kind: "search" },
+      ...["one", "one", "two"].map((part) => ({ kind: "fetch", url: `https://example.com/${part}`, sha256: "1".repeat(64) })),
+    ], "insufficient-fetches"],
+  ])("rejects %s before delivery/indexing", async (_label, records, failureCode) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-grounding-reject-"));
+    const evidence = path.join(root, "grounding.jsonl");
+    const artifacts = ["detailed", "popular"].map((id) => ({ id, local: path.join(root, `${id}.md`), remote: `magnus@nas:/${id}`, required: true }));
+    try {
+      await writeFile(evidence, (records as Array<Record<string, string>>).map((record) => JSON.stringify(record)).join("\n"));
+      for (const artifact of artifacts) await writeFile(artifact.local, "[source](https://example.com/one) [source](https://example.com/two) [source](https://example.com/three)");
+      const result = await __test__.readGroundingEvidence(evidence, { artifacts });
+      expect(result.accepted).toBe(false);
+      if (failureCode === "insufficient-fetches") {
+        expect(["insufficient-fetches", "artifact-unfetched-url", "artifact-not-enough-links"]).toContain(result.failureCode);
+      } else {
+        expect(result.failureCode).toBe(failureCode);
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("rejects invented, private, and duplicate artifact links", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-grounding-links-"));
+    const evidence = path.join(root, "grounding.jsonl");
+    const artifact = path.join(root, "report.md");
+    const fetched = ["https://example.com/one", "https://example.com/two", "https://example.com/three"];
+    try {
+      await writeFile(evidence, [JSON.stringify({ kind: "search" }), ...fetched.map((url) => JSON.stringify({ kind: "fetch", url, sha256: "a".repeat(64) }))].join("\n"));
+      await writeFile(artifact, `[one](${fetched[0]}) [duplicate](${fetched[0]}) [private](http://127.0.0.1/x)`);
+      const result = await __test__.readGroundingEvidence(evidence, { artifacts: [{ id: "report", local: artifact, remote: "magnus@nas:/report", required: true }] });
+      expect(result.accepted).toBe(false);
+      expect(["artifact-duplicate-url", "artifact-unsafe-url"]).toContain(result.failureCode);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("exposes only the three Hugin tool result shapes and refuses unknown artifact IDs", async () => {
     const registered: Record<string, { execute: (id: string, params: Record<string, string>) => Promise<unknown> }> = {};
     const module = await import("../scripts/research-pi-extension.mjs");
@@ -230,8 +300,77 @@ describe("dedicated research Pi/M5 runtime", () => {
       const written = await registered.write_artifact!.execute("id", { id: "report", content: "hello" });
       expect(written).toEqual({ content: [{ type: "text", text: "artifact report written" }], details: {} });
       await expect(registered.write_artifact!.execute("id", { id: "../escape", content: "no" })).rejects.toThrow(/Unknown artifact ID/);
+      await expect(registered.fetch_content!.execute("id", { url: "http://[::ffff:127.0.0.1]/" })).rejects.toThrow(/forbidden/);
       expect(await readFile(artifact, "utf8")).toBe("hello");
       expect(Object.keys(registered).sort()).toEqual(["fetch_content", "web_search", "write_artifact"]);
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("records successful extension calls in the Hugin sidecar, outside model text", async () => {
+    const registered: Record<string, { execute: (id: string, params: Record<string, string>) => Promise<unknown> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-evidence-test-"));
+    const helper = path.join(root, "helper.mjs");
+    const evidence = path.join(root, "grounding.jsonl");
+    await writeFile(helper, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify(process.argv[1] === 'fetch' ? {url:'https://example.com/a', content:'body'} : {results:[{url:'https://example.com/a'}]})));\n");
+    await chmod(helper, 0o700);
+    const previous = { ...process.env };
+    process.env.HUGIN_RESEARCH_EVIDENCE_FILE = evidence;
+    try {
+      // The production setting is an absolute command; use a tiny shell-free
+      // node wrapper per helper so this test exercises the real child boundary.
+      const searchHelper = path.join(root, "search.mjs");
+      const fetchHelper = path.join(root, "fetch.mjs");
+      await writeFile(searchHelper, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify({results:[{url:'https://93.184.216.34/a'}]})));\n");
+      await writeFile(fetchHelper, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify({url:'https://93.184.216.34/a', content:'body'})));\n");
+      await chmod(searchHelper, 0o700); await chmod(fetchHelper, 0o700);
+      process.env.HUGIN_RESEARCH_SEARCH_HELPER = searchHelper;
+      process.env.HUGIN_RESEARCH_FETCH_HELPER = fetchHelper;
+      module.default({ registerTool(tool: { name: string; execute: (id: string, params: Record<string, string>) => Promise<unknown> }) { registered[tool.name] = tool; } });
+      mockPi(JSON.stringify({ results: [{ url: "https://93.184.216.34/a" }] }));
+      await registered.web_search!.execute("id", { query: "test" });
+      mockPi(JSON.stringify({ url: "https://93.184.216.34/a", content: "body" }));
+      await registered.fetch_content!.execute("id", { url: "https://93.184.216.34/a" });
+      const records = (await readFile(evidence, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      expect(records).toEqual([
+        { kind: "search" },
+        { kind: "fetch", url: "https://93.184.216.34/a", sha256: expect.any(String) },
+      ]);
+      expect(JSON.stringify(records)).not.toContain("body");
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not record empty search or fetch helper results as successful evidence", async () => {
+    const registered: Record<string, { execute: (id: string, params: Record<string, string>) => Promise<unknown> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-empty-evidence-test-"));
+    const searchHelper = path.join(root, "search.mjs");
+    const fetchHelper = path.join(root, "fetch.mjs");
+    const evidence = path.join(root, "grounding.jsonl");
+    await writeFile(searchHelper, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify({results:[]})));\n");
+    await writeFile(fetchHelper, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify({url:'https://93.184.216.34/a', content:''})));\n");
+    await chmod(searchHelper, 0o700); await chmod(fetchHelper, 0o700);
+    const previous = { ...process.env };
+    Object.assign(process.env, {
+      HUGIN_RESEARCH_EVIDENCE_FILE: evidence,
+      HUGIN_RESEARCH_SEARCH_HELPER: searchHelper,
+      HUGIN_RESEARCH_FETCH_HELPER: fetchHelper,
+    });
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (id: string, params: Record<string, string>) => Promise<unknown> }) { registered[tool.name] = tool; } });
+      mockPi(JSON.stringify({ results: [] }));
+      await expect(registered.web_search!.execute("id", { query: "empty" })).rejects.toThrow(/no results/);
+      mockPi(JSON.stringify({ url: "https://93.184.216.34/a", content: "" }));
+      await expect(registered.fetch_content!.execute("id", { url: "https://93.184.216.34/a" })).rejects.toThrow(/empty content/);
+      await expect(readFile(evidence, "utf8")).rejects.toThrow();
     } finally {
       for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
       Object.assign(process.env, previous);

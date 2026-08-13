@@ -19,7 +19,7 @@ function sliceBetween(startMarker: string, endMarker: string): string {
   return SRC.slice(start, end);
 }
 
-describe("delivery recovery preserves sensitivity evidence (#280)", () => {
+describe("delivery recovery preserves sensitivity and grounding evidence", () => {
   it("checkpoints the exact sensitivity snapshot before delivery can crash", () => {
     const liveDelivery = sliceBetween(
       "if (deliveryEligible && task.artifactManifest)",
@@ -32,6 +32,18 @@ describe("delivery recovery preserves sensitivity evidence (#280)", () => {
     );
   });
 
+  it("persists accepted research grounding before the delivery checkpoint", () => {
+    const grounding = sliceBetween(
+      "let researchGroundingFailureReason",
+      "const deliveryEligible",
+    );
+    expect(grounding).toContain('RESEARCH_GROUNDING_KEY');
+    expect(grounding).toContain('JSON.stringify(validatedGrounding)');
+    expect(SRC.indexOf('JSON.stringify(validatedGrounding)')).toBeLessThan(
+      SRC.indexOf('if (deliveryEligible && task.artifactManifest)'),
+    );
+  });
+
   it("reuses the checkpoint in delivery reconciliation's terminal result", () => {
     const recovery = sliceBetween(
       "async function reconcileDeliveryPending(",
@@ -39,5 +51,10 @@ describe("delivery recovery preserves sensitivity evidence (#280)", () => {
     );
     expect(recovery).toContain("readSensitivityCheckpoint(");
     expect(recovery).toContain("sensitivity: recoverySensitivity");
+    expect(recovery).toContain("RESEARCH_GROUNDING_KEY");
+    expect(recovery).toContain("parseResearchGroundingAttestation");
+    expect(recovery).toContain("validateResearchGroundingAttestation");
+    expect(recovery).toContain("requiredArtifactIds");
+    expect(recovery).toContain("durable accepted research grounding attestation is missing or invalid");
   });
 });

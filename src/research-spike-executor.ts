@@ -7,6 +7,18 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import type { ArtifactManifest } from "./artifact-delivery.js";
 import { isSovereignGatewayHost, resolveGatewayRootUrl } from "./orchestrator/provider-config.js";
+import {
+  canonicalResearchUrl,
+  buildResearchGroundingAttestation,
+  extractMarkdownLinks,
+  extractUrls,
+  isSafePublicResearchUrl,
+  RESEARCH_REQUIRED_FETCHES,
+  RESEARCH_REQUIRED_SEARCHES,
+  type ResearchGroundingAttestation,
+  type ResearchGroundingEvidence,
+  type ResearchGroundingRecord,
+} from "./research-grounding.js";
 
 export const RESEARCH_PI_FLAGS = [
   "--no-session",
@@ -50,6 +62,7 @@ export interface ResearchSpikeRunResult {
   resultText: string | null;
   model: string;
   error?: string;
+  grounding?: ResearchGroundingAttestation;
 }
 
 const DEFAULT_MODEL = "qwen3-coder-next-80b";
@@ -260,6 +273,7 @@ export function buildResearchLaunch(
   const env: NodeJS.ProcessEnv = {
     PATH: "/home/magnus/.npm-global/bin:/usr/local/bin:/usr/bin:/bin", HOME: "/tmp/hugin-research-home", PI_CODING_AGENT_DIR: SANDBOX_PI_CONFIG_DIR,
     HUGIN_RESEARCH_SEARCH_HELPER: config.searchHelper, HUGIN_RESEARCH_FETCH_HELPER: config.fetchHelper,
+    HUGIN_RESEARCH_EVIDENCE_FILE: `${SANDBOX_PI_CONFIG_DIR}/grounding.jsonl`,
     HUGIN_RESEARCH_ALLOWED_SEARCH_HOSTS: config.allowedSearchHosts.join(","),
     HUGIN_RESEARCH_ARTIFACTS: JSON.stringify(Object.fromEntries(request.artifactManifest.artifacts.filter((a) => a.required).map((a) => [a.id, a.local]))),
     HUGIN_RESEARCH_M5_API_KEY: config.gatewayApiKey, HUGIN_RESEARCH_M5_URL: config.gatewayBaseUrl,
@@ -412,6 +426,56 @@ function parsePiOutput(raw: string, maxOutputChars = Number.MAX_SAFE_INTEGER): {
   return parser.result();
 }
 
+async function readGroundingEvidence(file: string, artifactManifest: ArtifactManifest): Promise<ResearchGroundingEvidence> {
+  const raw = await fs.readFile(file, "utf8").catch(() => "");
+  const records: ResearchGroundingRecord[] = [];
+  for (const line of raw.split(/\r?\n/).filter(Boolean)) {
+    try {
+      const value = JSON.parse(line) as ResearchGroundingRecord;
+      if (value.kind === "search" || value.kind === "fetch") records.push(value);
+    } catch { return {
+      version: 1, accepted: false, requiredSearches: RESEARCH_REQUIRED_SEARCHES,
+      requiredFetches: RESEARCH_REQUIRED_FETCHES, successfulSearches: 0,
+      uniqueSuccessfulFetches: [], artifactUrls: {}, failureCode: "evidence-invalid",
+    }; }
+  }
+  const searches = records.filter((record) => record.kind === "search").length;
+  const fetched = new Map<string, { url: string; contentSha256: string }>();
+  for (const record of records.filter((value) => value.kind === "fetch")) {
+    if (!record.url || !record.sha256 || !isSafePublicResearchUrl(record.url) || !/^[a-f0-9]{64}$/.test(record.sha256)) continue;
+    const url = canonicalResearchUrl(record.url);
+    if (!fetched.has(url)) fetched.set(url, { url, contentSha256: record.sha256 });
+  }
+  const artifactUrls: Record<string, string[]> = {};
+  let failureCode: ResearchGroundingEvidence["failureCode"];
+  if (searches < RESEARCH_REQUIRED_SEARCHES) failureCode = "insufficient-searches";
+  if (fetched.size < RESEARCH_REQUIRED_FETCHES) failureCode = failureCode ?? "insufficient-fetches";
+  for (const artifact of artifactManifest.artifacts.filter((value) => value.required)) {
+    const content = await fs.readFile(artifact.local, "utf8").catch(() => "");
+    if (!content) { failureCode = "artifact-missing"; continue; }
+    const linked = extractMarkdownLinks(content);
+    const allUrls = extractUrls(content);
+    if (linked.length === 0) { failureCode = failureCode ?? "artifact-no-links"; continue; }
+    const urls = [...new Set(linked.map((url) => canonicalResearchUrl(url)))];
+    artifactUrls[artifact.id] = urls.filter((url) => isSafePublicResearchUrl(url) && fetched.has(url));
+    if (urls.length !== linked.length) failureCode = failureCode ?? "artifact-duplicate-url";
+    if (allUrls.some((url) => !isSafePublicResearchUrl(url))) failureCode = failureCode ?? "artifact-unsafe-url";
+    if (allUrls.some((url) => !fetched.has(canonicalResearchUrl(url)))) failureCode = failureCode ?? "artifact-unfetched-url";
+    if (urls.length < RESEARCH_REQUIRED_FETCHES) failureCode = failureCode ?? "artifact-not-enough-links";
+  }
+  const grounding: ResearchGroundingEvidence = {
+    version: 1,
+    accepted: !failureCode,
+    requiredSearches: RESEARCH_REQUIRED_SEARCHES,
+    requiredFetches: RESEARCH_REQUIRED_FETCHES,
+    successfulSearches: searches,
+    uniqueSuccessfulFetches: [...fetched.values()],
+    artifactUrls,
+    ...(failureCode ? { failureCode } : {}),
+  };
+  return grounding;
+}
+
 export async function executeResearchSpike(request: ResearchSpikeRunRequest): Promise<ResearchSpikeRunResult> {
   const maxResultChars = effectiveResearchResultChars(request.maxOutputChars);
   const loaded = loadResearchRuntimeConfig(request.env);
@@ -435,6 +499,8 @@ export async function executeResearchSpike(request: ResearchSpikeRunRequest): Pr
     return { exitCode: 1, output: reason, resultText: null, ...base, error: reason };
   }
   const configDir = await fs.mkdtemp(path.join(os.tmpdir(), "hugin-research-pi-"));
+  const evidencePath = path.join(configDir, "grounding.jsonl");
+  await fs.writeFile(evidencePath, "", { mode: 0o600 });
   const modelsPath = path.join(configDir, "models.json");
   await fs.writeFile(modelsPath, providerModelsJson(loaded.config), { mode: 0o600 });
   const extension = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../scripts/research-pi-extension.mjs");
@@ -474,17 +540,35 @@ export async function executeResearchSpike(request: ResearchSpikeRunRequest): Pr
     });
     child.on("close", async (code) => {
       clearTimeout(timer); request.signal?.removeEventListener("abort", abort);
-      await fs.rm(configDir, { recursive: true, force: true }).catch(() => undefined);
       parser.finish();
       const parsed = parser.result();
       const semanticError = parsed.error;
-      const exitCode = timedOut ? "TIMEOUT" : killReason ? 1 : code === 0 && !semanticError ? 0 : 1;
-      const resultText = semanticError ? composeResearchResult(semanticError, parsed.text, maxResultChars) : parsed.text || null;
+      let grounding: ResearchGroundingAttestation | undefined;
+      if (code === 0 && !semanticError && !timedOut && !killReason) {
+        const evidence = await readGroundingEvidence(evidencePath, request.artifactManifest);
+        grounding = buildResearchGroundingAttestation(evidence);
+      }
+      await fs.rm(configDir, { recursive: true, force: true }).catch(() => undefined);
+      const groundingError = grounding && !grounding.accepted ? `Research grounding rejected: ${grounding.failureCode}` : undefined;
+      const exitCode = timedOut ? "TIMEOUT" : killReason ? 1 : code === 0 && !semanticError && !groundingError ? 0 : 1;
+      const partialOutput = parsed.text || stderrFallback.toString();
+      const visibleError = semanticError ?? groundingError;
+      const resultText = visibleError
+        ? composeResearchResult(visibleError, partialOutput, maxResultChars)
+        : parsed.text || null;
       const output = resultText || stderrFallback.toString();
       await fs.writeFile(base.logFile, diagnostic.toString(), { mode: 0o600 }).catch(() => undefined);
-      resolve({ exitCode, output: output.slice(0, maxResultChars), resultText, model: loaded.config.model, logFile: base.logFile, ...(semanticError ? { error: semanticError } : {}) });
+      resolve({
+        exitCode,
+        output: output.slice(0, maxResultChars),
+        resultText,
+        model: loaded.config.model,
+        logFile: base.logFile,
+        ...(visibleError ? { error: visibleError } : {}),
+        grounding,
+      });
     });
   });
 }
 
-export const __test__ = { privateAddress, parsePiOutput, providerModelsJson, buildPiPrompt, precreateArtifacts };
+export const __test__ = { privateAddress, parsePiOutput, providerModelsJson, buildPiPrompt, precreateArtifacts, readGroundingEvidence, composeResearchResult };
