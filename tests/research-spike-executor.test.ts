@@ -10,6 +10,7 @@ import {
   buildResearchLaunch,
   executeResearchSpike,
   loadResearchRuntimeConfig,
+  RESEARCH_TOOL_BUDGET,
   sanitizeResearchPrompt,
   validateResearchUrl,
 } from "../src/research-spike-executor.js";
@@ -151,6 +152,30 @@ describe("dedicated research Pi/M5 runtime", () => {
     expect(sanitized).toContain("Research the hardware options.");
     expect(sanitized).toContain("Cite primary sources.");
     expect(sanitized).not.toMatch(/rsync|memory_write|magnus@|mimir-inbox|\/secret\/report/i);
+  });
+
+  it("discloses the enforced web-tool budgets in the research prompt", () => {
+    const prompt = __test__.buildPiPrompt({
+      prompt: "Investigate the topic.",
+      workingDir: "/home/magnus/scratch",
+      timeoutMs: 1_000,
+      maxOutputChars: 1_000,
+      artifactManifest: { artifacts: [
+        { id: "report", local: "/home/magnus/scratch/report.md", remote: "magnus@nas:/r/report", required: true },
+      ] },
+    });
+    expect(prompt).toMatch(/at most 6 web_search calls and 12 fetch_content calls/);
+    expect(prompt).toMatch(/Consecutive duplicate calls are blocked/);
+    expect(prompt).toMatch(/3 consecutive helper failures/);
+  });
+
+  it("keeps the prompt budget constants in parity with the Pi extension", async () => {
+    const extension = await import("../scripts/research-pi-extension.mjs");
+    expect(extension.RESEARCH_TOOL_BUDGET).toEqual({
+      webSearch: RESEARCH_TOOL_BUDGET.webSearch,
+      fetchContent: RESEARCH_TOOL_BUDGET.fetchContent,
+      maxConsecutiveHelperFailures: RESEARCH_TOOL_BUDGET.maxConsecutiveHelperFailures,
+    });
   });
 
   it("turns a semantic Pi turn error into a failed result even with process exit 0", () => {
@@ -371,6 +396,90 @@ describe("dedicated research Pi/M5 runtime", () => {
       mockPi(JSON.stringify({ url: "https://93.184.216.34/a", content: "" }));
       await expect(registered.fetch_content!.execute("id", { url: "https://93.184.216.34/a" })).rejects.toThrow(/empty content/);
       await expect(readFile(evidence, "utf8")).rejects.toThrow();
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces per-run search quotas and consecutive duplicate blocking", async () => {
+    const registered: Record<string, { execute: (id: string, params: Record<string, string>) => Promise<unknown> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-budget-test-"));
+    const searchHelper = path.join(root, "search.mjs");
+    const previous = { ...process.env };
+    await writeFile(searchHelper, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify({results:[{url:'https://example.com/a'}]})));\n");
+    await chmod(searchHelper, 0o700);
+    Object.assign(process.env, { HUGIN_RESEARCH_SEARCH_HELPER: searchHelper });
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (id: string, params: Record<string, string>) => Promise<unknown> }) { registered[tool.name] = tool; } });
+      for (let i = 0; i < 6; i += 1) {
+        mockPi(JSON.stringify({ results: [{ url: "https://example.com/a" }] }));
+        await registered.web_search!.execute("id", { query: `quota-${i}` });
+      }
+      await expect(registered.web_search!.execute("id", { query: "quota-7" })).rejects.toThrow(/quota exhausted/);
+      const duplicateRegistered = registered;
+      module.default({ registerTool(tool: { name: string; execute: (id: string, params: Record<string, string>) => Promise<unknown> }) { duplicateRegistered[tool.name] = tool; } });
+      mockPi(JSON.stringify({ results: [{ url: "https://example.com/a" }] }));
+      await duplicateRegistered.web_search!.execute("id", { query: "duplicate" });
+      await expect(duplicateRegistered.web_search!.execute("id", { query: "duplicate" })).rejects.toThrow(/consecutive duplicate/);
+      // A duplicate is rejected, but a changed query can still make progress.
+      mockPi(JSON.stringify({ results: [{ url: "https://example.com/a" }] }));
+      await expect(duplicateRegistered.web_search!.execute("id", { query: "another" })).resolves.toBeDefined();
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("opens one bounded diagnostic after repeated helper failures and caps quota", async () => {
+    const registered: Record<string, { execute: (id: string, params: Record<string, string>) => Promise<unknown> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-failure-budget-test-"));
+    const searchHelper = path.join(root, "search.mjs");
+    const previous = { ...process.env };
+    await writeFile(searchHelper, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => { process.stderr.write('HTTP 403 forbidden\\n'); process.exit(1); });\n");
+    await chmod(searchHelper, 0o700);
+    Object.assign(process.env, { HUGIN_RESEARCH_SEARCH_HELPER: searchHelper });
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (id: string, params: Record<string, string>) => Promise<unknown> }) { registered[tool.name] = tool; } });
+      mockPi("", "HTTP 403 forbidden", 1);
+      await expect(registered.web_search!.execute("id", { query: "failure-1" })).rejects.toThrow(/helper failed.*403/);
+      mockPi("", "HTTP 403 forbidden", 1);
+      await expect(registered.web_search!.execute("id", { query: "failure-2" })).rejects.toThrow(/helper failed.*403/);
+      mockPi("", "HTTP 403 forbidden", 1);
+      await expect(registered.web_search!.execute("id", { query: "failure-3" })).rejects.toThrow(/stopped after 3 consecutive helper failures.*403/);
+      await expect(registered.web_search!.execute("id", { query: "failure-4" })).rejects.toThrow(/stopped after 3 consecutive helper failures/);
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps search and fetch quotas independent", async () => {
+    const registered: Record<string, { execute: (id: string, params: Record<string, string>) => Promise<unknown> }> = {};
+    const module = await import("../scripts/research-pi-extension.mjs");
+    const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-fetch-budget-test-"));
+    const searchHelper = path.join(root, "search.mjs");
+    const fetchHelper = path.join(root, "fetch.mjs");
+    const previous = { ...process.env };
+    await writeFile(searchHelper, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify({results:[{url:'https://example.com/a'}]})));\n");
+    await writeFile(fetchHelper, "#!/usr/bin/env node\nprocess.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify({url:'https://93.184.216.34/a', content:'body'})));\n");
+    await chmod(searchHelper, 0o700); await chmod(fetchHelper, 0o700);
+    Object.assign(process.env, { HUGIN_RESEARCH_SEARCH_HELPER: searchHelper, HUGIN_RESEARCH_FETCH_HELPER: fetchHelper });
+    try {
+      module.default({ registerTool(tool: { name: string; execute: (id: string, params: Record<string, string>) => Promise<unknown> }) { registered[tool.name] = tool; } });
+      // Exhaust only the search budget; fetch remains independently available.
+      for (let i = 0; i < 6; i += 1) {
+        mockPi(JSON.stringify({ results: [{ url: "https://example.com/a" }] }));
+        await registered.web_search!.execute("id", { query: `search-${i}` });
+      }
+      await expect(registered.web_search!.execute("id", { query: "search-over" })).rejects.toThrow(/web_search quota exhausted/);
+      mockPi(JSON.stringify({ url: "https://93.184.216.34/a", content: "body" }));
+      await registered.fetch_content!.execute("id", { url: "https://93.184.216.34/a" });
     } finally {
       for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
       Object.assign(process.env, previous);

@@ -57,6 +57,7 @@ export async function requestPublicText(rawUrl, options = {}) {
         accept: "text/html,application/xhtml+xml,text/plain,application/json,application/xml;q=0.8,*/*;q=0.1",
         "accept-encoding": "identity",
         "user-agent": "HuginResearch/1.0 (+https://github.com/Magnus-Gille/hugin)",
+        ...(options.headers ?? {}),
       },
       lookup: (_host, opts, callback) => opts.all
         ? callback(null, [{ address: resolved.address, family: resolved.family }])
