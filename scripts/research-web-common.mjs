@@ -58,7 +58,9 @@ export async function requestPublicText(rawUrl, options = {}) {
         "accept-encoding": "identity",
         "user-agent": "HuginResearch/1.0 (+https://github.com/Magnus-Gille/hugin)",
       },
-      lookup: (_host, _opts, callback) => callback(null, resolved.address, resolved.family),
+      lookup: (_host, opts, callback) => opts.all
+        ? callback(null, [{ address: resolved.address, family: resolved.family }])
+        : callback(null, resolved.address, resolved.family),
     }, resolve);
     req.setTimeout(timeoutMs, () => req.destroy(new Error("Research fetch timed out")));
     req.on("error", reject);
