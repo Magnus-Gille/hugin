@@ -4,7 +4,7 @@ import { parseDuckDuckGoResults } from "../scripts/research-web-search.mjs";
 
 describe("research web helpers", () => {
   it("rejects private, loopback, link-local, CGNAT, and mapped addresses", () => {
-    for (const address of ["127.0.0.1", "10.2.3.4", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1"]) {
+    for (const address of ["127.0.0.1", "10.2.3.4", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "::", "::1", "fd00::1", "fe80::1", "ff02::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1"]) {
       expect(isPublicAddress(address), address).toBe(false);
     }
     expect(isPublicAddress("1.1.1.1")).toBe(true);
