@@ -184,6 +184,19 @@ describe("dedicated research Pi/M5 runtime", () => {
     expect(__test__.parsePiOutput(JSON.stringify({ type: "message", message: { role: "assistant", content: "done", stopReason: "stop" } }))).toEqual({ text: "done" });
   });
 
+  it("excludes duplicated toolResult message events from assistant output", () => {
+    const diagnostic = "Research web access stopped after 3 consecutive helper failures: HTTP 403 forbidden";
+    const raw = [
+      JSON.stringify({ type: "message_start", message: { role: "toolResult", content: diagnostic } }),
+      JSON.stringify({ type: "message_end", message: { role: "toolResult", content: diagnostic } }),
+      JSON.stringify({ type: "message_end", message: { role: "assistant", content: "I stopped." } }),
+      JSON.stringify({ type: "turn_end", message: { stopReason: "stop" } }),
+    ].join("\n");
+    const parsed = __test__.parsePiOutput(raw);
+    expect(parsed.text).toBe("I stopped.");
+    expect(parsed.text).not.toContain(diagnostic);
+  });
+
   it("bounds output and resultText while still detecting a late semantic error", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-output-bound-"));
     try {

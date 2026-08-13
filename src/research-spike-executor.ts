@@ -401,19 +401,23 @@ class PiOutputParser {
     try {
       const event = JSON.parse(this.line) as Record<string, unknown>;
       const message = event.message as Record<string, unknown> | undefined;
+      // Pi emits toolResult content in message_start/message_end as well as
+      // assistant messages. Only finalized assistant text belongs in the
+      // user-visible research result.
+      const isAssistantMessage = message?.role === "assistant";
       const content = message?.content;
       const appendText = (text: string): void => {
         if (this.hasText) this.textOutput.append("\n");
         this.textOutput.append(text);
         this.hasText = true;
       };
-      if (Array.isArray(content)) {
+      if (isAssistantMessage && Array.isArray(content)) {
         for (const block of content) {
           if (block && typeof block === "object" && typeof (block as Record<string, unknown>).text === "string") {
             appendText((block as Record<string, string>).text);
           }
         }
-      } else if (typeof content === "string") {
+      } else if (isAssistantMessage && typeof content === "string") {
         appendText(content);
       }
       const stopReason = message?.stopReason ?? event.stopReason;
@@ -574,7 +578,10 @@ export async function executeResearchSpike(request: ResearchSpikeRunRequest): Pr
           : `Research grounding rejected: ${grounding.failureCode}`
         : undefined;
       const exitCode = timedOut ? "TIMEOUT" : killReason ? 1 : code === 0 && !semanticError && !groundingError ? 0 : 1;
-      const partialOutput = parsed.text || stderrFallback.toString();
+      const circuitDiagnostic = grounding?.failureCode === "helper-circuit" ? groundingFailureDiagnostic : undefined;
+      const partialOutput = circuitDiagnostic
+        ? (parsed.text || stderrFallback.toString()).split(circuitDiagnostic).join("").trim()
+        : parsed.text || stderrFallback.toString();
       const visibleError = grounding?.failureCode === "helper-circuit"
         ? groundingError
         : semanticError ?? groundingError;
