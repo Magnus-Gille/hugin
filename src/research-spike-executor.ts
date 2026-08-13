@@ -18,6 +18,9 @@ export const RESEARCH_PI_FLAGS = [
   "web_search,fetch_content,write_artifact",
 ] as const;
 
+const SANDBOX_PI_CONFIG_DIR = "/tmp/hugin-research-pi";
+const SANDBOX_PI_EXTENSION = "/tmp/hugin-research-pi-extension.mjs";
+
 export interface ResearchSpikeRuntimeConfig {
   piCommand: string;
   bwrapCommand: string;
@@ -244,13 +247,15 @@ export function buildResearchLaunch(
 ): { args: string[]; env: NodeJS.ProcessEnv } {
   const args = [
     "--die-with-parent", "--ro-bind", "/", "/", "--tmpfs", "/tmp", "--dir", "/tmp/hugin-research-home", "--proc", "/proc", "--dev", "/dev",
-    "--chdir", request.workingDir, "--ro-bind", configDir, "/opt/hugin-research-pi",
-    "--ro-bind", extension, "/opt/hugin-research-pi-extension.mjs",
+    // `/` is already read-only. Mount ephemeral runtime inputs under the
+    // private `/tmp` tmpfs, whose destination parent Bubblewrap can create.
+    "--chdir", request.workingDir, "--ro-bind", configDir, SANDBOX_PI_CONFIG_DIR,
+    "--ro-bind", extension, SANDBOX_PI_EXTENSION,
     ...artifactPaths.flatMap((file) => ["--bind", file, file]),
-    "--", config.piCommand, ...RESEARCH_PI_FLAGS, "--extension", "/opt/hugin-research-pi-extension.mjs", "--provider", "m5-local", "--model", config.model, "--mode", "json", "-p", buildPiPrompt(request),
+    "--", config.piCommand, ...RESEARCH_PI_FLAGS, "--extension", SANDBOX_PI_EXTENSION, "--provider", "m5-local", "--model", config.model, "--mode", "json", "-p", buildPiPrompt(request),
   ];
   const env: NodeJS.ProcessEnv = {
-    PATH: "/home/magnus/.npm-global/bin:/usr/local/bin:/usr/bin:/bin", HOME: "/tmp/hugin-research-home", PI_CODING_AGENT_DIR: "/opt/hugin-research-pi",
+    PATH: "/home/magnus/.npm-global/bin:/usr/local/bin:/usr/bin:/bin", HOME: "/tmp/hugin-research-home", PI_CODING_AGENT_DIR: SANDBOX_PI_CONFIG_DIR,
     HUGIN_RESEARCH_SEARCH_HELPER: config.searchHelper, HUGIN_RESEARCH_FETCH_HELPER: config.fetchHelper,
     HUGIN_RESEARCH_ALLOWED_SEARCH_HOSTS: config.allowedSearchHosts.join(","),
     HUGIN_RESEARCH_ARTIFACTS: JSON.stringify(Object.fromEntries(request.artifactManifest.artifacts.filter((a) => a.required).map((a) => [a.id, a.local]))),
