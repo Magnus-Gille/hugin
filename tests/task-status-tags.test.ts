@@ -331,6 +331,42 @@ describe("task status tag helpers", () => {
     ]);
   });
 
+  it("preserves exactly one valid research index marker through terminalization", () => {
+    expect(buildTerminalStatusTags("completed", [
+      "completed",
+      "runtime:homeserver",
+      "research-index:verified",
+    ])).toEqual([
+      "completed",
+      "runtime:homeserver",
+      "research-index:verified",
+    ]);
+
+    expect(buildTerminalStatusTags("failed", [
+      "failed",
+      "runtime:homeserver",
+      "research-index:failed",
+    ])).toEqual([
+      "failed",
+      "runtime:homeserver",
+      "research-index:failed",
+    ]);
+
+    expect(buildTerminalStatusTags("failed", [
+      "running",
+      "runtime:homeserver",
+      "research-index:failed",
+      "research-index:untrusted",
+      "research-index:verified",
+      "research-index:verified",
+      "research-index:failed",
+    ])).toEqual([
+      "failed",
+      "runtime:homeserver",
+      "research-index:failed",
+    ]);
+  });
+
   it.each(["draft", "conversation"])(
     "preserves the additive M5 task type %s through terminalization",
     (taskType) => {
