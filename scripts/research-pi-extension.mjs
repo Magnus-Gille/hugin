@@ -179,7 +179,9 @@ export default function registerResearchTools(pi) {
   pi.registerTool({
     name: "web_search", label: "web_search", description: "Search the public web through the configured Hugin helper.",
     executionMode: "sequential",
-    parameters: schema({ query: {} }, ["query"]),
+    // Keep fields optional at Pi's schema gate so malformed calls enter the
+    // Hugin-owned meter and terminal policy path instead of bypassing it.
+    parameters: schema({ query: {} }, []),
     execute: async (_id, params, _signal, _onUpdate, ctx) => {
       const outcome = await helperCall("web_search", params?.query, RESEARCH_TOOL_BUDGET.webSearch, async () => {
         if (typeof params?.query !== "string" || !params.query.trim() || params.query.length > 1_000) throw new Error("web_search query is required");
@@ -199,7 +201,7 @@ export default function registerResearchTools(pi) {
   pi.registerTool({
     name: "fetch_content", label: "fetch_content", description: "Fetch one public web page through the configured Hugin helper.",
     executionMode: "sequential",
-    parameters: schema({ url: {} }, ["url"]),
+    parameters: schema({ url: {} }, []),
     execute: async (_id, params, _signal, _onUpdate, ctx) => {
       const outcome = await helperCall("fetch_content", params?.url, RESEARCH_TOOL_BUDGET.fetchContent, async () => {
         if (typeof params?.url !== "string" || !params.url.trim() || params.url.length > 4_096) throw new Error("fetch_content URL is required");

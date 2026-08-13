@@ -487,6 +487,8 @@ describe("dedicated research Pi/M5 runtime", () => {
     const module = await import("../scripts/research-pi-extension.mjs");
     try {
       module.default({ registerTool(tool: { name: string; execute: (...args: any[]) => Promise<any> }) { registered[tool.name] = tool; } });
+      expect((registered.web_search as any).parameters.required).toEqual([]);
+      expect((registered.fetch_content as any).parameters.required).toEqual([]);
       await expect(registered.web_search!.execute("bad-1", {})).rejects.toThrow(/query is required/);
       const terminal = await registered.web_search!.execute("bad-2", {});
       expect(terminal).toMatchObject({ terminate: true, content: [{ text: expect.stringMatching(/consecutive duplicate/) }] });
@@ -495,7 +497,7 @@ describe("dedicated research Pi/M5 runtime", () => {
     }
   });
 
-  it("stops a mixed parallel tool batch once, after recording the terminal evidence", async () => {
+  it("stops directly concurrent tool executions once, after recording terminal evidence", async () => {
     const registered: Record<string, { execute: (...args: any[]) => Promise<any> }> = {};
     const module = await import("../scripts/research-pi-extension.mjs");
     const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-mixed-batch-"));
