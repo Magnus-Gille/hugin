@@ -404,7 +404,8 @@ class PiOutputParser {
       // Pi emits toolResult content in message_start/message_end as well as
       // assistant messages. Only finalized assistant text belongs in the
       // user-visible research result.
-      const isAssistantMessage = message?.role === "assistant";
+      const isAssistantMessage = message?.role === "assistant"
+        && (event.type === "message_end" || event.type === "message");
       const content = message?.content;
       const appendText = (text: string): void => {
         if (this.hasText) this.textOutput.append("\n");

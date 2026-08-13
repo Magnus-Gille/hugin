@@ -197,6 +197,14 @@ describe("dedicated research Pi/M5 runtime", () => {
     expect(parsed.text).not.toContain(diagnostic);
   });
 
+  it("collects assistant content only from finalized message events", () => {
+    const raw = [
+      JSON.stringify({ type: "message_start", message: { role: "assistant", content: "one copy" } }),
+      JSON.stringify({ type: "message_end", message: { role: "assistant", content: "one copy" } }),
+    ].join("\n");
+    expect(__test__.parsePiOutput(raw).text).toBe("one copy");
+  });
+
   it("bounds output and resultText while still detecting a late semantic error", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "hugin-research-output-bound-"));
     try {
