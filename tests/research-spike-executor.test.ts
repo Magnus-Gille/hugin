@@ -14,6 +14,7 @@ import {
   sanitizeResearchPrompt,
   validateResearchUrl,
 } from "../src/research-spike-executor.js";
+const researchExtension = await import("../scripts/research-pi-extension.mjs");
 
 const env = {
   HUGIN_RESEARCH_M5_URL: "http://100.99.119.52:8080",
@@ -589,5 +590,21 @@ describe("dedicated research Pi/M5 runtime", () => {
       Object.assign(process.env, previous);
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("waits for SIGKILL/close when a helper ignores SIGTERM", async () => {
+    spawnMock.mockReset();
+    const child = new EventEmitter() as any;
+    child.stdin = { end: vi.fn(), on: vi.fn() };
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    child.kill = vi.fn((signal: string) => {
+      if (signal === "SIGKILL") queueMicrotask(() => child.emit("close", 137));
+    });
+    spawnMock.mockImplementationOnce(() => child);
+    const started = Date.now();
+    await expect(researchExtension.helper("ignored-term-helper", {}, 5, 5)).rejects.toThrow(/timed out after 5ms/);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(5);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
   });
 });

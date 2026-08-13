@@ -23,6 +23,7 @@ const MAX_DIAGNOSTIC_CHARS = 400;
 const MAX_HELPER_STDOUT_CHARS = 160_000;
 const MAX_HELPER_STDERR_CHARS = 2_000;
 const CHILD_GRACE_MS = 250;
+const CHILD_CLOSE_FALLBACK_MS = 1_000;
 
 function allowedUrl(raw) {
   let url;
@@ -69,24 +70,29 @@ function isPublicAddress(address) {
 // the Pi extension avoids uncancellable libuv DNS work in the agent process.
 export function resolvePublicUrl(raw) { return allowedUrl(raw); }
 
-function helper(command, payload) {
+export function helper(command, payload, timeoutMs = 15_000, graceMs = CHILD_GRACE_MS) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, [], { stdio: ["pipe", "pipe", "pipe"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" } });
     let stdout = ""; let stderr = ""; let settled = false;
-    let killTimer;
+    let killTimer; let fallbackTimer; let terminalError;
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       clearTimeout(killTimer);
+      clearTimeout(fallbackTimer);
       error ? reject(error) : resolve(value);
     };
     const stopChild = (error) => {
+      if (terminalError) return;
+      terminalError = error;
       child.kill("SIGTERM");
-      killTimer = setTimeout(() => child.kill("SIGKILL"), CHILD_GRACE_MS);
-      finish(error);
+      killTimer = setTimeout(() => {
+        child.kill("SIGKILL");
+        fallbackTimer = setTimeout(() => finish(terminalError), CHILD_CLOSE_FALLBACK_MS);
+      }, graceMs);
     };
-    const timer = setTimeout(() => stopChild(new Error("research helper timed out after 15000ms")), 15000);
+    const timer = setTimeout(() => stopChild(new Error(`research helper timed out after ${timeoutMs}ms`)), timeoutMs);
     child.stdout.on("data", (chunk) => {
       if (settled) return;
       stdout += chunk.toString();
@@ -95,6 +101,7 @@ function helper(command, payload) {
     child.stderr.on("data", (chunk) => { if (stderr.length < MAX_HELPER_STDERR_CHARS) stderr += chunk.toString().slice(0, MAX_HELPER_STDERR_CHARS - stderr.length); });
     child.on("error", (error) => finish(error));
     child.on("close", (code) => {
+      if (terminalError) return finish(terminalError);
       if (code === 0) finish(null, stdout.slice(0, MAX_HELPER_STDOUT_CHARS));
       else finish(new Error(stderr.replace(/[\r\n]+/g, " ").slice(0, MAX_HELPER_STDERR_CHARS) || `research helper exited ${code}`));
     });
