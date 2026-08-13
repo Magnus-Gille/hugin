@@ -69,6 +69,10 @@ describe("dedicated research Pi/M5 runtime", () => {
     expect(launch.args).toContain("/tmp/hugin-research-pi-extension.mjs");
     expect(launch.args).not.toContain("/opt/hugin-research-pi");
     expect(launch.env.PI_CODING_AGENT_DIR).toBe("/tmp/hugin-research-pi");
+    const configDestination = launch.args.indexOf("/tmp/hugin-research-pi");
+    const extensionDestination = launch.args.indexOf("/tmp/hugin-research-pi-extension.mjs");
+    expect(launch.args[configDestination - 2]).toBe("--bind");
+    expect(launch.args[extensionDestination - 2]).toBe("--ro-bind");
     expect(launch.env).toEqual(expect.objectContaining({ PATH: "/home/magnus/.npm-global/bin:/usr/local/bin:/usr/bin:/bin", HOME: "/tmp/hugin-research-home" }));
     expect(launch.env).not.toHaveProperty("MUNIN_API_KEY");
   });
