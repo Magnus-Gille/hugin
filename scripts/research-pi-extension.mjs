@@ -3,7 +3,6 @@
  * reader, shell, SSH, rsync, or Munin tool. */
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
-import { promises as dns } from "node:dns";
 import { createHash } from "node:crypto";
 import net from "node:net";
 
@@ -23,7 +22,7 @@ const MAX_DIAGNOSTIC_CHARS = 400;
 // envelope while keeping the child boundary bounded.
 const MAX_HELPER_STDOUT_CHARS = 160_000;
 const MAX_HELPER_STDERR_CHARS = 2_000;
-const DNS_TIMEOUT_MS = 5_000;
+const CHILD_GRACE_MS = 250;
 
 function allowedUrl(raw) {
   let url;
@@ -65,33 +64,33 @@ function isPublicAddress(address) {
     !/^fe[89ab]/.test(normalized) && !normalized.startsWith("ff");
 }
 
-export async function resolvePublicUrl(raw, lookup = dns.lookup, timeoutMs = DNS_TIMEOUT_MS) {
-  const checked = allowedUrl(raw);
-  const host = new URL(checked).hostname;
-  let timer;
-  const addresses = await Promise.race([
-    lookup(host, { all: true, verbatim: true }),
-    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Research DNS lookup timed out")), timeoutMs); }),
-  ]).finally(() => clearTimeout(timer));
-  if (addresses.length === 0 || addresses.some(({ address }) => !isPublicAddress(address))) throw new Error("URL DNS resolution returned a forbidden private address");
-  return checked;
-}
+// DNS validation belongs to the killable host-side fetch helper
+// (research-web-common.mjs). Keeping only the syntactic/public-literal gate in
+// the Pi extension avoids uncancellable libuv DNS work in the agent process.
+export function resolvePublicUrl(raw) { return allowedUrl(raw); }
 
 function helper(command, payload) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, [], { stdio: ["pipe", "pipe", "pipe"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" } });
     let stdout = ""; let stderr = ""; let settled = false;
+    let killTimer;
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(killTimer);
       error ? reject(error) : resolve(value);
     };
-    const timer = setTimeout(() => { child.kill("SIGTERM"); finish(new Error("research helper timed out after 15000ms")); }, 15000);
+    const stopChild = (error) => {
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => child.kill("SIGKILL"), CHILD_GRACE_MS);
+      finish(error);
+    };
+    const timer = setTimeout(() => stopChild(new Error("research helper timed out after 15000ms")), 15000);
     child.stdout.on("data", (chunk) => {
       if (settled) return;
       stdout += chunk.toString();
-      if (stdout.length > MAX_HELPER_STDOUT_CHARS) { child.kill("SIGTERM"); finish(new Error("research helper returned too much output")); }
+      if (stdout.length > MAX_HELPER_STDOUT_CHARS) stopChild(new Error("research helper returned too much output"));
     });
     child.stderr.on("data", (chunk) => { if (stderr.length < MAX_HELPER_STDERR_CHARS) stderr += chunk.toString().slice(0, MAX_HELPER_STDERR_CHARS - stderr.length); });
     child.on("error", (error) => finish(error));
@@ -99,6 +98,7 @@ function helper(command, payload) {
       if (code === 0) finish(null, stdout.slice(0, MAX_HELPER_STDOUT_CHARS));
       else finish(new Error(stderr.replace(/[\r\n]+/g, " ").slice(0, MAX_HELPER_STDERR_CHARS) || `research helper exited ${code}`));
     });
+    if (typeof child.stdin.on === "function") child.stdin.on("error", () => undefined);
     child.stdin.end(JSON.stringify(payload));
   });
 }

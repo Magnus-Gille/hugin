@@ -477,9 +477,10 @@ describe("dedicated research Pi/M5 runtime", () => {
     }
   });
 
-  it("bounds DNS resolution before helper execution", async () => {
+  it("keeps extension URL checks synchronous; DNS stays in the killable helper", async () => {
     const module = await import("../scripts/research-pi-extension.mjs");
-    await expect(module.resolvePublicUrl("https://example.com/", async () => new Promise(() => undefined), 1)).rejects.toThrow(/DNS lookup timed out/);
+    expect(module.resolvePublicUrl("https://example.com/")).toBe("https://example.com/");
+    expect(() => module.resolvePublicUrl("http://127.0.0.1/")).toThrow(/forbidden/);
   });
 
   it("meters schema-invalid web-tool arguments and terminates the repeated loop", async () => {
