@@ -247,6 +247,38 @@ describe("LearningTaskContract v1 producer handshake", () => {
       .toBe("2026-07-19T10:00:02.250Z");
   });
 
+  it("aborts preparation before a model-capable dispatch when the overall deadline fires", async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_, reject) => {
+      if (init.signal?.aborted) {
+        reject(new DOMException("deadline", "AbortError"));
+        return;
+      }
+      init.signal?.addEventListener("abort", () => reject(new DOMException("deadline", "AbortError")), { once: true });
+    }));
+    const buildPreparedDispatch = vi.fn(() => {
+      throw new Error("must not build after deadline");
+    });
+    const result = await prepareDurableLearningTaskAttempt({
+      taskId: "task-001",
+      startedAt,
+      rawTaskText: "raw task bytes",
+      renderedPrompt: "## Task\nraw task bytes",
+      gatewayBaseUrl: "https://m5.test",
+      apiKey: "private-owner-key",
+      buildSource: () => structuredClone(context().source),
+      persistStart: async () => { setTimeout(() => controller.abort(), 0); },
+      buildPreparedDispatch,
+      persistReplayPayload: async () => {},
+      persistPrepared: async () => {},
+      fetchImpl: fetchImpl as typeof fetch,
+      signal: controller.signal,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(buildPreparedDispatch).not.toHaveBeenCalled();
+    expect(result.preparation.kind).toBe("preflight-failed");
+  });
+
   it("keeps the prepared request byte-identical when execution starts later", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-07-19T10:00:02.500Z"));

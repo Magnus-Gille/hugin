@@ -549,6 +549,35 @@ describe("executeHomeserverTask — delegate path", () => {
     expect(result.output).not.toContain("Extract the year");
   });
 
+  it("keeps a prepared-dispatch failure model-free and emits negative evidence", async () => {
+    const ready = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract" }),
+      "delegate-dispatch-failed",
+    );
+    const prepared = ready.learningTask!.kind === "ready" ? ready.learningTask : null;
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const result = await executeHomeserverTask({
+      ...ready,
+      learningTask: {
+        kind: "dispatch-failed",
+        attempt: prepared!.context.attempt,
+        attemptStartRef: prepared!.context.attemptStartRef,
+        requestStamp: prepared!.preparedDispatch.requestStamp,
+        requestStampDigest: prepared!.preparedDispatch.requestStampDigest,
+        failureReason: "prepared replay persistence failed",
+      },
+    }, "delegate-dispatch-failed", tmpLogDir);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.exitCode).toBe(1);
+    expect(result.learningTask).toMatchObject({
+      state: "m5-not-admitted",
+      evidenceAccepted: false,
+      failureCode: "prepared-dispatch-persistence-failed",
+    });
+    expect(result.output).not.toContain("Extract the year");
+  });
+
   it("rejects a paid-looking response when the exact gateway echo is absent", async () => {
     const task = withLearningTaskContext(
       makeTaskConfig({ path: "delegate", taskType: "extract" }),

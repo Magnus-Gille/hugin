@@ -153,6 +153,27 @@ import {
 import { createImmutableLearningArtifact } from "./learning-task-store.js";
 import { buildAuthenticatedLearningTaskSource } from "./learning-task-source.js";
 import {
+  OrganicShadowQueue,
+  MICRO_EXPERIMENT_MAX_COMPLETION_TOKENS,
+  buildOrganicResult,
+  classifyOrganicLearningTaskAdmission,
+  decideOrganicEligibility,
+  enqueueOrganicShadowAfterBaseline,
+  microExperimentDigest,
+  organicBaselineModelMatchesResult,
+  organicBaselineModelMatchesTask,
+  organicVerifierDigestMatches,
+  reconcileOrganicOrphanPlan,
+  shadowWallBudgetForBaselineTimeout,
+  persistOrganicOrphanInvalidAfterBaseline,
+  persistOrganicPlanBeforeDispatch,
+  persistOrganicResultCreateOnly,
+  type OrganicBaselineExecution,
+  type OrganicArtifactStore,
+  type OrganicMicroExperimentPlan,
+  type OrganicShadowExecution,
+} from "./organic-micro-experiment.js";
+import {
   executeOpencodeTask,
   loadOpencodeGatewayConfig,
   type OpencodeExecutorResult,
@@ -623,6 +644,23 @@ const config = {
   ratatoskrSendUrl: process.env.HUGIN_RATATOSKR_SEND_URL?.trim() || "",
   ratatoskrSendApiKey: process.env.HUGIN_RATATOSKR_SEND_API_KEY?.trim() || "",
   authAlarmChatId: parseChatIdEnv(process.env.HUGIN_AUTH_ALARM_CHAT_ID),
+  // Organic micro-experiment pilot (#384). Default OFF. Enabling it still
+  // requires every owner-installed binding/oracle identity below; missing
+  // values are an abstention, never an inferred route or model identity.
+  organicMicroExperimentEnabled: process.env.HUGIN_ORGANIC_MICRO_EXPERIMENT === "on",
+  organicMicroExperimentPlanTimeoutMs: parseBoundedPositiveInt(
+    process.env.HUGIN_ORGANIC_MICRO_EXPERIMENT_PLAN_TIMEOUT_MS,
+    250,
+    5_000,
+  ),
+  organicBaselineBindingRef: process.env.HUGIN_ORGANIC_BASELINE_BINDING_REF?.trim() || "",
+  organicBaselineBindingDigest: process.env.HUGIN_ORGANIC_BASELINE_BINDING_DIGEST?.trim() || "",
+  organicBaselineModel: process.env.HUGIN_ORGANIC_BASELINE_MODEL?.trim() || "",
+  organicChallengerBindingRef: process.env.HUGIN_ORGANIC_CHALLENGER_BINDING_REF?.trim() || "",
+  organicChallengerBindingDigest: process.env.HUGIN_ORGANIC_CHALLENGER_BINDING_DIGEST?.trim() || "",
+  organicChallengerModel: process.env.HUGIN_ORGANIC_CHALLENGER_MODEL?.trim() || "",
+  organicOracleId: process.env.HUGIN_ORGANIC_ORACLE_ID?.trim() || "",
+  organicOracleDigest: process.env.HUGIN_ORGANIC_ORACLE_DIGEST?.trim() || "",
 };
 
 const brokerEnv = readBrokerEnv(process.env);
@@ -849,6 +887,11 @@ const orchVerdictMunin = createMuninClient();
 // dispatcher's serial Munin request slot so an experiment upload cannot delay a
 // task claim, completion checkpoint, or lease renewal.
 const learningExperimentMunin = createMuninClient();
+const organicMicroExperimentMunin = createMuninClient({
+  requestTimeoutMs: 5_000,
+  maxRetries: 0,
+});
+const organicShadowQueue = new OrganicShadowQueue(1);
 
 // Verdict layer (docs/orchestrator-verdict-layer.md, V4/V7). Gated on a
 // single master switch (HUGIN_ORCH_VERDICT_STORE, default "on") — when
@@ -925,6 +968,9 @@ interface TaskConfig {
   /** Authenticated Hugin Broker source, never parsed from free-form task prose. */
   brokerPrincipal?: string;
   brokerAttestedNamespace?: string;
+  /** Canonical Broker envelope facts used by the narrow organic seam. */
+  brokerCanonicalHomeserverOneShot?: boolean;
+  brokerCanonicalEnvelopeDigest?: string;
   /** Why an embedded Broker claim did not qualify as authenticated learning provenance. */
   brokerAttestationError?: string;
 }
@@ -1246,6 +1292,15 @@ function parseTask(content: string): TaskConfig | null {
     brokerPrincipal: brokerAttestation?.ok ? brokerAttestation.principal : undefined,
     brokerAttestedNamespace: brokerAttestation?.ok
       ? brokerAttestation.attestation.namespace
+      : undefined,
+    brokerCanonicalHomeserverOneShot: canonicalBrokerEnvelope
+      ? canonicalBrokerEnvelope.alias_resolved.runtime === "homeserver"
+        && canonicalBrokerEnvelope.alias_resolved.family === "one-shot"
+        && canonicalBrokerEnvelope.tool_policy.mode === "none"
+        && canonicalBrokerEnvelope.acceptance.mode === "verifier"
+      : false,
+    brokerCanonicalEnvelopeDigest: canonicalBrokerEnvelope
+      ? microExperimentDigest(canonicalBrokerEnvelope)
       : undefined,
     brokerAttestationError: brokerAttestation && !brokerAttestation.ok
       ? brokerAttestation.error
@@ -1687,6 +1742,129 @@ async function writeStructuredTaskResult(
         result: durableResult,
       }
     : null;
+}
+
+function organicTaskRef(taskId: string): string {
+  return `ref:task-${microExperimentDigest(taskId).slice("sha256:".length, "sha256:".length + 24)}`;
+}
+
+function organicArtifactStore(taskNs: string, classification: string | undefined): OrganicArtifactStore {
+  return {
+    createOnly: async (key, content, signal) => {
+      if (signal?.aborted) throw new Error("organic artifact write aborted");
+      return createImmutableLearningArtifact(organicMicroExperimentMunin, {
+        namespace: taskNs,
+        key,
+        content,
+        tags: ["type:micro-experiment", "contract:grimnir-micro-experiment-v1"],
+        classification,
+      }, { allowExactExisting: true, signal });
+    },
+    read: async (key, signal) => (await organicMicroExperimentMunin.read(taskNs, key, { signal }))?.content ?? null,
+  };
+}
+
+async function readOrganicPlanBeforeDispatch(
+  taskNs: string,
+  timeoutMs: number,
+): Promise<OrganicMicroExperimentPlan | null> {
+  try {
+    const entry = await organicMicroExperimentMunin.read(
+      taskNs,
+      "micro-experiment-plan",
+      { signal: AbortSignal.timeout(timeoutMs) },
+    );
+    if (!entry) return null;
+    const parsed = JSON.parse(entry.content) as OrganicMicroExperimentPlan;
+    return parsed;
+  } catch {
+    // The create-only persistence path remains authoritative. A read failure
+    // must not block ordinary work or cause an unvalidated replay.
+    return null;
+  }
+}
+
+function organicPlanForTask(
+  task: TaskConfig,
+  taskId: string,
+  taskNs: string,
+  startedAt: string,
+  brokerSourceIsAuthoritative: boolean,
+): OrganicMicroExperimentPlan | null {
+  if (!config.organicMicroExperimentEnabled
+    || task.runtime !== "homeserver"
+    || !task.brokerCanonicalHomeserverOneShot
+    || !task.brokerCanonicalEnvelopeDigest
+    || !task.brokerPrincipal
+    || task.brokerAttestedNamespace !== taskNs
+    || !brokerSourceIsAuthoritative
+    || !task.homeserverVerifier
+    || !config.organicChallengerModel
+    || !organicBaselineModelMatchesTask(config.organicBaselineModel, task.model)
+    || !Number.isSafeInteger(task.maxOutputTokens)) {
+    return null;
+  }
+  const baselineMaxTokens = task.maxOutputTokens as number;
+  if (baselineMaxTokens <= 0 || baselineMaxTokens > MICRO_EXPERIMENT_MAX_COMPLETION_TOKENS) return null;
+  const shadowWallMs = shadowWallBudgetForBaselineTimeout(task.timeoutMs);
+  if (shadowWallMs === null
+    || !organicVerifierDigestMatches(task.homeserverVerifier, config.organicOracleDigest)) return null;
+  const decision = decideOrganicEligibility({
+    enabled: true,
+    taskId,
+    taskRef: organicTaskRef(taskId),
+    createdAt: startedAt,
+    inputDigest: microExperimentDigest(task.prompt),
+    authenticatedSource: true,
+    deterministicVerifier: true,
+    recursiveShadow: false,
+    baselineBindingRef: config.organicBaselineBindingRef,
+    baselineBindingDigest: config.organicBaselineBindingDigest,
+    challengerBindingRef: config.organicChallengerBindingRef,
+    challengerBindingDigest: config.organicChallengerBindingDigest,
+    oracleId: config.organicOracleId,
+    oracleDigest: config.organicOracleDigest,
+    axisKind: "model-route",
+    changedFields: ["route.model"],
+    maxWallMs: shadowWallMs,
+    maxCompletionTokens: baselineMaxTokens,
+  });
+  return decision.eligible ? decision.plan : null;
+}
+
+function organicExecutionFromHomeserver(
+  result: HomeserverExecutorResult,
+  startedMs: number,
+): OrganicBaselineExecution {
+  return {
+    executionStatus: result.exitCode === "TIMEOUT"
+      ? "timed-out"
+      : result.exitCode === 0 ? "completed" : "failed",
+    outputDigest: microExperimentDigest(result.resultText ?? result.output),
+    oracleStatus: result.outcome === "pass"
+      ? "pass"
+      : result.outcome === "fail" || result.outcome === "error"
+        ? "fail"
+        : "not-run",
+    latencyMs: Math.max(0, Math.round(result.inferenceMs ?? (Date.now() - startedMs))),
+    ...(result.promptTokens === null ? {} : { promptTokens: result.promptTokens }),
+    ...(result.completionTokens === null ? {} : { completionTokens: result.completionTokens }),
+  };
+}
+
+async function persistOrganicResultForTask(
+  taskNs: string,
+  classification: string | undefined,
+  result: ReturnType<typeof buildOrganicResult>,
+): Promise<void> {
+  const persisted = await persistOrganicResultCreateOnly(
+    organicArtifactStore(taskNs, classification),
+    result,
+    5_000,
+  );
+  if (!persisted.persisted) {
+    throw new Error(`organic micro-experiment result persistence failed: ${persisted.reason}`);
+  }
 }
 
 async function refreshPipelineSummary(
@@ -5623,6 +5801,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     let opencodeJournalExtras: Record<string, unknown> = {};
     let opencodeResult: OpencodeExecutorResult | null = null;
     let homeserverResult: HomeserverExecutorResult | null = null;
+    let organicPlan: OrganicMicroExperimentPlan | null = null;
+    let organicOrphanPlan: OrganicMicroExperimentPlan | null = null;
+    let organicShadowRun: (() => Promise<OrganicShadowExecution>) | null = null;
     let effectiveExecutor = executorLabel;
     let researchEffectiveModel: string | undefined;
     let researchGrounding: ResearchGroundingAttestation | undefined;
@@ -6056,6 +6237,37 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         maxOutputChars: config.maxOutputChars,
         injectedContext: task.contextResolution?.content || undefined,
       });
+      const proposedOrganicPlan = organicPlanForTask(
+        task,
+        taskId,
+        taskNs,
+        startedAt,
+        !signingVerdict.provenance.verifiedSubmitter,
+      );
+      const existingOrganicPlan = proposedOrganicPlan
+        ? await readOrganicPlanBeforeDispatch(taskNs, config.organicMicroExperimentPlanTimeoutMs)
+        : null;
+      const planToPersist = existingOrganicPlan ?? proposedOrganicPlan;
+      if (planToPersist) {
+        const planPersistence = await persistOrganicPlanBeforeDispatch(
+          organicArtifactStore(taskNs, taskClassification),
+          planToPersist,
+          config.organicMicroExperimentPlanTimeoutMs,
+          "micro-experiment-plan",
+        );
+        if (planPersistence.persisted && planPersistence.status === "created") {
+          organicPlan = planToPersist;
+        } else if (planPersistence.persisted && planPersistence.status === "exact-existing") {
+          // The exact bytes were validated by the store, so this is a
+          // restart/orphan marker. It may receive one explicit INVALID result
+          // after the rerun baseline commits, but it must never replay M5.
+          organicOrphanPlan = planToPersist;
+        } else {
+          console.warn(
+            `Organic micro-experiment abstained for ${taskNs}: ${planPersistence.persisted ? "exact-existing plan (restart/replay guard)" : `plan persistence ${planPersistence.reason}`}`,
+          );
+        }
+      }
       let authenticatedLearningSource: LearningTaskSource | undefined;
       try {
         authenticatedLearningSource = buildLearningTaskSource(
@@ -6213,6 +6425,179 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           homeserverResult.output = `[LearningTaskContract evidence rejected: ${failureReason}]\n`;
           console.error(`${failureReason} for ${taskNs}:`, err);
         }
+      }
+      if (organicPlan && authenticatedLearningSource) {
+        const shadowPlan = organicPlan;
+        organicShadowRun = async () => {
+          const shadowStartedAtMs = Date.now();
+          const shadowStartedAt = new Date(shadowStartedAtMs).toISOString();
+          const shadowDeadline = new AbortController();
+          const shadowDeadlineTimer = setTimeout(
+            () => shadowDeadline.abort(new Error("organic shadow wall budget exceeded")),
+            shadowPlan.execution.max_wall_ms,
+          );
+          const shadowLogId = `organic-shadow-${shadowPlan.experiment_id.slice(-24)}`;
+          const shadowTaskConfig = {
+            ...homeserverTaskConfig,
+            modelId: config.organicChallengerModel,
+            maxTokens: shadowPlan.execution.max_completion_tokens,
+            // Preserve the baseline executor timeout exactly. The experiment's
+            // larger max_wall_ms is bounded headroom for preparation/evidence,
+            // not a second runtime-parameter axis.
+            timeoutMs: task.timeoutMs,
+          };
+          const shadowRenderedPrompt = renderHomeserverUserMessage({
+            prompt: task.prompt,
+            gatewayBaseUrl: gateway.baseUrl,
+            apiKey: gateway.apiKey,
+            path: "delegate",
+            taskType: task.homeserverTaskType!,
+            maxTokens: shadowPlan.execution.max_completion_tokens,
+            verifier: task.homeserverVerifier,
+            timeoutMs: task.timeoutMs,
+            maxOutputChars: config.maxOutputChars,
+            injectedContext: task.contextResolution?.content || undefined,
+          });
+          try {
+            const preparedShadowTask = await prepareDurableLearningTaskAttempt({
+              taskId,
+              startedAt: shadowStartedAt,
+              rawTaskText: task.prompt,
+              renderedPrompt: shadowRenderedPrompt,
+              gatewayBaseUrl: gateway.baseUrl,
+              apiKey: gateway.apiKey,
+              buildSource: () => authenticatedLearningSource,
+              signal: shadowDeadline.signal,
+              persistStart: async (ref, record, signal) => {
+                await createImmutableLearningArtifact(organicMicroExperimentMunin, {
+                  namespace: ref.namespace,
+                  key: ref.key,
+                  content: JSON.stringify(record),
+                  tags: ["learning-task-attempt", "attempt:started", "contract:grimnir-learning-task-v1"],
+                  classification: taskClassification,
+                }, { signal });
+              },
+              buildPreparedDispatch: (context) => {
+                const requestBody = buildFreshHomeserverDelegateRequestBody(
+                  shadowTaskConfig,
+                  taskId,
+                  context,
+                );
+                return createPreparedLearningTaskDispatch({
+                  context,
+                  requestStamp: requestBody.learningTaskStamp!,
+                  requestBody,
+                });
+              },
+              persistReplayPayload: async (ref, record, signal) => {
+                await createImmutableLearningArtifact(organicMicroExperimentMunin, {
+                  namespace: ref.namespace,
+                  key: ref.key,
+                  content: JSON.stringify(record),
+                  tags: ["learning-task-replay", "attempt:prepared", "contract:grimnir-learning-task-v1"],
+                  classification: taskClassification,
+                }, { signal });
+              },
+              persistPrepared: async (ref, record, signal) => {
+                await createImmutableLearningArtifact(organicMicroExperimentMunin, {
+                  namespace: ref.namespace,
+                  key: ref.key,
+                  content: JSON.stringify(record),
+                  tags: ["learning-task-dispatch", "attempt:prepared", "contract:grimnir-learning-task-v1"],
+                  classification: taskClassification,
+                }, { signal });
+              },
+            });
+            const shadowAttemptKey = learningTaskAttemptKey(preparedShadowTask.attempt.attemptId);
+            // If the overall wall deadline expired during preparation, feed the
+            // model-free negative projection to the executor. This preserves a
+            // terminal LearningTask outcome without ever issuing a late model
+            // request. If the deadline races after this check, the executor's
+            // already-aborted signal still closes the fetch before admission.
+            const shadowPreparation = shadowDeadline.signal.aborted
+              ? {
+                  kind: "preflight-failed" as const,
+                  attempt: preparedShadowTask.attempt,
+                  attemptStartRef: preparedShadowTask.attemptStartRef,
+                  failureReason: "organic shadow wall budget exceeded before dispatch",
+                }
+              : preparedShadowTask.preparation;
+            // The executor already has model-free projections for both
+            // preparation failures. Feeding either projection back through it
+            // records truthful negative LearningTask evidence and cannot call M5.
+            const shadowResult = await executeHomeserverTask({
+              ...shadowTaskConfig,
+              learningTask: shadowPreparation,
+            }, shadowLogId, LOG_DIR, { abortController: shadowDeadline });
+            if (!shadowResult.learningTask) {
+              throw new Error("organic shadow returned no LearningTask evidence");
+            }
+            const parsedEvidence = learningTaskExecutionEvidenceSchema.parse({
+              ...shadowResult.learningTask,
+              attemptOutcomeRef: { namespace: taskNs, key: `${shadowAttemptKey}-outcome` },
+            });
+            const durableEvidence = shadowPreparation.kind === "ready"
+              ? validatePreparedLearningTaskOutcome(
+                  shadowPreparation.preparedDispatch,
+                  parsedEvidence,
+                )
+              : parsedEvidence;
+            const cleanupController = new AbortController();
+            const cleanupTimer = setTimeout(
+              () => cleanupController.abort(new Error("organic shadow evidence cleanup deadline exceeded")),
+              ORGANIC_SHADOW_CLEANUP_TIMEOUT_MS,
+            );
+            try {
+              await createImmutableLearningArtifact(organicMicroExperimentMunin, {
+              namespace: taskNs,
+              key: `${shadowAttemptKey}-outcome`,
+              content: JSON.stringify(durableEvidence),
+              tags: [
+                "learning-task-attempt",
+                durableEvidence.state === "m5-admitted" ? "attempt:admitted" : "attempt:not-admitted",
+                "contract:grimnir-learning-task-v1",
+              ],
+              classification: taskClassification,
+              }, { allowExactExisting: true, signal: cleanupController.signal });
+            } finally {
+              clearTimeout(cleanupTimer);
+            }
+            // Measure through the terminal LearningTask receipt, not merely
+            // gateway inference. A successful but late evidence write still
+            // invalidates the experiment instead of being reported as useful.
+            const shadowLatencyMs = Math.max(0, Date.now() - shadowStartedAtMs);
+            const shadowBudgetExceeded = shadowDeadline.signal.aborted
+              || shadowLatencyMs > shadowPlan.execution.max_wall_ms;
+            if (shadowPreparation.kind === "ready"
+              && shadowResult.modelId !== config.organicChallengerModel) {
+              throw new Error("organic shadow gateway model identity did not match the owner binding");
+            }
+            return {
+              executionStatus: shadowResult.exitCode === "TIMEOUT"
+                ? "timed-out"
+                : shadowResult.exitCode === 0 ? "completed" : "failed",
+              outputDigest: microExperimentDigest(shadowResult.resultText ?? shadowResult.output),
+              oracleStatus: shadowResult.outcome === "pass"
+                ? "pass"
+                : shadowResult.outcome === "fail" || shadowResult.outcome === "error"
+                  ? "fail"
+                  : "not-run",
+              // This is measured from before preparation through durable
+              // evidence, not just gateway inference.
+              latencyMs: shadowLatencyMs,
+              ...(shadowResult.promptTokens === null ? {} : { promptTokens: shadowResult.promptTokens }),
+              ...(shadowResult.completionTokens === null ? {} : { completionTokens: shadowResult.completionTokens }),
+              admission: classifyOrganicLearningTaskAdmission({
+                state: durableEvidence.state,
+                evidenceAccepted: durableEvidence.evidenceAccepted,
+                gatewayEchoDigest: durableEvidence.gatewayEchoDigest,
+              }),
+              ...(shadowBudgetExceeded ? { invalidReason: "budget-exceeded" as const } : {}),
+            } satisfies OrganicShadowExecution;
+          } finally {
+            clearTimeout(shadowDeadlineTimer);
+          }
+        };
       }
       currentOllamaAbort = null;
       exitCode = homeserverResult.exitCode;
@@ -7464,6 +7849,76 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       }
     }
 
+    // Organic shadow work begins only after the canonical result-structured
+    // baseline commit succeeded. This call is intentionally fire-and-forget:
+    // the coordinator waits only on the already-completed barrier and enqueue,
+    // never on M5 inference or shadow evidence persistence.
+    if (terminalStructuredResultOk && organicPlan && homeserverResult) {
+      const planForShadow = organicPlan;
+      const baselineExecution = organicExecutionFromHomeserver(homeserverResult, startMs);
+      const baselineRouteMatches = organicBaselineModelMatchesResult(
+        config.organicBaselineModel,
+        homeserverResult.modelId,
+      );
+      if (!baselineRouteMatches) {
+        // The persisted plan named one owner baseline route, but the gateway
+        // did not prove that route in the actual baseline result. Never let a
+        // challenger run against an identity-mismatched baseline.
+        void persistOrganicOrphanInvalidAfterBaseline({
+          baselineCommitted: Promise.resolve(),
+          plan: planForShadow,
+          startedAt,
+          finishedAt: completedAt,
+          baseline: baselineExecution,
+          reason: "identity-mismatch",
+          persistResult: (result) => persistOrganicResultForTask(taskNs, taskClassification, result),
+        }).catch((error) => {
+          console.error(
+            `Organic baseline identity INVALID persistence failed for ${taskNs}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      } else if (organicShadowRun) {
+        const shadowRunner = organicShadowRun;
+        void enqueueOrganicShadowAfterBaseline({
+          baselineCommitted: Promise.resolve(),
+          queue: organicShadowQueue,
+          plan: planForShadow,
+          baseline: baselineExecution,
+          startedAt,
+          runShadow: shadowRunner,
+          persistResult: (result) => persistOrganicResultForTask(taskNs, taskClassification, result),
+          now: () => new Date().toISOString(),
+        }).then((outcome) => {
+          if (outcome !== "enqueued") {
+            console.warn(`Organic micro-experiment ${outcome} for ${taskNs}`);
+          }
+        }).catch((error) => {
+          console.error(
+            `Organic micro-experiment coordinator failed for ${taskNs}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      }
+    }
+    if (terminalStructuredResultOk && organicOrphanPlan && homeserverResult) {
+      const baselineRouteMatches = organicBaselineModelMatchesResult(
+        config.organicBaselineModel,
+        homeserverResult.modelId,
+      );
+      void persistOrganicOrphanInvalidAfterBaseline({
+        baselineCommitted: Promise.resolve(),
+        plan: organicOrphanPlan,
+        startedAt,
+        finishedAt: completedAt,
+        baseline: organicExecutionFromHomeserver(homeserverResult, startMs),
+        reason: baselineRouteMatches ? "evidence-incomplete" : "identity-mismatch",
+        persistResult: (result) => persistOrganicResultForTask(taskNs, taskClassification, result),
+      }).catch((error) => {
+        console.error(
+          `Organic orphan INVALID result persistence failed for ${taskNs}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
+
     // hugin#284: capture from the DURABLE terminal result, never from mutable
     // executor locals. A pending status survives partial registry writes and
     // is replayed idempotently by startup/periodic reconciliation. The M5
@@ -7640,6 +8095,85 @@ async function runHomeserverLearningRegistryReconciliation(): Promise<void> {
   }
 }
 
+const ORGANIC_RECOVERY_SCAN_BUDGET = { maxPages: 4, maxResults: 200 } as const;
+const ORGANIC_SHADOW_CLEANUP_TIMEOUT_MS = 2_000;
+let organicRecoveryScanUntil: string | undefined;
+
+/**
+ * Drain a bounded set of plan rows left by a dispatcher restart. This scan is
+ * deliberately content-blind and uses the dedicated organic Munin client; it
+ * validates only durable artifacts and never reconstructs or replays M5 work.
+ */
+async function reconcileOrganicOrphanPlans(): Promise<void> {
+  let page: Awaited<ReturnType<typeof queryAllMuninEntries>>;
+  try {
+    page = await queryAllMuninEntries(
+      organicMicroExperimentMunin,
+      {
+        tags: ["type:micro-experiment"],
+        namespace: "tasks/",
+        entry_type: "state",
+        ...(organicRecoveryScanUntil ? { until: organicRecoveryScanUntil } : {}),
+      },
+      ORGANIC_RECOVERY_SCAN_BUDGET,
+    );
+  } catch (error) {
+    console.error(
+      `Organic micro-experiment reconciliation query failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return;
+  }
+  if (page.budgetExhausted && page.continuationUntil) {
+    organicRecoveryScanUntil = page.continuationUntil;
+  } else if (!page.budgetExhausted) {
+    organicRecoveryScanUntil = undefined;
+  }
+
+  let scanned = 0;
+  let invalidated = 0;
+  let failed = 0;
+  for (const row of page.results.filter((candidate) => candidate.key === "micro-experiment-plan")) {
+    scanned++;
+    try {
+      const statusEntry = await organicMicroExperimentMunin.read(row.namespace, "status");
+      const terminal = statusEntry ? isTerminalTaskStatus(statusEntry.tags) : false;
+      const classification = statusEntry?.classification;
+      const recovery = await reconcileOrganicOrphanPlan({
+        taskNamespace: row.namespace,
+        baselineTerminal: terminal,
+        shadowActive: (plan) => organicShadowQueue.has(plan.experiment_id),
+        store: {
+          read: async (key) => (await organicMicroExperimentMunin.read(row.namespace, key))?.content ?? null,
+          persistResult: async (result) => {
+            const persisted = await persistOrganicResultCreateOnly(
+              organicArtifactStore(row.namespace, classification),
+              result,
+              5_000,
+            );
+            if (!persisted.persisted) {
+              throw new Error(`result persistence ${persisted.reason}`);
+            }
+            return persisted.status;
+          },
+        },
+      });
+      if (recovery.status === "invalidated") invalidated++;
+      if (recovery.status === "failed") failed++;
+    } catch (error) {
+      failed++;
+      console.warn(
+        `Organic micro-experiment reconciliation failed for one bounded row: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  if (scanned > 0 || page.truncated) {
+    console.log(
+      `Organic micro-experiment reconciliation: scanned=${scanned} invalidated=${invalidated} `
+      + `failed=${failed} truncated=${page.truncated}`,
+    );
+  }
+}
+
 async function pollLoop(): Promise<void> {
   console.log(
     `Hugin dispatcher started (poll interval: ${config.pollIntervalMs}ms)`
@@ -7673,6 +8207,7 @@ async function pollLoop(): Promise<void> {
   }
   await reconcileBlockedTasks();
   await runHomeserverLearningRegistryReconciliation();
+  await reconcileOrganicOrphanPlans();
   await primeTrackedPipelineSummaries();
   await reconcileTrackedPipelineSummaries();
 
@@ -7725,6 +8260,7 @@ async function pollLoop(): Promise<void> {
       }
       if (pollCount % 60 === 0) {
         await runHomeserverLearningRegistryReconciliation();
+        await reconcileOrganicOrphanPlans();
       }
       lastBlockedTaskCount = await countTasksWithLifecycle("blocked");
       // Fire-and-forget heartbeat
