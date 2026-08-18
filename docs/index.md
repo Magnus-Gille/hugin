@@ -131,6 +131,9 @@ scheduling, and pipeline phases.
   learning registry and the current capture status.
 - [LearningTaskContract producer handshake](learning-task-handshake.md):
   Producer-side handshake and joint live-smoke gate for learning evidence.
+- [Organic micro-experiments](organic-micro-experiments.md): Default-off,
+  content-blind plan/result seam for one bounded non-blocking M5 shadow,
+  wired only for the narrow authenticated Broker homeserver envelope lane.
 - [AI user testing review](ai-user-testing-review.md): Human-oriented review of
   the Hugin codebase and operator experience.
 - [AI user testing review (Codex)](ai-user-testing-review-codex.md): Codex-led

@@ -398,6 +398,7 @@ export class MuninClient {
     expectedUpdatedAt?: string,
     classification?: string,
     createIfAbsent?: boolean,
+    options: MuninRequestOptions = {},
   ): Promise<Record<string, unknown>> {
     if (createIfAbsent === true && expectedUpdatedAt !== undefined) {
       throw new Error("Munin write preconditions createIfAbsent and expectedUpdatedAt are mutually exclusive");
@@ -407,7 +408,7 @@ export class MuninClient {
     if (expectedUpdatedAt) args.expected_updated_at = expectedUpdatedAt;
     if (classification) args.classification = classification;
     if (createIfAbsent === true) args.create_if_absent = true;
-    const result = (await this.callTool("memory_write", args)) as
+    const result = (await this.callTool("memory_write", args, options)) as
       | Record<string, unknown>
       | undefined
       | null;

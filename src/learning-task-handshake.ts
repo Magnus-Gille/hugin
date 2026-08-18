@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
+import { composeAbortSignals } from "./munin-client.js";
 
 import {
   buildHuginTaskIdentity,
@@ -631,6 +632,7 @@ interface ReadPreflightOptions {
   now?: () => Date;
   randomUuid?: () => string;
   fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
 }
 
 async function readBoundedJson(res: Response): Promise<unknown> {
@@ -658,15 +660,24 @@ export async function fetchLearningTaskPreflight(
   const now = options.now ?? (() => new Date());
   const uuid = options.randomUuid ?? randomUUID;
   const headers = { Authorization: `Bearer ${options.apiKey}`, Accept: "application/json" };
-  const principalResponse = await fetchImpl(`${options.gatewayBaseUrl}/portal/me`, {
-    method: "GET",
-    headers,
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!principalResponse.ok) {
-    throw new LearningTaskHandshakeError(`authenticated M5 principal lookup failed with HTTP ${principalResponse.status}`);
+  const principalRequest = options.signal
+    ? composeAbortSignals([options.signal, AbortSignal.timeout(10_000)])
+    : { signal: AbortSignal.timeout(10_000), cleanup: () => {} };
+  let principalResponse: Response;
+  let principalRaw: unknown;
+  try {
+    principalResponse = await fetchImpl(`${options.gatewayBaseUrl}/portal/me`, {
+      method: "GET",
+      headers,
+      signal: principalRequest.signal,
+    });
+    if (!principalResponse.ok) {
+      throw new LearningTaskHandshakeError(`authenticated M5 principal lookup failed with HTTP ${principalResponse.status}`);
+    }
+    principalRaw = await readBoundedJson(principalResponse);
+  } finally {
+    principalRequest.cleanup();
   }
-  const principalRaw = await readBoundedJson(principalResponse);
   const principal = z.object({ alias: z.string().min(1), tier: z.literal("owner") }).passthrough()
     .safeParse(principalRaw);
   if (!principal.success) {
@@ -684,14 +695,24 @@ export async function fetchLearningTaskPreflight(
     requested_at: requestedAt,
     requested_capabilities: structuredClone(LEARNING_TASK_CAPABILITIES),
   });
-  const capabilityResponse = await fetchImpl(
-    `${options.gatewayBaseUrl}${LEARNING_TASK_PREFLIGHT_ENDPOINT}`,
-    { method: "GET", headers, signal: AbortSignal.timeout(10_000) },
-  );
-  if (!capabilityResponse.ok) {
-    throw new LearningTaskHandshakeError(`authenticated learning-task preflight failed with HTTP ${capabilityResponse.status}`);
+  const capabilityRequest = options.signal
+    ? composeAbortSignals([options.signal, AbortSignal.timeout(10_000)])
+    : { signal: AbortSignal.timeout(10_000), cleanup: () => {} };
+  let capabilityResponse: Response;
+  let capabilityRaw: unknown;
+  try {
+    capabilityResponse = await fetchImpl(
+      `${options.gatewayBaseUrl}${LEARNING_TASK_PREFLIGHT_ENDPOINT}`,
+      { method: "GET", headers, signal: capabilityRequest.signal },
+    );
+    if (!capabilityResponse.ok) {
+      throw new LearningTaskHandshakeError(`authenticated learning-task preflight failed with HTTP ${capabilityResponse.status}`);
+    }
+    capabilityRaw = await readBoundedJson(capabilityResponse);
+  } finally {
+    capabilityRequest.cleanup();
   }
-  const parsed = preflightResponseSchema.safeParse(await readBoundedJson(capabilityResponse));
+  const parsed = preflightResponseSchema.safeParse(capabilityRaw);
   if (!parsed.success) {
     throw new LearningTaskHandshakeError("learning-task preflight advertised an unsupported or partial contract");
   }
@@ -1325,6 +1346,7 @@ export async function prepareDurableLearningTaskAttempt(input: {
   persistStart: (
     ref: LearningTaskEvidenceRef,
     record: DurableLearningTaskAttemptStart,
+    signal?: AbortSignal,
   ) => Promise<void>;
   buildPreparedDispatch: (
     context: LearningTaskRequestContext,
@@ -1335,14 +1357,17 @@ export async function prepareDurableLearningTaskAttempt(input: {
   persistReplayPayload: (
     ref: LearningTaskEvidenceRef,
     record: LearningTaskReplayPayload,
+    signal?: AbortSignal,
   ) => Promise<void>;
   persistPrepared: (
     ref: LearningTaskEvidenceRef,
     record: PreparedLearningTaskDispatch,
+    signal?: AbortSignal,
   ) => Promise<void>;
   now?: () => Date;
   randomUuid?: () => string;
   fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
 }): Promise<{
   attempt: LearningTaskAttemptStart;
   attemptStartRef: LearningTaskEvidenceRef;
@@ -1366,8 +1391,10 @@ export async function prepareDurableLearningTaskAttempt(input: {
   let preparedDispatch: PreparedLearningTaskDispatch | undefined;
   let replayPayload: LearningTaskReplayPayload | undefined;
   try {
-    await input.persistStart(attemptStartRef, durableLearningTaskAttemptStart(attempt));
+    if (input.signal?.aborted) throw new Error("learning-task preparation deadline exceeded");
+    await input.persistStart(attemptStartRef, durableLearningTaskAttemptStart(attempt), input.signal);
     startPersisted = true;
+    if (input.signal?.aborted) throw new Error("learning-task preparation deadline exceeded");
     const source = input.buildSource();
     const preflight = await fetchLearningTaskPreflight({
       gatewayBaseUrl: input.gatewayBaseUrl,
@@ -1376,7 +1403,9 @@ export async function prepareDurableLearningTaskAttempt(input: {
       now,
       randomUuid: uuid,
       fetchImpl: input.fetchImpl,
+      signal: input.signal,
     });
+    if (input.signal?.aborted) throw new Error("learning-task preparation deadline exceeded");
     // The accepted preflight establishes the earliest safe point to freeze the
     // request stamp. Every later defensive serialization must reuse this exact
     // timestamp rather than sample wall-clock time again.
@@ -1392,8 +1421,9 @@ export async function prepareDurableLearningTaskAttempt(input: {
     const prepared = input.buildPreparedDispatch(context);
     preparedDispatch = prepared.preparedDispatch;
     replayPayload = prepared.replayPayload;
-    await input.persistReplayPayload(preparedDispatch.replayPayloadRef, replayPayload);
-    await input.persistPrepared(preparedDispatch.preparedDispatchRef, preparedDispatch);
+    await input.persistReplayPayload(preparedDispatch.replayPayloadRef, replayPayload, input.signal);
+    if (input.signal?.aborted) throw new Error("learning-task preparation deadline exceeded");
+    await input.persistPrepared(preparedDispatch.preparedDispatchRef, preparedDispatch, input.signal);
     return {
       attempt,
       attemptStartRef,

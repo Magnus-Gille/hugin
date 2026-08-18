@@ -19,7 +19,7 @@ export interface ImmutableLearningArtifactWrite {
 export async function createImmutableLearningArtifact(
   munin: MuninClient,
   write: ImmutableLearningArtifactWrite,
-  options: { allowExactExisting?: boolean } = {},
+  options: { allowExactExisting?: boolean; signal?: AbortSignal } = {},
 ): Promise<"created" | "exact-existing"> {
   try {
     const result = await munin.write(
@@ -30,6 +30,7 @@ export async function createImmutableLearningArtifact(
       undefined,
       write.classification,
       true,
+      { signal: options.signal },
     );
     if (result.status !== "created") {
       throw new Error(
@@ -43,7 +44,7 @@ export async function createImmutableLearningArtifact(
       && error.conflictReason === "already_exists")) {
       throw error;
     }
-    const existing = await munin.read(write.namespace, write.key);
+    const existing = await munin.read(write.namespace, write.key, { signal: options.signal });
     if (!existing
       || existing.content !== write.content
       || existing.classification !== write.classification) {
