@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { query, type Query } from "@anthropic-ai/claude-agent-sdk";
+import { redactCredentialTokens } from "./exfiltration-scanner.js";
 import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
 
 type HttpMcpServer = { type: "http"; url: string; headers?: Record<string, string> };
@@ -10,6 +11,15 @@ type McpServerEntry = HttpMcpServer | StdioMcpServer;
 type ClaudePermissionMode = "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk";
 
 const FRICTION_MCP_DIST_PATH = fileURLToPath(new URL("./friction-mcp.js", import.meta.url));
+const FORWARDED_FRICTION_ENV_KEYS = [
+  "HOME",
+  "PATH",
+  "XDG_STATE_HOME",
+  "HUGIN_FRICTION_WRITE_TIMEOUT_MS",
+  "HUGIN_FRICTION_OUTBOX_PATH",
+  "HUGIN_FRICTION_OUTBOX_MAX_ENTRIES",
+  "HUGIN_FRICTION_OUTBOX_MAX_BYTES",
+] as const;
 
 export type TaskPermissionProfile = "read-only" | "trusted-code";
 
@@ -92,11 +102,12 @@ export interface SdkExecutorOptions {
 }
 
 /**
- * Format captured child stderr into a log block for task output on failure.
+ * Format captured child stderr into a bounded, redacted log block.
  *
- * Returns the formatted block (capped to the last 4000 chars of stderr) when
- * `exitCode !== 0` and `stderrBuf` contains non-whitespace content.
- * Returns null on success (exitCode 0) or when the buffer is empty/whitespace.
+ * On successful parent tasks, only friction-mcp diagnostics are retained so
+ * unrelated child output cannot leak into a successful durable task result.
+ * Failure output retains the useful stderr tail, with credential-like values
+ * redacted. In both cases the captured content is capped to 4000 characters.
  *
  * Exported so it can be unit-tested independently without mocking the full SDK.
  */
@@ -104,11 +115,33 @@ export function formatChildStderr(
   stderrBuf: string,
   exitCode: number | "TIMEOUT",
 ): string | null {
-  if (exitCode === 0 || !stderrBuf.trim()) {
-    return null;
-  }
-  const capped = stderrBuf.trim().slice(-4000);
+  const lines = stderrBuf
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0)
+    .filter((line) => exitCode !== 0 || line.trimStart().startsWith("friction-mcp:"));
+  if (lines.length === 0) return null;
+  const capped = lines
+    .map(redactChildStderrLine)
+    .join("\n")
+    .trim()
+    .slice(-4000);
   return `\n[child stderr]\n${capped}\n`;
+}
+
+function forwardedFrictionEnv(): Record<string, string> {
+  const forwarded: Record<string, string> = {};
+  for (const key of FORWARDED_FRICTION_ENV_KEYS) {
+    const value = process.env[key];
+    if (value?.trim()) forwarded[key] = value;
+  }
+  return forwarded;
+}
+
+function redactChildStderrLine(line: string): string {
+  return redactCredentialTokens(line
+    .replace(/\b(?:bearer|basic)\s+[^\s,;]+/gi, (match) => `${match.split(/\s+/, 1)[0]} [redacted]`)
+    .replace(/\b(?:api[_-]?key|token|password|secret|authorization)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
+    .replace(/[\0\r]/g, " "));
 }
 
 export async function executeSdkTask(
@@ -244,6 +277,7 @@ export async function executeSdkTask(
           MUNIN_API_KEY: task.muninApiKey,
           HUGIN_FRICTION_TASK_ID: taskId,
           HUGIN_FRICTION_MODEL_ID: task.model ?? "unknown",
+          ...forwardedFrictionEnv(),
         },
       };
     }

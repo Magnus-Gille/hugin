@@ -1628,6 +1628,37 @@ describe("POST /v1/friction/report", () => {
     });
   });
 
+  it("keeps authenticated reporter provenance inside Munin's 20-tag limit", async () => {
+    const res = await fetch(`${harness.url}/v1/friction/report`, {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        friction_type: "tool_failure",
+        severity: "blocking",
+        summary: "rich friction",
+        detail: "The report has every derived field and the maximum caller tags.",
+        event_id: "66666666-7777-4888-8999-000000000000",
+        task_id: "rich-task",
+        model_id: "gpt-5.4-codex",
+        resource_assessment: "under-resourced",
+        alias_suggested: "large-reasoning",
+        tool_name: "ssh",
+        tags: Array.from({ length: 16 }, (_, index) => `repo:rich-${index}`),
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const tags = harness.munin.writes.at(-1)?.tags ?? [];
+    expect(tags.length).toBeLessThanOrEqual(20);
+    expect(tags).toContain("friction:tool_failure");
+    expect(tags).toContain("task:rich-task");
+    expect(tags).toContain("resource:under-resourced");
+    expect(tags).toContain("alias-suggested:large-reasoning");
+    expect(tags).toContain("tool:ssh");
+    expect(tags).toContain("reporter:claude-code");
+    expect(tags).toContain("repo:rich-0");
+  });
+
   it("inherits the restricted classification of a linked private task", async () => {
     harness.munin.reads["tasks/private-task/status"] = {
       namespace: "tasks/private-task",
