@@ -331,6 +331,51 @@ describe("SDK executor", () => {
     expect(result.output).not.toContain("[child stderr]");
   });
 
+  it("retains bounded friction-mcp diagnostics on successful parent tasks without secrets", async () => {
+    const anthropicToken = "s" + "k-ant-api03-" + "A".repeat(32);
+    const openAiProjectToken = "s" + "k-proj-" + "B".repeat(32);
+    const openAiLegacyToken = "s" + "k-" + "C".repeat(48);
+    const githubToken = "g" + "h" + "p_" + "D".repeat(36);
+    const githubFineGrainedToken = "g" + "ithub_pat_" + "E".repeat(30);
+    let capturedStderrCb: ((data: string) => void) | undefined;
+    const gen = createMockQuery([createMockResultSuccess("All good.")]);
+    const originalNext = gen.next.bind(gen);
+    gen.next = async () => {
+      capturedStderrCb?.(
+        "friction-mcp: write error for signals/friction/key: Authorization: Bearer super-secret; "
+        + `Basic basic-secret ${anthropicToken} ${openAiProjectToken} ${openAiLegacyToken} `
+        + `${githubToken} ${githubFineGrainedToken}\n`,
+      );
+      return originalNext();
+    };
+    mockedQuery.mockImplementation(({ options }) => {
+      capturedStderrCb = options?.stderr;
+      return gen as ReturnType<typeof query>;
+    });
+
+    const result = await executeSdkTask(makeTaskConfig(), "test-task-friction-stderr", tmpLogDir);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toContain("[child stderr]");
+    expect(result.output).toContain("friction-mcp: write error");
+    expect(result.output).not.toContain("super-secret");
+    expect(result.output).not.toContain("basic-secret");
+    expect(result.output).not.toContain(anthropicToken);
+    expect(result.output).not.toContain(openAiProjectToken);
+    expect(result.output).not.toContain(openAiLegacyToken);
+    expect(result.output).not.toContain(githubToken);
+    expect(result.output).not.toContain(githubFineGrainedToken);
+    const logContent = fs.readFileSync(result.logFile, "utf-8");
+    expect(logContent).toContain("friction-mcp: write error");
+    expect(logContent).not.toContain("super-secret");
+    expect(logContent).not.toContain("basic-secret");
+    expect(logContent).not.toContain(anthropicToken);
+    expect(logContent).not.toContain(openAiProjectToken);
+    expect(logContent).not.toContain(openAiLegacyToken);
+    expect(logContent).not.toContain(githubToken);
+    expect(logContent).not.toContain(githubFineGrainedToken);
+  });
+
   it("forwards muninSessionId as mcp-session-id header to the Munin MCP server", async () => {
     const messages = [createMockResultSuccess("Done")];
     mockedQuery.mockReturnValue(createMockQuery(messages) as ReturnType<typeof query>);
@@ -414,6 +459,67 @@ describe("SDK executor", () => {
     } finally {
       if (previous === undefined) delete process.env.HUGIN_FRICTION_INJECTION;
       else process.env.HUGIN_FRICTION_INJECTION = previous;
+    }
+  });
+
+  it("forwards explicitly set friction outbox configuration without unrelated env", async () => {
+    const frictionKeys = [
+      "HOME",
+      "PATH",
+      "XDG_STATE_HOME",
+      "HUGIN_FRICTION_WRITE_TIMEOUT_MS",
+      "HUGIN_FRICTION_OUTBOX_PATH",
+      "HUGIN_FRICTION_OUTBOX_MAX_ENTRIES",
+      "HUGIN_FRICTION_OUTBOX_MAX_BYTES",
+    ] as const;
+    const previous = Object.fromEntries(frictionKeys.map((key) => [key, process.env[key]]));
+    const unrelatedKey = "HUGIN_SENSITIVITY_CHECKPOINT_SECRET";
+    const unrelatedPrevious = process.env[unrelatedKey];
+    const previousInjection = process.env.HUGIN_FRICTION_INJECTION;
+    process.env.HUGIN_FRICTION_INJECTION = "on";
+    process.env.XDG_STATE_HOME = "/tmp/hugin-state";
+    process.env.HUGIN_FRICTION_WRITE_TIMEOUT_MS = "1500";
+    process.env.HUGIN_FRICTION_OUTBOX_PATH = "/tmp/hugin-outbox";
+    process.env.HUGIN_FRICTION_OUTBOX_MAX_ENTRIES = "12";
+    process.env.HUGIN_FRICTION_OUTBOX_MAX_BYTES = "65536";
+    process.env[unrelatedKey] = "dispatcher-only-secret";
+    try {
+      mockedQuery.mockReturnValue(
+        createMockQuery([createMockResultSuccess("Done")]) as ReturnType<typeof query>,
+      );
+      await executeSdkTask(makeTaskConfig(), "test-friction-env", tmpLogDir);
+
+      const call = mockedQuery.mock.calls[0]?.[0] as {
+        options?: {
+          mcpServers?: Record<string, { env?: Record<string, string> }>;
+        };
+      };
+      const env = call.options?.mcpServers?.["friction"]?.env;
+      expect(env).toMatchObject({
+        HOME: process.env.HOME,
+        PATH: process.env.PATH,
+        XDG_STATE_HOME: "/tmp/hugin-state",
+        HUGIN_FRICTION_WRITE_TIMEOUT_MS: "1500",
+        HUGIN_FRICTION_OUTBOX_PATH: "/tmp/hugin-outbox",
+        HUGIN_FRICTION_OUTBOX_MAX_ENTRIES: "12",
+        HUGIN_FRICTION_OUTBOX_MAX_BYTES: "65536",
+      });
+      expect(env).not.toHaveProperty(unrelatedKey);
+    } finally {
+      if (previous.XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = previous.XDG_STATE_HOME;
+      if (previous.HUGIN_FRICTION_WRITE_TIMEOUT_MS === undefined) delete process.env.HUGIN_FRICTION_WRITE_TIMEOUT_MS;
+      else process.env.HUGIN_FRICTION_WRITE_TIMEOUT_MS = previous.HUGIN_FRICTION_WRITE_TIMEOUT_MS;
+      if (previous.HUGIN_FRICTION_OUTBOX_PATH === undefined) delete process.env.HUGIN_FRICTION_OUTBOX_PATH;
+      else process.env.HUGIN_FRICTION_OUTBOX_PATH = previous.HUGIN_FRICTION_OUTBOX_PATH;
+      if (previous.HUGIN_FRICTION_OUTBOX_MAX_ENTRIES === undefined) delete process.env.HUGIN_FRICTION_OUTBOX_MAX_ENTRIES;
+      else process.env.HUGIN_FRICTION_OUTBOX_MAX_ENTRIES = previous.HUGIN_FRICTION_OUTBOX_MAX_ENTRIES;
+      if (previous.HUGIN_FRICTION_OUTBOX_MAX_BYTES === undefined) delete process.env.HUGIN_FRICTION_OUTBOX_MAX_BYTES;
+      else process.env.HUGIN_FRICTION_OUTBOX_MAX_BYTES = previous.HUGIN_FRICTION_OUTBOX_MAX_BYTES;
+      if (unrelatedPrevious === undefined) delete process.env[unrelatedKey];
+      else process.env[unrelatedKey] = unrelatedPrevious;
+      if (previousInjection === undefined) delete process.env.HUGIN_FRICTION_INJECTION;
+      else process.env.HUGIN_FRICTION_INJECTION = previousInjection;
     }
   });
 

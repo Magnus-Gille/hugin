@@ -20,6 +20,8 @@ import {
 
 export const FRICTION_NAMESPACE = "signals/friction";
 export const FRICTION_NO_TASK = "no-task";
+export const MAX_MUNIN_TAGS = 20;
+export const MAX_MUNIN_TAG_CHARS = 200;
 
 const SERVER_OWNED_FRICTION_TAG_PREFIXES = [
   "friction:",
@@ -90,7 +92,7 @@ export function buildFrictionTags(args: FrictionTagInputs): string[] {
   const { input, modelId, resolvedTaskId } = args;
   const category: FrictionCategory = FRICTION_CATEGORY[input.friction_type as FrictionType];
 
-  const tags: string[] = [
+  const derivedTags: string[] = [
     `friction:${input.friction_type}`,
     `friction-category:${shortCategory(category)}`,
     `severity:${input.severity}`,
@@ -100,21 +102,21 @@ export function buildFrictionTags(args: FrictionTagInputs): string[] {
   ];
 
   if (resolvedTaskId) {
-    tags.push(`task:${resolvedTaskId}`);
+    derivedTags.push(`task:${resolvedTaskId}`);
   }
   if (input.resource_assessment) {
-    tags.push(`resource:${input.resource_assessment}`);
+    derivedTags.push(`resource:${input.resource_assessment}`);
   }
   if (input.alias_suggested) {
-    tags.push(`alias-suggested:${input.alias_suggested}`);
+    derivedTags.push(`alias-suggested:${input.alias_suggested}`);
   }
   if (input.tool_name) {
-    tags.push(`tool:${input.tool_name}`);
+    derivedTags.push(`tool:${input.tool_name}`);
   }
-  if (input.tags && input.tags.length > 0) {
-    tags.push(...input.tags);
-  }
-  return tags;
+  const callerTags = keepCallerFrictionTags(input.tags) ?? [];
+  return [...derivedTags, ...callerTags]
+    .map((tag) => tag.slice(0, MAX_MUNIN_TAG_CHARS))
+    .slice(0, MAX_MUNIN_TAGS);
 }
 
 function shortCategory(category: FrictionCategory): string {

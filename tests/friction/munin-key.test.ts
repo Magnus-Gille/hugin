@@ -126,6 +126,40 @@ describe("buildFrictionTags", () => {
     });
     expect(tags).toContain("friction-category:spec");
   });
+
+  it("caps the merged tags at Munin's 20-tag contract while preserving derived tags", () => {
+    const tags = buildFrictionTags({
+      input: {
+        friction_type: "tool_failure",
+        severity: "blocking",
+        summary: "x",
+        detail: "y",
+        resource_assessment: "under-resourced",
+        alias_suggested: "large-reasoning",
+        tool_name: "ssh",
+        tags: Array.from({ length: 16 }, (_, index) => `caller-${index}`),
+      },
+      modelId: "m",
+      resolvedTaskId: "task-1",
+    });
+
+    expect(tags).toHaveLength(20);
+    expect(tags.slice(0, 10)).toEqual([
+      "friction:tool_failure",
+      "friction-category:env",
+      "severity:blocking",
+      "model:m",
+      "source:model-self-report",
+      "schema:v1",
+      "task:task-1",
+      "resource:under-resourced",
+      "alias-suggested:large-reasoning",
+      "tool:ssh",
+    ]);
+    expect(tags.slice(10)).toEqual(
+      Array.from({ length: 10 }, (_, index) => `caller-${index}`),
+    );
+  });
 });
 
 describe("buildFrictionContent", () => {

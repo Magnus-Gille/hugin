@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   scanForExfiltration,
   redactExfiltration,
+  redactCredentialTokens,
   compareExfilSeverity,
 } from "../src/exfiltration-scanner.js";
 
@@ -258,5 +259,31 @@ describe("redactExfiltration", () => {
     const content = `prefix ${token} suffix`;
     const r = scanForExfiltration(content);
     expect(redactExfiltration(content, r)).toBe("prefix [redacted: api-key] suffix");
+  });
+});
+
+describe("redactCredentialTokens", () => {
+  it("redacts canonical credential formats without redacting ordinary labels", () => {
+    const anthropic = "s" + "k-ant-api03-" + "A".repeat(32);
+    const openAiProject = "s" + "k-proj-" + "B".repeat(32);
+    const openAiLegacy = "s" + "k-" + "C".repeat(48);
+    const github = "g" + "h" + "p_" + "D".repeat(36);
+    const githubFineGrained = "g" + "ithub_pat_" + "E".repeat(30);
+    const ordinary = [
+      "s" + "k-ant-api03-short",
+      "s" + "k-proj-short",
+      "s" + "k-short",
+      "g" + "hp_short",
+      "g" + "ithub_pat_short",
+    ];
+    const content = [anthropic, openAiProject, openAiLegacy, github, githubFineGrained, ...ordinary].join(" ");
+    const redacted = redactCredentialTokens(content);
+
+    expect(redacted).not.toContain(anthropic);
+    expect(redacted).not.toContain(openAiProject);
+    expect(redacted).not.toContain(openAiLegacy);
+    expect(redacted).not.toContain(github);
+    expect(redacted).not.toContain(githubFineGrained);
+    for (const label of ordinary) expect(redacted).toContain(label);
   });
 });

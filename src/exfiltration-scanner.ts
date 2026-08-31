@@ -39,6 +39,29 @@ interface PatternSpec {
   regex: RegExp;
 }
 
+const CREDENTIAL_TOKEN_PATTERNS = [
+  // Anthropic: sk-ant-<kind>-<payload>
+  "\\bs\\u006B-ant-[a-z0-9]+-[A-Za-z0-9_\\-]{24,}",
+  // OpenAI project/user: sk-proj-<payload>, sk-<40+char>
+  "\\bs\\u006B-proj-[A-Za-z0-9_\\-]{24,}",
+  "\\bs\\u006B-[A-Za-z0-9]{40,}",
+  // Legacy Stripe-style secret keys are also credential-like; require a
+  // substantial payload so ordinary `sk_*` labels remain untouched.
+  "\\bs\\u006B_[A-Za-z0-9_\\-]{16,}",
+  // GitHub classic PAT/server/oauth/user/refresh
+  "\\b\\u0067h[pousr]_[A-Za-z0-9]{30,}",
+  // GitHub fine-grained PAT: github_pat_<22+_underscore/alnum>
+  "\\b\\u0067ithub_pat_[A-Za-z0-9_]{22,}",
+  // Slack
+  "\\bxox[baprs]-[A-Za-z0-9\\-]{10,}",
+  // AWS access key id
+  "\\b\\u0041KIA[0-9A-Z]{16}\\b",
+  // Google API key
+  "\\b\\u0041Iza[0-9A-Za-z_\\-]{35}\\b",
+  // Generic Bearer JWT
+  "\\bBearer\\s+ey[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}",
+].join("|");
+
 const SEVERITY_RANK: Record<ExfilSeverity, number> = {
   none: 0,
   low: 1,
@@ -59,28 +82,7 @@ const PATTERNS: PatternSpec[] = [
   {
     id: "api-key",
     severity: "high",
-    regex: new RegExp(
-      [
-        // Anthropic: sk-ant-<kind>-<payload>
-        "\\bs\u006B-ant-[a-z0-9]+-[A-Za-z0-9_\\-]{24,}",
-        // OpenAI project/user: sk-proj-<payload>, sk-<40+char>
-        "\\bs\u006B-proj-[A-Za-z0-9_\\-]{24,}",
-        "\\bs\u006B-[A-Za-z0-9]{40,}",
-        // GitHub classic PAT/server/oauth/user/refresh
-        "\\b\u0067h[pousr]_[A-Za-z0-9]{30,}",
-        // GitHub fine-grained PAT: github_pat_<22+_underscore/alnum>
-        "\\b\u0067ithub_pat_[A-Za-z0-9_]{22,}",
-        // Slack
-        "\\bxox[baprs]-[A-Za-z0-9\\-]{10,}",
-        // AWS access key id
-        "\\b\u0041KIA[0-9A-Z]{16}\\b",
-        // Google API key
-        "\\b\u0041Iza[0-9A-Za-z_\\-]{35}\\b",
-        // Generic Bearer JWT
-        "\\bBearer\\s+ey[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}",
-      ].join("|"),
-      "gi",
-    ),
+    regex: new RegExp(CREDENTIAL_TOKEN_PATTERNS, "gi"),
   },
   {
     id: "exfil-command",
@@ -120,6 +122,11 @@ const PATTERNS: PatternSpec[] = [
     regex: /[A-Za-z0-9+/]{256,}={0,2}/g,
   },
 ];
+
+/** Redact only credential-shaped tokens covered by the canonical scanner. */
+export function redactCredentialTokens(content: string): string {
+  return content.replace(new RegExp(CREDENTIAL_TOKEN_PATTERNS, "gi"), "[redacted]");
+}
 
 function maxSeverity(a: ExfilSeverity, b: ExfilSeverity): ExfilSeverity {
   return SEVERITY_RANK[a] >= SEVERITY_RANK[b] ? a : b;

@@ -1,13 +1,15 @@
 /**
  * `report_friction` MCP tool handler.
  *
- * Friction events are lossy by design — write failures must not block
- * task execution and must not surface to the model as MCP errors. The
- * only hard error is input validation (bad schema = caller's fault).
+ * Friction writes are non-blocking for the parent task, but never silently
+ * successful: a write failure is durably spooled and returned as `ok:false`.
+ * The only MCP protocol error is input validation (bad schema = caller's
+ * fault); the task can continue while the caller receives recovery state.
  *
  * Write contract:
- *   - hard timeout (default 2s) via AbortController + Promise.race
- *   - on timeout / Munin error → log to stderr, return { ok: true, dropped: true }
+ *   - hard timeout (default 2s) via a bounded Promise.race
+ *   - on timeout / Munin error → spool the exact event, log bounded diagnostics,
+ *     return { ok: false, dropped: true, recovery: "spooled" }
  *   - on success → return { ok: true, dropped: false, namespace, key }
  */
 
@@ -25,6 +27,12 @@ import {
   type ReportFrictionInput,
   reportFrictionInputShape,
 } from "./schema.js";
+import {
+  createFrictionOutbox,
+  defaultFrictionOutboxDirectory,
+  redactFrictionDiagnostic,
+  type FrictionOutbox,
+} from "./outbox.js";
 
 export interface FrictionMuninWriter {
   write(
@@ -49,6 +57,10 @@ export interface FrictionToolDeps {
   now?: () => Date;
   /** Stderr override for tests. */
   stderr?: (line: string) => void;
+  /** Durable local queue for Munin failures. Defaults to the operator state directory. */
+  outbox?: FrictionOutbox;
+  /** Override the default queue directory, primarily for isolated tests. */
+  outboxDirectory?: string;
 }
 
 export interface FrictionTool {
@@ -104,6 +116,10 @@ export function buildFrictionTool(deps: FrictionToolDeps): FrictionTool {
   const writeTimeoutMs = deps.writeTimeoutMs ?? 2_000;
   const now = deps.now ?? (() => new Date());
   const stderr = deps.stderr ?? ((line: string) => process.stderr.write(line));
+  const outbox = deps.outbox ?? createFrictionOutbox({
+    directory: deps.outboxDirectory ?? defaultFrictionOutboxDirectory(),
+    stderr,
+  });
 
   return {
     name: "report_friction",
@@ -140,47 +156,66 @@ export function buildFrictionTool(deps: FrictionToolDeps): FrictionTool {
         recordedAt,
       });
 
-      const writePromise = deps.munin
-        .write(namespace, key, content, tags, undefined, "internal")
-        .then(() => ({ ok: true, dropped: false }) as const)
-        .catch((err: unknown) => {
-          const message = err instanceof Error ? err.message : String(err);
-          stderr(`friction-mcp: write error for ${namespace}/${key}: ${message}\n`);
-          return { ok: true, dropped: true, reason: "write_error" } as const;
-        });
-
-      const timeoutPromise = new Promise<{
-        ok: true;
-        dropped: true;
-        reason: "timeout";
-      }>((resolve) => {
-        setTimeout(() => {
-          stderr(
-            `friction-mcp: write timed out after ${writeTimeoutMs}ms for ${namespace}/${key}\n`,
-          );
-          resolve({ ok: true, dropped: true, reason: "timeout" });
-        }, writeTimeoutMs).unref?.();
-      });
-
-      const outcome = await Promise.race([writePromise, timeoutPromise]);
-
-      if (outcome.dropped) {
-        return asResult({
-          ok: true,
-          dropped: true,
-          reason: "reason" in outcome ? outcome.reason : "unknown",
-          namespace,
-          key,
-        });
+      const writeOutcome = await writeWithTimeout(
+        Promise.resolve().then(() =>
+          deps.munin.write(namespace, key, content, tags, undefined, "internal")),
+        writeTimeoutMs,
+      );
+      if (writeOutcome.kind === "success") {
+        return asResult({ ok: true, dropped: false, namespace, key });
       }
-      return asResult({
-        ok: true,
-        dropped: false,
+
+      const reason = writeOutcome.kind === "timeout" ? "timeout" : "write_error";
+      const diagnostic = writeOutcome.kind === "timeout"
+        ? `write timed out after ${writeTimeoutMs}ms`
+        : redactFrictionDiagnostic(writeOutcome.error);
+      const recovery = await outbox.enqueue({
         namespace,
         key,
+        content,
+        tags,
+        classification: "internal",
+      });
+      const recoveryState = recovery.stored ? "spooled" : recovery.reason;
+      stderr(
+        `friction-mcp: ${reason === "timeout" ? "write timed out" : "write error"} for `
+        + `${namespace}/${key}: ${diagnostic}; ${recoveryState} `
+        + `(pending=${recovery.pendingCount})\n`,
+      );
+      return asResult({
+        ok: false,
+        dropped: true,
+        reason,
+        recovery: recoveryState,
+        namespace,
+        key,
+        diagnostic,
+        pending: recovery.pendingCount,
+        oldestAt: recovery.oldestAt,
       });
     },
   };
+}
+
+type WriteOutcome =
+  | { kind: "success" }
+  | { kind: "error"; error: unknown }
+  | { kind: "timeout" };
+
+async function writeWithTimeout(
+  promise: Promise<unknown>,
+  timeoutMs: number,
+): Promise<WriteOutcome> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race<WriteOutcome>([
+    promise.then(() => ({ kind: "success" as const }), (error: unknown) => ({ kind: "error" as const, error })),
+    new Promise<WriteOutcome>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: "timeout" }), timeoutMs);
+      timer.unref?.();
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  return outcome;
 }
 
 function pickTaskId(fromInput: string | undefined, fromDeps: string | undefined): string | undefined {

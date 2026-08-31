@@ -39,6 +39,7 @@ import {
   buildFrictionNamespace,
   buildFrictionTags,
   keepCallerFrictionTags,
+  MAX_MUNIN_TAGS,
   sanitiseTaskId,
 } from "../friction/munin-key.js";
 import {
@@ -470,13 +471,16 @@ export class BrokerTaskStore {
         }
         throw new FrictionIdempotencyConflictError(trustedInput.event_id!);
       }
+      const frictionTags = buildFrictionTags({
+        input: trustedInput,
+        modelId,
+        resolvedTaskId,
+        source: "broker-api",
+      });
+      // The authenticated reporter is a required provenance tag. Reserve one
+      // Munin tag slot for it after the derived tags have been assembled.
       const tags = [...new Set([
-        ...buildFrictionTags({
-          input: trustedInput,
-          modelId,
-          resolvedTaskId,
-          source: "broker-api",
-        }),
+        ...frictionTags.slice(0, MAX_MUNIN_TAGS - 1),
         `reporter:${reporterTag}`,
       ])];
       const contentPayload = JSON.parse(buildFrictionContent({
