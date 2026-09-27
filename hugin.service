@@ -17,7 +17,12 @@ ExecStart=/usr/bin/node dist/main.js
 Restart=always
 RestartSec=10
 EnvironmentFile=/home/magnus/repos/hugin/.env
-Environment=PATH=/home/magnus/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+# .npm-global/bin holds the pinned research Pi harness installed by
+# deploy-pi.sh (npm's default global prefix is not user-writable on a fresh
+# host); .local/bin holds standalone Codex plus an unrelated `pi` binary of a
+# different version. .npm-global/bin MUST precede .local/bin so the pinned
+# research Pi resolves before that unrelated ~/.local/bin/pi (issue #390).
+Environment=PATH=/home/magnus/.npm-global/bin:/home/magnus/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 # Sandboxing
 # ProtectSystem is deliberately NOT set: under any value (true/full/strict) it
