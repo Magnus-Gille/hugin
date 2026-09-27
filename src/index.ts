@@ -2992,6 +2992,12 @@ function startLeaseRenewal(taskNs: string, entryContent: string, baseTags: strin
     } catch (err) {
       console.error(`Lease renewal failed for ${taskNs}:`, err);
     }
+    // #389: the outer poll loop only emits a heartbeat between tasks, so a
+    // single long-running task (up to the 12h dispatcher ceiling) would
+    // otherwise leave `polled_at` stale for its entire execution even though
+    // the worker is alive and busy. Reuse this already-running timer to keep
+    // the heartbeat fresh with `current_task` set while a task is in flight.
+    emitHeartbeat(lastBlockedTaskCount);
   }, LEASE_RENEWAL_INTERVAL_MS);
 }
 
@@ -8379,6 +8385,10 @@ export const __test__ = {
   isSubmitterAllowed,
   pollOnce,
   writeResearchSpikeIndexes,
+  emitHeartbeat,
+  startLeaseRenewal,
+  stopLeaseRenewal,
+  LEASE_RENEWAL_INTERVAL_MS,
   inspectState: () => ({
     currentTask,
     currentTaskConfig,
@@ -8392,6 +8402,12 @@ export const __test__ = {
     currentCancellation = null;
     lastPendingQueueSnapshot = snapshotPendingQueue([], false);
     lastQueueTruncationWarningAtMs = null;
+  },
+  // Test-only: simulate a task being in flight so the lease-renewal timer's
+  // heartbeat guard (`currentTask === taskNs`) passes without driving a full
+  // task execution through pollOnce.
+  setCurrentTaskForTest: (taskNs: string | null) => {
+    currentTask = taskNs;
   },
 };
 
