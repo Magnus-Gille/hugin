@@ -190,7 +190,12 @@ set -e
 [[ "$codex_block_rc" -eq 0 ]] || fail "unit PATH must find and execute the ~/.local/bin Codex stub (output: $codex_block_output)"
 [[ -z "$codex_block_output" ]] || fail "successful Codex preflight should be quiet (output: $codex_block_output)"
 
-MISSING_CODEX_PATH="${LOCAL_UNIT_PATH//:$REMOTE_BLOCK_TEST_HOME\/\.local\/bin/}"
+# The negative case must not depend on host-installed Codex: use only a controlled
+# empty directory. The preflight block uses shell builtins plus `codex`, so nothing
+# else needs to resolve on this PATH.
+MISSING_CODEX_BIN="$REMOTE_BLOCK_TEST_HOME/empty-bin"
+mkdir -p "$MISSING_CODEX_BIN"
+MISSING_CODEX_PATH="$MISSING_CODEX_BIN"
 set +e
 missing_codex_output="$(HOME="$REMOTE_BLOCK_TEST_HOME" bash -c "$(codex_sandbox_preflight_block "$MISSING_CODEX_PATH")" 2>&1)"
 missing_codex_rc=$?
