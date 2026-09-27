@@ -75,8 +75,22 @@ describe("parseLivenessCliArgs", () => {
     expect(() => parseLivenessCliArgs(["--poll-interval-ms", "1e308"])).toThrow();
     expect(() => parseLivenessCliArgs(["--poll-interval-ms", "1.5"])).toThrow();
 
+  });
+
+  it("applies the dispatcher's fallback and clamp rules to HUGIN_POLL_INTERVAL_MS", () => {
+    // Same semantics as parseBoundedPositiveInt in the dispatcher: invalid → default,
+    // oversized → clamped to the ceiling, so the CLI assesses with the interval the
+    // running worker actually uses.
+    process.env.HUGIN_POLL_INTERVAL_MS = "bogus";
+    expect(parseLivenessCliArgs([]).pollIntervalMs).toBe(30_000);
     process.env.HUGIN_POLL_INTERVAL_MS = "3600001";
-    expect(() => parseLivenessCliArgs([])).toThrow();
+    expect(parseLivenessCliArgs([]).pollIntervalMs).toBe(3_600_000);
+    delete process.env.HUGIN_POLL_INTERVAL_MS;
+  });
+
+  it("lets an explicit --poll-interval-ms override an invalid HUGIN_POLL_INTERVAL_MS", () => {
+    process.env.HUGIN_POLL_INTERVAL_MS = "bogus";
+    expect(parseLivenessCliArgs(["--poll-interval-ms", "45000"]).pollIntervalMs).toBe(45_000);
     delete process.env.HUGIN_POLL_INTERVAL_MS;
   });
 

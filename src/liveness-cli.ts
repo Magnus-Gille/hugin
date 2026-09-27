@@ -13,6 +13,7 @@ import { parseArgs as parseNodeArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { MuninClient } from "./munin-client.js";
+import { parseBoundedPositiveInt } from "./task-helpers.js";
 import {
   assessWorkerLiveness,
   isSafeWorkerLivenessId,
@@ -77,15 +78,16 @@ export function parseLivenessCliArgs(argv: string[]): LivenessCliOptions {
     },
   });
 
-  const envPollInterval = process.env.HUGIN_POLL_INTERVAL_MS;
-  const defaultPollIntervalMs = envPollInterval === undefined
-    ? DEFAULT_POLL_INTERVAL_MS
-    : parsePollInterval(envPollInterval, "HUGIN_POLL_INTERVAL_MS");
-
-  let pollIntervalMs = defaultPollIntervalMs;
-  if (values["poll-interval-ms"] !== undefined) {
-    pollIntervalMs = parsePollInterval(values["poll-interval-ms"], "--poll-interval-ms");
-  }
+  // An explicit flag is validated strictly and wins. Otherwise mirror the dispatcher's
+  // own HUGIN_POLL_INTERVAL_MS parsing (invalid → default, oversized → clamped) so the
+  // assessment uses the interval the running worker actually polls at.
+  const pollIntervalMs = values["poll-interval-ms"] !== undefined
+    ? parsePollInterval(values["poll-interval-ms"], "--poll-interval-ms")
+    : parseBoundedPositiveInt(
+      process.env.HUGIN_POLL_INTERVAL_MS,
+      DEFAULT_POLL_INTERVAL_MS,
+      WORKER_LIVENESS_MAX_POLL_INTERVAL_MS,
+    );
 
   return {
     json: values.json ?? false,

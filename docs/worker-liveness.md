@@ -16,10 +16,10 @@ staleness threshold.
 
 | Field | Type | Notes |
 |---|---|---|
-| `worker_id` | string | Host-based identity (issue #77), not PID-based; at most 200 characters and no control characters. |
+| `worker_id` | string | Host-based identity (issue #77), not PID-based. Must be a plain id (`[A-Za-z0-9][A-Za-z0-9._:-]*`, at most 200 characters); anything else makes the heartbeat `malformed` and is never echoed. |
 | `process_instance_id` | string | Distinguishes restarts of the same worker. |
 | `polled_at` | string (ISO 8601) | Timestamp of this heartbeat write. |
-| `current_task` | string \| null | The Munin task namespace currently executing, or `null` when idle; at most 200 characters and no control characters. |
+| `current_task` | string \| null | The Munin task namespace currently executing (`tasks/<id>`, at most 200 characters), or `null` when idle. Free text or another namespace makes the heartbeat `malformed` and is never echoed. |
 | `blocked_tasks` | number | Count of tasks in the `blocked` lifecycle. |
 | `uptime_s` | number | Seconds since process start. |
 | `group`, `sequence` | optional | Present only while executing a grouped/sequenced task. |
@@ -82,8 +82,10 @@ hugin-liveness [--json] [--poll-interval-ms <n>]
 - Reads `tasks/_heartbeat` (key `status`) via the same Munin client contract
   as other Hugin CLIs (`MUNIN_URL`, default `http://localhost:3030`;
   `MUNIN_API_KEY`, required). The API key is never printed.
-- `--poll-interval-ms` defaults to `HUGIN_POLL_INTERVAL_MS` or `30000`; both
-  values must be positive integers no greater than `3600000`.
+- `--poll-interval-ms`, when given, must be a positive integer no greater than
+  `3600000` (otherwise exit 2) and takes precedence. Without it, the CLI parses
+  `HUGIN_POLL_INTERVAL_MS` exactly like the dispatcher: invalid values fall back
+  to `30000` and oversized values are clamped to `3600000`.
 - Optionally counts currently-pending tasks with the same cheap
   `tags:["pending"], namespace:"tasks/", entry_type:"state", limit:1` query
   Hugin's own `countTasksWithLifecycle` uses; a failure there degrades to

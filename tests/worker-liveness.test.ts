@@ -167,6 +167,45 @@ describe("assessWorkerLiveness", () => {
     expect(oversized.currentTask).toBeNull();
   });
 
+  it("does not echo free-text ids that do not match the worker/task id formats", () => {
+    const freeTextTask = assessWorkerLiveness({
+      heartbeat: heartbeatJson({ current_task: "private customer text" }),
+      now: NOW,
+      pollIntervalMs: POLL_INTERVAL_MS,
+    });
+    const freeTextWorker = assessWorkerLiveness({
+      heartbeat: heartbeatJson({ worker_id: "a worker with prose", current_task: null }),
+      now: NOW,
+      pollIntervalMs: POLL_INTERVAL_MS,
+    });
+    const nonTaskNamespace = assessWorkerLiveness({
+      heartbeat: heartbeatJson({ current_task: "projects/secret-client" }),
+      now: NOW,
+      pollIntervalMs: POLL_INTERVAL_MS,
+    });
+
+    for (const result of [freeTextTask, freeTextWorker, nonTaskNamespace]) {
+      expect(result.state).toBe("malformed");
+      expect(result.workerId).toBeNull();
+      expect(result.currentTask).toBeNull();
+      expect(result.reason).not.toMatch(/private|prose|secret/);
+    }
+  });
+
+  it("accepts real dispatcher id formats", () => {
+    const result = assessWorkerLiveness({
+      heartbeat: heartbeatJson({
+        worker_id: "hugin-huginmunin",
+        current_task: "tasks/20260927-160602-local-jev-models",
+      }),
+      now: NOW,
+      pollIntervalMs: POLL_INTERVAL_MS,
+    });
+    expect(result.state).toBe("healthy-busy");
+    expect(result.workerId).toBe("hugin-huginmunin");
+    expect(result.currentTask).toBe("tasks/20260927-160602-local-jev-models");
+  });
+
   it("reports malformed for a future polled_at beyond clock-skew tolerance", () => {
     const result = assessWorkerLiveness({
       heartbeat: heartbeatJson({ polled_at: isoOffset(-(WORKER_LIVENESS_CLOCK_SKEW_TOLERANCE_MS + 1)) }),

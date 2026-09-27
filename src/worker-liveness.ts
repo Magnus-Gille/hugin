@@ -21,11 +21,20 @@ export const WORKER_LIVENESS_ID_MAX_LENGTH = 200;
 
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001F\u007F]/;
 
+/**
+ * Id formats the dispatcher actually writes: a plain worker id (e.g. `hugin-<host>`) and a
+ * Munin task namespace (`tasks/<id>`). Anything else (free text, other namespaces) is
+ * refused so the content-blind output can never echo stored prose.
+ */
+const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const TASK_ID_PATTERN = /^tasks\/[A-Za-z0-9][A-Za-z0-9._\/-]{0,193}$/;
+
 export function isSafeWorkerLivenessId(value: unknown): value is string {
   return typeof value === "string"
     && value.length > 0
     && value.length <= WORKER_LIVENESS_ID_MAX_LENGTH
-    && !CONTROL_CHARACTER_PATTERN.test(value);
+    && !CONTROL_CHARACTER_PATTERN.test(value)
+    && (WORKER_ID_PATTERN.test(value) || TASK_ID_PATTERN.test(value));
 }
 
 function assertValidPollIntervalMs(pollIntervalMs: number): void {
@@ -79,16 +88,8 @@ export interface AssessWorkerLivenessInput {
 // module falsely report "malformed".
 const heartbeatShapeSchema = z
   .object({
-    worker_id: z.string().min(1).max(WORKER_LIVENESS_ID_MAX_LENGTH)
-      .refine((value) => !CONTROL_CHARACTER_PATTERN.test(value), {
-        message: "must not contain control characters",
-      })
-      .nullish(),
-    current_task: z.string().min(1).max(WORKER_LIVENESS_ID_MAX_LENGTH)
-      .refine((value) => !CONTROL_CHARACTER_PATTERN.test(value), {
-        message: "must not contain control characters",
-      })
-      .nullish(),
+    worker_id: z.string().max(WORKER_LIVENESS_ID_MAX_LENGTH).regex(WORKER_ID_PATTERN).nullish(),
+    current_task: z.string().max(WORKER_LIVENESS_ID_MAX_LENGTH).regex(TASK_ID_PATTERN).nullish(),
     polled_at: z.string().min(1),
   })
   .passthrough();
