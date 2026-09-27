@@ -5,6 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_SCRIPT="$SCRIPT_DIR/deploy-pi.sh"
+REMOTE_BLOCKS="$SCRIPT_DIR/lib/deploy-pi-remote-blocks.sh"
 ORIGINAL_PATH="$PATH"
 REAL_RSYNC="$(command -v rsync)"
 TMP_DIR="$(mktemp -d)"
@@ -95,6 +96,107 @@ assert_order() {
   local tail="${haystack#*"$before"}"
   [[ "$tail" == *"$after"* ]] || fail "$label ($after appeared before $before)"
 }
+
+# Execute the exact prerequisite command blocks locally. The old fake ssh only
+# logged these commands, so it could not catch an install that failed to create
+# the pinned Pi executable or a Codex PATH that did not reach ~/.local/bin.
+REMOTE_BLOCK_TEST_HOME="$TMP_DIR/remote-home"
+REMOTE_BLOCK_TEST_BIN="$TMP_DIR/remote-bin"
+REMOTE_BLOCK_TEST_REPO="$TMP_DIR/remote-repo"
+mkdir -p "$REMOTE_BLOCK_TEST_HOME/.local/bin" "$REMOTE_BLOCK_TEST_BIN" \
+  "$REMOTE_BLOCK_TEST_REPO/scripts"
+touch "$REMOTE_BLOCK_TEST_REPO/scripts/research-pi-extension.mjs" \
+  "$REMOTE_BLOCK_TEST_REPO/scripts/research-web-search.mjs" \
+  "$REMOTE_BLOCK_TEST_REPO/scripts/research-web-fetch.mjs"
+chmod +x "$REMOTE_BLOCK_TEST_REPO/scripts/research-web-search.mjs" \
+  "$REMOTE_BLOCK_TEST_REPO/scripts/research-web-fetch.mjs"
+
+cat >"$REMOTE_BLOCK_TEST_BIN/npm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+prefix=''
+package=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --prefix)
+      prefix="$2"
+      shift 2
+      ;;
+    --*)
+      shift
+      ;;
+    *)
+      package="$1"
+      shift
+      ;;
+  esac
+done
+version="${package##*@}"
+mkdir -p "$prefix/bin"
+cat >"$prefix/bin/pi" <<PI
+#!/usr/bin/env bash
+if [ "\${1:-}" = '--version' ]; then
+  printf '%s\n' '$version'
+fi
+PI
+chmod +x "$prefix/bin/pi"
+EOF
+
+cat >"$REMOTE_BLOCK_TEST_BIN/bwrap" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+
+cat >"$REMOTE_BLOCK_TEST_HOME/.local/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = sandbox ] && [ "${2:-}" = -- ] && [ "${3:-}" = /bin/true ]; then
+  exit 0
+fi
+exit 64
+EOF
+chmod +x "$REMOTE_BLOCK_TEST_BIN/npm" "$REMOTE_BLOCK_TEST_BIN/bwrap" \
+  "$REMOTE_BLOCK_TEST_HOME/.local/bin/codex"
+
+UNIT_PATH="$(sed -n 's/^Environment=PATH=//p' "$SCRIPT_DIR/../hugin.service" | head -n1)"
+[[ -n "$UNIT_PATH" ]] || fail "hugin.service must provide a unit PATH for the hermetic preflight test"
+LOCAL_UNIT_PATH="${UNIT_PATH//\/home\/magnus/$REMOTE_BLOCK_TEST_HOME}"
+
+set +e
+source "$REMOTE_BLOCKS"
+research_block="$(research_pi_install_block '@earendil-works/pi-coding-agent' '0.84.1' "$REMOTE_BLOCK_TEST_REPO")"
+HOME="$REMOTE_BLOCK_TEST_HOME" PATH="$REMOTE_BLOCK_TEST_BIN:/usr/bin:/bin" \
+  bash -c "$research_block"
+research_block_rc=$?
+set -e
+[[ "$research_block_rc" -eq 0 ]] || fail "research Pi remote block must install and verify the pinned executable locally"
+[[ -x "$REMOTE_BLOCK_TEST_HOME/.npm-global/bin/pi" ]] || fail "research Pi test npm must create an executable under --prefix"
+if [[ -x "$REMOTE_BLOCK_TEST_HOME/.npm-global/bin/pi" ]]; then
+  installed_pi_version="$("$REMOTE_BLOCK_TEST_HOME/.npm-global/bin/pi" --version)"
+  [[ "$installed_pi_version" == '0.84.1' ]] || fail "research Pi test npm installed version '$installed_pi_version'"
+fi
+
+set +e
+bare_codex_path_output="$(PATH="$REMOTE_BLOCK_TEST_BIN:/usr/bin:/bin" command -v codex 2>&1)"
+bare_codex_path_rc=$?
+set -e
+[[ "$bare_codex_path_rc" -ne 0 ]] || fail "bare shell PATH must not find the ~/.local/bin Codex stub"
+[[ -z "$bare_codex_path_output" ]] || fail "bare shell PATH must not report a Codex executable"
+
+set +e
+codex_block_output="$(HOME="$REMOTE_BLOCK_TEST_HOME" bash -c "$(codex_sandbox_preflight_block "$LOCAL_UNIT_PATH")" 2>&1)"
+codex_block_rc=$?
+set -e
+[[ "$codex_block_rc" -eq 0 ]] || fail "unit PATH must find and execute the ~/.local/bin Codex stub (output: $codex_block_output)"
+[[ -z "$codex_block_output" ]] || fail "successful Codex preflight should be quiet (output: $codex_block_output)"
+
+MISSING_CODEX_PATH="${LOCAL_UNIT_PATH//:$REMOTE_BLOCK_TEST_HOME\/\.local\/bin/}"
+set +e
+missing_codex_output="$(HOME="$REMOTE_BLOCK_TEST_HOME" bash -c "$(codex_sandbox_preflight_block "$MISSING_CODEX_PATH")" 2>&1)"
+missing_codex_rc=$?
+set -e
+[[ "$missing_codex_rc" -ne 0 ]] || fail "unit PATH without ~/.local/bin must fail the Codex preflight"
+assert_contains "$missing_codex_output" "NO_CODEX" "Codex preflight reports NO_CODEX when unit PATH omits ~/.local/bin"
 
 init_clean_source() {
   local source_dir="$1"

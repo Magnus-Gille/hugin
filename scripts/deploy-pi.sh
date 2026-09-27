@@ -20,6 +20,8 @@ REMOTE_DIR="/home/$DEPLOY_USER/repos/hugin"
 # extension/flag contract is not compatible with arbitrary future releases.
 RESEARCH_PI_PACKAGE="${HUGIN_RESEARCH_PI_PACKAGE:-@earendil-works/pi-coding-agent}"
 RESEARCH_PI_VERSION="${HUGIN_RESEARCH_PI_VERSION:-0.84.1}"
+# shellcheck source=lib/deploy-pi-remote-blocks.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/deploy-pi-remote-blocks.sh"
 
 read_clean_deploy_sha() {
   local repo_root source_status source_sha
@@ -113,27 +115,7 @@ echo "==> Installing pinned research Pi harness ($RESEARCH_PI_PACKAGE@$RESEARCH_
 # fresh host (it resolves under /usr), so install into an explicit
 # user-owned prefix instead. hugin.service's PATH points at this same
 # ~/.npm-global/bin (issue #390).
-ssh "$REMOTE" "
-  set -e
-  NPM_GLOBAL_PREFIX=\"\$HOME/.npm-global\"
-  mkdir -p \"\$NPM_GLOBAL_PREFIX\"
-  npm install --global --prefix \"\$NPM_GLOBAL_PREFIX\" --ignore-scripts '$RESEARCH_PI_PACKAGE@$RESEARCH_PI_VERSION'
-  case \"\$NPM_GLOBAL_PREFIX\" in
-    /*) ;;
-    *) echo 'npm global prefix is not absolute' >&2; exit 1 ;;
-  esac
-  PI_BIN=\"\$NPM_GLOBAL_PREFIX/bin/pi\"
-  test -x \"\$PI_BIN\" || { echo 'research Pi executable missing from npm global prefix' >&2; exit 1; }
-  test \"\$(\"\$PI_BIN\" --version 2>/dev/null)\" = \"$RESEARCH_PI_VERSION\" || {
-    echo 'research Pi version mismatch' >&2
-    \"\$PI_BIN\" --version >&2 || true
-    exit 1
-  }
-  command -v bwrap >/dev/null || { echo 'bubblewrap (bwrap) is required for Runtime: research' >&2; exit 1; }
-  test -f '$REMOTE_DIR/scripts/research-pi-extension.mjs'
-  test -x '$REMOTE_DIR/scripts/research-web-search.mjs'
-  test -x '$REMOTE_DIR/scripts/research-web-fetch.mjs'
-"
+ssh "$REMOTE" "$(research_pi_install_block "$RESEARCH_PI_PACKAGE" "$RESEARCH_PI_VERSION" "$REMOTE_DIR")"
 
 echo "==> Removing legacy system-level service (one-time migration, idempotent)..."
 ssh "$REMOTE" "
@@ -231,10 +213,7 @@ if [ -z "$UNIT_PATH" ]; then
   echo "ERROR: could not parse Environment=PATH= from $UNIT_SERVICE_FILE; refusing Codex preflight." >&2
   exit 1
 fi
-if ssh "$REMOTE" "
-  PATH='$UNIT_PATH' command -v codex >/dev/null 2>&1 || { echo 'NO_CODEX'; exit 1; }
-  PATH='$UNIT_PATH' codex sandbox -- /bin/true >/dev/null 2>&1 || { echo 'CODEX_SANDBOX_FAIL'; exit 1; }
-"; then
+if ssh "$REMOTE" "$(codex_sandbox_preflight_block "$UNIT_PATH")"; then
   echo "  OK: Codex zero-token sandbox command passed on the host"
 else
   echo "  WARNING: host-side Codex sandbox preflight FAILED."
