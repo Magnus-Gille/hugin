@@ -29,7 +29,10 @@ describe("heartbeat during task execution (#389)", () => {
     vi.unstubAllGlobals();
   });
 
-  async function importDispatcher(writes: FakeWrite[]) {
+  async function importDispatcher(
+    writes: FakeWrite[],
+    getLoadedModels?: () => Promise<Record<string, string[]>>,
+  ) {
     const fakeHome = path.join(process.cwd(), ".tmp-test-home-heartbeat");
     fs.mkdirSync(path.join(fakeHome, ".hugin"), { recursive: true });
 
@@ -83,6 +86,13 @@ describe("heartbeat during task execution (#389)", () => {
       return { ...actual, MuninClient: FakeMuninClient };
     });
 
+    vi.doMock("../src/ollama-hosts.js", async () => {
+      const actual = await vi.importActual<typeof import("../src/ollama-hosts.js")>(
+        "../src/ollama-hosts.js",
+      );
+      return getLoadedModels ? { ...actual, getLoadedModels } : actual;
+    });
+
     const mod = await import("../src/index.js");
     // Network is disabled for this test — getLoadedModels()'s best-effort
     // /api/ps probe must fail fast rather than depend on real ollama hosts.
@@ -99,11 +109,7 @@ describe("heartbeat during task execution (#389)", () => {
     __test__.resetState();
     __test__.setCurrentTaskForTest("tasks/long-running-task");
 
-    __test__.startLeaseRenewal(
-      "tasks/long-running-task",
-      "content",
-      ["running", "runtime:claude"],
-    );
+    __test__.startTaskHeartbeat("tasks/long-running-task");
 
     // Advance past 3 renewal intervals to simulate a long task blocking the
     // outer poll loop for well over a single poll interval.
@@ -120,7 +126,7 @@ describe("heartbeat during task execution (#389)", () => {
     expect(parsed.current_task).toBe("tasks/long-running-task");
     expect(Date.now() - Date.parse(parsed.polled_at)).toBeLessThan(1_000);
 
-    __test__.stopLeaseRenewal();
+    __test__.stopTaskHeartbeat();
     fs.rmSync(path.join(process.cwd(), ".tmp-test-home-heartbeat"), {
       recursive: true,
       force: true,
@@ -133,12 +139,12 @@ describe("heartbeat during task execution (#389)", () => {
     __test__.resetState();
     __test__.setCurrentTaskForTest("tasks/short-task");
 
-    __test__.startLeaseRenewal("tasks/short-task", "content", ["running"]);
+    __test__.startTaskHeartbeat("tasks/short-task");
     await vi.advanceTimersByTimeAsync(__test__.LEASE_RENEWAL_INTERVAL_MS);
     const countAfterOneTick = writes.filter((w) => w.namespace === "tasks/_heartbeat").length;
     expect(countAfterOneTick).toBeGreaterThanOrEqual(1);
 
-    __test__.stopLeaseRenewal();
+    __test__.stopTaskHeartbeat();
     __test__.setCurrentTaskForTest(null);
 
     await vi.advanceTimersByTimeAsync(__test__.LEASE_RENEWAL_INTERVAL_MS * 3);
@@ -157,7 +163,7 @@ describe("heartbeat during task execution (#389)", () => {
     __test__.resetState();
     __test__.setCurrentTaskForTest("tasks/task-a");
 
-    __test__.startLeaseRenewal("tasks/task-a", "content", ["running"]);
+    __test__.startTaskHeartbeat("tasks/task-a");
     // Simulate the dispatcher moving on to a different task without an
     // explicit stopLeaseRenewal() call (defensive guard inside the timer).
     __test__.setCurrentTaskForTest("tasks/task-b");
@@ -165,6 +171,75 @@ describe("heartbeat during task execution (#389)", () => {
     await vi.advanceTimersByTimeAsync(__test__.LEASE_RENEWAL_INTERVAL_MS * 2);
     const heartbeatWrites = writes.filter((w) => w.namespace === "tasks/_heartbeat");
     expect(heartbeatWrites.length).toBe(0);
+
+    fs.rmSync(path.join(process.cwd(), ".tmp-test-home-heartbeat"), {
+      recursive: true,
+      force: true,
+    });
+  });
+
+  it("continues heartbeats after lease renewal stops during delivery", async () => {
+    const writes: FakeWrite[] = [];
+    const { __test__ } = await importDispatcher(writes);
+    __test__.resetState();
+    __test__.setCurrentTaskForTest("tasks/delivery-task");
+    __test__.startLeaseRenewal("tasks/delivery-task", "content", ["running"]);
+    __test__.startTaskHeartbeat("tasks/delivery-task");
+
+    await vi.advanceTimersByTimeAsync(__test__.LEASE_RENEWAL_INTERVAL_MS);
+    const beforeDelivery = writes.filter((w) => w.namespace === "tasks/_heartbeat").length;
+    const leaseWritesBeforeDelivery = writes.filter(
+      (w) => w.namespace === "tasks/delivery-task" && w.key === "status",
+    ).length;
+
+    __test__.stopLeaseRenewal();
+    await vi.advanceTimersByTimeAsync(__test__.TASK_HEARTBEAT_INTERVAL_MS * 2);
+
+    const heartbeatWrites = writes.filter((w) => w.namespace === "tasks/_heartbeat");
+    const leaseWritesAfterDelivery = writes.filter(
+      (w) => w.namespace === "tasks/delivery-task" && w.key === "status",
+    ).length;
+    expect(heartbeatWrites.length).toBeGreaterThanOrEqual(beforeDelivery + 2);
+    expect(leaseWritesAfterDelivery).toBe(leaseWritesBeforeDelivery);
+
+    __test__.stopTaskHeartbeat();
+    __test__.setCurrentTaskForTest(null);
+    fs.rmSync(path.join(process.cwd(), ".tmp-test-home-heartbeat"), {
+      recursive: true,
+      force: true,
+    });
+  });
+
+  it("serializes overlapping emissions and writes the newest snapshot last", async () => {
+    const writes: FakeWrite[] = [];
+    let releaseFirstModels!: () => void;
+    const firstModelsReady = new Promise<void>((resolve) => {
+      releaseFirstModels = resolve;
+    });
+    let modelCalls = 0;
+    const getLoadedModels = vi.fn(async () => {
+      modelCalls++;
+      if (modelCalls === 1) await firstModelsReady;
+      return {};
+    });
+    const { __test__ } = await importDispatcher(writes, getLoadedModels);
+    __test__.resetState();
+    __test__.setCurrentTaskForTest("tasks/old-task");
+
+    const first = __test__.emitHeartbeat(0);
+    await Promise.resolve();
+    __test__.setCurrentTaskForTest(null);
+    const second = __test__.emitHeartbeat(0);
+    releaseFirstModels();
+    await Promise.all([first, second]);
+
+    const heartbeatWrites = writes.filter((w) => w.namespace === "tasks/_heartbeat");
+    expect(heartbeatWrites).toHaveLength(2);
+    expect(JSON.parse(heartbeatWrites.at(-1)!.content).current_task).toBeNull();
+    expect(heartbeatWrites.map((w) => JSON.parse(w.content).current_task)).not.toEqual([
+      null,
+      "tasks/old-task",
+    ]);
 
     fs.rmSync(path.join(process.cwd(), ".tmp-test-home-heartbeat"), {
       recursive: true,

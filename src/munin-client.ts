@@ -484,7 +484,7 @@ export class MuninClient {
     entry_type?: string;
     since?: string;
     until?: string;
-  }): Promise<{ results: MuninQueryResult[]; total: number }> {
+  }, options: MuninRequestOptions = {}): Promise<{ results: MuninQueryResult[]; total: number }> {
     const args: Record<string, unknown> = {};
     if (opts.query) args.query = opts.query;
     if (opts.tags) args.tags = opts.tags;
@@ -493,7 +493,7 @@ export class MuninClient {
     if (opts.entry_type) args.entry_type = opts.entry_type;
     if (opts.since) args.since = opts.since;
     if (opts.until) args.until = opts.until;
-    return (await this.callTool("memory_query", args)) as {
+    return (await this.callTool("memory_query", args, options)) as {
       results: MuninQueryResult[];
       total: number;
     };

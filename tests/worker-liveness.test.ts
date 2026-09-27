@@ -37,6 +37,13 @@ describe("computeWorkerLivenessThresholdMs", () => {
       Math.max(WORKER_LIVENESS_STALE_MULTIPLIER * POLL_INTERVAL_MS, WORKER_LIVENESS_MIN_THRESHOLD_MS),
     );
   });
+
+  it("rejects invalid dispatcher poll intervals defensively", () => {
+    expect(() => computeWorkerLivenessThresholdMs(0)).toThrow();
+    expect(() => computeWorkerLivenessThresholdMs(1.5)).toThrow();
+    expect(() => computeWorkerLivenessThresholdMs(3_600_001)).toThrow();
+    expect(() => computeWorkerLivenessThresholdMs(1e308)).toThrow();
+  });
 });
 
 describe("assessWorkerLiveness", () => {
@@ -138,6 +145,26 @@ describe("assessWorkerLiveness", () => {
       pollIntervalMs: POLL_INTERVAL_MS,
     });
     expect(result.state).toBe("malformed");
+  });
+
+  it("does not accept content-bearing or oversized worker ids", () => {
+    const withNewline = assessWorkerLiveness({
+      heartbeat: heartbeatJson({ worker_id: "worker\nforged", current_task: "tasks/ok" }),
+      now: NOW,
+      pollIntervalMs: POLL_INTERVAL_MS,
+    });
+    const oversized = assessWorkerLiveness({
+      heartbeat: heartbeatJson({ current_task: `tasks/${"x".repeat(201)}` }),
+      now: NOW,
+      pollIntervalMs: POLL_INTERVAL_MS,
+    });
+
+    expect(withNewline.state).toBe("malformed");
+    expect(withNewline.workerId).toBeNull();
+    expect(withNewline.currentTask).toBeNull();
+    expect(oversized.state).toBe("malformed");
+    expect(oversized.workerId).toBeNull();
+    expect(oversized.currentTask).toBeNull();
   });
 
   it("reports malformed for a future polled_at beyond clock-skew tolerance", () => {

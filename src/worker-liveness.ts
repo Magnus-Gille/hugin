@@ -15,9 +15,34 @@ export const WORKER_LIVENESS_STALE_MULTIPLIER = 3;
 export const WORKER_LIVENESS_MIN_THRESHOLD_MS = 180_000;
 /** A `polled_at` this far in the future (clock skew) is tolerated as healthy, not "malformed". */
 export const WORKER_LIVENESS_CLOCK_SKEW_TOLERANCE_MS = 60_000;
+/** Same maximum accepted by the dispatcher's HUGIN_POLL_INTERVAL_MS parser. */
+export const WORKER_LIVENESS_MAX_POLL_INTERVAL_MS = 3_600_000;
+export const WORKER_LIVENESS_ID_MAX_LENGTH = 200;
+
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001F\u007F]/;
+
+export function isSafeWorkerLivenessId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= WORKER_LIVENESS_ID_MAX_LENGTH
+    && !CONTROL_CHARACTER_PATTERN.test(value);
+}
+
+function assertValidPollIntervalMs(pollIntervalMs: number): void {
+  if (
+    !Number.isSafeInteger(pollIntervalMs)
+    || pollIntervalMs <= 0
+    || pollIntervalMs > WORKER_LIVENESS_MAX_POLL_INTERVAL_MS
+  ) {
+    throw new Error(
+      `pollIntervalMs must be a positive integer no greater than ${WORKER_LIVENESS_MAX_POLL_INTERVAL_MS}`,
+    );
+  }
+}
 
 /** threshold = max(3 * pollIntervalMs, 180_000) */
 export function computeWorkerLivenessThresholdMs(pollIntervalMs: number): number {
+  assertValidPollIntervalMs(pollIntervalMs);
   return Math.max(WORKER_LIVENESS_STALE_MULTIPLIER * pollIntervalMs, WORKER_LIVENESS_MIN_THRESHOLD_MS);
 }
 
@@ -54,8 +79,16 @@ export interface AssessWorkerLivenessInput {
 // module falsely report "malformed".
 const heartbeatShapeSchema = z
   .object({
-    worker_id: z.string().min(1).nullish(),
-    current_task: z.string().nullish(),
+    worker_id: z.string().min(1).max(WORKER_LIVENESS_ID_MAX_LENGTH)
+      .refine((value) => !CONTROL_CHARACTER_PATTERN.test(value), {
+        message: "must not contain control characters",
+      })
+      .nullish(),
+    current_task: z.string().min(1).max(WORKER_LIVENESS_ID_MAX_LENGTH)
+      .refine((value) => !CONTROL_CHARACTER_PATTERN.test(value), {
+        message: "must not contain control characters",
+      })
+      .nullish(),
     polled_at: z.string().min(1),
   })
   .passthrough();

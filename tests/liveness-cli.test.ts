@@ -70,6 +70,16 @@ describe("parseLivenessCliArgs", () => {
     expect(() => parseLivenessCliArgs(["--poll-interval-ms", "-5"])).toThrow();
   });
 
+  it("rejects oversized, fractional, and unsafe poll intervals from args and env", () => {
+    expect(() => parseLivenessCliArgs(["--poll-interval-ms", "3600001"])).toThrow();
+    expect(() => parseLivenessCliArgs(["--poll-interval-ms", "1e308"])).toThrow();
+    expect(() => parseLivenessCliArgs(["--poll-interval-ms", "1.5"])).toThrow();
+
+    process.env.HUGIN_POLL_INTERVAL_MS = "3600001";
+    expect(() => parseLivenessCliArgs([])).toThrow();
+    delete process.env.HUGIN_POLL_INTERVAL_MS;
+  });
+
   it("rejects unknown options", () => {
     expect(() => parseLivenessCliArgs(["--bogus"])).toThrow();
   });
@@ -93,6 +103,49 @@ describe("runLivenessCheck", () => {
     const result = await runLivenessCheck(client, { pollIntervalMs: 30_000, now: NOW });
     expect(result.state).toBe("stale");
     expect(result.attention).toBe(true);
+  });
+
+  it("assesses after a delayed pending query, not before it", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const polledAt = new Date(NOW.getTime() - 179_900).toISOString();
+    const client: LivenessMuninReader = {
+      read: async () => ({ content: heartbeatContent({ polled_at: polledAt }) }),
+      query: () => new Promise((resolve) => {
+        setTimeout(() => resolve({ total: 0 }), 200);
+      }),
+    };
+
+    const resultPromise = runLivenessCheck(client, { pollIntervalMs: 30_000 });
+    await vi.advanceTimersByTimeAsync(200);
+    const result = await resultPromise;
+
+    expect(result.state).toBe("stale");
+    vi.useRealTimers();
+  });
+
+  it("degrades a pending-count query that exceeds its timeout to unknown", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    let aborted = false;
+    const client: LivenessMuninReader = {
+      read: async () => ({ content: heartbeatContent({ polled_at: isoOffset(1_000_000) }) }),
+      query: (_opts, options) => {
+        options?.signal?.addEventListener("abort", () => {
+          aborted = true;
+        });
+        return new Promise(() => {});
+      },
+    };
+
+    const resultPromise = runLivenessCheck(client, { pollIntervalMs: 30_000 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await resultPromise;
+
+    expect(result.state).toBe("stale");
+    expect(result.attention).toBe(true);
+    expect(aborted).toBe(true);
+    vi.useRealTimers();
   });
 
   it("reports absent when no heartbeat entry exists", async () => {
@@ -168,6 +221,29 @@ describe("main (CLI exit codes with an injected client)", () => {
     const client = new FakeClient(null, 0, new Error("network unreachable"));
     const code = await main([], { client, now: NOW });
     expect(code).toBe(2);
+  });
+
+  it("exits 2 for an oversized poll interval", async () => {
+    const client = new FakeClient(heartbeatContent(), 0);
+    const code = await main(["--poll-interval-ms", "3600001"], { client, now: NOW });
+    expect(code).toBe(2);
+  });
+
+  it("prints only a fixed error class and HTTP status, never a key-bearing error body", async () => {
+    const client = new FakeClient(
+      null,
+      0,
+      new Error("Munin 401: response body echoed test-key and other private data"),
+    );
+    const writeSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    const code = await main([], { client, now: NOW });
+    const printed = writeSpy.mock.calls.map((c) => c[0]).join("");
+
+    expect(code).toBe(2);
+    expect(printed).toBe("hugin-liveness: infrastructure error (HTTP 401)\n");
+    expect(printed).not.toContain("test-key");
+    writeSpy.mockRestore();
   });
 
   it("exits 2 when MUNIN_API_KEY is missing and no client is injected", async () => {

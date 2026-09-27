@@ -16,10 +16,10 @@ staleness threshold.
 
 | Field | Type | Notes |
 |---|---|---|
-| `worker_id` | string | Host-based identity (issue #77), not PID-based. |
+| `worker_id` | string | Host-based identity (issue #77), not PID-based; at most 200 characters and no control characters. |
 | `process_instance_id` | string | Distinguishes restarts of the same worker. |
 | `polled_at` | string (ISO 8601) | Timestamp of this heartbeat write. |
-| `current_task` | string \| null | The Munin task namespace currently executing, or `null` when idle. |
+| `current_task` | string \| null | The Munin task namespace currently executing, or `null` when idle; at most 200 characters and no control characters. |
 | `blocked_tasks` | number | Count of tasks in the `blocked` lifecycle. |
 | `uptime_s` | number | Seconds since process start. |
 | `group`, `sequence` | optional | Present only while executing a grouped/sequenced task. |
@@ -30,17 +30,22 @@ The outer poll loop (`pollOnce` plus its wrapper in the main loop) emits a
 heartbeat once per poll cycle. A single task can run for up to the 12-hour
 dispatcher ceiling, which would otherwise leave `polled_at` stale for the
 task's entire execution even though the worker is alive and busy. To avoid
-that, the already-running lease-renewal timer (`startLeaseRenewal`, every
-`LEASE_RENEWAL_INTERVAL_MS` = 60s while a task is claimed) also calls
-`emitHeartbeat` on every tick, so a busy worker keeps `current_task` set and
-`polled_at` fresh throughout execution.
+that, an independent task-heartbeat timer (`startTaskHeartbeat`, every 60s)
+starts when execution begins and continues through checkpoint writes and
+artifact delivery. It stops only when the task is fully finalized and
+`current_task` is cleared. Lease renewal is separate and is not renewed
+during delivery.
+
+Heartbeat emissions are serialized. The dispatcher waits for the best-effort
+loaded-model probe before building the snapshot, then queues the write so an
+older busy snapshot cannot overwrite a newer idle one.
 
 ## Threshold and states
 
 `computeWorkerLivenessThresholdMs(pollIntervalMs)` returns
-`max(3 * pollIntervalMs, 180_000)` milliseconds — the `HUGIN_POLL_INTERVAL_MS`
-config value (default 30000, max 3,600,000) tells the assessment how often a
-healthy worker is expected to refresh its heartbeat.
+`max(3 * pollIntervalMs, 180_000)` milliseconds. `pollIntervalMs` must be a
+positive safe integer no greater than 3,600,000 — the same bound as the
+dispatcher’s `HUGIN_POLL_INTERVAL_MS` parser. Invalid values are rejected.
 
 `assessWorkerLiveness({ heartbeat, now, pollIntervalMs, pendingCount? })`
 returns one of:
@@ -77,11 +82,17 @@ hugin-liveness [--json] [--poll-interval-ms <n>]
 - Reads `tasks/_heartbeat` (key `status`) via the same Munin client contract
   as other Hugin CLIs (`MUNIN_URL`, default `http://localhost:3030`;
   `MUNIN_API_KEY`, required). The API key is never printed.
-- `--poll-interval-ms` defaults to `HUGIN_POLL_INTERVAL_MS` or `30000`.
+- `--poll-interval-ms` defaults to `HUGIN_POLL_INTERVAL_MS` or `30000`; both
+  values must be positive integers no greater than `3600000`.
 - Optionally counts currently-pending tasks with the same cheap
   `tags:["pending"], namespace:"tasks/", entry_type:"state", limit:1` query
   Hugin's own `countTasksWithLifecycle` uses; a failure there degrades to
-  "pending count unknown" rather than failing the whole check.
+  "pending count unknown" rather than failing the whole check. The query is
+  bounded by a 5-second timeout. Assessment time is captured after the
+  heartbeat read and this query complete.
+- Infrastructure errors print only a fixed error class and, when available,
+  the HTTP status; response bodies and the configured `MUNIN_API_KEY` are
+  never printed.
 - Default output is a one-line human summary; `--json` prints the full
   `WorkerLivenessAssessment`.
 

@@ -15,12 +15,15 @@ import { resolve } from "node:path";
 import { MuninClient } from "./munin-client.js";
 import {
   assessWorkerLiveness,
+  isSafeWorkerLivenessId,
+  WORKER_LIVENESS_MAX_POLL_INTERVAL_MS,
   type WorkerLivenessAssessment,
 } from "./worker-liveness.js";
 
 const HEARTBEAT_NAMESPACE = "tasks/_heartbeat";
 const HEARTBEAT_KEY = "status";
 const DEFAULT_POLL_INTERVAL_MS = 30_000;
+const PENDING_COUNT_TIMEOUT_MS = 5_000;
 
 const USAGE = `Usage: hugin-liveness [options]
 
@@ -53,7 +56,7 @@ export interface LivenessMuninReader {
     namespace?: string;
     entry_type?: string;
     limit?: number;
-  }): Promise<{ total: number }>;
+  }, options?: { signal?: AbortSignal }): Promise<{ total: number }>;
 }
 
 export interface LivenessCliOptions {
@@ -74,17 +77,14 @@ export function parseLivenessCliArgs(argv: string[]): LivenessCliOptions {
     },
   });
 
-  const envDefault = Number(process.env.HUGIN_POLL_INTERVAL_MS);
-  const defaultPollIntervalMs =
-    Number.isFinite(envDefault) && envDefault > 0 ? envDefault : DEFAULT_POLL_INTERVAL_MS;
+  const envPollInterval = process.env.HUGIN_POLL_INTERVAL_MS;
+  const defaultPollIntervalMs = envPollInterval === undefined
+    ? DEFAULT_POLL_INTERVAL_MS
+    : parsePollInterval(envPollInterval, "HUGIN_POLL_INTERVAL_MS");
 
   let pollIntervalMs = defaultPollIntervalMs;
   if (values["poll-interval-ms"] !== undefined) {
-    const parsed = Number(values["poll-interval-ms"]);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      throw new Error("--poll-interval-ms must be a positive number");
-    }
-    pollIntervalMs = parsed;
+    pollIntervalMs = parsePollInterval(values["poll-interval-ms"], "--poll-interval-ms");
   }
 
   return {
@@ -94,22 +94,48 @@ export function parseLivenessCliArgs(argv: string[]): LivenessCliOptions {
   };
 }
 
+function parsePollInterval(raw: string, source: string): number {
+  const parsed = Number(raw);
+  if (
+    !Number.isSafeInteger(parsed)
+    || parsed <= 0
+    || parsed > WORKER_LIVENESS_MAX_POLL_INTERVAL_MS
+  ) {
+    throw new Error(
+      `${source} must be a positive integer no greater than ${WORKER_LIVENESS_MAX_POLL_INTERVAL_MS}`,
+    );
+  }
+  return parsed;
+}
+
 /**
  * Best-effort pending-task count. `undefined` (unknown) on any failure —
  * a pending-count outage must never turn a liveness check itself into an
  * infrastructure error.
  */
 async function fetchPendingCount(client: LivenessMuninReader): Promise<number | undefined> {
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    const { total } = await client.query({
+    const query = client.query({
       tags: ["pending"],
       namespace: "tasks/",
       entry_type: "state",
       limit: 1,
-    });
-    return total;
+    }, { signal: controller.signal });
+    return await Promise.race([
+      query.then(({ total }) => total).catch(() => undefined),
+      new Promise<undefined>((resolve) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          resolve(undefined);
+        }, PENDING_COUNT_TIMEOUT_MS);
+      }),
+    ]);
   } catch {
     return undefined;
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
   }
 }
 
@@ -117,9 +143,9 @@ export async function runLivenessCheck(
   client: LivenessMuninReader,
   options: { pollIntervalMs: number; now?: Date },
 ): Promise<WorkerLivenessAssessment> {
-  const now = options.now ?? new Date();
   const entry = await client.read(HEARTBEAT_NAMESPACE, HEARTBEAT_KEY);
   const pendingCount = await fetchPendingCount(client);
+  const now = options.now ?? new Date();
   return assessWorkerLiveness({
     heartbeat: entry?.content ?? null,
     now,
@@ -134,18 +160,56 @@ export function computeExitCode(assessment: Pick<WorkerLivenessAssessment, "stat
 
 export function formatSummary(assessment: WorkerLivenessAssessment): string {
   const parts = [`worker ${assessment.state}`];
-  if (assessment.workerId) parts.push(`worker_id=${assessment.workerId}`);
+  if (isSafeWorkerLivenessId(assessment.workerId)) {
+    parts.push(`worker_id=${assessment.workerId}`);
+  }
   if (assessment.ageMs !== null) parts.push(`age_ms=${assessment.ageMs}`);
   parts.push(`threshold_ms=${assessment.thresholdMs}`);
-  if (assessment.currentTask) parts.push(`current_task=${assessment.currentTask}`);
+  if (isSafeWorkerLivenessId(assessment.currentTask)) {
+    parts.push(`current_task=${assessment.currentTask}`);
+  }
   parts.push(`attention=${assessment.attention}`);
-  return `${parts.join(" ")} — ${assessment.reason}`;
+  return `${parts.join(" ")} — ${assessment.reason.replace(/[\r\n]/g, " ")}`;
 }
 
 export interface LivenessCliOverrides {
   /** Test-only: skip real Munin construction and env-var checks. */
   client?: LivenessMuninReader;
   now?: Date;
+}
+
+function redactConfiguredApiKey(value: string): string {
+  const apiKey = process.env.MUNIN_API_KEY?.trim();
+  return apiKey ? value.split(apiKey).join("[REDACTED]") : value;
+}
+
+function writeStderr(value: string): void {
+  process.stderr.write(redactConfiguredApiKey(value));
+}
+
+function writeStdout(value: string): void {
+  process.stdout.write(redactConfiguredApiKey(value));
+}
+
+function extractHttpStatus(error: unknown): number | null {
+  if (typeof error === "object" && error !== null) {
+    for (const key of ["httpStatus", "statusCode", "status"] as const) {
+      const value = (error as Record<string, unknown>)[key];
+      if (typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599) {
+        return value;
+      }
+    }
+  }
+  const message = error instanceof Error ? error.message : "";
+  const match = message.match(/\b(?:HTTP|Munin)\s+([1-5]\d{2})\b/i);
+  return match ? Number(match[1]) : null;
+}
+
+function formatInfrastructureError(error: unknown): string {
+  const status = extractHttpStatus(error);
+  return status === null
+    ? "hugin-liveness: infrastructure error\n"
+    : `hugin-liveness: infrastructure error (HTTP ${status})\n`;
 }
 
 export async function main(
@@ -156,14 +220,12 @@ export async function main(
   try {
     options = parseLivenessCliArgs(argv);
   } catch (error) {
-    process.stderr.write(
-      `hugin-liveness: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
+    writeStderr("hugin-liveness: invalid arguments\n");
     return 2;
   }
 
   if (options.help) {
-    process.stdout.write(USAGE);
+    writeStdout(USAGE);
     return 0;
   }
 
@@ -171,7 +233,7 @@ export async function main(
   if (!client) {
     const apiKey = process.env.MUNIN_API_KEY?.trim();
     if (!apiKey) {
-      process.stderr.write("hugin-liveness: MUNIN_API_KEY is required\n");
+      writeStderr("hugin-liveness: configuration error\n");
       return 2;
     }
     client = new MuninClient({
@@ -187,16 +249,14 @@ export async function main(
       now: overrides.now,
     });
   } catch (error) {
-    process.stderr.write(
-      `hugin-liveness: infrastructure error — ${error instanceof Error ? error.message : String(error)}\n`,
-    );
+    writeStderr(formatInfrastructureError(error));
     return 2;
   }
 
   if (options.json) {
-    process.stdout.write(`${JSON.stringify(assessment, null, 2)}\n`);
+    writeStdout(`${JSON.stringify(assessment, null, 2)}\n`);
   } else {
-    process.stdout.write(`${formatSummary(assessment)}\n`);
+    writeStdout(`${formatSummary(assessment)}\n`);
   }
 
   return computeExitCode(assessment);
@@ -207,9 +267,7 @@ if (import.meta.url === invokedPath) {
   main().then((code) => {
     process.exitCode = code;
   }).catch((error) => {
-    process.stderr.write(
-      `hugin-liveness: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
+    writeStderr(formatInfrastructureError(error));
     process.exitCode = 2;
   });
 }
