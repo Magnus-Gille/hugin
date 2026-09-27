@@ -1,5 +1,37 @@
 # Hugin — Status
 
+## 2026-09-27 — production outage diagnosed; fresh-host deploy fix in review
+
+- **Outage:** Hugin has not run in production since 2026-08-29 (last
+  `tasks/_heartbeat` at 10:11Z). The service host's SD card failed and its OS
+  was reinstalled; the 2026-09-02 recovery restored only Munin and Heimdall.
+  On the rebuilt host there is no `hugin.service` unit, no `.env`, no build,
+  and no `.deployed-commit`. The worker did not crash; it was never redeployed.
+  Pending tasks queued silently in the meantime (#389).
+- **Fresh-host deploy defects (#390), fixed on `fix/390-fresh-host-path`
+  (PR #391, head `9ecf0ad`):** standalone Codex now installs into
+  `~/.local/bin`, which neither the unit PATH nor the deploy preflight's SSH
+  shell covered; and the research Pi install assumed a user-writable npm global
+  prefix (`/usr` on a fresh host). The unit PATH now lists
+  `~/.npm-global/bin` before `~/.local/bin` (so the pinned research `pi` still
+  wins), the install uses an explicit `$HOME/.npm-global` prefix, and the
+  Codex preflight reuses the unit's PATH as the single source of truth.
+- **In progress:** `feat/389-worker-liveness` (deterministic worker-liveness
+  check + `hugin-liveness` CLI). An `.env` template is being prepared; the
+  original file was lost with the SD card.
+
+**Verification:** #390 red/green (1 vitest + 5 deploy-test assertions failed
+on `main`, pass after), `bash scripts/deploy-pi.test.sh`, `npm run build`, full
+`npm test` (177 files / 2,816 tests, 3 skipped), `git diff --check`; the real
+Codex preflight passes on the target host. PR CI pending.
+
+**Next:** merge #391 after green CI; recreate the host `.env` (owner-held
+secrets); deploy the exact merged SHA through `./scripts/deploy-pi.sh` with
+owner confirmation; verify `/health`, the timers, and a fresh heartbeat; then
+let the one queued task run exactly once. Related fleet follow-ups are routed
+to their owning repos (grimnir#204, grimnir#206, munin-memory#330, mimir#38,
+brokkr#131).
+
 ## 2026-08-02 — #339 pi-harness pre-spawn abort gap fixed
 
 - Branch `codex/issue-339-worktree-binding` now re-checks `req.signal.aborted`
