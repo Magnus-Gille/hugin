@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2029
 set -euo pipefail
 
 # Rotate the Hugin homeserver gateway key from the owner's workstation.
@@ -49,10 +50,20 @@ done
 
 # The config is owner-local and is intentionally sourced so operators can use
 # normal shell quoting. No config value is echoed by this script.
-# shellcheck disable=SC1090
+set +x
 set -a
-source "$CONFIG_PATH"
+# shellcheck disable=SC1090
+if ! source "$CONFIG_PATH" 2>/dev/null; then
+  set +x
+  die "could not load config file"
+fi
+config_xtrace=0
+case "$-" in
+  *x*) config_xtrace=1 ;;
+esac
 set +a
+set +x
+[ "$config_xtrace" -eq 0 ] || die "shell tracing must remain disabled"
 
 required_config=(
   M5_GATEWAY_SSH_TARGET
@@ -96,6 +107,8 @@ done
 
 read -r -a gateway_wrapper_words <<<"$M5_GATEWAY_CLI_WRAPPER"
 [ "${#gateway_wrapper_words[@]}" -gt 0 ] || die "M5_GATEWAY_CLI_WRAPPER is empty"
+read -r -a systemctl_prefix_words <<<"$M5_SERVICE_SYSTEMCTL_PREFIX"
+[ "${#systemctl_prefix_words[@]}" -gt 0 ] || die "M5_SERVICE_SYSTEMCTL_PREFIX is empty"
 
 shell_quote() {
   local value="$1"
@@ -126,6 +139,12 @@ gateway_command() {
       ;;
     preflight|commit|abort)
       command+=" --plan $(shell_quote "$plan_id")"
+      ;;
+    list)
+      command+=" --all"
+      ;;
+    rotations)
+      # `keys rotations` takes no --plan; the plan row is selected by prefix.
       ;;
     *)
       return 1
@@ -162,6 +181,28 @@ def one(name: bytes, required: bool):
 api = one(b"HOMESERVER_GATEWAY_API_KEY", True)
 expiry = one(b"HOMESERVER_GATEWAY_KEY_EXPIRES_AT", False)
 sys.stdout.buffer.write(api + b"\n" + (expiry or b"__HUGIN_ROTATION_ABSENT__") + b"\n")
+PY
+
+read -r -d '' REMOTE_CLEANUP_PY <<'PY' || true
+# ROTATE_CLEANUP
+from pathlib import Path
+import os
+import stat
+import sys
+import time
+
+path = Path(sys.argv[1])
+cutoff = time.time() - 24 * 60 * 60
+for candidate in path.parent.glob(".hugin-m5-key-rotation-*"):
+    try:
+        metadata = candidate.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            continue
+        if metadata.st_uid != os.getuid() or metadata.st_mtime >= cutoff:
+            continue
+        candidate.unlink()
+    except FileNotFoundError:
+        pass
 PY
 
 read -r -d '' REMOTE_UPDATE_PY <<'PY' || true
@@ -283,7 +324,8 @@ PY
 python_command() {
   local code="$1"
   shift
-  local command="python3 -c $(shell_quote "$code")"
+  local command
+  command="python3 -c $(shell_quote "$code")"
   local arg
   for arg in "$@"; do
     command+=" $(shell_quote "$arg")"
@@ -292,7 +334,13 @@ python_command() {
 }
 
 service_restart_command() {
-  printf '%s restart %s' "$M5_SERVICE_SYSTEMCTL_PREFIX" "$(shell_quote "$M5_SERVICE_UNIT")"
+  local command=""
+  local word
+  for word in "${systemctl_prefix_words[@]}"; do
+    command+=" $(shell_quote "$word")"
+  done
+  command+=" restart $(shell_quote "$M5_SERVICE_UNIT")"
+  printf '%s' "${command# }"
 }
 
 service_health_command() {
@@ -313,18 +361,80 @@ service_probe_command() {
 plan_id=""
 new_expiry=""
 stage_pid=""
+active_pid=""
 backup_ready=0
+write_started=0
+commit_attempted=0
 old_api_line=""
 old_expiry_line=""
+remote_capture_output=""
+commit_state_result=""
+capture_sequence=0
+current_step="startup"
 stage_dir="$(mktemp -d)"
 stage_fifo="$stage_dir/stage-output"
 mkfifo "$stage_fifo"
-trap 'rm -rf "$stage_dir"' EXIT
+
+stop_process() {
+  local pid="$1"
+  [ -n "$pid" ] || return 0
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+cleanup_resources() {
+  stop_process "${active_pid:-}"
+  stop_process "${stage_pid:-}"
+  exec 3<&- 2>/dev/null || true
+  rm -rf "$stage_dir"
+}
+trap cleanup_resources EXIT
+
+run_remote() {
+  local target="$1"
+  local command="$2"
+  local status
+  ssh "$target" "$command" >/dev/null 2>/dev/null &
+  active_pid="$!"
+  if wait "$active_pid"; then
+    status=0
+  else
+    status="$?"
+  fi
+  active_pid=""
+  return "$status"
+}
+
+run_remote_capture() {
+  local target="$1"
+  local command="$2"
+  local capture_fifo
+  local capture_status
+  local remote_status
+  capture_sequence=$((capture_sequence + 1))
+  capture_fifo="$stage_dir/capture-$capture_sequence"
+  mkfifo "$capture_fifo"
+  ssh "$target" "$command" >"$capture_fifo" 2>/dev/null &
+  active_pid="$!"
+  if remote_capture_output="$(cat "$capture_fifo")"; then
+    capture_status=0
+  else
+    capture_status="$?"
+  fi
+  if wait "$active_pid"; then
+    remote_status=0
+  else
+    remote_status="$?"
+  fi
+  active_pid=""
+  rm -f "$capture_fifo"
+  [ "$capture_status" -eq 0 ] && [ "$remote_status" -eq 0 ]
+}
 
 abort_staged_plan() {
   if [ -n "$plan_id" ]; then
     echo "ABORT"
-    if ! ssh "$M5_GATEWAY_SSH_TARGET" "$(gateway_command abort "$plan_id")" >/dev/null 2>/dev/null; then
+    if ! run_remote "$M5_GATEWAY_SSH_TARGET" "$(gateway_command abort "$plan_id")"; then
       echo "FAIL abort" >&2
       return 1
     fi
@@ -334,28 +444,36 @@ abort_staged_plan() {
 
 rollback_after_stage() {
   local failed_step="$1"
+  local rollback_failed=0
+  trap ':' INT TERM
   echo "FAIL $failed_step" >&2
   if [ "$backup_ready" -eq 1 ]; then
     echo "ROLLBACK write"
     if ! printf '%s\n%s\n' "$old_api_line" "$old_expiry_line" |
       ssh "$M5_SERVICE_SSH_TARGET" "$(python_command "$REMOTE_ROLLBACK_PY" "$M5_SERVICE_ENV_PATH")" >/dev/null 2>/dev/null; then
       echo "FAIL rollback" >&2
+      rollback_failed=1
     fi
     echo "ROLLBACK restart"
-    if ! ssh "$M5_SERVICE_SSH_TARGET" "$(service_restart_command)" >/dev/null 2>/dev/null; then
+    if ! run_remote "$M5_SERVICE_SSH_TARGET" "$(service_restart_command)"; then
       echo "FAIL rollback-restart" >&2
+      rollback_failed=1
     fi
   fi
   abort_staged_plan || true
+  [ "$rollback_failed" -eq 0 ] || echo "ERROR rollback incomplete; manual recovery required" >&2
   exit 1
 }
 
 capture_backup() {
   local old_state
   local old_state_rest
-  if ! old_state="$(ssh "$M5_SERVICE_SSH_TARGET" "$(python_command "$REMOTE_INSPECT_PY" "$M5_SERVICE_ENV_PATH")" 2>/dev/null)"; then
+  set +x
+  if ! run_remote_capture "$M5_SERVICE_SSH_TARGET" \
+    "$(python_command "$REMOTE_INSPECT_PY" "$M5_SERVICE_ENV_PATH")"; then
     return 1
   fi
+  old_state="$remote_capture_output"
   old_api_line="${old_state%%$'\n'*}"
   old_state_rest="${old_state#*$'\n'}"
   old_expiry_line="${old_state_rest%%$'\n'*}"
@@ -365,6 +483,113 @@ capture_backup() {
   backup_ready=1
 }
 
+cleanup_stale_rotation_temps() {
+  run_remote "$M5_SERVICE_SSH_TARGET" \
+    "$(python_command "$REMOTE_CLEANUP_PY" "$M5_SERVICE_ENV_PATH")"
+}
+
+classify_commit_state() {
+  local output="$1" plan_prefix row_status
+  # Real `keys rotations` output is a table: PLAN (first 20 chars) LOGICAL
+  # REPLACEMENT STATUS PREFLIGHT, with STATUS staged|committed|aborted.
+  plan_prefix="${plan_id:0:20}"
+  if [ -n "$plan_prefix" ]; then
+    row_status="$(printf '%s\n' "$output" | awk -v p="$plan_prefix" '$1 == p { print $4; exit }')"
+    case "$row_status" in
+      committed) printf 'committed'; return 0 ;;
+      staged|aborted) printf 'not-committed'; return 0 ;;
+    esac
+  fi
+  if printf '%s\n' "$output" |
+    grep -Eiq '(^|[^[:alnum:]_])(state|status)[[:space:]]*[:=][[:space:]]*(committed|complete|completed)([^[:alnum:]_]|$)'; then
+    printf 'committed'
+    return 0
+  fi
+  if printf '%s\n' "$output" |
+    grep -Eiq '(^|[^[:alnum:]_])(state|status)[[:space:]]*[:=][[:space:]]*(staged|pending|aborted|not[-_ ]*committed|rolled[-_ ]*back)([^[:alnum:]_]|$)'; then
+    printf 'not-committed'
+    return 0
+  fi
+  if printf '%s\n' "$output" | grep -F -- "$M5_GATEWAY_KEY_ALIAS" |
+    grep -Eiq '(revoked|replaced|committed)'; then
+    printf 'committed'
+    return 0
+  fi
+  return 1
+}
+
+query_commit_state() {
+  local state
+  current_step="commit-status"
+  commit_state_result="unknown"
+  if run_remote_capture "$M5_GATEWAY_SSH_TARGET" "$(gateway_command rotations "$plan_id")"; then
+    if state="$(classify_commit_state "$remote_capture_output")"; then
+      commit_state_result="$state"
+      return 0
+    fi
+  fi
+  if run_remote_capture "$M5_GATEWAY_SSH_TARGET" "$(gateway_command list)"; then
+    if state="$(classify_commit_state "$remote_capture_output")"; then
+      commit_state_result="$state"
+      return 0
+    fi
+  fi
+}
+
+handle_signal() {
+  local signal="$1"
+  local exit_code=130
+  [ "$signal" = TERM ] && exit_code=143
+  trap - INT TERM
+  set +x
+  stop_process "${active_pid:-}"
+  stop_process "${stage_pid:-}"
+  exec 3<&- 2>/dev/null || true
+  echo "ERROR interrupted during $current_step" >&2
+  if [ "$commit_attempted" -eq 1 ]; then
+    echo "ERROR commit outcome unknown; new key retained; manual recovery required" >&2
+    exit "$exit_code"
+  fi
+  if [ "$write_started" -eq 1 ]; then
+    rollback_after_stage "$current_step interrupted"
+  fi
+  abort_staged_plan || true
+  exit "$exit_code"
+}
+iso_from_epoch() {
+  local epoch="$1"
+  date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ||
+    date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
+}
+
+# Print the replacement key's expiry: the authoritative EXPIRES column from
+# `keys list --all` when the alias row is found and active, else stage time +
+# the configured TTL. Output never contains key material.
+resolve_replacement_expiry() {
+  local alias="$1" started="$2" listing="" row="" iso=""
+  if [ -n "$alias" ] && listing="$(ssh "$M5_GATEWAY_SSH_TARGET" "$(gateway_command list)" 2>/dev/null)"; then
+    row="$(printf '%s\n' "$listing" | awk -v a="$alias" '$1 == a { print; exit }')"
+    iso="$(printf '%s\n' "$row" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,3})?Z' | head -1)"
+    if [ -n "$iso" ]; then
+      printf '%s' "$iso"
+      return 0
+    fi
+  fi
+  iso_from_epoch "$((started + M5_GATEWAY_KEY_TTL_SECONDS))"
+}
+
+trap 'handle_signal INT' INT
+trap 'handle_signal TERM' TERM
+
+set +x
+current_step="cleanup"
+echo "STEP cleanup"
+if ! cleanup_stale_rotation_temps; then
+  echo "FAIL cleanup" >&2
+  exit 1
+fi
+
+current_step="stage"
 echo "STEP stage"
 # A FIFO keeps the staged output on a pipe while retaining a waitable SSH PID;
 # this works on the Bash 3.2 still present on some owner workstations.
@@ -373,21 +598,35 @@ stage_pid="$!"
 exec 3<"$stage_fifo"
 
 saw_stage_separator=0
+replacement_alias=""
+stage_started_epoch="$(date -u +%s)"
 while IFS= read -r stage_line <&3; do
   if [[ "$stage_line" =~ ^[[:space:]]*plan:[[:space:]]*([^[:space:]]+)$ ]]; then
     plan_id="${BASH_REMATCH[1]}"
-  elif [[ "$stage_line" =~ ^[[:space:]]*overlap[[:space:]]expires:[[:space:]]*([^[:space:]]+)$ ]]; then
-    new_expiry="${BASH_REMATCH[1]}"
+  elif [[ "$stage_line" =~ replacement[[:space:]]+\'([^\']+)\' ]]; then
+    replacement_alias="${BASH_REMATCH[1]}"
+  elif [[ "$stage_line" =~ ^[[:space:]]*(key[[:space:]]+)?expires:[[:space:]]*([^[:space:]]+)$ ]]; then
+    # Not printed by current gateway CLIs; accepted if a future version adds it.
+    new_expiry="${BASH_REMATCH[2]}"
   elif [ -z "$stage_line" ]; then
     saw_stage_separator=1
     break
   fi
 done
 
+# The gateway's `keys stage` output does not include the new key's expiry
+# ("overlap expires" is the OLD key's grace deadline). Prefer the authoritative
+# EXPIRES value for the replacement alias from `keys list --all`; fall back to
+# stage time + configured TTL.
+if [ -z "$new_expiry" ] && [ "$saw_stage_separator" -eq 1 ] && [ -n "$plan_id" ]; then
+  new_expiry="$(resolve_replacement_expiry "$replacement_alias" "$stage_started_epoch")" || new_expiry=""
+fi
+
 if [ "$saw_stage_separator" -ne 1 ] || [ -z "$plan_id" ] ||
   [[ ! "$new_expiry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,3})?(Z|[+-][0-9]{2}:[0-9]{2})$ ]]; then
   exec 3<&-
   wait "$stage_pid" || true
+  stage_pid=""
   if [ -n "$plan_id" ] && capture_backup; then
     rollback_after_stage stage
   fi
@@ -402,31 +641,44 @@ echo "EXPIRY $new_expiry"
 if ! capture_backup; then
   exec 3<&-
   wait "$stage_pid" || true
+  stage_pid=""
   rollback_after_stage inspect
 fi
 
+current_step="write"
 echo "STEP write"
-if ! cat <&3 |
-  ssh "$M5_SERVICE_SSH_TARGET" "$(python_command "$REMOTE_UPDATE_PY" "$M5_SERVICE_ENV_PATH" "$new_expiry")" >/dev/null 2>/dev/null; then
+write_started=1
+ssh "$M5_SERVICE_SSH_TARGET" "$(python_command "$REMOTE_UPDATE_PY" "$M5_SERVICE_ENV_PATH" "$new_expiry")" <&3 >/dev/null 2>/dev/null &
+active_pid="$!"
+if ! wait "$active_pid"; then
+  active_pid=""
   exec 3<&-
   wait "$stage_pid" || true
+  stage_pid=""
   rollback_after_stage write
 fi
+active_pid=""
 exec 3<&-
 if ! wait "$stage_pid"; then
+  stage_pid=""
   rollback_after_stage stage
 fi
+stage_pid=""
 
+current_step="restart"
 echo "STEP restart"
-if ! ssh "$M5_SERVICE_SSH_TARGET" "$(service_restart_command)" >/dev/null 2>/dev/null; then
+if ! run_remote "$M5_SERVICE_SSH_TARGET" "$(service_restart_command)"; then
   rollback_after_stage restart
 fi
 
+current_step="health"
 echo "STEP health"
 health_code=""
 for _ in $(seq 1 30); do
-  if health_code="$(ssh "$M5_SERVICE_SSH_TARGET" "$(service_health_command)" 2>/dev/null)" &&
-    [ "$health_code" = "200" ]; then
+  if run_remote_capture "$M5_SERVICE_SSH_TARGET" "$(service_health_command)"; then
+    health_code="$remote_capture_output"
+  fi
+  if [ "$health_code" = "200" ]; then
     echo "HTTP health $health_code"
     break
   fi
@@ -437,9 +689,11 @@ if [ "$health_code" != "200" ]; then
   rollback_after_stage health
 fi
 
+current_step="probe"
 echo "STEP probe"
 probe_code=""
-if probe_code="$(ssh "$M5_SERVICE_SSH_TARGET" "$(service_probe_command)" 2>/dev/null)"; then
+if run_remote_capture "$M5_SERVICE_SSH_TARGET" "$(service_probe_command)"; then
+  probe_code="$remote_capture_output"
   echo "HTTP probe $probe_code"
 fi
 if [ "$probe_code" != "200" ]; then
@@ -447,14 +701,30 @@ if [ "$probe_code" != "200" ]; then
   rollback_after_stage probe
 fi
 
+current_step="preflight"
 echo "STEP preflight"
-if ! ssh "$M5_GATEWAY_SSH_TARGET" "$(gateway_command preflight "$plan_id")" >/dev/null 2>/dev/null; then
+if ! run_remote "$M5_GATEWAY_SSH_TARGET" "$(gateway_command preflight "$plan_id")"; then
   rollback_after_stage preflight
 fi
 
+current_step="commit"
+commit_attempted=1
 echo "STEP commit"
-if ! ssh "$M5_GATEWAY_SSH_TARGET" "$(gateway_command commit "$plan_id")" >/dev/null 2>/dev/null; then
-  rollback_after_stage commit
+if ! run_remote "$M5_GATEWAY_SSH_TARGET" "$(gateway_command commit "$plan_id")"; then
+  query_commit_state
+  case "$commit_state_result" in
+    committed)
+      echo "ERROR commit acknowledged ambiguously; new key retained" >&2
+      exit 1
+      ;;
+    not-committed)
+      rollback_after_stage commit
+      ;;
+    *)
+      echo "ERROR commit outcome unknown; new key retained; manual recovery required" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 echo "SUCCESS"
