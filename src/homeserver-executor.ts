@@ -263,6 +263,20 @@ function parseRetryAfter(res: Response): number | null {
   return null;
 }
 
+/** True for fetch/undici client-side timeout errors (not generic transport failures). */
+function isClientTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "TimeoutError" || error.name === "HeadersTimeoutError" || error.name === "BodyTimeoutError") {
+    return true;
+  }
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause === null || typeof cause !== "object") return false;
+  const code = (cause as { code?: unknown }).code;
+  return code === "UND_ERR_HEADERS_TIMEOUT"
+    || code === "UND_ERR_BODY_TIMEOUT"
+    || code === "UND_ERR_CONNECT_TIMEOUT";
+}
+
 export function renderHomeserverUserMessage(task: HomeserverTaskConfig): string {
   const parts: string[] = [];
   if (task.injectedContext) parts.push("## Context\n" + task.injectedContext);
@@ -882,7 +896,13 @@ export async function executeHomeserverTask(
     }
     return finish();
   } catch (err) {
-    const huginDeadlineWon = gatewayRequestTimedOut;
+    // A client-side timeout processed at/after Hugin's absolute deadline (but
+    // before the timer callback ran) is still deadline expiry, not a transport
+    // failure. Early client timeouts remain generic transport failures.
+    const clientTimeoutAtDeadline = !gatewayRequestTimedOut
+      && Date.now() >= taskDeadlineMs
+      && isClientTimeoutError(err);
+    const huginDeadlineWon = gatewayRequestTimedOut || clientTimeoutAtDeadline;
     if (result.learningTask?.requestStamp !== undefined
       && result.learningTask.state === "m5-not-admitted") {
       result.learningTask = learningTaskExecutionEvidenceSchema.parse({
@@ -896,7 +916,7 @@ export async function executeHomeserverTask(
     // Recovery can itself be asynchronous. Re-check the live deadline winner
     // after it returns so a task timer that fired during the probe still owns
     // TIMEOUT classification.
-    if (gatewayRequestTimedOut) {
+    if (gatewayRequestTimedOut || clientTimeoutAtDeadline) {
       return finishGatewayTimeout();
     } else {
       // Client/transport aborts are not Hugin deadline expiry. The dispatcher

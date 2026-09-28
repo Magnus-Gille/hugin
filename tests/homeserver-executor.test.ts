@@ -1015,6 +1015,38 @@ describe("executeHomeserverTask — delegate path", () => {
     expect(result.output).not.toContain("Gateway request timed out");
   });
 
+  it("treats an undici timeout processed at the task deadline as a Hugin TIMEOUT", async () => {
+    vi.useFakeTimers();
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract", timeoutMs: 250 }),
+      "delegate-undici-at-deadline",
+    );
+    let rejectFetch!: (reason?: unknown) => void;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockReturnValueOnce(
+      new Promise<Response>((_resolve, reject) => {
+        rejectFetch = reject;
+      }),
+    );
+    const recovery = vi.fn(async () => null);
+    try {
+      const resultPromise = executeHomeserverTask(
+        task,
+        "delegate-undici-at-deadline",
+        tmpLogDir,
+        { recoverAmbiguousLearningTask: recovery },
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      vi.setSystemTime(new Date(Date.now() + task.timeoutMs));
+      rejectFetch(Object.assign(new TypeError("fetch failed"), { cause: { code: "UND_ERR_HEADERS_TIMEOUT" } }));
+      const result = await resultPromise;
+      expect(recovery).not.toHaveBeenCalled();
+      expect(result.exitCode).toBe("TIMEOUT");
+      expect(result.failureKind).toBe("HOMESERVER_TIMEOUT");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not run bounded learning recovery after the declared task deadline expires", async () => {
     vi.useFakeTimers();
     const task = withLearningTaskContext(
