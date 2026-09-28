@@ -672,7 +672,10 @@ describe("executeHomeserverTask — delegate path", () => {
     );
     const externalAbort = new AbortController();
     vi.spyOn(globalThis, "fetch").mockImplementationOnce(async (_url, init) => {
-      externalAbort.abort(new Error("operator cancelled task"));
+      const abortError = Object.assign(new Error("operator cancelled task"), {
+        name: "AbortError",
+      });
+      externalAbort.abort(abortError);
       const signal = (init as RequestInit).signal!;
       throw signal.reason;
     });
@@ -686,6 +689,8 @@ describe("executeHomeserverTask — delegate path", () => {
     );
 
     expect(recovery).not.toHaveBeenCalled();
+    expect(result.exitCode).toBe(1);
+    expect(result.failureKind).not.toBe("HOMESERVER_TIMEOUT");
     expect(result.learningTask).toMatchObject({
       state: "m5-not-admitted",
       evidenceAccepted: false,
@@ -887,7 +892,7 @@ describe("executeHomeserverTask — delegate path", () => {
         delegated: false,
         escalated: true,
         decisionReason: "routing-table: draft is a frontier-escalation gap type → escalate",
-        output: "",
+        output: "frontier output must not become the human-facing result",
       })),
     );
 
@@ -984,22 +989,109 @@ describe("executeHomeserverTask — delegate path", () => {
     }
   });
 
-  it("classifies an undici headers-timeout cause as a gateway timeout", async () => {
+  it.each([
+    "UND_ERR_HEADERS_TIMEOUT",
+    "UND_ERR_BODY_TIMEOUT",
+    "UND_ERR_CONNECT_TIMEOUT",
+  ])("treats an undici %s cause delivered before the task deadline as a generic transport failure", async (code) => {
     const task = withLearningTaskContext(
       makeTaskConfig({ path: "delegate", taskType: "extract", timeoutMs: 250 }),
-      "delegate-undici-timeout",
+      `delegate-undici-${code.toLowerCase()}`,
     );
     const error = Object.assign(new TypeError("fetch failed"), {
-      cause: { code: "UND_ERR_HEADERS_TIMEOUT" },
+      cause: { code },
     });
     vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(error);
 
-    const result = await executeHomeserverTask(task, "delegate-undici-timeout", tmpLogDir);
+    const result = await executeHomeserverTask(
+      task,
+      `delegate-undici-${code.toLowerCase()}`,
+      tmpLogDir,
+    );
 
-    expect(result.exitCode).toBe("TIMEOUT");
-    expect(result.failureKind).toBe("HOMESERVER_TIMEOUT");
-    expect(result.output).toContain("Gateway request timed out");
-    expect(result.output).not.toContain("Gateway error: fetch failed");
+    expect(result.exitCode).toBe(1);
+    expect(result.failureKind).not.toBe("HOMESERVER_TIMEOUT");
+    expect(result.output).toContain("Gateway error: fetch failed");
+    expect(result.output).not.toContain("Gateway request timed out");
+  });
+
+  it("does not run bounded learning recovery after the declared task deadline expires", async () => {
+    vi.useFakeTimers();
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract", timeoutMs: 250 }),
+      "delegate-recovery-deadline",
+    );
+    let rejectFetch!: (reason?: unknown) => void;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockReturnValueOnce(
+      new Promise<Response>((_resolve, reject) => {
+        rejectFetch = reject;
+      }),
+    );
+    const recovery = vi.fn(async () => null);
+
+    try {
+      const resultPromise = executeHomeserverTask(
+        task,
+        "delegate-recovery-deadline",
+        tmpLogDir,
+        { recoverAmbiguousLearningTask: recovery },
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(new Date(Date.now() + task.timeoutMs));
+      rejectFetch(new TypeError("socket closed after admission"));
+      const result = await resultPromise;
+
+      expect(recovery).not.toHaveBeenCalled();
+      expect(result.exitCode).toBe(1);
+      expect(result.failureKind).not.toBe("HOMESERVER_TIMEOUT");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborts an in-flight learning recovery probe when the task deadline fires", async () => {
+    vi.useFakeTimers();
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract", timeoutMs: 250 }),
+      "delegate-recovery-in-flight-deadline",
+    );
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(
+      new TypeError("socket closed after admission"),
+    );
+    let recoverySignal: AbortSignal | undefined;
+    const recovery = vi.fn(async (_failureEvidence: unknown, signal?: AbortSignal) => {
+      recoverySignal = signal;
+      await new Promise<void>((resolve) => {
+        if (!signal || signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return null;
+    });
+
+    try {
+      const resultPromise = executeHomeserverTask(
+        task,
+        "delegate-recovery-in-flight-deadline",
+        tmpLogDir,
+        { recoverAmbiguousLearningTask: recovery },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(recovery).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(task.timeoutMs);
+      const result = await resultPromise;
+
+      expect(recoverySignal?.aborted).toBe(true);
+      expect(result.exitCode).toBe("TIMEOUT");
+      expect(result.failureKind).toBe("HOMESERVER_TIMEOUT");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("allows a gateway response that arrives within the declared timeout", async () => {
