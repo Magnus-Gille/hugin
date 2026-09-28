@@ -79,6 +79,21 @@ decision reason, verifier notes and `ledgerId` in `result-structured`; Hugin's
 receipt binds the exact status/result bytes and repository state, records the
 authenticated reviewer, and never changes M5's capability ledger.
 
+For the direct homeserver `/delegate` lane, a response with `escalated: true`
+(or the gateway wire spelling `escalate: true`) is a non-execution: Hugin
+terminalizes the task as failed with `HOMESERVER_ESCALATED`, preserves the
+gateway `decisionReason` in the human result and structured provenance, and
+adds a failure lifecycle tag. A `delegated: false` response with no output is
+handled the same way. A `delegated: false` response that contains output is
+treated as gateway-owned execution output and remains successful; this is an
+explicit compatibility decision for responses that produce output outside the
+local delegation flag. A normal delegated response is unchanged.
+
+The gateway request, including response-body consumption, is bounded by the
+task's declared timeout. The deadline is not replaced by a shorter gateway
+constant, and a slow transport that reports an abort-shaped error is recorded
+as `TIMEOUT` / `HOMESERVER_TIMEOUT` rather than generic `fetch failed`.
+
 The old orch-v1 worker, reconciler and new journal writes are retired. The v1
 alias catalogue and existing JSONL journal remain available for historical
 reads only.

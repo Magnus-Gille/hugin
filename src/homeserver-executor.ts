@@ -51,6 +51,14 @@ import {
 
 export type HomeserverPath = "chat" | "delegate";
 
+// These are durable machine-readable execution failures, not M5 verification
+// outcomes. In particular, an escalation response means this Hugin task did
+// not run in the requested local homeserver lane and must not look completed.
+export const HOMESERVER_ESCALATED_FAILURE_KIND = "HOMESERVER_ESCALATED";
+export const HOMESERVER_TIMEOUT_FAILURE_KIND = "HOMESERVER_TIMEOUT";
+export const HOMESERVER_ESCALATED_FAILURE_TAG = "failure:homeserver-escalated";
+export const HOMESERVER_TIMEOUT_FAILURE_TAG = "failure:homeserver-timeout";
+
 export type HomeserverResponseFormat =
   | { type: "text" }
   | { type: "json_object" }
@@ -173,6 +181,8 @@ export interface HomeserverExecutorResult {
   huginTaskIdentity: HuginTaskIdentity | null;
   /** Exact producer stamp/join evidence for this authoritative Hugin attempt. */
   learningTask: LearningTaskExecutionEvidence | null;
+  /** Hugin execution failure discriminator; null for normal responses. */
+  failureKind: string | null;
 }
 
 export interface HomeserverExecutorOptions {
@@ -188,6 +198,7 @@ export interface HomeserverExecutorOptions {
    */
   recoverAmbiguousLearningTask?: (
     failureEvidence: LearningTaskExecutionEvidence,
+    signal?: AbortSignal,
   ) => Promise<LearningTaskExecutionEvidence | null>;
 }
 
@@ -250,6 +261,20 @@ function parseRetryAfter(res: Response): number | null {
   const dateMs = Date.parse(raw);
   if (!Number.isNaN(dateMs)) return Math.max(0, Math.round((dateMs - Date.now()) / 1000));
   return null;
+}
+
+/** True for fetch/undici client-side timeout errors (not generic transport failures). */
+function isClientTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "TimeoutError" || error.name === "HeadersTimeoutError" || error.name === "BodyTimeoutError") {
+    return true;
+  }
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause === null || typeof cause !== "object") return false;
+  const code = (cause as { code?: unknown }).code;
+  return code === "UND_ERR_HEADERS_TIMEOUT"
+    || code === "UND_ERR_BODY_TIMEOUT"
+    || code === "UND_ERR_CONNECT_TIMEOUT";
 }
 
 export function renderHomeserverUserMessage(task: HomeserverTaskConfig): string {
@@ -432,6 +457,7 @@ export async function executeHomeserverTask(
     provenance: null,
     huginTaskIdentity: null,
     learningTask: null,
+    failureKind: null,
   };
 
   const finish = async (): Promise<HomeserverExecutorResult> => {
@@ -460,7 +486,26 @@ export async function executeHomeserverTask(
     if (options.abortController.signal.aborted) abortController.abort();
     else options.abortController.signal.addEventListener("abort", () => abortController.abort());
   }
-  const timer = setTimeout(() => abortController.abort(), task.timeoutMs);
+  // Keep one absolute task deadline for both headers and body consumption. A
+  // request must never inherit a shorter client default, and any preparation
+  // time already spent must count against the task's declared timeout.
+  let gatewayRequestTimedOut = false;
+  const taskDeadlineMs = startMs + task.timeoutMs;
+  let rejectGatewayTimeout: ((reason?: unknown) => void) | null = null;
+  const gatewayTimeout = new Promise<never>((_resolve, reject) => {
+    rejectGatewayTimeout = reject;
+  });
+  // Mark handled immediately: the deadline can fire before the first
+  // Promise.race subscribes (e.g. slow preparation), and an unhandled
+  // rejection would crash the single dispatcher process.
+  gatewayTimeout.catch(() => {});
+  const timer = setTimeout(() => {
+    gatewayRequestTimedOut = true;
+    abortController.abort();
+    const timeoutError = new Error("gateway request timed out");
+    timeoutError.name = "TimeoutError";
+    rejectGatewayTimeout?.(timeoutError);
+  }, Math.max(0, taskDeadlineMs - Date.now()));
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (task.apiKey) headers.Authorization = `Bearer ${task.apiKey}`;
@@ -474,6 +519,14 @@ export async function executeHomeserverTask(
     gatewaySpanEnded = true;
     await endTaskSpan(gatewaySpan, { outcome, errorClass });
   };
+  const finishGatewayTimeout = async (): Promise<HomeserverExecutorResult> => {
+    gatewayRequestTimedOut = true;
+    result.exitCode = "TIMEOUT";
+    result.failureKind = HOMESERVER_TIMEOUT_FAILURE_KIND;
+    appendOutput(`\n[Gateway request timed out after ${Math.round((Date.now() - startMs) / 1000)}s]\n`);
+    await finishGatewaySpan("failed", "timeout");
+    return finish();
+  };
 
   const recoverAmbiguousLearningTask = async (): Promise<void> => {
     const original = result.learningTask;
@@ -483,11 +536,16 @@ export async function executeHomeserverTask(
       || original.state !== "m5-not-admitted"
       || original.evidenceAccepted
       || original.failureCode !== "transport-not-admitted"
+      || gatewayRequestTimedOut
+      || Date.now() >= taskDeadlineMs
       || task.learningTask?.kind !== "ready") {
       return;
     }
     try {
-      const recovered = await options.recoverAmbiguousLearningTask(original);
+      const recovered = await options.recoverAmbiguousLearningTask(
+        original,
+        abortController.signal,
+      );
       if (!recovered
         || recovered.state !== "m5-admitted"
         || !recovered.evidenceAccepted) {
@@ -588,12 +646,15 @@ export async function executeHomeserverTask(
       headers.traceparent = gatewaySpan.traceparent;
     }
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: abortController.signal,
-    });
+    const res = await Promise.race([
+      fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: abortController.signal,
+      }),
+      gatewayTimeout,
+    ]);
     // NOTE: the abort timer stays armed until the body is fully consumed (see the
     // finally below) — a gateway that flushes headers then stalls the body must not
     // be able to wedge Hugin's single worker on res.json()/res.text().
@@ -603,7 +664,8 @@ export async function executeHomeserverTask(
       result.backpressure = res.status === 429 ? "quota" : "admission";
       result.retryAfterS = parseRetryAfter(res);
       result.exitCode = 1;
-      const detail = await res.text().catch(() => "");
+      const detail = await Promise.race([res.text(), gatewayTimeout]).catch(() => "");
+      if (gatewayRequestTimedOut) return finishGatewayTimeout();
       appendOutput(
         `[Gateway ${res.status} ${result.backpressure}${result.retryAfterS !== null ? `, retry ${result.retryAfterS}s` : ""}] ${detail}\n`,
       );
@@ -612,7 +674,8 @@ export async function executeHomeserverTask(
     }
 
     if (!res.ok) {
-      const errText = await res.text().catch(() => "");
+      const errText = await Promise.race([res.text(), gatewayTimeout]).catch(() => "");
+      if (gatewayRequestTimedOut) return finishGatewayTimeout();
       result.exitCode = res.status; // surface 401/403/400 as the exit code
       const eligibleStamped5xx = res.status >= 500
         && task.path === "delegate"
@@ -656,7 +719,7 @@ export async function executeHomeserverTask(
       // the result of an already-paid run.
       let raw: unknown;
       try {
-        raw = await res.json();
+        raw = await Promise.race([res.json(), gatewayTimeout]);
       } catch (error) {
         if (task.learningTask?.kind !== "ready" || !(error instanceof SyntaxError)) throw error;
         const reason = "gateway returned malformed JSON without an exact admission echo";
@@ -740,6 +803,25 @@ export async function executeHomeserverTask(
       if (typeof outcome.metrics?.latencyMs === "number" && Number.isFinite(outcome.metrics.latencyMs)) {
         result.inferenceMs = outcome.metrics.latencyMs;
       }
+      const outputPresent = text.trim().length > 0;
+      const didNotExecuteLocally = provenance.escalated === true
+        || (provenance.delegated === false && !outputPresent);
+      if (didNotExecuteLocally) {
+        const reason = provenance.decisionReason
+          ?? (provenance.escalated === true
+            ? "gateway escalated the task instead of executing it locally"
+            : "gateway reported no local delegation output");
+        result.failureKind = HOMESERVER_ESCALATED_FAILURE_KIND;
+        result.exitCode = 1;
+        // Escalated output was not produced by the requested local lane. Keep
+        // it in the diagnostic output, but force the dispatcher to use that
+        // output instead of presenting it as the human-facing response; the
+        // appended reason must remain visible in the task result.
+        result.resultText = null;
+        appendOutput(`[Homeserver delegation not executed locally: ${reason}]\n`);
+        await finishGatewaySpan("failed", "homeserver-escalated");
+        return finish();
+      }
       // A well-formed 200 DelegationOutcome can still report failure; don't mask fail/error
       // as a successful Hugin execution (that would suppress retry/escalation downstream).
       result.exitCode = provenance.outcome === "fail" || provenance.outcome === "error" ? 1 : 0;
@@ -789,7 +871,7 @@ export async function executeHomeserverTask(
 
     try {
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await Promise.race([reader.read(), gatewayTimeout]);
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
@@ -804,6 +886,7 @@ export async function executeHomeserverTask(
 
     if (timedOut) {
       result.exitCode = "TIMEOUT";
+      result.failureKind = HOMESERVER_TIMEOUT_FAILURE_KIND;
       appendOutput("\n[Gateway streaming timed out]\n");
       await finishGatewaySpan("failed", "timeout");
     } else {
@@ -813,21 +896,32 @@ export async function executeHomeserverTask(
     }
     return finish();
   } catch (err) {
+    // A client-side timeout processed at/after Hugin's absolute deadline (but
+    // before the timer callback ran) is still deadline expiry, not a transport
+    // failure. Early client timeouts remain generic transport failures.
+    const clientTimeoutAtDeadline = !gatewayRequestTimedOut
+      && Date.now() >= taskDeadlineMs
+      && isClientTimeoutError(err);
+    const huginDeadlineWon = gatewayRequestTimedOut || clientTimeoutAtDeadline;
     if (result.learningTask?.requestStamp !== undefined
       && result.learningTask.state === "m5-not-admitted") {
       result.learningTask = learningTaskExecutionEvidenceSchema.parse({
         ...result.learningTask,
-        failureReason: err instanceof Error && err.name === "AbortError"
+        failureReason: huginDeadlineWon
           ? "gateway request timed out before an exact admission echo"
           : "gateway request failed before an exact admission echo",
       });
       await recoverAmbiguousLearningTask();
     }
-    if (err instanceof Error && err.name === "AbortError") {
-      result.exitCode = "TIMEOUT";
-      appendOutput(`\n[Gateway request aborted after ${Math.round((Date.now() - startMs) / 1000)}s]\n`);
-      await finishGatewaySpan("failed", "timeout");
+    // Recovery can itself be asynchronous. Re-check the live deadline winner
+    // after it returns so a task timer that fired during the probe still owns
+    // TIMEOUT classification.
+    if (gatewayRequestTimedOut || clientTimeoutAtDeadline) {
+      return finishGatewayTimeout();
     } else {
+      // Client/transport aborts are not Hugin deadline expiry. The dispatcher
+      // separately records operator cancellation when applicable; this result
+      // must remain a generic transport failure unless the Hugin timer won.
       result.exitCode = 1;
       appendOutput(`\n[Gateway error: ${err instanceof Error ? err.message : String(err)}]\n`);
       await finishGatewaySpan("failed", "gateway-transport-error");

@@ -245,6 +245,31 @@ describe("structured task result schema", () => {
     expect(result.runtimeMetadata?.delegation?.ledgerId).toBe("ledger-1");
   });
 
+  it("preserves an additive homeserver failure kind and decision reason", () => {
+    const result = buildStructuredTaskResult({
+      schemaVersion: 1, taskId: "m5-escalated", taskNamespace: "tasks/m5-escalated",
+      lifecycle: "failed", outcome: "failed", runtime: "homeserver",
+      executor: "homeserver-delegate", resultSource: "homeserver-delegate", exitCode: 1,
+      completedAt: "2026-09-28T12:00:00Z", bodyKind: "output",
+      bodyText: "[Homeserver delegation failed: routing-table gap → escalate]",
+      errorMessage: "routing-table gap → escalate",
+      failureKind: "HOMESERVER_ESCALATED",
+      runtimeMetadata: {
+        delegation: {
+          delegated: false,
+          escalated: true,
+          decisionReason: "routing-table gap → escalate",
+        },
+      },
+    });
+
+    expect(result.failureKind).toBe("HOMESERVER_ESCALATED");
+    expect(result.errorMessage).toContain("routing-table gap → escalate");
+    expect(result.runtimeMetadata?.delegation?.decisionReason).toBe(
+      "routing-table gap → escalate",
+    );
+  });
+
   // Issue #163: the orchestrator fan-out path delegated to M5 too, but dropped
   // every M5 provenance field before the durable result — so an operator could
   // not tell which node/model/verifier produced a fanout leaf, nor join it back

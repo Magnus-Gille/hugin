@@ -164,8 +164,9 @@ export function extractM5Provenance(raw: unknown): M5DelegationProvenance {
   const delegated = bool(r["delegated"]);
   if (delegated !== undefined) p.delegated = delegated;
 
-  // The gateway calls it `escalate`; Hugin's durable field is `escalated`.
-  const escalated = bool(r["escalate"]);
+  // The gateway's current wire field is `escalate`; accept the already-seen
+  // durable spelling too so an equivalent response cannot lose the signal.
+  const escalated = bool(r["escalate"]) ?? bool(r["escalated"]);
   if (escalated !== undefined) p.escalated = escalated;
 
   const formatRetried = bool(r["formatRetried"]);

@@ -39,4 +39,22 @@ describe("task result formatting", () => {
     expect(result).toContain("- **Group:** pipeline:abc");
     expect(result).toContain("- **Sequence:** 2");
   });
+
+  it("renders a homeserver non-execution failure kind", () => {
+    const result = buildTaskResultDocument({
+      exitCode: 1,
+      failureKind: "HOMESERVER_ESCALATED",
+      startedAt: "2026-09-28T08:50:59.124Z",
+      completedAt: "2026-09-28T08:51:02.092Z",
+      durationSeconds: 3,
+      executor: "homeserver-delegate",
+      resultSource: "homeserver-delegate",
+      logFile: "~/.hugin/logs/escalated.log",
+      body: "[Homeserver delegation not executed locally: route gap → escalate]",
+    });
+
+    expect(result).toContain("- **Exit code:** 1");
+    expect(result).toContain("- **Failure kind:** HOMESERVER_ESCALATED");
+    expect(result).toContain("route gap → escalate");
+  });
 });
