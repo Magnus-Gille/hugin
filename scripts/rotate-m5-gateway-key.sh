@@ -416,11 +416,19 @@ run_remote_capture() {
   mkfifo "$capture_fifo"
   ssh "$target" "$command" >"$capture_fifo" 2>/dev/null &
   active_pid="$!"
-  if remote_capture_output="$(cat "$capture_fifo")"; then
-    capture_status=0
-  else
-    capture_status="$?"
-  fi
+  # Drain the FIFO with the read builtin in the main shell: bash defers traps
+  # while a foreground command substitution such as $(cat fifo) is blocked,
+  # whereas read returns on a trapped signal so INT/TERM recovery can run.
+  local capture_line=""
+  remote_capture_output=""
+  capture_status=0
+  exec 4<"$capture_fifo"
+  while IFS= read -r capture_line <&4 || [ -n "$capture_line" ]; do
+    remote_capture_output+="$capture_line"$'\n'
+    capture_line=""
+  done
+  exec 4<&-
+  remote_capture_output="${remote_capture_output%$'\n'}"
   if wait "$active_pid"; then
     remote_status=0
   else
