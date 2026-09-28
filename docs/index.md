@@ -44,6 +44,9 @@ scheduling, and pipeline phases.
 - [Artifact delivery recovery runbook](testing/delivery-recovery-e2e.md):
   End-to-end acceptance/recovery procedure for declared artifacts and the
   `delivery:*` terminal states.
+- [Worker liveness](worker-liveness.md): Deterministic `tasks/_heartbeat`
+  staleness contract (`assessWorkerLiveness`, `hugin-liveness` CLI), its
+  threshold formula, states, and exit codes for submitters and Heimdall.
 - [Workload contract v1](workload-contract.md): Owner-side requirement
   declaration for moving Hugin across nodes, including drain/verify/restore
   boundaries and the dependency map for Munin, Mimir, and M5.

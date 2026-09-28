@@ -703,6 +703,7 @@ const DISPATCHER_FAILURE_EXIT_CODE = 1;
 
 const LEASE_DURATION_MS = 120_000; // 2 minutes — renewed during execution
 const LEASE_RENEWAL_INTERVAL_MS = 60_000; // renew every 60s
+const TASK_HEARTBEAT_INTERVAL_MS = 60_000; // heartbeat every 60s while executing, including delivery
 const LEASE_REAPER_INTERVAL_MS = 60_000; // scan for expired foreign leases every 60s
 
 // Worker identity is HOST-based, NOT PID-based (issue #77). A PID-derived id
@@ -781,6 +782,7 @@ let brokerBindStatus: BrokerBindStatus | null = null;
 // shutdown has already begun.
 let brokerBindAbort: AbortController | null = null;
 let leaseRenewalTimer: ReturnType<typeof setInterval> | null = null;
+let taskHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let cancelWatchTimer: ReturnType<typeof setInterval> | null = null;
 let leaseReaperTimer: ReturnType<typeof setInterval> | null = null;
 let leaseReaperInFlight = false;
@@ -794,6 +796,7 @@ let authAlarmState: AuthAlarmState = INITIAL_AUTH_ALARM_STATE;
 let lastPendingQueueSnapshot: PendingQueueSnapshot = snapshotPendingQueue([], false);
 let lastQueueTruncationWarningAtMs: number | null = null;
 let lastBlockedTaskCount = 0;
+let heartbeatEmission: Promise<void> = Promise.resolve();
 const startedAt = Date.now();
 const pipelineSummaryManager = new PipelineSummaryManager();
 // Claim-time assessment cache. It prevents a signature that was valid when a
@@ -2924,8 +2927,7 @@ function releaseCurrentClaimWithSchedulerOutcome(input: {
   model?: string;
 }): void {
   const releasedAt = new Date().toISOString();
-  currentTask = null;
-  currentTaskConfig = null;
+  clearCurrentTask();
   if (!input.prediction || !input.claimAttestation || !input.claimEvidencePersistence
     || !input.terminalResult) return;
 
@@ -2975,6 +2977,30 @@ function releaseCurrentClaimWithSchedulerOutcome(input: {
         (err instanceof Error ? err.message : String(err)),
     );
   }
+}
+
+function startTaskHeartbeat(taskNs: string): void {
+  stopTaskHeartbeat();
+  taskHeartbeatTimer = setInterval(() => {
+    if (!currentTask || currentTask !== taskNs) {
+      stopTaskHeartbeat();
+      return;
+    }
+    void emitHeartbeat(lastBlockedTaskCount);
+  }, TASK_HEARTBEAT_INTERVAL_MS);
+}
+
+function stopTaskHeartbeat(): void {
+  if (taskHeartbeatTimer) {
+    clearInterval(taskHeartbeatTimer);
+    taskHeartbeatTimer = null;
+  }
+}
+
+function clearCurrentTask(): void {
+  stopTaskHeartbeat();
+  currentTask = null;
+  currentTaskConfig = null;
 }
 
 /** Start periodic lease renewal for the current task. */
@@ -4855,8 +4881,9 @@ async function failTaskWithMessage(
 
 // --- Heartbeat ---
 
-async function emitHeartbeat(blockedTasks: number): Promise<void> {
+async function writeHeartbeat(blockedTasks: number): Promise<void> {
   try {
+    const loadedModels = await getLoadedModels();
     const heartbeat: Record<string, unknown> = {
       worker_id: workerId,
       process_instance_id: processInstanceId,
@@ -4868,12 +4895,17 @@ async function emitHeartbeat(blockedTasks: number): Promise<void> {
     };
     if (currentTaskConfig?.group) heartbeat.group = currentTaskConfig.group;
     if (currentTaskConfig?.sequence !== undefined) heartbeat.sequence = currentTaskConfig.sequence;
-    const loadedModels = await getLoadedModels();
     if (Object.keys(loadedModels).length > 0) heartbeat.ollama_loaded = loadedModels;
     await munin.write("tasks/_heartbeat", "status", JSON.stringify(heartbeat), ["heartbeat"]);
   } catch (err) {
     console.error("Heartbeat write failed:", err);
   }
+}
+
+function emitHeartbeat(blockedTasks: number): Promise<void> {
+  const emission = heartbeatEmission.then(() => writeHeartbeat(blockedTasks));
+  heartbeatEmission = emission;
+  return emission;
 }
 
 // --- Poll loop ---
@@ -5588,8 +5620,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
   let executionTraceErrorClass: string | undefined;
   console.log(`Executing task ${taskNs}...`);
 
-  // Start periodic lease renewal
+  // Start lease renewal and the independent during-task heartbeat. The
+  // heartbeat remains active after lease renewal stops for delivery.
   startLeaseRenewal(taskNs, entry.content, claimTags);
+  startTaskHeartbeat(taskNs);
 
   try {
     if (declaredRuntime === "pipeline") {
@@ -7408,8 +7442,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         );
         executionTraceOutcome = "degraded";
         executionTraceErrorClass = "delivery-pending";
-        currentTask = null;
-        currentTaskConfig = null;
+        clearCurrentTask();
         return { hadTask: true, queueDepth };
       }
       // Budget already exhausted on the first attempt (e.g. maxAttempts<=1):
@@ -7708,8 +7741,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           );
           executionTraceOutcome = "stale";
           executionTraceErrorClass = "status-cas-lost";
-          currentTask = null;
-          currentTaskConfig = null;
+          clearCurrentTask();
           return { hadTask: true, queueDepth };
         }
         const resultRecordingTraceOutcome = deriveResultRecordingTraceOutcome(cancelledFinalize);
@@ -7830,8 +7862,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           );
           executionTraceOutcome = "stale";
           executionTraceErrorClass = "status-cas-lost";
-          currentTask = null;
-          currentTaskConfig = null;
+          clearCurrentTask();
           return { hadTask: true, queueDepth };
         }
         const resultRecordingTraceOutcome = deriveResultRecordingTraceOutcome(finalizeOutcome);
@@ -8066,9 +8097,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     currentOpencodeAbort = null;
     currentOrchestratorAbort = null;
     currentCancellation = null;
-    currentTask = null;
+    clearCurrentTask();
     currentClaimTags = null;
-    currentTaskConfig = null;
     // Rotate session off the task scope so subsequent poll/heartbeat writes
     // don't pollute the task's session window.
     munin.setSessionId(randomUUID());
@@ -8379,6 +8409,13 @@ export const __test__ = {
   isSubmitterAllowed,
   pollOnce,
   writeResearchSpikeIndexes,
+  emitHeartbeat,
+  startTaskHeartbeat,
+  stopTaskHeartbeat,
+  startLeaseRenewal,
+  stopLeaseRenewal,
+  LEASE_RENEWAL_INTERVAL_MS,
+  TASK_HEARTBEAT_INTERVAL_MS,
   inspectState: () => ({
     currentTask,
     currentTaskConfig,
@@ -8386,12 +8423,20 @@ export const __test__ = {
   }),
   resetState: () => {
     shuttingDown = false;
-    currentTask = null;
+    stopTaskHeartbeat();
+    stopLeaseRenewal();
+    clearCurrentTask();
     currentClaimTags = null;
-    currentTaskConfig = null;
     currentCancellation = null;
     lastPendingQueueSnapshot = snapshotPendingQueue([], false);
     lastQueueTruncationWarningAtMs = null;
+  },
+  // Test-only: simulate a task being in flight so the lease-renewal timer's
+  // heartbeat guard (`currentTask === taskNs`) passes without driving a full
+  // task execution through pollOnce.
+  setCurrentTaskForTest: (taskNs: string | null) => {
+    if (taskNs === null) stopTaskHeartbeat();
+    currentTask = taskNs;
   },
 };
 
@@ -8548,6 +8593,7 @@ async function shutdown(signal: string): Promise<void> {
     });
   }
 
+  clearCurrentTask();
   process.exit(0);
 }
 

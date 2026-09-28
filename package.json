@@ -6,7 +6,8 @@
   "bin": {
     "hugin-mcp": "dist/mcp-server.js",
     "friction-mcp": "dist/friction-mcp.js",
-    "hugin-friction": "dist/friction-cli.js"
+    "hugin-friction": "dist/friction-cli.js",
+    "hugin-liveness": "dist/liveness-cli.js"
   },
   "scripts": {
     "build": "tsc",
