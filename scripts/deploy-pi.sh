@@ -20,6 +20,8 @@ REMOTE_DIR="/home/$DEPLOY_USER/repos/hugin"
 # extension/flag contract is not compatible with arbitrary future releases.
 RESEARCH_PI_PACKAGE="${HUGIN_RESEARCH_PI_PACKAGE:-@earendil-works/pi-coding-agent}"
 RESEARCH_PI_VERSION="${HUGIN_RESEARCH_PI_VERSION:-0.84.1}"
+# shellcheck source=lib/deploy-pi-remote-blocks.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/deploy-pi-remote-blocks.sh"
 
 read_clean_deploy_sha() {
   local repo_root source_status source_sha
@@ -109,26 +111,11 @@ echo "==> Installing dependencies on Pi..."
 ssh "$REMOTE" "cd $REMOTE_DIR && npm ci --omit=dev"
 
 echo "==> Installing pinned research Pi harness ($RESEARCH_PI_PACKAGE@$RESEARCH_PI_VERSION)..."
-ssh "$REMOTE" "
-  set -e
-  npm install --global --ignore-scripts '$RESEARCH_PI_PACKAGE@$RESEARCH_PI_VERSION'
-  NPM_GLOBAL_PREFIX=\"\$(npm prefix --global)\"
-  case \"\$NPM_GLOBAL_PREFIX\" in
-    /*) ;;
-    *) echo 'npm global prefix is not absolute' >&2; exit 1 ;;
-  esac
-  PI_BIN=\"\$NPM_GLOBAL_PREFIX/bin/pi\"
-  test -x \"\$PI_BIN\" || { echo 'research Pi executable missing from npm global prefix' >&2; exit 1; }
-  test \"\$(\"\$PI_BIN\" --version 2>/dev/null)\" = \"$RESEARCH_PI_VERSION\" || {
-    echo 'research Pi version mismatch' >&2
-    \"\$PI_BIN\" --version >&2 || true
-    exit 1
-  }
-  command -v bwrap >/dev/null || { echo 'bubblewrap (bwrap) is required for Runtime: research' >&2; exit 1; }
-  test -f '$REMOTE_DIR/scripts/research-pi-extension.mjs'
-  test -x '$REMOTE_DIR/scripts/research-web-search.mjs'
-  test -x '$REMOTE_DIR/scripts/research-web-fetch.mjs'
-"
+# npm's default global prefix (npm prefix --global) is not user-writable on a
+# fresh host (it resolves under /usr), so install into an explicit
+# user-owned prefix instead. hugin.service's PATH points at this same
+# ~/.npm-global/bin (issue #390).
+ssh "$REMOTE" "$(research_pi_install_block "$RESEARCH_PI_PACKAGE" "$RESEARCH_PI_VERSION" "$REMOTE_DIR")"
 
 echo "==> Removing legacy system-level service (one-time migration, idempotent)..."
 ssh "$REMOTE" "
@@ -208,16 +195,25 @@ else
   echo "  NAS reachability are fixed (else delivery-capable tasks will fail)."
 fi
 
-echo "==> Host-side Codex sandbox preflight (issues #59/#218)..."
+echo "==> Host-side Codex sandbox preflight (issues #59/#218/#390)..."
 # Exercise Codex's own zero-token sandbox entry point, not merely whichever
 # bwrap happens to be first on PATH. This catches a missing/incompatible system
 # bwrap before restart. It is still outside hugin.service confinement; the
 # post-restart /health gate below is authoritative because Hugin repeats this
 # exact command from inside the live unit before polling or any Codex task.
-if ssh "$REMOTE" "
-  command -v codex >/dev/null 2>&1 || { echo 'NO_CODEX'; exit 1; }
-  codex sandbox -- /bin/true >/dev/null 2>&1 || { echo 'CODEX_SANDBOX_FAIL'; exit 1; }
-"; then
+# Resolve codex using the exact PATH hugin.service grants at runtime, not the
+# non-interactive SSH shell's PATH: a fresh host installs standalone Codex
+# under ~/.local/bin, which a plain `ssh host cmd` shell does not put on PATH,
+# so this preflight would otherwise report NO_CODEX despite the unit being
+# able to find it. hugin.service's Environment=PATH= line is the single
+# source of truth for that PATH (issue #390).
+UNIT_SERVICE_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/hugin.service"
+UNIT_PATH="$(sed -n 's/^Environment=PATH=//p' "$UNIT_SERVICE_FILE" | head -n1)"
+if [ -z "$UNIT_PATH" ]; then
+  echo "ERROR: could not parse Environment=PATH= from $UNIT_SERVICE_FILE; refusing Codex preflight." >&2
+  exit 1
+fi
+if ssh "$REMOTE" "$(codex_sandbox_preflight_block "$UNIT_PATH")"; then
   echo "  OK: Codex zero-token sandbox command passed on the host"
 else
   echo "  WARNING: host-side Codex sandbox preflight FAILED."

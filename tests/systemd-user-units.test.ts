@@ -29,3 +29,19 @@ describe("systemd user services", () => {
     expect(existsSync(resolve(artifactPath))).toBe(false);
   });
 });
+
+describe("hugin.service PATH (issue #390)", () => {
+  it("orders .npm-global/bin before .local/bin so the pinned research Pi wins", () => {
+    const unit = readFileSync(resolve("hugin.service"), "utf8");
+    const match = unit.match(/^Environment=PATH=(.+)$/m);
+    expect(match).not.toBeNull();
+    const entries = (match as RegExpMatchArray)[1].split(":");
+
+    const npmGlobalIndex = entries.indexOf("/home/magnus/.npm-global/bin");
+    const localBinIndex = entries.indexOf("/home/magnus/.local/bin");
+
+    expect(npmGlobalIndex).toBeGreaterThanOrEqual(0);
+    expect(localBinIndex).toBeGreaterThanOrEqual(0);
+    expect(npmGlobalIndex).toBeLessThan(localBinIndex);
+  });
+});
