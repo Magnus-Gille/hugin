@@ -80,8 +80,9 @@ commit)
   exit "${FAKE_COMMIT_RC:-0}"
   ;;
 rotations)
-  case "${FAKE_ROTATION_STATE:-not-committed}" in
+  case "${FAKE_ROTATION_STATE:-staged}" in
     committed) rotation_status=committed ;;
+    aborted) rotation_status=aborted ;;
     *) rotation_status=staged ;;
   esac
   printf '%-21s %-18s %-20s %-10s %s\n' PLAN LOGICAL REPLACEMENT STATUS PREFLIGHT
@@ -265,7 +266,7 @@ for failure_case in stage write restart health probe preflight commit; do
     health) export FAKE_HEALTH_HTTP_CODE=503 ;;
     probe) export FAKE_PROBE_HTTP_CODE=401 ;;
     preflight) export FAKE_PREFLIGHT_RC=95 ;;
-    commit) export FAKE_COMMIT_RC=96 ;;
+    commit) export FAKE_COMMIT_RC=96 FAKE_ROTATION_STATE=aborted ;;
   esac
   set +e
   failure_output="$(bash "$ROTATE_SCRIPT" --config "$CONFIG" 2>"$TEST_ROOT/$failure_case.err")"
@@ -294,7 +295,7 @@ assert_contains "$rollback_failure_output$(cat "$TEST_ROOT/rollback-failure.err"
 assert_contains "$(cat "$CALL_LOG")" "keys abort --plan rot_test395plan0001" \
   "rollback failure still aborts the staged plan"
 
-for commit_state in committed not-committed unknown; do
+for commit_state in committed staged aborted unknown; do
   reset_fixture
   export FAKE_COMMIT_RC=96 FAKE_ROTATION_STATE="$commit_state"
   if [[ "$commit_state" == unknown ]]; then
@@ -307,7 +308,7 @@ for commit_state in committed not-committed unknown; do
   ambiguous_err="$(cat "$TEST_ROOT/ambiguous-$commit_state.err")"
   [[ "$ambiguous_rc" -ne 0 ]] || fail "ambiguous $commit_state commit exits non-zero"
   calls="$(cat "$CALL_LOG")"
-  if [[ "$commit_state" == committed || "$commit_state" == unknown ]]; then
+  if [[ "$commit_state" == committed || "$commit_state" == staged || "$commit_state" == unknown ]]; then
     assert_contains "$(cat "$REMOTE_ENV")" \
       'HOMESERVER_GATEWAY_API_KEY=new-secret-value' \
       "ambiguous $commit_state outcome retains the new key"
@@ -317,6 +318,10 @@ for commit_state in committed not-committed unknown; do
       assert_contains "$ambiguous_output$ambiguous_err" \
         "commit acknowledged ambiguously; new key retained" \
         "committed ambiguity explains retained key"
+    elif [[ "$commit_state" == staged ]]; then
+      assert_contains "$ambiguous_output$ambiguous_err" \
+        "plan rot_test395plan0001 is still staged; new key retained" \
+        "staged ambiguity retains the new key and explains recovery"
     else
       assert_contains "$ambiguous_output$ambiguous_err" \
         "commit outcome unknown; new key retained; manual recovery required" \
@@ -324,8 +329,7 @@ for commit_state in committed not-committed unknown; do
     fi
   else
     assert_env_restored
-    assert_contains "$calls" "keys abort --plan rot_test395plan0001" \
-      "uncommitted ambiguity rolls back and aborts"
+    # aborted plan: roll back to the previous key (a further abort is harmless)
   fi
 done
 

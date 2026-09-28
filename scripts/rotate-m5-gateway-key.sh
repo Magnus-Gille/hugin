@@ -497,7 +497,10 @@ classify_commit_state() {
     row_status="$(printf '%s\n' "$output" | awk -v p="$plan_prefix" '$1 == p { print $4; exit }')"
     case "$row_status" in
       committed) printf 'committed'; return 0 ;;
-      staged|aborted) printf 'not-committed'; return 0 ;;
+      # After a lost acknowledgement a still-staged plan may yet commit, so it
+      # is unresolved, not permission to roll back. Only an aborted plan is.
+      staged) printf 'staged'; return 0 ;;
+      aborted) printf 'not-committed'; return 0 ;;
     esac
   fi
   if printf '%s\n' "$output" |
@@ -565,17 +568,19 @@ iso_from_epoch() {
 # Print the replacement key's expiry: the authoritative EXPIRES column from
 # `keys list --all` when the alias row is found and active, else stage time +
 # the configured TTL. Output never contains key material.
+# Sets new_expiry. Runs in the main shell (no command substitution) and uses
+# the tracked remote runner so the INT/TERM trap can stop a hung lookup.
 resolve_replacement_expiry() {
-  local alias="$1" started="$2" listing="" row="" iso=""
-  if [ -n "$alias" ] && listing="$(ssh "$M5_GATEWAY_SSH_TARGET" "$(gateway_command list)" 2>/dev/null)"; then
-    row="$(printf '%s\n' "$listing" | awk -v a="$alias" '$1 == a { print; exit }')"
+  local alias="$1" started="$2" row="" iso=""
+  if [ -n "$alias" ] && run_remote_capture "$M5_GATEWAY_SSH_TARGET" "$(gateway_command list)"; then
+    row="$(printf '%s\n' "$remote_capture_output" | awk -v a="$alias" '$1 == a { print; exit }')"
     iso="$(printf '%s\n' "$row" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,3})?Z' | head -1)"
-    if [ -n "$iso" ]; then
-      printf '%s' "$iso"
-      return 0
-    fi
   fi
-  iso_from_epoch "$((started + M5_GATEWAY_KEY_TTL_SECONDS))"
+  if [ -n "$iso" ]; then
+    new_expiry="$iso"
+  else
+    new_expiry="$(iso_from_epoch "$((started + M5_GATEWAY_KEY_TTL_SECONDS))")" || new_expiry=""
+  fi
 }
 
 trap 'handle_signal INT' INT
@@ -619,7 +624,7 @@ done
 # EXPIRES value for the replacement alias from `keys list --all`; fall back to
 # stage time + configured TTL.
 if [ -z "$new_expiry" ] && [ "$saw_stage_separator" -eq 1 ] && [ -n "$plan_id" ]; then
-  new_expiry="$(resolve_replacement_expiry "$replacement_alias" "$stage_started_epoch")" || new_expiry=""
+  resolve_replacement_expiry "$replacement_alias" "$stage_started_epoch" || new_expiry=""
 fi
 
 if [ "$saw_stage_separator" -ne 1 ] || [ -z "$plan_id" ] ||
@@ -715,6 +720,11 @@ if ! run_remote "$M5_GATEWAY_SSH_TARGET" "$(gateway_command commit "$plan_id")";
   case "$commit_state_result" in
     committed)
       echo "ERROR commit acknowledged ambiguously; new key retained" >&2
+      exit 1
+      ;;
+    staged)
+      echo "ERROR commit outcome unresolved: plan $plan_id is still staged; new key retained (both keys stay valid during the overlap)" >&2
+      echo "ERROR finish manually: keys commit --plan $plan_id, or keys abort --plan $plan_id and restore the previous key" >&2
       exit 1
       ;;
     not-committed)

@@ -20,8 +20,7 @@ scripts/rotate-m5-gateway-key.sh --config PATH
 ```
 
 The script runs the gateway CLI through the configured service-sandbox wrapper,
-parses the staged plan and the new key's gateway-reported expiry separately from
-the old-key overlap deadline, and streams the new key directly from the gateway
+parses the staged plan and replacement alias, and streams the new key directly from the gateway
 SSH process into the service-host updater. The key is not printed,
 placed in an argument, or stored in a workstation file. The updater replaces
 exactly one `HOMESERVER_GATEWAY_API_KEY` line, sets
@@ -29,15 +28,22 @@ exactly one `HOMESERVER_GATEWAY_API_KEY` line, sets
 unit, waits for the configured health URL, and performs the authenticated
 protected-route probe before `keys preflight` and `keys commit`.
 
+`keys stage` does not print the new key's expiry (its `overlap expires` line is
+the old key's grace deadline). The script reads the replacement alias's
+`EXPIRES` value from `keys list --all` and falls back to stage time plus the
+configured TTL if that listing is unavailable.
+
 Rotation temporary files on the service host use a recognizable prefix and are
 cleaned on the next run only when they are regular files owned by the service
 user and older than 24 hours. Any failure after the service write restores the
 previous key and expiry, restarts the service, calls `keys abort`, and exits
 non-zero. Interrupts apply the same step-aware recovery and stop active stage or
 write children. If commit acknowledgement is ambiguous, the script queries
-authoritative gateway rotation state; a committed or unknowable outcome retains
-the new key and requires manual recovery rather than risking an old key that
-the gateway may have revoked. Output is limited to steps, the plan id, HTTP
+authoritative gateway rotation state (`keys rotations`). Only an `aborted` plan
+permits rollback. A `committed`, still-`staged`, or unknowable outcome retains
+the new key: both keys remain valid during the overlap, and a staged plan may
+still commit after a lost acknowledgement. The script then prints the plan id
+and the manual `keys commit` / `keys abort` recovery commands. Output is limited to steps, the plan id, HTTP
 codes, and the new expiry; the plaintext key must never be included in logs or
 test diagnostics.
 
