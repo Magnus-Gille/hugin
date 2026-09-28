@@ -296,6 +296,10 @@ import {
   type SkillRoute,
 } from "./task-result-schema.js";
 import {
+  buildHomeserverCredentialHealth,
+  HOMESERVER_CREDENTIAL_WARNING_INTERVAL_MS,
+} from "./homeserver-credential-health.js";
+import {
   buildSensitivityCheckpoint,
   parseSensitivityCheckpoint,
   SENSITIVITY_CHECKPOINT_KEY,
@@ -666,6 +670,48 @@ const config = {
   organicOracleId: process.env.HUGIN_ORGANIC_ORACLE_ID?.trim() || "",
   organicOracleDigest: process.env.HUGIN_ORGANIC_ORACLE_DIGEST?.trim() || "",
 };
+
+// Capture the optional gateway-key expiry at startup. The raw value is never
+// returned or logged; only the content-blind health projection is exposed.
+const homeserverCredentialExpiryRaw =
+  process.env.HOMESERVER_GATEWAY_KEY_EXPIRES_AT?.trim();
+let homeserverCredentialWarningTimer: ReturnType<typeof setInterval> | null = null;
+let homeserverCredentialWarningDay: number | null = null;
+
+function currentHomeserverCredentialHealth() {
+  return buildHomeserverCredentialHealth(homeserverCredentialExpiryRaw);
+}
+
+function warnHomeserverCredentialExpiry(): void {
+  const health = currentHomeserverCredentialHealth();
+  if (health.state !== "expiring" && health.state !== "expired") return;
+
+  const warningDay = Math.floor(Date.now() / (24 * 60 * 60 * 1000));
+  if (homeserverCredentialWarningDay === warningDay) return;
+  homeserverCredentialWarningDay = warningDay;
+  console.warn(
+    `[homeserver-credential] gateway key ${health.state}; ` +
+      `expires_at=${health.expires_at ?? "unknown"}; ` +
+      `days_remaining=${health.days_remaining ?? "unknown"}`,
+  );
+}
+
+function startHomeserverCredentialExpiryWarning(): void {
+  stopHomeserverCredentialExpiryWarning();
+  warnHomeserverCredentialExpiry();
+  homeserverCredentialWarningTimer = setInterval(
+    warnHomeserverCredentialExpiry,
+    HOMESERVER_CREDENTIAL_WARNING_INTERVAL_MS,
+  );
+  homeserverCredentialWarningTimer.unref?.();
+}
+
+function stopHomeserverCredentialExpiryWarning(): void {
+  if (homeserverCredentialWarningTimer) {
+    clearInterval(homeserverCredentialWarningTimer);
+    homeserverCredentialWarningTimer = null;
+  }
+}
 
 const brokerEnv = readBrokerEnv(process.env);
 const piReadOnlyAllowedRoots = Array.from(new Set([
@@ -8340,7 +8386,7 @@ async function pollLoop(): Promise<void> {
 
 // --- Health endpoint ---
 
-const app = express();
+export const app = express();
 
 app.get("/health", (_req, res) => {
   const traceHealth = taskTraceRuntime.getHealth();
@@ -8351,6 +8397,7 @@ app.get("/health", (_req, res) => {
     process_instance_id: processInstanceId,
     current_task: currentTask,
     polling: !shuttingDown,
+    homeserver_credential: currentHomeserverCredentialHealth(),
     ...buildQueueObservabilityFields(lastPendingQueueSnapshot),
     blocked_tasks: lastBlockedTaskCount,
     ollama_hosts: getHostStatus(),
@@ -8468,6 +8515,7 @@ async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   console.log(`Received ${signal}, shutting down (worker: ${workerId})...`);
   shuttingDown = true;
+  stopHomeserverCredentialExpiryWarning();
 
   // Hard deadline: force exit after 30s regardless of cleanup state.
   // Unref'd so it doesn't keep the process alive if everything exits cleanly first.
@@ -8638,6 +8686,7 @@ export function startDispatcher(): void {
 
   // Ensure log directory exists
   ensureLogDir();
+  startHomeserverCredentialExpiryWarning();
   console.log(`Worker ID: ${workerId} (instance: ${processInstanceId})`);
   console.log(`Log directory: ${LOG_DIR}`);
 
