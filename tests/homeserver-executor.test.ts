@@ -876,6 +876,158 @@ describe("executeHomeserverTask — delegate path", () => {
     expect(unvR.exitCode).toBe(0);
     expect(unvR.resultText).toBe("ran ok");
   });
+
+  it("fails when the gateway escalates without local execution and preserves the reason", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "draft" }),
+      "delegate-escalated",
+    );
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse(withLearningTaskGatewayEcho(task, "delegate-escalated", {
+        delegated: false,
+        escalated: true,
+        decisionReason: "routing-table: draft is a frontier-escalation gap type → escalate",
+        output: "",
+      })),
+    );
+
+    const result = await executeHomeserverTask(task, "delegate-escalated", tmpLogDir);
+
+    expect(result.exitCode).toBeGreaterThan(0);
+    expect(result.failureKind).toBe("HOMESERVER_ESCALATED");
+    expect(result.decisionReason).toBe(
+      "routing-table: draft is a frontier-escalation gap type → escalate",
+    );
+    expect(result.output).toContain(
+      "routing-table: draft is a frontier-escalation gap type → escalate",
+    );
+    expect(result.resultText).toBeNull();
+  });
+
+  it("treats delegated=false with output as executed output and leaves it successful", async () => {
+    // A false delegated flag plus output is treated as an executed gateway
+    // response (for example, a gateway-owned non-local output). Only an
+    // escalation signal or a false flag with no output is a non-execution.
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "draft" }),
+      "delegate-false-with-output",
+    );
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse(withLearningTaskGatewayEcho(task, "delegate-false-with-output", {
+        delegated: false,
+        escalate: false,
+        decisionReason: "gateway-owned output",
+        output: "drafted text",
+      })),
+    );
+
+    const result = await executeHomeserverTask(
+      task,
+      "delegate-false-with-output",
+      tmpLogDir,
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.failureKind).toBeNull();
+    expect(result.resultText).toBe("drafted text");
+  });
+
+  it("reports a gateway request timeout distinctly when an abort-shaped fetch error occurs", async () => {
+    vi.useFakeTimers();
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract", timeoutMs: 25 }),
+      "delegate-timeout",
+    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => new Promise<Response>((_resolve, reject) => {
+      // Simulate a slow gateway/undici path that reports its own generic
+      // transport error after the task deadline. The executor must win the
+      // race with its task-derived deadline and report a timeout instead.
+      setTimeout(() => reject(new TypeError("fetch failed")), 100);
+    }));
+
+    try {
+      const resultPromise = executeHomeserverTask(task, "delegate-timeout", tmpLogDir);
+      await vi.advanceTimersByTimeAsync(25);
+      const result = await resultPromise;
+
+      expect(result.exitCode).toBe("TIMEOUT");
+      expect(result.failureKind).toBe("HOMESERVER_TIMEOUT");
+      expect(result.output).toContain("Gateway request timed out");
+      expect(result.output).not.toContain("Gateway error: fetch failed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds response-body consumption by the same task timeout", async () => {
+    vi.useFakeTimers();
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract", timeoutMs: 25 }),
+      "delegate-body-timeout",
+    );
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    try {
+      const resultPromise = executeHomeserverTask(task, "delegate-body-timeout", tmpLogDir);
+      await vi.advanceTimersByTimeAsync(25);
+      const result = await resultPromise;
+
+      expect(result.exitCode).toBe("TIMEOUT");
+      expect(result.failureKind).toBe("HOMESERVER_TIMEOUT");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("classifies an undici headers-timeout cause as a gateway timeout", async () => {
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract", timeoutMs: 250 }),
+      "delegate-undici-timeout",
+    );
+    const error = Object.assign(new TypeError("fetch failed"), {
+      cause: { code: "UND_ERR_HEADERS_TIMEOUT" },
+    });
+    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(error);
+
+    const result = await executeHomeserverTask(task, "delegate-undici-timeout", tmpLogDir);
+
+    expect(result.exitCode).toBe("TIMEOUT");
+    expect(result.failureKind).toBe("HOMESERVER_TIMEOUT");
+    expect(result.output).toContain("Gateway request timed out");
+    expect(result.output).not.toContain("Gateway error: fetch failed");
+  });
+
+  it("allows a gateway response that arrives within the declared timeout", async () => {
+    vi.useFakeTimers();
+    const task = withLearningTaskContext(
+      makeTaskConfig({ path: "delegate", taskType: "extract", timeoutMs: 250 }),
+      "delegate-within-timeout",
+    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return jsonResponse(withLearningTaskGatewayEcho(task, "delegate-within-timeout", {
+        delegated: true,
+        escalate: false,
+        output: "1998",
+      }));
+    });
+
+    try {
+      const resultPromise = executeHomeserverTask(task, "delegate-within-timeout", tmpLogDir);
+      await vi.advanceTimersByTimeAsync(10);
+      const result = await resultPromise;
+
+      expect(result.exitCode).toBe(0);
+      expect(result.resultText).toBe("1998");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("executeHomeserverTask — backpressure & errors", () => {

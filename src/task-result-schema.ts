@@ -484,6 +484,9 @@ export const structuredTaskResultSchema = z.object({
   bodyKind: taskExecutionBodyKindSchema,
   bodyText: z.string(),
   errorMessage: z.string().min(1).optional(),
+  // Additive execution discriminator. Existing readers may ignore it; new
+  // consumers can distinguish gateway non-execution/timeout from task logic.
+  failureKind: z.string().min(1).optional(),
   prUrl: z.string().url().optional(),
   repositoryOutcome: repositoryOutcomeSchema.optional(),
   repositoryChange: repositoryChangeEvidenceSchema.optional(),

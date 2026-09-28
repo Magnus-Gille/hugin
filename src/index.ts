@@ -127,6 +127,10 @@ import {
   buildHomeserverDelegateTaskConfig,
   loadHomeserverGatewayConfig,
   renderHomeserverUserMessage,
+  HOMESERVER_ESCALATED_FAILURE_KIND,
+  HOMESERVER_ESCALATED_FAILURE_TAG,
+  HOMESERVER_TIMEOUT_FAILURE_KIND,
+  HOMESERVER_TIMEOUT_FAILURE_TAG,
   type HomeserverExecutorResult,
   type HomeserverVerifierSpec,
 } from "./homeserver-executor.js";
@@ -6956,7 +6960,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // classifying its output (Codex review, #123: DEPS_DRIFT is never
     // inferred from output text).
     const failureClassification = !ok && !isTimeout && !isCancelled
-      ? piHarnessAdmissionFailureReason
+      ? isHomeserver && homeserverResult?.failureKind === HOMESERVER_ESCALATED_FAILURE_KIND
+        ? {
+            kind: HOMESERVER_ESCALATED_FAILURE_KIND,
+            tag: HOMESERVER_ESCALATED_FAILURE_TAG,
+            reason: homeserverResult.decisionReason
+              ?? "Homeserver gateway escalated the task instead of executing it locally",
+          }
+        : piHarnessAdmissionFailureReason
         ? piHarnessAdmissionFailureClassification(piHarnessAdmissionFailureReason)
         : checkoutGateRefusalReason
         ? checkoutGateFailureClassification(checkoutGateRefusalReason)
@@ -7472,7 +7483,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         buildTaskResultDocument({
           timedOut: isTimeout,
           exitCode,
-          failureKind: deliveryFailureKind ?? failureClassification?.kind,
+          failureKind: deliveryFailureKind
+            ?? homeserverResult?.failureKind
+            ?? failureClassification?.kind,
           startedAt,
           completedAt,
           durationSeconds: Math.round(durationMs / 1000),
@@ -7769,6 +7782,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       );
       const extraTerminalTags = [
         ...(failureClassification ? [failureClassification.tag] : []),
+        ...(isHomeserver && homeserverResult?.failureKind === HOMESERVER_TIMEOUT_FAILURE_KIND
+          ? [HOMESERVER_TIMEOUT_FAILURE_TAG]
+          : []),
         ...(publicationFailureTag ? [publicationFailureTag] : []),
       ];
       const resultRecordingSpan = startTaskLifecycleSpan(
@@ -7810,6 +7826,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
                 sequence: task.sequence,
                 costUsd: costUsd ?? undefined,
                 prUrl,
+                failureKind: deliveryFailureKind
+                  ?? homeserverResult?.failureKind
+                  ?? failureClassification?.kind,
                 repositoryOutcome,
                 repositoryChange,
                 bodyKind: structuredBodyKind,
@@ -7818,6 +7837,9 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
                   ? undefined
                   : failureClassification
                     ? failureClassification.reason
+                    : isHomeserver && homeserverResult?.failureKind === HOMESERVER_ESCALATED_FAILURE_KIND
+                      ? homeserverResult.decisionReason
+                        ?? "Homeserver gateway escalated the task instead of executing it locally"
                     : researchGroundingFailureReason
                       ? researchGroundingFailureReason
                     : deliveryFailureKind === "RESEARCH_INDEX_FAILED"
