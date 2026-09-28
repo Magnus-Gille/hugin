@@ -47,6 +47,9 @@ scheduling, and pipeline phases.
 - [Worker liveness](worker-liveness.md): Deterministic `tasks/_heartbeat`
   staleness contract (`assessWorkerLiveness`, `hugin-liveness` CLI), its
   threshold formula, states, and exit codes for submitters and Heimdall.
+- [M5 gateway-key rotation](m5-key-rotation.md): Local-configured staged key
+  rotation, pipe-only secret handling, rollback/abort sequencing, and the
+  content-blind `/health` expiry warning.
 - [Workload contract v1](workload-contract.md): Owner-side requirement
   declaration for moving Hugin across nodes, including drain/verify/restore
   boundaries and the dependency map for Munin, Mimir, and M5.
