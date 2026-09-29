@@ -1,5 +1,28 @@
 # Hugin — Status
 
+## 2026-09-28 — production restored at `652d373`
+
+- **Deployed** `652d3732cafdfd8db9215a0fca5c0d1856603b8c` (#391 fresh-host
+  deploy fix + #393 worker liveness) with `./scripts/deploy-pi.sh`. Attempt 1
+  failed host resolution before any remote change; attempt 2 hit an SSH
+  timeout during a network route change and left the host markerless as
+  designed; the idempotent third run passed every acceptance gate.
+- **Verified:** `.deployed-commit` equals the SHA; `hugin.service` and both
+  timers active; `/health` ok with `codex_sandbox.available: true`;
+  `hugin-liveness` reports `healthy-idle`; the broker answers authenticated
+  requests on its tailnet port; the M5 gateway credential (#394, rotated via
+  the gateway's staged workflow, expires 2026-10-27) authenticates; an
+  end-to-end `Runtime: homeserver` canary returned the expected answer.
+- **Correction to the 2026-09-27 entry:** there was no queued task to resume.
+  The one pending task had already been completed by an owner-selected inline
+  fallback and cancelled, so acceptance used synthetic canaries instead.
+- Closed #389, #390, #394.
+
+**Next:** #396 (a gateway escalation is recorded as `completed` with empty
+output; cold-load request fails before the task timeout); #395 (one-command key
+rotation + expiry warning before 2026-10-27); consumers of the liveness contract
+are tracked in their own repositories.
+
 ## 2026-09-27 — production outage diagnosed; fresh-host deploy fix in review
 
 - **Outage:** Hugin has not run in production since 2026-08-29 (last
