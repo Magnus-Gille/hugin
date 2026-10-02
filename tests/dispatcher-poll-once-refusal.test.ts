@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface FakeEntry {
   id: string;
@@ -23,11 +24,24 @@ interface FakeWrite {
 }
 
 describe("pollOnce — managed checkout refusal", () => {
+  const fakeHomes: string[] = [];
+
   beforeEach(() => {
     vi.resetModules();
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
+  });
+
+  afterAll(() => {
+    // Dispatcher log streams can still be opening when pollOnce resolves.
+    // Keep their parent directories alive through worker shutdown, then remove
+    // only the homes created by this suite.
+    process.once("exit", () => {
+      for (const fakeHome of fakeHomes) {
+        fs.rmSync(fakeHome, { recursive: true, force: true });
+      }
+    });
   });
 
   afterEach(() => {
@@ -36,8 +50,15 @@ describe("pollOnce — managed checkout refusal", () => {
     vi.unstubAllGlobals();
   });
 
+  function createFakeHome(): string {
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "hugin-test-home-"));
+    expect(path.relative(process.cwd(), fakeHome)).toMatch(/^\.\.(?:[/\\]|$)/);
+    fakeHomes.push(fakeHome);
+    return fakeHome;
+  }
+
   it("short-circuits before model spend, classifies as infra failure, and persists checkout-gate friction", async () => {
-    const fakeHome = path.join(process.cwd(), ".tmp-test-home");
+    const fakeHome = createFakeHome();
     fs.mkdirSync(path.join(fakeHome, ".hugin"), { recursive: true });
 
     vi.stubEnv("MUNIN_API_KEY", "test-key");
@@ -282,7 +303,7 @@ Edit the repository.`;
   });
 
   it("classifies orchestrator pi-harness admission refusal as infra failure, persists friction, and marks the checkout contaminated", async () => {
-    const fakeHome = path.join(process.cwd(), ".tmp-test-home");
+    const fakeHome = createFakeHome();
     fs.mkdirSync(path.join(fakeHome, ".hugin", "logs"), { recursive: true });
 
     vi.stubEnv("MUNIN_API_KEY", "test-key");
@@ -554,7 +575,7 @@ Edit the repository.`;
   });
 
   it("marks repositoryOutcome checkout-contaminated when pi-harness binding admission fails after a clean checkout gate", async () => {
-    const fakeHome = path.join(process.cwd(), ".tmp-test-home");
+    const fakeHome = createFakeHome();
     fs.mkdirSync(path.join(fakeHome, ".hugin", "logs"), { recursive: true });
 
     vi.stubEnv("MUNIN_API_KEY", "test-key");
