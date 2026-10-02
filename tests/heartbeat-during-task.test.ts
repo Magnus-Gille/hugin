@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface FakeWrite {
   namespace: string;
@@ -14,12 +15,22 @@ interface FakeWrite {
 // without a during-execution heartbeat a busy-but-alive worker looks
 // identical to a dead one from Munin's `tasks/_heartbeat` entry alone.
 describe("heartbeat during task execution (#389)", () => {
+  const fakeHomes: string[] = [];
+
   beforeEach(() => {
     vi.resetModules();
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
     vi.useFakeTimers();
+  });
+
+  afterAll(() => {
+    process.once("exit", () => {
+      for (const fakeHome of fakeHomes) {
+        fs.rmSync(fakeHome, { recursive: true, force: true });
+      }
+    });
   });
 
   afterEach(() => {
@@ -33,7 +44,9 @@ describe("heartbeat during task execution (#389)", () => {
     writes: FakeWrite[],
     getLoadedModels?: () => Promise<Record<string, string[]>>,
   ) {
-    const fakeHome = path.join(process.cwd(), ".tmp-test-home-heartbeat");
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "hugin-test-home-heartbeat-"));
+    expect(path.relative(process.cwd(), fakeHome)).toMatch(/^\.\.(?:[/\\]|$)/);
+    fakeHomes.push(fakeHome);
     fs.mkdirSync(path.join(fakeHome, ".hugin"), { recursive: true });
 
     vi.stubEnv("MUNIN_API_KEY", "test-key");
@@ -127,10 +140,6 @@ describe("heartbeat during task execution (#389)", () => {
     expect(Date.now() - Date.parse(parsed.polled_at)).toBeLessThan(1_000);
 
     __test__.stopTaskHeartbeat();
-    fs.rmSync(path.join(process.cwd(), ".tmp-test-home-heartbeat"), {
-      recursive: true,
-      force: true,
-    });
   });
 
   it("stops emitting the during-task heartbeat once the timer is cleared", async () => {
@@ -150,11 +159,6 @@ describe("heartbeat during task execution (#389)", () => {
     await vi.advanceTimersByTimeAsync(__test__.LEASE_RENEWAL_INTERVAL_MS * 3);
     const countAfterStop = writes.filter((w) => w.namespace === "tasks/_heartbeat").length;
     expect(countAfterStop).toBe(countAfterOneTick);
-
-    fs.rmSync(path.join(process.cwd(), ".tmp-test-home-heartbeat"), {
-      recursive: true,
-      force: true,
-    });
   });
 
   it("also stops the heartbeat when the timer's own currentTask guard fires (task changed underneath it)", async () => {
@@ -171,11 +175,6 @@ describe("heartbeat during task execution (#389)", () => {
     await vi.advanceTimersByTimeAsync(__test__.LEASE_RENEWAL_INTERVAL_MS * 2);
     const heartbeatWrites = writes.filter((w) => w.namespace === "tasks/_heartbeat");
     expect(heartbeatWrites.length).toBe(0);
-
-    fs.rmSync(path.join(process.cwd(), ".tmp-test-home-heartbeat"), {
-      recursive: true,
-      force: true,
-    });
   });
 
   it("continues heartbeats after lease renewal stops during delivery", async () => {
@@ -204,10 +203,6 @@ describe("heartbeat during task execution (#389)", () => {
 
     __test__.stopTaskHeartbeat();
     __test__.setCurrentTaskForTest(null);
-    fs.rmSync(path.join(process.cwd(), ".tmp-test-home-heartbeat"), {
-      recursive: true,
-      force: true,
-    });
   });
 
   it("serializes overlapping emissions and writes the newest snapshot last", async () => {
@@ -240,10 +235,5 @@ describe("heartbeat during task execution (#389)", () => {
       null,
       "tasks/old-task",
     ]);
-
-    fs.rmSync(path.join(process.cwd(), ".tmp-test-home-heartbeat"), {
-      recursive: true,
-      force: true,
-    });
   });
 });
