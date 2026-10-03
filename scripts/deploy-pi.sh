@@ -220,16 +220,6 @@ else
   echo "  The post-restart in-service health acceptance will remain authoritative."
 fi
 
-echo "==> Refreshing Claude config on the Pi (claude-config bootstrap)..."
-# Config now lives in the versioned Magnus-Gille/claude-config repo (+ claude-skills,
-# skills-private), consumed via symlinks. Pull latest + re-run bootstrap instead of the
-# old rsync (which would clobber the symlinks with real dirs). See claude-config/README.md.
-# See scripts/lib/claude-config-bootstrap.sh (issue #153): missing checkout is optional
-# infra and informational, a broken existing checkout stays a real WARNING.
-# shellcheck source=lib/claude-config-bootstrap.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/claude-config-bootstrap.sh"
-claude_config_bootstrap "$REMOTE"
-
 echo "==> Installing CLI update cron job..."
 CRON_CMD="0 4 * * * $REMOTE_DIR/scripts/update-cli.sh 2>&1 | logger -t hugin-update"
 ssh "$REMOTE" "crontab -l 2>/dev/null | grep -v 'update-cli.sh' | { cat; echo '$CRON_CMD'; } | crontab -"

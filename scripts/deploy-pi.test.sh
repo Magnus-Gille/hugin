@@ -41,8 +41,13 @@ printf 'ssh %s\n' "$call" >>"$CALL_LOG"
 if [[ -n "${FAKE_SSH_FAIL_MATCH:-}" && "$call" == *"$FAKE_SSH_FAIL_MATCH"* ]]; then
   exit "${FAKE_SSH_FAIL_RC:-99}"
 fi
+# Model an existing checkout so the regression catches the old deploy path's
+# refresh even when the optional repository is present on the Pi.
 if [[ "$call" == *"test -d ~/repos/claude-config"* ]]; then
-  exit 1
+  exit 0
+fi
+if [[ "$call" == *"cd ~/repos/claude-config && git pull -q --ff-only && ./bootstrap.sh --no-plugins"* ]]; then
+  exit 0
 fi
 if [[ "$call" == *"curl -fsS http://127.0.0.1:3032/health"* ]]; then
   # Execute the exact remote command string so local-to-remote quote loss is a
@@ -358,6 +363,7 @@ full_first_ssh="$(grep -m1 '^ssh ' "$CALL_LOG")"
 assert_contains "$full_first_ssh" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "marker invalidation is the first remote command"
 assert_contains "$full_calls" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "deployment invalidates the old marker"
 assert_order "$full_calls" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "rsync " "marker invalidation precedes payload sync"
+assert_not_contains "$full_calls" "claude-config" "normal deployment leaves optional Claude config maintenance to its owner"
 assert_not_contains "$full_calls" "git fetch origin" "deployment never depends on remote Git fetch"
 assert_not_contains "$full_calls" "git reset" "deployment never depends on a remote Git checkout"
 assert_contains "$full_calls" "npm ci --omit=dev" "deployment installs the shipped lockfile deterministically"

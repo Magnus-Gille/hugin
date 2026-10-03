@@ -14,7 +14,8 @@
 #
 # To refresh a machine's config now:
 #   ssh <host> 'cd ~/repos/claude-config && git pull --ff-only && ./bootstrap.sh'
-# (deploy-pi.sh does this automatically.)
+# Run this only as separately authorized maintenance for the claude-config owner;
+# deploy-pi.sh does not refresh it.
 echo "sync-claude-config.sh is DEPRECATED — config now lives in the claude-config repo." >&2
 echo "Run: ssh <host> 'cd ~/repos/claude-config && git pull --ff-only && ./bootstrap.sh'" >&2
 exit 0
