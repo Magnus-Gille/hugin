@@ -20,6 +20,7 @@ import {
 } from "./savings.js";
 import { parseIntEnv, isSavingsEnabled, resolveSavingsBaselineModel } from "./config.js";
 import { selectOrinMacroRoute } from "./orin-macro-route.js";
+import type { TaskType } from "./plan.js";
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -36,6 +37,8 @@ export interface OrchestratorTaskInput {
    * the sensitivity guard passes, so it never materializes for a rejected task.
    */
   injectedContext?: string;
+  /** Optional, content-blind observation of normalized planner identities. */
+  onPlanObservation?: (plan: readonly { id: string; taskType: TaskType }[]) => void;
 }
 
 export interface OrchestratorExecResult {
@@ -259,6 +262,7 @@ export async function runOrchestratorTask(
         taskType,
         sensitivity: input.sensitivity,
       }),
+    onPlanObservation: input.onPlanObservation,
   }).then((result): OrchestrationResult | "TIMEOUT" => result);
 
   // Race the engine against the timeout.

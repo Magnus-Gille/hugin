@@ -47,6 +47,33 @@ function buildMockInvoker(
 }
 
 describe("runOrchestration — happy fanout", () => {
+  it("observes normalized planned identities before execution and isolates observer errors", async () => {
+    const plan = JSON.stringify({ subtasks: [
+      { id: "child-a", prompt: "private prompt", taskType: "code-review" },
+    ] });
+    const observed: unknown[] = [];
+    const result = await runOrchestration("task", buildMockInvoker(new Map([
+      ["planner", [ok(plan)]],
+      ["worker", [ok("worker result")]],
+      ["synthesizer", [ok("final")]],
+    ])), undefined, { onPlanObservation: (children) => {
+      observed.push(children);
+      throw new Error("observer failure");
+    } });
+    expect(observed).toEqual([[{ id: "child-a", taskType: "code-review" }]]);
+    expect(result.ok).toBe(true);
+  });
+
+  it("does not report a parser fallback as a planned child", async () => {
+    const observed: unknown[] = [];
+    await runOrchestration("task", buildMockInvoker(new Map([
+      ["planner", [ok("not a plan")]],
+      ["worker", [ok("worker result")]],
+      ["synthesizer", [ok("final")]],
+    ])), undefined, { onPlanObservation: (children) => observed.push(children) });
+    expect(observed).toEqual([]);
+  });
+
   it("planner returns 3 subtasks → 3 worker calls → synthesizer merges → ok:true", async () => {
     const responses = new Map<OrchestratorRole, WorkerResult[]>([
       ["planner", [ok(VALID_PLAN_3, 0.01)]],

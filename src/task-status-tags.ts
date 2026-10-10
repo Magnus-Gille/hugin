@@ -14,6 +14,7 @@ const TASK_TYPE_PREFIX = "task-type:";
 const TASK_TAXONOMY_PREFIX = "task-taxonomy:";
 const RUNTIME_ROW_PREFIX = "runtime-row:";
 const IDEMPOTENCY_PREFIX = "idempotency:";
+const CODE_HEALTH_ATTEMPT_PREFIX = "code-health-attempt:";
 // Runtime-owned artefact delivery (issue #68). `delivery:*` must survive lease
 // renewal AND the terminal status flip: the nonterminal `delivery:pending`
 // checkpoint and the terminal `delivery:verified`/`delivery:failed` markers are
@@ -41,6 +42,11 @@ export const SCHEDULER_PREDICTION_DIGEST_PREFIX = "scheduler-prediction-sha256:"
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+/** Remove every caller-supplied or stale capture identity before a new claim. */
+export function stripCodeHealthAttemptTags(tags: readonly string[]): string[] {
+  return tags.filter((tag) => !tag.startsWith(CODE_HEALTH_ATTEMPT_PREFIX));
+}
 
 export interface SchedulerDecisionPointer {
   decisionId: string;
@@ -96,7 +102,7 @@ function getRuntimeTag(tags: string[], runtimeFallback?: string): string | undef
 function collectPersistentStatusTags(
   tags: string[],
   runtimeFallback?: string,
-  preserveClaimedSchedulerPointer = false,
+  preserveClaimedPointers = false,
 ): string[] {
   const runtimeTag = getRuntimeTag(tags, runtimeFallback);
   const typeTags = tags.filter((tag) => tag.startsWith(TYPE_PREFIX));
@@ -118,6 +124,15 @@ function collectPersistentStatusTags(
   const taskTaxonomyTags = tags.filter((tag) => tag.startsWith(TASK_TAXONOMY_PREFIX));
   const runtimeRowTags = tags.filter((tag) => tag.startsWith(RUNTIME_ROW_PREFIX));
   const idempotencyTags = tags.filter((tag) => tag.startsWith(IDEMPOTENCY_PREFIX));
+  const rawCodeHealthAttemptTags = tags.filter((tag) => tag.startsWith(CODE_HEALTH_ATTEMPT_PREFIX));
+  const codeHealthAttemptTags = rawCodeHealthAttemptTags.filter((tag) =>
+    UUID_PATTERN.test(tag.slice(CODE_HEALTH_ATTEMPT_PREFIX.length)),
+  );
+  const codeHealthAttemptTag = preserveClaimedPointers
+    && rawCodeHealthAttemptTags.length === 1
+    && codeHealthAttemptTags.length === 1
+    ? codeHealthAttemptTags
+    : [];
   const rawSchedulerDecisionTags = tags.filter((tag) => tag.startsWith(SCHEDULER_DECISION_PREFIX));
   const rawSchedulerPredictionTags = tags.filter((tag) => tag.startsWith(SCHEDULER_PREDICTION_DIGEST_PREFIX));
   const schedulerDecisionTags = rawSchedulerDecisionTags.filter((tag) => {
@@ -128,7 +143,7 @@ function collectPersistentStatusTags(
     const value = tag.slice(SCHEDULER_PREDICTION_DIGEST_PREFIX.length);
     return SHA256_PATTERN.test(value);
   });
-  const schedulerPointerTags = preserveClaimedSchedulerPointer
+  const schedulerPointerTags = preserveClaimedPointers
     && rawSchedulerDecisionTags.length === 1
     && rawSchedulerPredictionTags.length === 1
     && schedulerDecisionTags.length === 1
@@ -153,6 +168,7 @@ function collectPersistentStatusTags(
     ...taskTaxonomyTags,
     ...runtimeRowTags,
     ...idempotencyTags,
+    ...codeHealthAttemptTag,
     ...schedulerPointerTags,
   ]);
 }
@@ -201,11 +217,11 @@ export function buildLeasedStatusTags(
   lifecycle: string,
   claimedBy: string,
   leaseExpires: string,
-  preserveClaimedSchedulerPointer = false,
+  preserveClaimedPointers = false,
 ): string[] {
   return [
     lifecycle,
-    ...(preserveClaimedSchedulerPointer
+    ...(preserveClaimedPointers
       ? getClaimedPersistentStatusTags(baseTags)
       : getPersistentStatusTags(baseTags)),
     `claimed_by:${claimedBy}`,

@@ -66,6 +66,7 @@ describe("pollOnce — managed checkout refusal", () => {
     vi.stubEnv("HUGIN_ALLOWED_SUBMITTERS", "hugin");
     vi.stubEnv("HUGIN_SIGNING_POLICY", "off");
     vi.stubEnv("HUGIN_SCHEDULER_SHADOW", "off");
+    vi.stubEnv("HUGIN_CODE_HEALTH_CAPTURE", "on");
     vi.stubEnv("HUGIN_VERSION_DRIFT_CHECK", "off");
     vi.stubEnv("HUGIN_SENSITIVITY_CHECKPOINT_SECRET", "x".repeat(32));
     vi.stubEnv("HOME", fakeHome);
@@ -80,6 +81,7 @@ describe("pollOnce — managed checkout refusal", () => {
     const taskContent = `## Task: Managed checkout refusal
 
 - **Runtime:** claude
+- **Context:** repo:sagascript
 - **Working dir:** /home/magnus/repos/demo
 - **Timeout:** 60000
 - **Capabilities:** code
@@ -236,7 +238,7 @@ Edit the repository.`;
 
     expect(result).toEqual({ hadTask: true, queueDepth: 1 });
     expect(prepareManagedCheckoutMock).toHaveBeenCalledWith(
-      "/home/magnus/repos/demo",
+      "/home/magnus/repos/sagascript",
       "task-checkout-refusal",
       expect.objectContaining({
         reposRoot: "/home/magnus/repos",
@@ -249,6 +251,8 @@ Edit the repository.`;
     expect(finalStatus?.tags).toEqual(
       expect.arrayContaining(["failed", "failure:infra", "runtime:claude"]),
     );
+    const attemptTag = finalStatus?.tags.find((tag) => tag.startsWith("code-health-attempt:"));
+    expect(attemptTag).toMatch(/^code-health-attempt:[0-9a-f-]{36}$/i);
 
     const resultEntry = entries.get(`${taskNs}/result`);
     expect(resultEntry?.content).toContain("- **Failure kind:** CHECKOUT_CONTAMINATED");
@@ -262,12 +266,26 @@ Edit the repository.`;
       exitCode: number;
       errorMessage?: string;
       repositoryOutcome?: { state?: string };
+      codeHealth?: {
+        identity?: { kind?: string; attemptId?: string };
+        executionFact?: string;
+        assessmentState?: string;
+        repo?: { owner?: string; name?: string };
+        observedModel?: string | null;
+      };
     };
     expect(structured.lifecycle).toBe("failed");
     expect(structured.outcome).toBe("failed");
     expect(structured.exitCode).toBe(1);
     expect(structured.errorMessage).toBe("working tree has ignored leftover state");
     expect(structured.repositoryOutcome?.state).toBe("checkout-contaminated");
+    expect(structured.codeHealth).toMatchObject({
+      identity: { kind: "attempt", attemptId: attemptTag?.slice("code-health-attempt:".length) },
+      executionFact: "failed",
+      assessmentState: "missing",
+      repo: { owner: "Magnus-Gille", name: "sagascript" },
+      observedModel: null,
+    });
 
     const frictionWrite = writes.find((write) => write.namespace === "signals/friction");
     expect(frictionWrite).toBeDefined();

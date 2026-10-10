@@ -8,6 +8,7 @@ import {
   buildPipelineParentCancelledTags,
   buildPipelineParentSuccessTags,
   buildTerminalStatusTags,
+  getClaimedPersistentStatusTags,
   getPersistentStatusTags,
   mergeClaimedSchedulerPointer,
   shouldDeferCancellationToLocalOwner,
@@ -132,6 +133,16 @@ describe("task status tag helpers", () => {
       "scheduler-decision:not-a-uuid",
       validDigest,
     ])).toEqual(["runtime:codex"]);
+  });
+
+  it("preserves only one strict code-health UUID after claim and drops it before claim", () => {
+    const attempt = "34f2d430-6c31-47de-860a-8b22bc97f4d4";
+    const tag = `code-health-attempt:${attempt}`;
+    expect(getPersistentStatusTags(["runtime:codex", tag])).toEqual(["runtime:codex"]);
+    expect(getClaimedPersistentStatusTags(["runtime:codex", tag])).toEqual(["runtime:codex", tag]);
+    expect(getClaimedPersistentStatusTags(["runtime:codex", "code-health-attempt:arbitrary"]))
+      .toEqual(["runtime:codex"]);
+    expect(getClaimedPersistentStatusTags(["runtime:codex", tag, tag])).toEqual(["runtime:codex"]);
   });
 
   it("never promotes a valid-looking caller pointer before a successful claim", () => {

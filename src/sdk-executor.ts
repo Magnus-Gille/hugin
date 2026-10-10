@@ -1,13 +1,25 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { query, type Query } from "@anthropic-ai/claude-agent-sdk";
+import {
+  createSdkMcpServer,
+  query,
+  type McpSdkServerConfigWithInstance,
+  type Query,
+} from "@anthropic-ai/claude-agent-sdk";
 import { redactCredentialTokens } from "./exfiltration-scanner.js";
 import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
+import {
+  createCodeHealthCaptureTool,
+  isCodeHealthCaptureConfigValid,
+  type CodeHealthCaptureConfig,
+  type CodeHealthCaptureSnapshot,
+  type CodeHealthCaptureTool,
+} from "./code-health-capture.js";
 
 type HttpMcpServer = { type: "http"; url: string; headers?: Record<string, string> };
 type StdioMcpServer = { type: "stdio"; command: string; args: string[]; env: Record<string, string> };
-type McpServerEntry = HttpMcpServer | StdioMcpServer;
+type McpServerEntry = HttpMcpServer | StdioMcpServer | McpSdkServerConfigWithInstance;
 type ClaudePermissionMode = "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk";
 
 const FRICTION_MCP_DIST_PATH = fileURLToPath(new URL("./friction-mcp.js", import.meta.url));
@@ -81,6 +93,8 @@ export interface SdkTaskConfig {
    * retrieval and session-flow telemetry to correlate queries with outcomes.
    */
   muninSessionId?: string;
+  /** Dispatcher-created binding; it exposes no tool unless every opt-in gate is active. */
+  codeHealthCapture?: CodeHealthCaptureConfig;
 }
 
 export interface SdkExecutorResult {
@@ -91,6 +105,8 @@ export interface SdkExecutorResult {
   costUsd: number | null;
   numTurns: number | null;
   durationApiMs: number | null;
+  /** Typed records actually supplied through the optional in-process tool. */
+  codeHealthCapture?: CodeHealthCaptureSnapshot;
 }
 
 // --- SDK Executor ---
@@ -237,6 +253,8 @@ export async function executeSdkTask(
   let durationApiMs: number | null = null;
   let exitCode: number | "TIMEOUT" = 1;
   let queryInstance: Query | null = null;
+  let codeHealthCaptureTool: CodeHealthCaptureTool | null = null;
+  let observedModel: string | null = null;
   // Accumulates stderr from the spawned Claude Code process.
   // Declared outside try so the catch/finally can read it.
   let stderrBuf = "";
@@ -282,6 +300,30 @@ export async function executeSdkTask(
       };
     }
 
+    // This fixed in-process tool stays behind all existing trust boundaries.
+    // It receives only the dispatcher's validated identity and fixed delivery
+    // configuration; no permission mode, allowed-tool list, prompt, or SDK env
+    // is changed here.
+    if (
+      process.env.HUGIN_FRICTION_INJECTION === "on" &&
+      process.env.HUGIN_CODE_HEALTH_CAPTURE === "on" &&
+      task.permissionProfile === "trusted-code" &&
+      task.muninUrl &&
+      task.muninApiKey &&
+      task.codeHealthCapture &&
+      isCodeHealthCaptureConfigValid(task.codeHealthCapture, taskId)
+    ) {
+      codeHealthCaptureTool = createCodeHealthCaptureTool({
+        ...task.codeHealthCapture,
+        observedModel: () => observedModel,
+      });
+      mcpServers["code-health"] = createSdkMcpServer({
+        name: "code-health",
+        version: "1.0.0",
+        tools: [codeHealthCaptureTool.contextTool, codeHealthCaptureTool],
+      });
+    }
+
     // Optional arxiv MCP injection — opt-in via HUGIN_ARXIV_MCP=on
     // Provides mcp__arxiv__search_papers, read_paper, download_paper, etc.
     // Requires uvx (astral.sh/uv) to be available on PATH.
@@ -324,6 +366,9 @@ export async function executeSdkTask(
     for await (const message of queryInstance) {
       switch (message.type) {
         case "assistant": {
+          if (typeof message.message.model === "string") {
+            observedModel = message.message.model;
+          }
           // Extract text content from the assistant message
           for (const block of message.message.content) {
             if (
@@ -389,6 +434,11 @@ export async function executeSdkTask(
     clearTimeout(timer);
     if (closeTimer) clearTimeout(closeTimer);
 
+    // Tool callbacks can still be finishing a bounded local outbox operation
+    // when SDK cancellation/timeout closes the query. Join them before
+    // projecting capture evidence so accepted reports are not lost.
+    await codeHealthCaptureTool?.settle();
+
     // Ensure query is cleaned up on timeout
     if (queryInstance && timedOut) {
       try {
@@ -429,5 +479,8 @@ export async function executeSdkTask(
     costUsd,
     numTurns,
     durationApiMs,
+    ...(codeHealthCaptureTool?.snapshot()
+      ? { codeHealthCapture: codeHealthCaptureTool.snapshot() }
+      : {}),
   };
 }

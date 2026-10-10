@@ -18,6 +18,62 @@ import {
 import { huginTaskIdentitySchema } from "./task-identity.js";
 import { learningTaskExecutionEvidenceSchema } from "./learning-task-handshake.js";
 import { researchGroundingSchema } from "./research-grounding.js";
+import { taskTypeSchema } from "./broker/task-type-metadata.js";
+
+const codeHealthUuidSchema = z.string().regex(
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+);
+const codeHealthShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i);
+const codeHealthOpaqueRefSchema = z.string().regex(/^ref:[a-z0-9][a-z0-9-]{0,95}$/);
+
+export const codeHealthIdentitySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("attempt"), attemptId: codeHealthUuidSchema }).strict(),
+  z.object({
+    kind: z.literal("not-started-refused"),
+    notStartedId: z.string().regex(/^[0-9a-f]{64}$/),
+    rejectedStatusRevisionSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  }).strict(),
+]);
+
+export const codeHealthChildSchema = z.object({
+  identitySha256: z.string().regex(/^[0-9a-f]{64}$/),
+  taskType: taskTypeSchema,
+  outcome: z.enum(["planned", "completed", "failed", "cancelled", "timed_out"]),
+}).strict();
+
+export const codeHealthCaptureDeliverySchema = z.object({
+  recordId: codeHealthOpaqueRefSchema,
+  recordKind: z.enum(["observation", "assessment"]),
+  status: z.enum(["acknowledged", "queued", "unsaved"]),
+  updatedAt: z.string().datetime().optional(),
+}).strict();
+
+/** Optional content-blind lifecycle binding; canonical assessments are a separate producer. */
+export const codeHealthEnvelopeSchema = z.object({
+  schemaVersion: z.literal(1),
+  taskId: z.string().min(1),
+  taskNamespace: z.string().min(1),
+  identity: codeHealthIdentitySchema,
+  repo: z.object({
+    owner: z.literal("Magnus-Gille"),
+    name: z.enum(["sagascript", "gille-inference"]),
+  }).strict(),
+  beforeSha: codeHealthShaSchema.nullable(),
+  afterSha: codeHealthShaSchema.nullable(),
+  executionFact: z.enum([
+    "completed", "failed", "timed_out", "cancelled", "not_started_refused",
+  ]),
+  assessmentState: z.enum(["missing", "partial", "complete"]),
+  observationRefs: z.array(codeHealthOpaqueRefSchema).max(32),
+  assessmentRefs: z.array(codeHealthOpaqueRefSchema).max(32),
+  taskClass: z.null(),
+  requestedModel: z.string().max(128).regex(/^[A-Za-z0-9._:/-]*$/).nullable(),
+  observedModel: z.string().max(128).regex(/^[A-Za-z0-9._:/-]*$/).nullable(),
+  plannedChildren: z.array(codeHealthChildSchema).max(32),
+  plannedChildrenOmitted: z.number().int().nonnegative(),
+  captureDelivery: z.array(codeHealthCaptureDeliverySchema).max(32).optional(),
+}).strict();
+export type CodeHealthEnvelope = z.infer<typeof codeHealthEnvelopeSchema>;
 
 export const taskExecutionOutcomeSchema = z.enum([
   "completed",
@@ -497,10 +553,88 @@ export const structuredTaskResultSchema = z.object({
   artifactDelivery: artifactDeliverySchema.optional(),
   /** Hugin-owned, content-blind web-grounding acceptance evidence. */
   researchGrounding: researchGroundingSchema.optional(),
+  codeHealth: codeHealthEnvelopeSchema.optional(),
   orchestratorOutcomes: z.array(orchestratorOutcomeSchema).optional(),
   savings: savingsSummarySchema.optional(),
   provenance: taskSubmissionProvenanceSchema.optional(),
 }).superRefine((value, ctx) => {
+  const codeHealth = value.codeHealth;
+  if (codeHealth) {
+    if (codeHealth.taskId !== value.taskId || codeHealth.taskNamespace !== value.taskNamespace) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["codeHealth", "taskNamespace"],
+        message: "code-health identity must match the structured task result",
+      });
+    }
+    const expectedFact = value.lifecycle === "cancelled"
+      ? "cancelled"
+      : value.outcome === "timed_out"
+        ? "timed_out"
+        : value.lifecycle === "completed"
+          ? "completed"
+          : "failed";
+    // A durable `delivery:pending` checkpoint can only be written after the
+    // executor completed. Recovery may later fail artifact delivery and must
+    // preserve that independent execution fact in the failed terminal result.
+    // Keep this exception closed to the exact recovery result shape; do not
+    // weaken refusal, cancellation, timeout, or other lifecycle validation.
+    const completedBeforeDeliveryFailure = codeHealth.executionFact === "completed"
+      && value.resultSource === "delivery-reconciliation"
+      && value.executor === "dispatcher"
+      && value.lifecycle === "failed"
+      && value.outcome === "failed"
+      && value.exitCode === 2
+      && value.artifactDelivery !== undefined
+      && codeHealth.identity.kind === "attempt";
+    if (codeHealth.executionFact !== "not_started_refused"
+      && codeHealth.executionFact !== expectedFact
+      && !completedBeforeDeliveryFailure) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["codeHealth", "executionFact"],
+        message: "code-health execution fact must match the structured task lifecycle",
+      });
+    }
+    if (codeHealth.executionFact === "not_started_refused"
+      && codeHealth.identity.kind !== "not-started-refused") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["codeHealth", "identity"],
+        message: "pre-start refusal requires a separate not-started identity",
+      });
+    }
+    if (codeHealth.executionFact === "not_started_refused"
+      && (value.lifecycle !== "failed" || value.outcome !== "failed")) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["codeHealth", "executionFact"],
+        message: "pre-start refusal must remain a failed, non-executed task result",
+      });
+    }
+    if (codeHealth.executionFact !== "not_started_refused"
+      && codeHealth.identity.kind !== "attempt") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["codeHealth", "identity"],
+        message: "executed lifecycle requires the accepted attempt identity",
+      });
+    }
+    if (codeHealth.assessmentState === "missing" && codeHealth.assessmentRefs.length > 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["codeHealth", "assessmentRefs"],
+        message: "missing assessment cannot carry assessment references",
+      });
+    }
+    if (codeHealth.assessmentState !== "missing" && codeHealth.assessmentRefs.length === 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["codeHealth", "assessmentRefs"],
+        message: "partial or complete assessment requires an opaque assessment reference",
+      });
+    }
+  }
   const learning = value.runtimeMetadata?.learningTask;
   if (!learning) return;
   const producerIdentity = value.runtimeMetadata?.huginTaskIdentity;

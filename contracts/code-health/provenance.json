@@ -1,0 +1,23 @@
+{
+  "source_repository": "Magnus-Gille/grimnir",
+  "source_revision": "7df005ce952a52816597d9888da977d689a631fd",
+  "source_tree": "768d661f090a9db5e96e2e1b8f2975a9490936bc",
+  "contract_version": "1.0",
+  "files": [
+    {
+      "path": "docs/code-health-agent-v1.schema.json",
+      "source_git_blob": "fad784b1337266147d8a6eb030b8e463e216ceeb",
+      "sha256": "c329c167c9537382613dbc93950ecb7c82e8b4e42b66562a5821abc9d76e3bea"
+    },
+    {
+      "path": "scripts/lib/code-health-agent.mjs",
+      "source_git_blob": "e343dfb0b0b4e9029370738883e991d429539a5c",
+      "sha256": "9d887baea538e9801785122448b098e37a803ead244fea3f167a338d79ccb258"
+    },
+    {
+      "path": "scripts/lib/code-health-schema.mjs",
+      "source_git_blob": "225af390d3e4c5ac62615ef0dc56104f9f02a34a",
+      "sha256": "0bf6801120221ea0a21b64b8a0d15efe96e6f51a8858f4be042878f36885eb59"
+    }
+  ]
+}
