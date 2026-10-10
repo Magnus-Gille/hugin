@@ -15,9 +15,14 @@ import { redactCredentialTokens } from "../exfiltration-scanner.js";
 import { MAX_MUNIN_TAGS, MAX_MUNIN_TAG_CHARS } from "./munin-key.js";
 
 export const FRICTION_OUTBOX_SCHEMA_VERSION = 1 as const;
+export const CODE_HEALTH_OUTBOX_SCHEMA_VERSION = 2 as const;
 export const DEFAULT_FRICTION_OUTBOX_MAX_ENTRIES = 256;
 export const DEFAULT_FRICTION_OUTBOX_MAX_BYTES = 1_048_576;
 export const DEFAULT_FRICTION_OUTBOX_REPLAY_TIMEOUT_MS = 2_000;
+export const CODE_HEALTH_PENDING_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+export const CODE_HEALTH_DELIVERY_TIMEOUT_MS = 2_000;
+const MAX_CODE_HEALTH_RECORD_BYTES = 16 * 1024;
+const MAX_CODE_HEALTH_TERMINAL_MARKERS = 256;
 const MAX_CONTENT_CHARS = 64_000;
 const MAX_NAMESPACE_CHARS = 200;
 const MAX_KEY_CHARS = 240;
@@ -44,6 +49,49 @@ const frictionOutboxEntrySchema = z.object({
 
 export type FrictionOutboxEntry = z.infer<typeof frictionOutboxEntrySchema>;
 
+export type CodeHealthClassification = "public" | "internal" | "client-confidential" | "client-restricted";
+
+export interface CodeHealthAppendRequest {
+  action: "append";
+  namespace: string;
+  idempotency_key: string;
+  record: Record<string, unknown>;
+  classification?: CodeHealthClassification;
+  expected_updated_at?: string;
+}
+
+export interface CodeHealthAppendReceipt {
+  record_id: string;
+  collected_at: string;
+  expires_at: string;
+  updated_at: string;
+  classification: CodeHealthClassification;
+}
+
+export const codeHealthAppendRequestSchema = z.object({
+  action: z.literal("append"),
+  namespace: z.string().min(1).max(MAX_NAMESPACE_CHARS),
+  idempotency_key: z.string().uuid(),
+  record: z.record(z.string(), z.unknown()),
+  classification: z.enum(["public", "internal", "client-confidential", "client-restricted"]).optional(),
+  expected_updated_at: z.string().datetime().optional(),
+}).strict();
+
+const codeHealthOutboxEntrySchema = z.object({
+  version: z.literal(CODE_HEALTH_OUTBOX_SCHEMA_VERSION),
+  enqueuedAt: z.string().datetime(),
+  request: codeHealthAppendRequestSchema,
+}).strict();
+const terminalMarkerSchema = z.object({
+  version: z.literal(1),
+  kind: z.enum(["expired", "permanent_refusal"]),
+  at: z.string().datetime(),
+}).strict();
+
+export type CodeHealthOutboxEntry = z.infer<typeof codeHealthOutboxEntrySchema>;
+type StoredOutboxEntry = FrictionOutboxEntry | CodeHealthOutboxEntry;
+const storedOutboxEntrySchema = z.union([frictionOutboxEntrySchema, codeHealthOutboxEntrySchema]);
+
 export interface FrictionOutboxWriter {
   write(
     namespace: string,
@@ -58,6 +106,7 @@ export interface FrictionOutboxWriter {
     namespace: string,
     key: string,
   ) => Promise<{ content: string; tags: string[]; classification?: string } | null>;
+  codeHealthAppend?: (request: CodeHealthAppendRequest) => Promise<unknown>;
 }
 
 export interface FrictionOutboxConfig {
@@ -66,6 +115,8 @@ export interface FrictionOutboxConfig {
   maxEntries?: number;
   maxBytes?: number;
   replayTimeoutMs?: number;
+  /** Optional test/host bound; code-health attempts are always capped at two seconds. */
+  codeHealthTimeoutMs?: number;
   now?: () => Date;
   stderr?: (line: string) => void;
 }
@@ -75,11 +126,26 @@ export interface FrictionOutboxStatus {
   pendingBytes: number;
   oldestAt: string | null;
   quarantinedCount: number;
+  codeHealthExpiredCount: number;
+  codeHealthPermanentRefusalCount: number;
 }
 
 export type FrictionOutboxEnqueueResult =
   | (FrictionOutboxStatus & { stored: true; duplicate: boolean })
   | (FrictionOutboxStatus & { stored: false; reason: "outbox_full" | "outbox_error" });
+
+export type CodeHealthOutboxEnqueueResult =
+  | (FrictionOutboxStatus & { stored: true; duplicate: boolean })
+  | (FrictionOutboxStatus & {
+      stored: false;
+      reason: "outbox_full" | "outbox_error" | "invalid_request" | "expired";
+    });
+
+export type CodeHealthOneAttemptResult =
+  | { kind: "response"; response: unknown }
+  | { kind: "queued" }
+  | { kind: "permanent_refusal" }
+  | { kind: "expired" };
 
 export interface FrictionOutboxReplayResult extends FrictionOutboxStatus {
   replayed: number;
@@ -90,7 +156,7 @@ export interface FrictionOutboxReplayResult extends FrictionOutboxStatus {
 interface PendingFile {
   name: string;
   size: number;
-  entry: FrictionOutboxEntry | null;
+  entry: StoredOutboxEntry | null;
   kind: "event" | "orphan-temp" | "orphan-claim" | "malformed";
   quarantined?: boolean;
   completeTemp?: boolean;
@@ -117,6 +183,7 @@ export class FrictionOutbox {
   private readonly maxEntries: number;
   private readonly maxBytes: number;
   private readonly replayTimeoutMs: number;
+  private readonly codeHealthTimeoutMs: number;
   private readonly now: () => Date;
   private readonly stderr: (line: string) => void;
   private readonly activeAdmissions = new Map<string, number>();
@@ -129,6 +196,10 @@ export class FrictionOutbox {
     this.replayTimeoutMs = positiveBound(
       config.replayTimeoutMs,
       DEFAULT_FRICTION_OUTBOX_REPLAY_TIMEOUT_MS,
+    );
+    this.codeHealthTimeoutMs = Math.min(
+      positiveBound(config.codeHealthTimeoutMs, CODE_HEALTH_DELIVERY_TIMEOUT_MS),
+      CODE_HEALTH_DELIVERY_TIMEOUT_MS,
     );
     this.now = config.now ?? (() => new Date());
     this.stderr = config.stderr ?? ((line) => process.stderr.write(line));
@@ -165,17 +236,17 @@ export class FrictionOutbox {
       const unmaterializedAdmissions = [...this.activeAdmissions.entries()]
         .filter(([reservedName]) => !activeIdentityNames.has(reservedName)
           && !current.some((file) => file.name === reservedName
-          || (file.entry !== null && `${identityDigest(file.entry)}.json` === reservedName)));
+          || (file.entry !== null && `${storedIdentityDigest(file.entry)}.json` === reservedName)));
       if (existing) {
         if (existing.kind === "event") {
-          return { stored: true, duplicate: true, ...statusFromFiles(current) };
+          return { stored: true, duplicate: true, ...(await this.statusSnapshot(current)) };
         }
         throw new Error("outbox contains an unsafe event-name collision");
       }
       const matchingTemp = current.some((file) => file.kind === "orphan-temp"
         && tempEventIdentity(file.name) === fileName);
       if (matchingTemp && await waitForStoredEvent(finalPath, normalized)) {
-        return { stored: true, duplicate: true, ...statusFromFiles(await this.listPending()) };
+        return { stored: true, duplicate: true, ...(await this.statusSnapshot(await this.listPending())) };
       }
       if (
         activeIdentityNames.size + unmaterializedAdmissions.length >= this.maxEntries
@@ -183,7 +254,7 @@ export class FrictionOutbox {
           + unmaterializedAdmissions.reduce((total, [, size]) => total + size, 0)
           + Buffer.byteLength(encoded) > this.maxBytes
       ) {
-        return { stored: false, reason: "outbox_full", ...statusFromFiles(current) };
+        return { stored: false, reason: "outbox_full", ...(await this.statusSnapshot(current)) };
       }
       this.activeAdmissions.set(fileName, Buffer.byteLength(encoded));
       reservedFileName = fileName;
@@ -219,10 +290,109 @@ export class FrictionOutbox {
       }
       await this.runMaintenance(true, fileName);
       const after = await this.listPending();
-      return { stored: true, duplicate, ...statusFromFiles(after) };
+      return { stored: true, duplicate, ...(await this.statusSnapshot(after)) };
     } catch (error) {
       this.log(`friction-mcp: unable to spool event: ${redactFrictionDiagnostic(error)}\n`);
       return { stored: false, reason: "outbox_error", ...(await this.safeStatus()) };
+    } finally {
+      if (reserved && reservedFileName) this.activeAdmissions.delete(reservedFileName);
+    }
+  }
+
+  async enqueueCodeHealth(request: CodeHealthAppendRequest): Promise<CodeHealthOutboxEnqueueResult> {
+    let reserved = false;
+    let reservedFileName: string | undefined;
+    try {
+      const parsedRequest = codeHealthAppendRequestSchema.parse(request);
+      const recordBytes = Buffer.byteLength(JSON.stringify(parsedRequest.record), "utf8");
+      if (recordBytes > MAX_CODE_HEALTH_RECORD_BYTES) {
+        return { stored: false, reason: "invalid_request", ...(await this.statusSnapshot(await this.listPending())) };
+      }
+      const observedAt = parsedRequest.record.observed_at;
+      if (
+        typeof observedAt !== "string"
+        || !Number.isFinite(Date.parse(observedAt))
+        || Date.parse(observedAt) > this.now().getTime()
+      ) {
+        return { stored: false, reason: "invalid_request", ...(await this.statusSnapshot(await this.listPending())) };
+      }
+      const normalized: CodeHealthOutboxEntry = codeHealthOutboxEntrySchema.parse({
+        version: CODE_HEALTH_OUTBOX_SCHEMA_VERSION,
+        enqueuedAt: this.now().toISOString(),
+        request: parsedRequest,
+      });
+      const encoded = `${JSON.stringify(normalized)}\n`;
+      if (Buffer.byteLength(encoded, "utf8") > MAX_ENTRY_FILE_BYTES) {
+        return { stored: false, reason: "invalid_request", ...(await this.statusSnapshot(await this.listPending())) };
+      }
+      await this.ensureDirectory();
+      await this.runMaintenance(false);
+      if (isCodeHealthExpired(normalized, this.now())) {
+        await this.recordCodeHealthTerminal(normalized, "expired");
+        return { stored: false, reason: "expired", ...(await this.statusSnapshot(await this.listPending())) };
+      }
+      const fileName = `${storedIdentityDigest(normalized)}.json`;
+      const finalPath = path.join(this.directory, fileName);
+      const current = await this.listPending();
+      const existingAtPath = current.find((file) => file.name === fileName);
+      if (existingAtPath && pendingIdentityName(existingAtPath) !== fileName) {
+        throw new Error("outbox contains an unsafe code-health event-name collision");
+      }
+      const existing = existingAtPath ?? current.find((file) => pendingIdentityName(file) === fileName);
+      const activeCurrent = current.filter((file) => !file.quarantined);
+      const activeIdentityNames = new Set(activeCurrent.map(pendingIdentityName));
+      const unmaterializedAdmissions = [...this.activeAdmissions.entries()]
+        .filter(([reservedName]) => !activeIdentityNames.has(reservedName)
+          && !current.some((file) => file.name === reservedName
+          || (file.entry !== null && `${storedIdentityDigest(file.entry)}.json` === reservedName)));
+      if (existing) {
+        if (existing.kind === "event") {
+          return { stored: true, duplicate: true, ...(await this.statusSnapshot(current)) };
+        }
+        throw new Error("outbox contains an unsafe code-health event-name collision");
+      }
+      const matchingTemp = current.some((file) => file.kind === "orphan-temp"
+        && tempEventIdentity(file.name) === fileName);
+      if (matchingTemp && await waitForStoredEvent(finalPath, normalized)) {
+        return { stored: true, duplicate: true, ...(await this.statusSnapshot(await this.listPending())) };
+      }
+      if (
+        activeIdentityNames.size + unmaterializedAdmissions.length >= this.maxEntries
+        || activeCurrent.reduce((total, file) => total + file.size, 0)
+          + unmaterializedAdmissions.reduce((total, [, size]) => total + size, 0)
+          + Buffer.byteLength(encoded) > this.maxBytes
+      ) {
+        return { stored: false, reason: "outbox_full", ...(await this.statusSnapshot(current)) };
+      }
+      this.activeAdmissions.set(fileName, Buffer.byteLength(encoded));
+      reservedFileName = fileName;
+      reserved = true;
+
+      const tempPath = path.join(this.directory, `.${fileName}.${process.pid}.${randomUUID()}.tmp`);
+      const handle = await fs.open(tempPath, "wx", 0o600);
+      let duplicate = false;
+      try {
+        await handle.writeFile(encoded, "utf8");
+        await handle.chmod(0o600);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      try {
+        await fs.link(tempPath, finalPath);
+      } catch (error) {
+        if (isErrno(error, "EEXIST")) duplicate = true;
+        else if (isErrno(error, "ENOENT") && await waitForStoredEvent(finalPath, normalized)) duplicate = true;
+        else throw error;
+      } finally {
+        await fs.unlink(tempPath).catch(() => undefined);
+      }
+      await this.runMaintenance(true, fileName);
+      return { stored: true, duplicate, ...(await this.statusSnapshot(await this.listPending())) };
+    } catch (error) {
+      void error;
+      this.log("hugin: unable to spool code-health event; request was not sent\n");
+      return { stored: false, reason: "outbox_error", ...(await this.statusSnapshot(await this.safeListPending())) };
     } finally {
       if (reserved && reservedFileName) this.activeAdmissions.delete(reservedFileName);
     }
@@ -234,7 +404,82 @@ export class FrictionOutbox {
     } catch (error) {
       this.log(`friction-mcp: unable to maintain outbox bounds: ${redactFrictionDiagnostic(error)}\n`);
     }
-    return statusFromFiles(await this.listPending());
+    return await this.statusSnapshot(await this.listPending());
+  }
+
+  /** Attempt only the durably spooled request, with one bounded fixed-API call. */
+  async sendCodeHealthOnce(
+    request: CodeHealthAppendRequest,
+    writer: Pick<FrictionOutboxWriter, "codeHealthAppend">,
+  ): Promise<CodeHealthOneAttemptResult> {
+    await this.ensureDirectory();
+    await this.runMaintenance(true);
+    const parsed = codeHealthAppendRequestSchema.safeParse(request);
+    if (!parsed.success) return { kind: "queued" };
+    const expectedName = `${codeHealthRequestDigest(parsed.data)}.json`;
+    const pending = (await this.listPending()).find((file) =>
+      file.kind === "event" && file.entry?.version === CODE_HEALTH_OUTBOX_SCHEMA_VERSION
+      && pendingIdentityName(file) === expectedName,
+    );
+    if (!pending?.entry || pending.entry.version !== CODE_HEALTH_OUTBOX_SCHEMA_VERSION) {
+      if (isCodeHealthExpiredRequest(parsed.data, this.now())) {
+        await this.recordCodeHealthTerminal({ version: 2, enqueuedAt: this.now().toISOString(), request: parsed.data }, "expired");
+        return { kind: "expired" };
+      }
+      return { kind: "queued" };
+    }
+    if (isCodeHealthExpired(pending.entry, this.now())) {
+      await this.recordCodeHealthTerminal(pending.entry, "expired");
+      return { kind: "expired" };
+    }
+    if (!writer.codeHealthAppend) return { kind: "queued" };
+    try {
+      const response = await withTimeout(
+        writer.codeHealthAppend(pending.entry.request),
+        this.codeHealthTimeoutMs,
+      );
+      if (isExplicitCodeHealthRefusal(response)) {
+        await this.recordCodeHealthTerminal(pending.entry, "permanent_refusal");
+        return { kind: "permanent_refusal" };
+      }
+      return { kind: "response", response };
+    } catch (error) {
+      if (isCodeHealthPermanentRefusal(error)) {
+        await this.recordCodeHealthTerminal(pending.entry, "permanent_refusal");
+        return { kind: "permanent_refusal" };
+      }
+      this.log("hugin: code-health delivery was ambiguous; exact request retained for retry\n");
+      return { kind: "queued" };
+    }
+  }
+
+  async acknowledgeCodeHealth(request: CodeHealthAppendRequest): Promise<boolean> {
+    const parsed = codeHealthAppendRequestSchema.safeParse(request);
+    if (!parsed.success) return false;
+    const name = `${codeHealthRequestDigest(parsed.data)}.json`;
+    const file = (await this.listPending()).find((candidate) =>
+      candidate.entry?.version === CODE_HEALTH_OUTBOX_SCHEMA_VERSION
+      && pendingIdentityName(candidate) === name,
+    );
+    if (!file) return true;
+    try {
+      await this.removePendingFile(file.name);
+      return true;
+    } catch {
+      this.log("hugin: acknowledged code-health request remains queued for idempotent cleanup\n");
+      return false;
+    }
+  }
+
+  async refuseCodeHealth(request: CodeHealthAppendRequest): Promise<void> {
+    const parsed = codeHealthAppendRequestSchema.safeParse(request);
+    if (!parsed.success) return;
+    const entry: CodeHealthOutboxEntry = {
+      version: CODE_HEALTH_OUTBOX_SCHEMA_VERSION,
+      enqueuedAt: this.now().toISOString(),
+      request: parsed.data,
+    };
+    await this.recordCodeHealthTerminal(entry, "permanent_refusal");
   }
 
   async replay(writer: FrictionOutboxWriter): Promise<FrictionOutboxReplayResult> {
@@ -268,6 +513,40 @@ export class FrictionOutbox {
           `friction-mcp: malformed outbox entry ${file.quarantined ? "quarantined" : "retained"}: `
           + `${outboxFileLabel(file.name)}\n`,
         );
+        continue;
+      }
+      if (file.entry.version === CODE_HEALTH_OUTBOX_SCHEMA_VERSION) {
+        if (isCodeHealthExpired(file.entry, this.now())) {
+          await this.recordCodeHealthTerminal(file.entry, "expired");
+          continue;
+        }
+        if (!writer.codeHealthAppend) {
+          failed++;
+          this.log("friction-mcp: code-health replay unavailable; exact request retained\n");
+          continue;
+        }
+        try {
+          const response = await withTimeout(
+            writer.codeHealthAppend(file.entry.request),
+            this.codeHealthTimeoutMs,
+          );
+          if (isExplicitCodeHealthRefusal(response)) {
+            await this.recordCodeHealthTerminal(file.entry, "permanent_refusal");
+            continue;
+          }
+          if (!validateCodeHealthAppendReceipt(file.entry.request, response)) {
+            throw new Error("code-health receipt did not match request");
+          }
+          await this.removePendingFile(file.name);
+          replayed++;
+        } catch (error) {
+          if (isCodeHealthPermanentRefusal(error)) {
+            await this.recordCodeHealthTerminal(file.entry, "permanent_refusal");
+            continue;
+          }
+          failed++;
+          this.log("friction-mcp: code-health replay ambiguous; exact request retained\n");
+        }
         continue;
       }
       try {
@@ -343,6 +622,8 @@ export class FrictionOutbox {
       let files = await this.listPending();
       await this.recoverOrphanTemps(files);
       files = await this.listPending();
+      await this.expireCodeHealthEntries(files);
+      files = await this.listPending();
       await this.quarantineMalformedFiles(files, quarantineBudget);
       files = await this.listPending();
       await this.recoverOrphanClaims(files, quarantineBudget);
@@ -357,6 +638,130 @@ export class FrictionOutbox {
     return next;
   }
 
+  private async expireCodeHealthEntries(files: PendingFile[]): Promise<void> {
+    for (const file of files) {
+      if (file.entry?.version !== CODE_HEALTH_OUTBOX_SCHEMA_VERSION) continue;
+      if (isCodeHealthExpired(file.entry, this.now())) {
+        await this.recordCodeHealthTerminal(file.entry, "expired");
+      }
+    }
+  }
+
+  private async recordCodeHealthTerminal(
+    entry: CodeHealthOutboxEntry,
+    kind: "expired" | "permanent_refusal",
+  ): Promise<void> {
+    const terminalDirectory = path.join(this.directory, "terminal");
+    const markerId = createHash("sha256")
+      .update(`${kind}\0${storedIdentityDigest(entry)}`)
+      .digest("hex");
+    const markerPath = path.join(terminalDirectory, `${markerId}.json`);
+    try {
+      await fs.mkdir(terminalDirectory, { recursive: true, mode: 0o700 });
+      await fs.chmod(terminalDirectory, 0o700);
+      const marker = `${JSON.stringify({ version: 1, kind, at: this.now().toISOString() })}\n`;
+      const tempPath = path.join(terminalDirectory, `.${markerId}.${process.pid}.${randomUUID()}.tmp`);
+      const handle = await fs.open(tempPath, "wx", 0o600);
+      try {
+        await handle.writeFile(marker, "utf8");
+        await handle.chmod(0o600);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      try {
+        await fs.link(tempPath, markerPath);
+      } catch (error) {
+        if (!isErrno(error, "EEXIST")) throw error;
+      } finally {
+        await fs.unlink(tempPath).catch(() => undefined);
+      }
+      await this.removeMatchingCodeHealthFile(entry);
+      await this.trimCodeHealthTerminalMarkers();
+    } catch {
+      this.log("hugin: unable to record bounded code-health terminal outcome; request retained\n");
+    }
+  }
+
+  private async removeMatchingCodeHealthFile(entry: CodeHealthOutboxEntry): Promise<void> {
+    const digest = `${storedIdentityDigest(entry)}.json`;
+    const pending = (await this.listPending()).find((file) =>
+      file.entry?.version === CODE_HEALTH_OUTBOX_SCHEMA_VERSION && pendingIdentityName(file) === digest,
+    );
+    if (pending) await this.removePendingFile(pending.name);
+  }
+
+  private async trimCodeHealthTerminalMarkers(): Promise<void> {
+    const terminalDirectory = path.join(this.directory, "terminal");
+    let names: string[];
+    try {
+      names = await fs.readdir(terminalDirectory);
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) return;
+      throw error;
+    }
+    const markers: Array<{ name: string; size: number; at: string }> = [];
+    for (const name of names) {
+      if (!/^[0-9a-f]{64}\.json$/.test(name)) continue;
+      try {
+        const filePath = path.join(terminalDirectory, name);
+        const stat = await fs.lstat(filePath);
+        if (!stat.isFile() || stat.isSymbolicLink()) continue;
+        const marker = terminalMarkerSchema.parse(JSON.parse(await fs.readFile(filePath, "utf8")));
+        markers.push({ name, size: stat.size, at: marker.at });
+      } catch {
+        continue;
+      }
+    }
+    let totalBytes = markers.reduce((total, marker) => total + marker.size, 0);
+    const maxMarkerCount = Math.min(this.maxEntries, MAX_CODE_HEALTH_TERMINAL_MARKERS);
+    markers.sort((left, right) => left.at.localeCompare(right.at) || left.name.localeCompare(right.name));
+    while (markers.length > maxMarkerCount || totalBytes > this.maxBytes) {
+      const oldest = markers.shift();
+      if (!oldest) break;
+      await fs.unlink(path.join(terminalDirectory, oldest.name)).catch(() => undefined);
+      totalBytes -= oldest.size;
+    }
+  }
+
+  private async codeHealthTerminalCounts(): Promise<Pick<FrictionOutboxStatus, "codeHealthExpiredCount" | "codeHealthPermanentRefusalCount">> {
+    const counts = { codeHealthExpiredCount: 0, codeHealthPermanentRefusalCount: 0 };
+    const terminalDirectory = path.join(this.directory, "terminal");
+    let names: string[];
+    try {
+      names = await fs.readdir(terminalDirectory);
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) return counts;
+      throw error;
+    }
+    for (const name of names) {
+      if (!/^[0-9a-f]{64}\.json$/.test(name)) continue;
+      try {
+        const filePath = path.join(terminalDirectory, name);
+        const stat = await fs.lstat(filePath);
+        if (!stat.isFile() || stat.isSymbolicLink()) continue;
+        const marker = terminalMarkerSchema.parse(JSON.parse(await fs.readFile(filePath, "utf8")));
+        if (marker.kind === "expired") counts.codeHealthExpiredCount++;
+        else counts.codeHealthPermanentRefusalCount++;
+      } catch {
+        continue;
+      }
+    }
+    return counts;
+  }
+
+  private async statusSnapshot(files: PendingFile[]): Promise<FrictionOutboxStatus> {
+    return { ...statusFromFiles(files), ...(await this.codeHealthTerminalCounts()) };
+  }
+
+  private async safeListPending(): Promise<PendingFile[]> {
+    try {
+      return await this.listPending();
+    } catch {
+      return [];
+    }
+  }
+
   private async recoverOrphanTemps(files: PendingFile[]): Promise<void> {
     for (const file of files) {
       if (file.kind !== "orphan-temp" || !file.completeTemp || !file.entry) continue;
@@ -364,7 +769,7 @@ export class FrictionOutbox {
         path.join(this.directory, file.name),
         file.name,
         "recovery",
-        `${identityDigest(file.entry)}.json`,
+        `${storedIdentityDigest(file.entry)}.json`,
       );
       if (claimPath) {
         await this.recoverValidClaim(path.relative(this.directory, claimPath));
@@ -462,15 +867,15 @@ export class FrictionOutbox {
         if (!stat.isFile() || stat.isSymbolicLink()) continue;
         const tempIdentity = tempEventIdentity(entry.name);
         if (tempIdentity || OUTBOX_TEMP_CANDIDATE_PATTERN.test(entry.name)) {
-          let parsed: FrictionOutboxEntry | null = null;
+          let parsed: StoredOutboxEntry | null = null;
           if (tempIdentity && stat.size <= MAX_ENTRY_FILE_BYTES) {
             try {
-              parsed = frictionOutboxEntrySchema.parse(JSON.parse(await fs.readFile(filePath, "utf8")));
+              parsed = storedOutboxEntrySchema.parse(JSON.parse(await fs.readFile(filePath, "utf8")));
             } catch {
               parsed = null;
             }
           }
-          const completeTemp = parsed !== null && `${identityDigest(parsed)}.json` === tempIdentity;
+          const completeTemp = parsed !== null && `${storedIdentityDigest(parsed)}.json` === tempIdentity;
           files.push({
             name: entry.name,
             size: stat.size,
@@ -494,7 +899,7 @@ export class FrictionOutbox {
         if (!entry.name.endsWith(".json")) continue;
         const raw = await fs.readFile(filePath, "utf8");
         try {
-          const parsed = frictionOutboxEntrySchema.parse(JSON.parse(raw));
+          const parsed = storedOutboxEntrySchema.parse(JSON.parse(raw));
           files.push({ name: entry.name, size: stat.size, entry: parsed, kind: "event" });
         } catch {
           files.push({ name: entry.name, size: stat.size, entry: null, kind: "malformed" });
@@ -515,7 +920,7 @@ export class FrictionOutbox {
           if (!stat.isFile() || stat.isSymbolicLink()) continue;
           const raw = await fs.readFile(quarantinePath, "utf8");
           try {
-            const parsed = frictionOutboxEntrySchema.parse(JSON.parse(raw));
+            const parsed = storedOutboxEntrySchema.parse(JSON.parse(raw));
             files.push({
               name: path.join("quarantine", entry.name),
               size: stat.size,
@@ -589,7 +994,7 @@ export class FrictionOutbox {
   private async claimQuarantineFile(file: PendingFile): Promise<string | null> {
     const fileName = path.basename(file.name);
     const safeBase = file.entry
-      ? `${identityDigest(file.entry)}.json`
+      ? `${storedIdentityDigest(file.entry)}.json`
       : `${createHash("sha256").update(file.name).digest("hex")}.json`;
     return await this.claimRootFile(
       path.join(this.directory, file.name),
@@ -659,10 +1064,10 @@ export class FrictionOutbox {
     const claim = claimInfo(path.basename(claimName));
     if (!claim) return false;
     const claimPath = path.join(this.directory, claimName);
-    let parsed: FrictionOutboxEntry;
+    let parsed: StoredOutboxEntry;
     try {
       const raw = await fs.readFile(claimPath, "utf8");
-      parsed = frictionOutboxEntrySchema.parse(JSON.parse(raw));
+      parsed = storedOutboxEntrySchema.parse(JSON.parse(raw));
     } catch (error) {
       if (!isErrno(error, "ENOENT")) {
         this.log(
@@ -672,7 +1077,7 @@ export class FrictionOutbox {
       }
       return false;
     }
-    if (`${identityDigest(parsed)}.json` !== claim.safeBase) return false;
+    if (`${storedIdentityDigest(parsed)}.json` !== claim.safeBase) return false;
     let durableHandle: Awaited<ReturnType<typeof fs.open>> | undefined;
     try {
       durableHandle = await fs.open(claimPath, "r");
@@ -738,9 +1143,16 @@ export class FrictionOutbox {
 
   private async safeStatus(): Promise<FrictionOutboxStatus> {
     try {
-      return statusFromFiles(await this.listPending());
+      return await this.statusSnapshot(await this.listPending());
     } catch {
-      return { pendingCount: 0, pendingBytes: 0, oldestAt: null, quarantinedCount: 0 };
+      return {
+        pendingCount: 0,
+        pendingBytes: 0,
+        oldestAt: null,
+        quarantinedCount: 0,
+        codeHealthExpiredCount: 0,
+        codeHealthPermanentRefusalCount: 0,
+      };
     }
   }
 
@@ -759,7 +1171,7 @@ function tempEventIdentity(fileName: string): string | null {
 
 function pendingIdentityName(file: PendingFile): string {
   return file.entry
-    ? `${identityDigest(file.entry)}.json`
+    ? `${storedIdentityDigest(file.entry)}.json`
     : tempEventIdentity(file.name) ?? file.name;
 }
 
@@ -771,13 +1183,13 @@ function claimInfo(fileName: string): { safeBase: string; reason: ClaimReason } 
 
 async function sameStoredEvent(
   filePath: string,
-  expected: FrictionOutboxEntry,
+  expected: StoredOutboxEntry,
 ): Promise<boolean> {
   try {
     const stat = await fs.lstat(filePath);
     if (!stat.isFile() || stat.isSymbolicLink()) return false;
-    const parsed = frictionOutboxEntrySchema.parse(JSON.parse(await fs.readFile(filePath, "utf8")));
-    return identityDigest(parsed) === identityDigest(expected);
+    const parsed = storedOutboxEntrySchema.parse(JSON.parse(await fs.readFile(filePath, "utf8")));
+    return storedIdentityDigest(parsed) === storedIdentityDigest(expected);
   } catch {
     return false;
   }
@@ -785,7 +1197,7 @@ async function sameStoredEvent(
 
 async function waitForStoredEvent(
   filePath: string,
-  expected: FrictionOutboxEntry,
+  expected: StoredOutboxEntry,
 ): Promise<boolean> {
   for (let attempt = 0; attempt < 200; attempt++) {
     if (await sameStoredEvent(filePath, expected)) return true;
@@ -806,6 +1218,123 @@ function identityDigest(entry: FrictionOutboxEntry): string {
     .digest("hex");
 }
 
+function storedIdentityDigest(entry: StoredOutboxEntry): string {
+  return entry.version === FRICTION_OUTBOX_SCHEMA_VERSION
+    ? identityDigest(entry)
+    : codeHealthRequestDigest(entry.request);
+}
+
+function codeHealthRequestDigest(request: CodeHealthAppendRequest): string {
+  return createHash("sha256")
+    .update(stableJson({ version: CODE_HEALTH_OUTBOX_SCHEMA_VERSION, request }))
+    .digest("hex");
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function isCodeHealthExpired(entry: CodeHealthOutboxEntry, now: Date): boolean {
+  const enqueuedAt = Date.parse(entry.enqueuedAt);
+  return isCodeHealthExpiredRequest(entry.request, now)
+    || Number.isFinite(enqueuedAt) && now.getTime() - enqueuedAt > CODE_HEALTH_PENDING_TTL_MS;
+}
+
+function isCodeHealthExpiredRequest(request: CodeHealthAppendRequest, now: Date): boolean {
+  const observedAt = request.record.observed_at;
+  return typeof observedAt === "string"
+    && Number.isFinite(Date.parse(observedAt))
+    && now.getTime() - Date.parse(observedAt) > CODE_HEALTH_PENDING_TTL_MS;
+}
+
+const TERMINAL_CODE_HEALTH_ERRORS = new Set([
+  "access_denied",
+  "conflict",
+  "idempotency_conflict",
+  "not_found",
+  "record_deleted",
+  "validation_error",
+]);
+
+function isCodeHealthPermanentRefusal(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const name = "name" in error ? error.name : undefined;
+  const code = "errorCode" in error ? error.errorCode : undefined;
+  return name === "MuninCodeHealthRejectedError"
+    && typeof code === "string"
+    && TERMINAL_CODE_HEALTH_ERRORS.has(code);
+}
+
+function isExplicitCodeHealthRefusal(response: unknown): boolean {
+  if (typeof response !== "object" || response === null || !("ok" in response)) return false;
+  if (response.ok !== false || !("error" in response) || typeof response.error !== "string") return false;
+  return TERMINAL_CODE_HEALTH_ERRORS.has(response.error);
+}
+
+export function validateCodeHealthAppendReceipt(
+  request: CodeHealthAppendRequest,
+  response: unknown,
+): CodeHealthAppendReceipt | null {
+  if (typeof response !== "object" || response === null || Array.isArray(response)) return null;
+  const value = response as Record<string, unknown>;
+  const classifications: CodeHealthClassification[] = ["public", "internal", "client-confidential", "client-restricted"];
+  if (
+    value.ok !== true
+    || value.action !== "code_health"
+    || value.status !== "stored" && value.status !== "replayed" && value.status !== "corrected"
+    || typeof value.id !== "string" || value.id.length === 0
+    || value.record_id !== request.record.record_id
+    || value.namespace !== request.namespace
+    || typeof value.idempotency_key !== "string"
+    || value.idempotency_key.toLowerCase() !== request.idempotency_key.toLowerCase()
+    || !isCanonicalIsoTimestamp(value.collected_at)
+    || !isCanonicalIsoTimestamp(value.expires_at)
+    || !isCanonicalIsoTimestamp(value.updated_at)
+    || typeof value.classification !== "string"
+    || !classifications.includes(value.classification as CodeHealthClassification)
+    || request.classification !== undefined && value.classification !== request.classification
+    || value.idempotency_replayed !== undefined && typeof value.idempotency_replayed !== "boolean"
+  ) return null;
+  const collectedAt = Date.parse(value.collected_at as string);
+  const expiresAt = Date.parse(value.expires_at as string);
+  if (expiresAt <= collectedAt || expiresAt > addUtcCalendarMonths(collectedAt, 6)) return null;
+  return {
+    record_id: value.record_id as string,
+    collected_at: value.collected_at as string,
+    expires_at: value.expires_at as string,
+    updated_at: value.updated_at as string,
+    classification: value.classification as CodeHealthClassification,
+  };
+}
+
+function isCanonicalIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value)) return false;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return false;
+  const normalized = new Date(parsed).toISOString();
+  return normalized === value || normalized.replace(/\.000Z$/, "Z") === value;
+}
+
+function addUtcCalendarMonths(timestamp: number, months: number): number {
+  const source = new Date(timestamp);
+  const day = source.getUTCDate();
+  const target = new Date(timestamp);
+  target.setUTCDate(1);
+  target.setUTCMonth(target.getUTCMonth() + months);
+  const lastDay = new Date(Date.UTC(
+    target.getUTCFullYear(),
+    target.getUTCMonth() + 1,
+    0,
+  )).getUTCDate();
+  target.setUTCDate(Math.min(day, lastDay));
+  return target.getTime();
+}
+
 function outboxFileLabel(fileName: string): string {
   return redactFrictionDiagnostic(fileName);
 }
@@ -821,6 +1350,8 @@ function statusFromFiles(files: PendingFile[]): FrictionOutboxStatus {
     pendingBytes: activeFiles.reduce((total, file) => total + file.size, 0),
     oldestAt: validDates[0] ?? null,
     quarantinedCount: files.filter((file) => file.quarantined).length,
+    codeHealthExpiredCount: 0,
+    codeHealthPermanentRefusalCount: 0,
   };
 }
 

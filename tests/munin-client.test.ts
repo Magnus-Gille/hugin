@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { MuninClient, MuninWriteRejectedError } from "../src/munin-client.js";
+import { MuninClient, MuninCodeHealthRejectedError, MuninWriteRejectedError } from "../src/munin-client.js";
 
 function rpcResponse(payload: unknown): Response {
   return new Response(
@@ -622,5 +622,60 @@ describe("MuninClient", () => {
     await expect(client.health({ requestTimeoutMs: 1 })).resolves.toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect((fetchMock.mock.calls[0]?.[1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("uses only the fixed memory_code_health append call and preserves optional CAS/classification", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      rpcResponse({ ok: true, action: "code_health", status: "stored" }),
+    );
+    const client = new MuninClient({
+      baseUrl: "http://munin.test",
+      apiKey: "test-key",
+      minRequestSpacingMs: 0,
+    });
+    const append = {
+      action: "append" as const,
+      namespace: "projects/grimnir/code-health",
+      idempotency_key: "a6b4c114-caa3-4cc0-9f31-2d6a8af8f4ef",
+      record: { record_id: "ref:assessment-1", observed_at: "2026-10-10T11:00:00Z" },
+      classification: "internal" as const,
+      expected_updated_at: "2026-10-10T10:00:00.000Z",
+    };
+
+    await client.codeHealthAppend(append);
+
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const body = JSON.parse(String(request.body));
+    expect(body.params.name).toBe("memory_code_health");
+    expect(body.params.arguments).toEqual(append);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("turns explicit code-health refusals into typed content-blind errors", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      rpcResponse({
+        ok: false,
+        action: "code_health",
+        error: "access_denied",
+        message: "private refusal details",
+      }),
+    );
+    const client = new MuninClient({
+      baseUrl: "http://munin.test",
+      apiKey: "test-key",
+      minRequestSpacingMs: 0,
+    });
+
+    const error = await client.codeHealthAppend({
+      action: "append",
+      namespace: "projects/grimnir/code-health",
+      idempotency_key: "a6b4c114-caa3-4cc0-9f31-2d6a8af8f4ef",
+      record: { record_id: "ref:assessment-1", observed_at: "2026-10-10T11:00:00Z" },
+    }).catch((value: unknown) => value);
+
+    expect(error).toBeInstanceOf(MuninCodeHealthRejectedError);
+    expect(error).toMatchObject({ errorCode: "access_denied" });
+    expect((error as Error).message).not.toContain("private refusal details");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

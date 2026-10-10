@@ -3,6 +3,21 @@
  * Talks to Munin's JSON-RPC 2.0 API over HTTP (stateless mode — no handshake needed).
  */
 
+import { z } from "zod";
+import type { CodeHealthAppendRequest } from "./friction/outbox.js";
+
+// Keep the client dependency one-way: importing the outbox schema here would
+// make MuninClient -> outbox -> friction modules part of the legacy friction
+// startup graph. This local fixed-API shape check avoids that runtime cycle.
+const codeHealthAppendRequestSchema = z.object({
+  action: z.literal("append"),
+  namespace: z.string().min(1).max(200),
+  idempotency_key: z.string().uuid(),
+  record: z.record(z.string(), z.unknown()),
+  classification: z.enum(["public", "internal", "client-confidential", "client-restricted"]).optional(),
+  expected_updated_at: z.string().datetime().optional(),
+}).strict();
+
 export interface MuninEntry {
   id: string;
   namespace: string;
@@ -83,6 +98,17 @@ export class MuninWriteRejectedError extends Error {
     this.currentUpdatedAt = typeof rejection.current_updated_at === "string"
       ? rejection.current_updated_at
       : undefined;
+  }
+}
+
+/** Explicit application-level refusal from memory_code_health. */
+export class MuninCodeHealthRejectedError extends Error {
+  readonly errorCode: string;
+
+  constructor(errorCode: string) {
+    super("Munin code-health append was explicitly rejected.");
+    this.name = "MuninCodeHealthRejectedError";
+    this.errorCode = errorCode;
   }
 }
 
@@ -421,6 +447,33 @@ export class MuninClient {
       });
     }
     return (result ?? {}) as Record<string, unknown>;
+  }
+
+  /** Fixed append adapter; callers cannot select a Munin tool or endpoint. */
+  async codeHealthAppend(request: CodeHealthAppendRequest): Promise<unknown> {
+    const parsed = codeHealthAppendRequestSchema.parse(request);
+    const args: Record<string, unknown> = {
+      action: "append",
+      namespace: parsed.namespace,
+      idempotency_key: parsed.idempotency_key,
+      record: parsed.record,
+    };
+    if (parsed.classification !== undefined) args.classification = parsed.classification;
+    if (parsed.expected_updated_at !== undefined) args.expected_updated_at = parsed.expected_updated_at;
+    const result = await this.callTool("memory_code_health", args, {
+      signal: AbortSignal.timeout(2_000),
+      requestTimeoutMs: 2_000,
+      maxRetries: 0,
+    });
+    if (
+      typeof result === "object" && result !== null
+      && "ok" in result && result.ok === false
+      && "action" in result && result.action === "code_health"
+      && "error" in result && typeof result.error === "string"
+    ) {
+      throw new MuninCodeHealthRejectedError(result.error);
+    }
+    return result;
   }
 
   async readBatch(reads: MuninReadRequest[]): Promise<MuninReadResult[]> {
