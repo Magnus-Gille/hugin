@@ -8719,6 +8719,7 @@ export const __test__ = {
   parseSubmittedByField,
   isSubmitterAllowed,
   pollOnce,
+  reconcileDeliveryPending,
   writeResearchSpikeIndexes,
   emitHeartbeat,
   startTaskHeartbeat,

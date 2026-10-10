@@ -574,8 +574,22 @@ export const structuredTaskResultSchema = z.object({
         : value.lifecycle === "completed"
           ? "completed"
           : "failed";
+    // A durable `delivery:pending` checkpoint can only be written after the
+    // executor completed. Recovery may later fail artifact delivery and must
+    // preserve that independent execution fact in the failed terminal result.
+    // Keep this exception closed to the exact recovery result shape; do not
+    // weaken refusal, cancellation, timeout, or other lifecycle validation.
+    const completedBeforeDeliveryFailure = codeHealth.executionFact === "completed"
+      && value.resultSource === "delivery-reconciliation"
+      && value.executor === "dispatcher"
+      && value.lifecycle === "failed"
+      && value.outcome === "failed"
+      && value.exitCode === 2
+      && value.artifactDelivery !== undefined
+      && codeHealth.identity.kind === "attempt";
     if (codeHealth.executionFact !== "not_started_refused"
-      && codeHealth.executionFact !== expectedFact) {
+      && codeHealth.executionFact !== expectedFact
+      && !completedBeforeDeliveryFailure) {
       ctx.addIssue({
         code: "custom",
         path: ["codeHealth", "executionFact"],

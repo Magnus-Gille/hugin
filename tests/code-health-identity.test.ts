@@ -171,6 +171,55 @@ describe("code-health attempt identity", () => {
       codeHealth: { ...refusal, observationRefs: ["https://host/private/path"] },
     })).toThrow();
   });
+
+  it("allows completed execution only for the exact failed delivery-reconciliation result", () => {
+    const codeHealth = buildCodeHealthEnvelope({
+      taskNamespace: "tasks/example",
+      taskId: "example",
+      attemptId: ATTEMPT,
+      repo: { owner: "Magnus-Gille", name: "sagascript" },
+      executionFact: "completed",
+    });
+    const recoveryResult = {
+      schemaVersion: 1 as const,
+      taskId: "example",
+      taskNamespace: "tasks/example",
+      lifecycle: "failed" as const,
+      outcome: "failed" as const,
+      runtime: "claude" as const,
+      executor: "dispatcher",
+      resultSource: "delivery-reconciliation",
+      exitCode: 2,
+      completedAt: "2026-10-10T12:30:00Z",
+      bodyKind: "response" as const,
+      bodyText: "",
+      codeHealth,
+      artifactDelivery: { ok: false, failureKind: "infra" as const, artifacts: [] },
+    };
+
+    expect(buildStructuredTaskResult(recoveryResult).codeHealth?.executionFact).toBe("completed");
+    for (const invalid of [
+      { ...recoveryResult, resultSource: "sdk-result" },
+      { ...recoveryResult, executor: "claude-sdk" },
+      { ...recoveryResult, artifactDelivery: undefined },
+      { ...recoveryResult, exitCode: 1 },
+      { ...recoveryResult, lifecycle: "cancelled" as const, outcome: "cancelled" as const, exitCode: "CANCELLED" as const },
+      { ...recoveryResult, outcome: "timed_out" as const, exitCode: "TIMEOUT" as const },
+      {
+        ...recoveryResult,
+        codeHealth: {
+          ...codeHealth,
+          identity: {
+            kind: "not-started-refused" as const,
+            notStartedId: "a".repeat(64),
+            rejectedStatusRevisionSha256: "b".repeat(64),
+          },
+        },
+      },
+    ]) {
+      expect(() => buildStructuredTaskResult(invalid as never)).toThrow();
+    }
+  });
 });
 
 describe("strict code-health attempt status tag", () => {
