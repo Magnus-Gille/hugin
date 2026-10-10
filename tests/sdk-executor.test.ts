@@ -6,6 +6,17 @@ import * as os from "node:os";
 // Mock the agent SDK before importing the executor
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   query: vi.fn(),
+  tool: vi.fn((name, description, inputSchema, handler) => ({
+    name,
+    description,
+    inputSchema,
+    handler,
+  })),
+  createSdkMcpServer: vi.fn(({ name, tools }) => ({
+    type: "sdk",
+    name,
+    instance: { tools },
+  })),
 }));
 
 import {
@@ -14,6 +25,7 @@ import {
   formatChildStderr,
   type SdkTaskConfig,
 } from "../src/sdk-executor.js";
+import type { CodeHealthCaptureConfig } from "../src/code-health-capture.js";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 const mockedQuery = vi.mocked(query);
@@ -87,7 +99,7 @@ function createMockAssistantMessage(text: string) {
 }
 
 // Helper to create a mock async generator
-function createMockQuery(messages: unknown[]) {
+function createMockQuery(messages: unknown[], onBeforeMessage?: (index: number) => Promise<void> | void) {
   let index = 0;
   const gen = {
     [Symbol.asyncIterator]() {
@@ -95,8 +107,10 @@ function createMockQuery(messages: unknown[]) {
     },
     async next() {
       if (index < messages.length) {
+        await onBeforeMessage?.(index);
         return { value: messages[index++], done: false };
       }
+      await onBeforeMessage?.(index);
       return { value: undefined, done: true };
     },
     async return() {
@@ -127,6 +141,62 @@ function createMockQuery(messages: unknown[]) {
   return gen;
 }
 
+const sdkCaptureAttemptId = "123e4567-e89b-42d3-a456-426614174000";
+
+function makeSdkCaptureConfig(taskId: string): CodeHealthCaptureConfig {
+  return {
+    binding: {
+      taskId,
+      taskNamespace: `tasks/${taskId}`,
+      attemptId: sdkCaptureAttemptId,
+      repo: { owner: "Magnus-Gille", name: "sagascript" },
+    },
+    namespace: "signals/code-health",
+    requestedModel: "claude-sonnet-4-6",
+    observedModel: () => null,
+    beforeSha: null,
+    afterSha: null,
+    validateCodeHealthRecord: async () => ({ valid: true, errors: [] }),
+    deliverCodeHealth: async (request) => ({
+      status: "acknowledged",
+      recordId: String(request.record.record_id),
+      receipt: {
+        record_id: String(request.record.record_id),
+        collected_at: "2026-10-10T12:30:01Z",
+        expires_at: "2027-10-10T12:30:01Z",
+        updated_at: "2026-10-10T12:30:02Z",
+        classification: "internal",
+      },
+    }),
+    createIdempotencyKey: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  };
+}
+
+function makeSdkObservation(taskId: string): Record<string, unknown> {
+  const worker = {
+    id: "ref:worker-sdk",
+    kind: "worker",
+    requested_model: "claude-sonnet-4-6",
+    observed_model: "claude-sonnet-4-6",
+    observed_effort: null,
+  };
+  return {
+    record_kind: "observation",
+    record_id: "ref:sdk-observation",
+    repo_owner: "Magnus-Gille",
+    repo_name: "sagascript",
+    task_id: taskId,
+    attempt_id: sdkCaptureAttemptId,
+    parent_attempt_id: null,
+    before_sha: null,
+    after_sha: null,
+    reporter: worker,
+    actual_worker: worker,
+    supersedes_record_id: null,
+    correction_ref: null,
+  };
+}
+
 let tmpLogDir: string;
 
 beforeEach(() => {
@@ -139,6 +209,168 @@ afterEach(() => {
 });
 
 describe("SDK executor", () => {
+  it("keeps capture unavailable unless friction injection, capture gate, and trusted-code are all enabled", async () => {
+    const previousFriction = process.env.HUGIN_FRICTION_INJECTION;
+    const previousCapture = process.env.HUGIN_CODE_HEALTH_CAPTURE;
+    process.env.HUGIN_CODE_HEALTH_CAPTURE = "on";
+    delete process.env.HUGIN_FRICTION_INJECTION;
+    try {
+      mockedQuery.mockReturnValue(createMockQuery([createMockResultSuccess("done")]) as ReturnType<typeof query>);
+      await executeSdkTask(makeTaskConfig({
+        permissionProfile: "trusted-code",
+        codeHealthCapture: makeSdkCaptureConfig("test-capture-friction-off"),
+      }), "test-capture-friction-off", tmpLogDir);
+      let call = mockedQuery.mock.calls.at(-1)?.[0] as {
+        options?: { mcpServers?: Record<string, unknown> };
+      };
+      expect(call.options?.mcpServers?.["code-health"]).toBeUndefined();
+
+      process.env.HUGIN_FRICTION_INJECTION = "on";
+      mockedQuery.mockReturnValue(createMockQuery([createMockResultSuccess("done")]) as ReturnType<typeof query>);
+      await executeSdkTask(makeTaskConfig({
+        permissionProfile: "read-only",
+        codeHealthCapture: makeSdkCaptureConfig("test-capture-read-only"),
+      }), "test-capture-read-only", tmpLogDir);
+      call = mockedQuery.mock.calls.at(-1)?.[0] as {
+        options?: { mcpServers?: Record<string, unknown> };
+      };
+      expect(call.options?.mcpServers?.["code-health"]).toBeUndefined();
+    } finally {
+      if (previousFriction === undefined) delete process.env.HUGIN_FRICTION_INJECTION;
+      else process.env.HUGIN_FRICTION_INJECTION = previousFriction;
+      if (previousCapture === undefined) delete process.env.HUGIN_CODE_HEALTH_CAPTURE;
+      else process.env.HUGIN_CODE_HEALTH_CAPTURE = previousCapture;
+    }
+  });
+
+  it("registers only the fixed read-context and report tools without changing trusted-code permissions", async () => {
+    const previousFriction = process.env.HUGIN_FRICTION_INJECTION;
+    const previousCapture = process.env.HUGIN_CODE_HEALTH_CAPTURE;
+    process.env.HUGIN_FRICTION_INJECTION = "on";
+    process.env.HUGIN_CODE_HEALTH_CAPTURE = "on";
+    try {
+      mockedQuery.mockReturnValue(createMockQuery([createMockResultSuccess("done")]) as ReturnType<typeof query>);
+      await executeSdkTask(makeTaskConfig({
+        permissionProfile: "trusted-code",
+        codeHealthCapture: makeSdkCaptureConfig("test-capture-gated"),
+      }), "test-capture-gated", tmpLogDir);
+
+      const call = mockedQuery.mock.calls.at(-1)?.[0] as {
+        options?: {
+          permissionMode?: string;
+          allowedTools?: string[];
+          mcpServers?: Record<string, {
+            type?: string;
+            instance?: { tools?: Array<{ name: string }> };
+            command?: string;
+          }>;
+        };
+      };
+      expect(call.options?.permissionMode).toBe(buildClaudePermissionOptions("trusted-code").permissionMode);
+      expect(call.options?.allowedTools).toBeUndefined();
+      expect(call.options?.mcpServers?.friction?.type).toBe("stdio");
+      expect(call.options?.mcpServers?.["code-health"]?.type).toBe("sdk");
+      expect(call.options?.mcpServers?.["code-health"]?.instance?.tools?.map((tool) => tool.name))
+        .toEqual(["get_code_health_context", "report_code_health"]);
+    } finally {
+      if (previousFriction === undefined) delete process.env.HUGIN_FRICTION_INJECTION;
+      else process.env.HUGIN_FRICTION_INJECTION = previousFriction;
+      if (previousCapture === undefined) delete process.env.HUGIN_CODE_HEALTH_CAPTURE;
+      else process.env.HUGIN_CODE_HEALTH_CAPTURE = previousCapture;
+    }
+  });
+
+  it("projects typed report refs and actual SDK model through normal completion", async () => {
+    const previousFriction = process.env.HUGIN_FRICTION_INJECTION;
+    const previousCapture = process.env.HUGIN_CODE_HEALTH_CAPTURE;
+    process.env.HUGIN_FRICTION_INJECTION = "on";
+    process.env.HUGIN_CODE_HEALTH_CAPTURE = "on";
+    try {
+      mockedQuery.mockReturnValue(createMockQuery(
+        [createMockAssistantMessage("working"), createMockResultSuccess("done")],
+        async (index) => {
+          if (index !== 1) return;
+          const call = mockedQuery.mock.calls.at(-1)?.[0] as {
+            options?: { mcpServers?: Record<string, { instance?: { tools?: Array<{
+              name: string;
+              handler: (args: unknown, extra: unknown) => Promise<unknown>;
+            }> } }> };
+          };
+          const tools = call.options?.mcpServers?.["code-health"]?.instance?.tools ?? [];
+          await tools.find((tool) => tool.name === "get_code_health_context")?.handler({}, {});
+          const reportTool = tools.find((tool) => tool.name === "report_code_health");
+          await reportTool?.handler({ record: makeSdkObservation("test-capture-normal") }, {});
+        },
+      ) as ReturnType<typeof query>);
+
+      const result = await executeSdkTask(makeTaskConfig({
+        permissionProfile: "trusted-code",
+        model: "claude-sonnet-4-6",
+        codeHealthCapture: makeSdkCaptureConfig("test-capture-normal"),
+      }), "test-capture-normal", tmpLogDir);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.codeHealthCapture).toMatchObject({
+        observationRefs: ["ref:sdk-observation"],
+        assessmentRefs: [],
+        assessmentState: "missing",
+        observedModel: "claude-sonnet-4-6",
+        captureDelivery: [{ recordId: "ref:sdk-observation", status: "acknowledged" }],
+      });
+    } finally {
+      if (previousFriction === undefined) delete process.env.HUGIN_FRICTION_INJECTION;
+      else process.env.HUGIN_FRICTION_INJECTION = previousFriction;
+      if (previousCapture === undefined) delete process.env.HUGIN_CODE_HEALTH_CAPTURE;
+      else process.env.HUGIN_CODE_HEALTH_CAPTURE = previousCapture;
+    }
+  });
+
+  it.each(["timeout", "cancel"] as const)("preserves accepted typed capture after SDK %s", async (mode) => {
+    const previousFriction = process.env.HUGIN_FRICTION_INJECTION;
+    const previousCapture = process.env.HUGIN_CODE_HEALTH_CAPTURE;
+    process.env.HUGIN_FRICTION_INJECTION = "on";
+    process.env.HUGIN_CODE_HEALTH_CAPTURE = "on";
+    const abortController = new AbortController();
+    try {
+      mockedQuery.mockReturnValue(createMockQuery(
+        [createMockAssistantMessage("working")],
+        async (index) => {
+          if (index !== 1) return;
+          const call = mockedQuery.mock.calls.at(-1)?.[0] as {
+            options?: { mcpServers?: Record<string, { instance?: { tools?: Array<{
+              name: string;
+              handler: (args: unknown, extra: unknown) => Promise<unknown>;
+            }> } }> };
+          };
+          const reportTool = call.options?.mcpServers?.["code-health"]?.instance?.tools
+            ?.find((tool) => tool.name === "report_code_health");
+          await reportTool?.handler({ record: makeSdkObservation(`test-capture-${mode}`) }, {});
+          if (mode === "timeout") await new Promise((resolve) => setTimeout(resolve, 20));
+          else abortController.abort();
+          const error = new Error("query aborted");
+          error.name = "AbortError";
+          throw error;
+        },
+      ) as ReturnType<typeof query>);
+
+      const result = await executeSdkTask(makeTaskConfig({
+        timeoutMs: mode === "timeout" ? 5 : 30_000,
+        permissionProfile: "trusted-code",
+        model: "claude-sonnet-4-6",
+        codeHealthCapture: makeSdkCaptureConfig(`test-capture-${mode}`),
+      }), `test-capture-${mode}`, tmpLogDir, { abortController });
+
+      expect(result.exitCode).toBe("TIMEOUT");
+      expect(result.codeHealthCapture?.assessmentState).toBe("missing");
+      expect(result.codeHealthCapture?.observationRefs).toEqual(["ref:sdk-observation"]);
+    } finally {
+      if (previousFriction === undefined) delete process.env.HUGIN_FRICTION_INJECTION;
+      else process.env.HUGIN_FRICTION_INJECTION = previousFriction;
+      if (previousCapture === undefined) delete process.env.HUGIN_CODE_HEALTH_CAPTURE;
+      else process.env.HUGIN_CODE_HEALTH_CAPTURE = previousCapture;
+    }
+  });
+
   it("does not expose the Hugin sensitivity checkpoint secret to Claude", async () => {
     const key = "HUGIN_SENSITIVITY_CHECKPOINT_SECRET";
     const previous = process.env[key];

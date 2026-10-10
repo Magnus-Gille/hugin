@@ -74,6 +74,13 @@ import {
 } from "./queue-observability.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
 import {
+  createCodeHealthTransportDependencies,
+  type CodeHealthCaptureConfig,
+  type CodeHealthCaptureSnapshot,
+  type CodeHealthClassification,
+  type CodeHealthAppendRequest,
+} from "./code-health-capture.js";
+import {
   classifyClaudeFailure,
   driftFailureClassification,
   AUTH_FAILURE_KIND,
@@ -242,11 +249,16 @@ import {
   stripSchedulerDecisionPointers,
 } from "./task-status-tags.js";
 import {
+  buildCodeHealthIdentityBinding,
   buildCodeHealthClaimTags,
   buildCodeHealthLifecycleEnvelope,
   type CodeHealthExecutionFact,
   type CodeHealthPlannedChildInput,
 } from "./code-health-identity.js";
+import {
+  createFrictionOutbox,
+  defaultFrictionOutboxDirectory,
+} from "./friction/outbox.js";
 import {
   buildSchedulerDecisionPrediction,
   buildSchedulerDecisionOutcomeFromTerminalResult,
@@ -626,6 +638,10 @@ const config = {
   // Content-blind SagaScript/Gille code-health lifecycle capture is explicitly
   // opt-in; it does not change execution, routing, or permissions.
   codeHealthCaptureEnabled: process.env.HUGIN_CODE_HEALTH_CAPTURE === "on",
+  // No code-health destination is guessed. Even with capture enabled, the SDK
+  // report tool remains absent unless an operator explicitly sets this exact
+  // Munin namespace.
+  codeHealthCaptureNamespace: process.env.HUGIN_CODE_HEALTH_NAMESPACE?.trim() || "",
   // Pre-flight Claude auth check (issue #129). When `on` (default), a Claude SDK
   // task probes the Pi's Claude credential BEFORE the (paid, slot-consuming) run
   // and short-circuits to a distinctly-classified AUTH_FAILED failure if the
@@ -2057,6 +2073,7 @@ function buildTaskCodeHealthEnvelope(input: {
   beforeSha?: string | null;
   afterSha?: string | null;
   plannedChildren?: readonly CodeHealthPlannedChildInput[];
+  capture?: CodeHealthCaptureSnapshot;
 }): StructuredTaskResult["codeHealth"] {
   if (!input.task) return undefined;
   return buildCodeHealthLifecycleEnvelope({
@@ -2069,10 +2086,78 @@ function buildTaskCodeHealthEnvelope(input: {
     statusRevision: input.statusRevision,
     executionFact: input.executionFact,
     requestedModel: input.task.model ?? null,
+    observedModel: input.capture?.observedModel,
     beforeSha: input.beforeSha,
     afterSha: input.afterSha,
+    assessmentState: input.capture?.assessmentState,
+    observationRefs: input.capture?.observationRefs,
+    assessmentRefs: input.capture?.assessmentRefs,
+    captureDelivery: input.capture?.captureDelivery,
     plannedChildren: input.plannedChildren,
   });
+}
+
+function buildSdkCodeHealthCaptureConfig(input: {
+  task: TaskConfig;
+  taskNs: string;
+  taskId: string;
+  tags: readonly string[];
+  classification?: string;
+  beforeSha?: string | null;
+}): CodeHealthCaptureConfig | undefined {
+  const { task } = input;
+  if (!config.codeHealthCaptureEnabled
+    || process.env.HUGIN_FRICTION_INJECTION !== "on"
+    || task.runtime !== "claude"
+    || task.permissionProfile !== "trusted-code"
+    || !config.codeHealthCaptureNamespace
+    || !config.muninUrl
+    || !config.muninApiKey) return undefined;
+
+  const binding = buildCodeHealthIdentityBinding({
+    taskNamespace: input.taskNs,
+    taskId: input.taskId,
+    context: task.context,
+    capabilities: task.capabilities,
+    enabled: config.codeHealthCaptureEnabled,
+    tags: input.tags,
+  });
+  if (!binding) return undefined;
+
+  const directory = process.env.HUGIN_FRICTION_OUTBOX_PATH?.trim()
+    || defaultFrictionOutboxDirectory();
+  const outbox = createFrictionOutbox({ directory });
+  const append = (request: CodeHealthAppendRequest): Promise<unknown> => {
+    const client = munin as unknown as {
+      codeHealthAppend?: (appendRequest: CodeHealthAppendRequest) => Promise<unknown>;
+    };
+    if (typeof client.codeHealthAppend !== "function") {
+      throw new Error("code-health transport is not integrated");
+    }
+    return client.codeHealthAppend.call(munin, request);
+  };
+  const dependencies = createCodeHealthTransportDependencies({
+    outbox,
+    writer: { codeHealthAppend: append },
+  });
+  const classification = ["public", "internal", "client-confidential", "client-restricted"]
+    .includes(input.classification ?? "")
+    ? input.classification as CodeHealthClassification
+    : undefined;
+
+  return {
+    ...dependencies,
+    binding,
+    namespace: config.codeHealthCaptureNamespace,
+    classification,
+    requestedModel: task.model ?? null,
+    observedModel: () => null,
+    beforeSha: input.beforeSha ?? null,
+    // The final task-branch commit is not authoritative until terminalization.
+    afterSha: null,
+    parentAttemptId: null,
+    childAttemptIds: [],
+  };
 }
 
 function getRuntimeFromTags(
@@ -5984,6 +6069,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // engine, carried into the structured result below. Null for every other
     // runtime and whenever savings weren't computed for this run.
     let orchSavings: SavingsSummary | null = null;
+    let sdkCodeHealthCapture: CodeHealthCaptureSnapshot | undefined;
     let ollamaJournalExtras: Record<string, unknown> = {};
     let opencodeJournalExtras: Record<string, unknown> = {};
     let opencodeResult: OpencodeExecutorResult | null = null;
@@ -6807,6 +6893,14 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         model: task.model,
         muninSessionId: munin.getSessionId(),
         permissionProfile: task.permissionProfile,
+        codeHealthCapture: buildSdkCodeHealthCaptureConfig({
+          task,
+          taskNs,
+          taskId,
+          tags: claimTags,
+          classification: taskClassification,
+          beforeSha: branchResult.action === "skipped" ? null : branchResult.baseCommit ?? null,
+        }),
       };
       const sdkOptions: SdkExecutorOptions = {
         abortController: sdkAbort,
@@ -6841,6 +6935,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       logFile = sdkResult.logFile;
       resultText = sdkResult.resultText;
       costUsd = sdkResult.costUsd;
+      sdkCodeHealthCapture = sdkResult.codeHealthCapture;
       sdkPreflightFailureKind = sdkResult.preflightFailureKind;
       return laneOutcomeFromExitCode(exitCode, {
         verifierKind: "none",
@@ -7905,6 +8000,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
                   executionFact: "cancelled",
                   beforeSha: repositoryOutcome?.baseCommit ?? repositoryChange?.baseCommit,
                   afterSha: repositoryChange?.headCommit,
+                  capture: sdkCodeHealthCapture,
                   plannedChildren: codeHealthPlannedChildren.map((child) => {
                     const observed = orchOutcomes.find((candidate) => candidate.subtask.id === child.plannerId);
                     return {
@@ -8034,6 +8130,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
                   executionFact: ok ? "completed" : isTimeout ? "timed_out" : "failed",
                   beforeSha: repositoryOutcome?.baseCommit ?? repositoryChange?.baseCommit,
                   afterSha: repositoryChange?.headCommit,
+                  capture: sdkCodeHealthCapture,
                   plannedChildren: codeHealthPlannedChildren.map((child) => {
                     const observed = orchOutcomes.find((candidate) => candidate.subtask.id === child.plannerId);
                     return {

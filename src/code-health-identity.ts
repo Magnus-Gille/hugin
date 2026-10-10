@@ -124,9 +124,10 @@ export function buildCodeHealthEnvelope(input: {
   observationRefs?: string[];
   assessmentRefs?: string[];
   requestedModel?: string | null;
-  /** A typed executor response can populate this in a later integration. */
+  /** Only the typed SDK capture callback may supply an observed model. */
   observedModel?: string | null;
   plannedChildren?: readonly CodeHealthPlannedChildInput[];
+  captureDelivery?: CodeHealthEnvelope["captureDelivery"];
 }): CodeHealthEnvelope {
   const identity = input.executionFact === "not_started_refused"
     ? input.notStartedIdentity
@@ -162,6 +163,7 @@ export function buildCodeHealthEnvelope(input: {
     requestedModel: safeModel(input.requestedModel),
     // Generic Hugin executor metadata may only echo the request; never treat it as observed.
     observedModel: safeModel(input.observedModel),
+    ...(input.captureDelivery ? { captureDelivery: input.captureDelivery } : {}),
     plannedChildren: (input.plannedChildren ?? []).slice(0, 32).map((child) => ({
       identitySha256: createHash("sha256")
         .update(`hugin-code-health-child-v1\0${input.attemptId ?? input.notStartedIdentity?.notStartedId}\0${child.plannerId}`, "utf8")
@@ -186,6 +188,11 @@ export function buildCodeHealthLifecycleEnvelope(input: {
   beforeSha?: string | null;
   afterSha?: string | null;
   plannedChildren?: readonly CodeHealthPlannedChildInput[];
+  assessmentState?: CodeHealthEnvelope["assessmentState"];
+  observationRefs?: string[];
+  assessmentRefs?: string[];
+  observedModel?: string | null;
+  captureDelivery?: CodeHealthEnvelope["captureDelivery"];
 }): CodeHealthEnvelope | undefined {
   if (!isCodeHealthEligible(input)) return undefined;
   const repo = classifyCodeHealthContext(input.context);
@@ -213,8 +220,13 @@ export function buildCodeHealthLifecycleEnvelope(input: {
     ...binding,
     executionFact: input.executionFact,
     requestedModel: input.requestedModel,
+    observedModel: input.observedModel,
     beforeSha: input.beforeSha,
     afterSha: input.afterSha,
+    assessmentState: input.assessmentState,
+    observationRefs: input.observationRefs,
+    assessmentRefs: input.assessmentRefs,
+    captureDelivery: input.captureDelivery,
     plannedChildren: input.plannedChildren,
   });
 }

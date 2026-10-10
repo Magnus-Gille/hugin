@@ -41,6 +41,13 @@ export const codeHealthChildSchema = z.object({
   outcome: z.enum(["planned", "completed", "failed", "cancelled", "timed_out"]),
 }).strict();
 
+export const codeHealthCaptureDeliverySchema = z.object({
+  recordId: codeHealthOpaqueRefSchema,
+  recordKind: z.enum(["observation", "assessment"]),
+  status: z.enum(["acknowledged", "queued", "unsaved"]),
+  updatedAt: z.string().datetime().optional(),
+}).strict();
+
 /** Optional content-blind lifecycle binding; canonical assessments are a separate producer. */
 export const codeHealthEnvelopeSchema = z.object({
   schemaVersion: z.literal(1),
@@ -64,6 +71,7 @@ export const codeHealthEnvelopeSchema = z.object({
   observedModel: z.string().max(128).regex(/^[A-Za-z0-9._:/-]*$/).nullable(),
   plannedChildren: z.array(codeHealthChildSchema).max(32),
   plannedChildrenOmitted: z.number().int().nonnegative(),
+  captureDelivery: z.array(codeHealthCaptureDeliverySchema).max(32).optional(),
 }).strict();
 export type CodeHealthEnvelope = z.infer<typeof codeHealthEnvelopeSchema>;
 
