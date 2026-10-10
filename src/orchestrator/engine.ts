@@ -285,6 +285,8 @@ function sumCosts(costs: (number | null)[]): number | null {
 
 export interface RunOrchestrationOpts {
   signal?: AbortSignal;
+  /** Content-blind observer called once after a valid plan is constructed. */
+  onPlanObservation?: (plan: readonly Pick<SubTask, "id" | "taskType">[]) => void;
   /** Adaptive verify gate lookup (V5) — see ConfidenceFn. */
   confidence?: ConfidenceFn;
   /** Hugin's already-gated, per-subtask macro route selector (issue #160). */
@@ -345,6 +347,15 @@ export async function runOrchestration(
     maxSubtasks: cfg.maxSubtasks,
     fallbackPrompt: taskPrompt,
   });
+  if (plan.strategy === "fanout") {
+    try {
+      opts?.onPlanObservation?.(Object.freeze(plan.subtasks.map(({ id, taskType }) =>
+        Object.freeze({ id, taskType }),
+      )));
+    } catch {
+      // Lifecycle observation is optional evidence and cannot affect execution.
+    }
+  }
 
   // -------------------------------------------------------------------------
   // 2. Fan-out workers

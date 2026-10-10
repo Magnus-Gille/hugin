@@ -124,6 +124,10 @@ scheduling, and pipeline phases.
 
 ## Learning, evaluation, and evidence
 
+- [Code-health lifecycle capture](code-health-lifecycle-capture.md): Default-off,
+  content-blind identity and execution lifecycle envelope for the two-repository
+  coding pilot.
+
 - [Continuous Hugin/M5 learning loop](continuous-learning-loop.md): Live
   cadence, admitted-attempt capture, and the broader continuous-learning state.
 - [Daily-use exam factory](daily-exam-factory.md): How completed

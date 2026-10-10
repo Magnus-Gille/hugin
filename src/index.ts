@@ -238,8 +238,15 @@ import {
   buildTerminalStatusTags,
   mergeClaimedSchedulerPointer,
   shouldDeferCancellationToLocalOwner,
+  stripCodeHealthAttemptTags,
   stripSchedulerDecisionPointers,
 } from "./task-status-tags.js";
+import {
+  buildCodeHealthClaimTags,
+  buildCodeHealthLifecycleEnvelope,
+  type CodeHealthExecutionFact,
+  type CodeHealthPlannedChildInput,
+} from "./code-health-identity.js";
 import {
   buildSchedulerDecisionPrediction,
   buildSchedulerDecisionOutcomeFromTerminalResult,
@@ -616,6 +623,9 @@ const config = {
   // Bounded-SEJF remains observation-only and opt-in. When off, the exact FIFO
   // champion is still recorded with an explicit shadow-disabled abstention.
   schedulerShadowEnabled: process.env.HUGIN_SCHEDULER_SHADOW === "on",
+  // Content-blind SagaScript/Gille code-health lifecycle capture is explicitly
+  // opt-in; it does not change execution, routing, or permissions.
+  codeHealthCaptureEnabled: process.env.HUGIN_CODE_HEALTH_CAPTURE === "on",
   // Pre-flight Claude auth check (issue #129). When `on` (default), a Claude SDK
   // task probes the Pi's Claude credential BEFORE the (paid, slot-consuming) run
   // and short-circuits to a distinctly-classified AUTH_FAILED failure if the
@@ -2005,6 +2015,7 @@ function createFailureStructuredResult(
     runtimeMetadata?: TaskExecutionRuntimeMetadata;
     approval?: TaskExecutionApprovalMetadata;
     sensitivity?: TaskExecutionSensitivity;
+    codeHealth?: StructuredTaskResult["codeHealth"];
   }
 ): StructuredTaskResult {
   const completedAt = options.completedAt || new Date().toISOString();
@@ -2033,6 +2044,34 @@ function createFailureStructuredResult(
     pipeline: options.pipeline,
     approval: options.approval,
     sensitivity: options.sensitivity,
+    codeHealth: options.codeHealth,
+  });
+}
+
+function buildTaskCodeHealthEnvelope(input: {
+  taskNs: string;
+  task: TaskConfig | null | undefined;
+  tags: readonly string[];
+  statusRevision: string;
+  executionFact: CodeHealthExecutionFact;
+  beforeSha?: string | null;
+  afterSha?: string | null;
+  plannedChildren?: readonly CodeHealthPlannedChildInput[];
+}): StructuredTaskResult["codeHealth"] {
+  if (!input.task) return undefined;
+  return buildCodeHealthLifecycleEnvelope({
+    enabled: config.codeHealthCaptureEnabled,
+    taskNamespace: input.taskNs,
+    taskId: extractTaskId(input.taskNs),
+    context: input.task.context,
+    capabilities: input.task.capabilities,
+    tags: input.tags,
+    statusRevision: input.statusRevision,
+    executionFact: input.executionFact,
+    requestedModel: input.task.model ?? null,
+    beforeSha: input.beforeSha,
+    afterSha: input.afterSha,
+    plannedChildren: input.plannedChildren,
   });
 }
 
@@ -2161,6 +2200,7 @@ function createCancelledStructuredResult(
     bodyText?: string;
     approval?: TaskExecutionApprovalMetadata;
     sensitivity?: TaskExecutionSensitivity;
+    codeHealth?: StructuredTaskResult["codeHealth"];
   }
 ): StructuredTaskResult {
   const completedAt = options.completedAt || new Date().toISOString();
@@ -2189,6 +2229,7 @@ function createCancelledStructuredResult(
     pipeline: options.pipeline,
     approval: options.approval,
     sensitivity: options.sensitivity,
+    codeHealth: options.codeHealth,
   });
 }
 
@@ -3324,6 +3365,7 @@ async function reconcileDeliveryPending(
   const reclaimTags = buildClaimTags(
     [...entry.tags.filter((t) => !t.startsWith("delivery:")), "delivery:pending"],
     "running",
+    true,
   );
   try {
     const r = await client.write(
@@ -3535,7 +3577,7 @@ async function reconcileDeliveryPending(
     taskNs,
     "status",
     entry.content,
-    buildTerminalStatusTags(
+    buildClaimedTerminalStatusTags(
       ok ? "completed" : "failed",
       [
         ...entry.tags.filter((t) => !t.startsWith("delivery:")),
@@ -3563,6 +3605,13 @@ async function reconcileDeliveryPending(
       bodyKind: "response",
       bodyText: "",
       errorMessage: ok ? undefined : recoveryFailureReason ?? delivery.error ?? "delivery failed",
+      codeHealth: buildTaskCodeHealthEnvelope({
+        taskNs,
+        task,
+        tags: reclaimTags,
+        statusRevision: entry.updated_at,
+        executionFact: "completed",
+      }),
       sensitivity: recoverySensitivity,
       artifactDelivery: {
         ok: delivery.ok,
@@ -3700,6 +3749,7 @@ async function recoverStaleTasks(): Promise<void> {
       );
 
       const runtimeTag = entry.tags.find((t) => t.startsWith("runtime:"));
+      const recoveryTask = parseTask(entry.content);
       const learningRecovery = runtimeTag === "runtime:homeserver"
         ? await recoverPreparedLearningAttempt(result.namespace, entry.classification)
         : null;
@@ -3709,7 +3759,7 @@ async function recoverStaleTasks(): Promise<void> {
         result.namespace,
         "status",
         entry.content,
-        buildTerminalStatusTags("failed", entry.tags),
+        buildClaimedTerminalStatusTags("failed", entry.tags),
         entry.updated_at,
         recoveryOutputClassification,
       );
@@ -3734,6 +3784,13 @@ async function recoverStaleTasks(): Promise<void> {
           {
             executor: "dispatcher",
             resultSource: "recovery",
+            codeHealth: buildTaskCodeHealthEnvelope({
+              taskNs: result.namespace,
+              task: recoveryTask,
+              tags: entry.tags,
+              statusRevision: entry.updated_at,
+              executionFact: "failed",
+            }),
             ...(learningRecovery
               ? {
                   runtimeMetadata: {
@@ -3850,7 +3907,7 @@ async function reapExpiredLeases(): Promise<void> {
           result.namespace,
           "status",
           entry.content,
-          buildTerminalStatusTags("failed", entry.tags),
+          buildClaimedTerminalStatusTags("failed", entry.tags),
           entry.updated_at,
           classification,
         );
@@ -3887,6 +3944,13 @@ async function reapExpiredLeases(): Promise<void> {
           sequence: task?.sequence,
           pipeline: task?.pipeline,
           sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
+          codeHealth: buildTaskCodeHealthEnvelope({
+            taskNs: result.namespace,
+            task,
+            tags: entry.tags,
+            statusRevision: entry.updated_at,
+            executionFact: "failed",
+          }),
         }),
         classification,
         reaperMunin,
@@ -4577,6 +4641,10 @@ async function gatePendingTaskForApproval(
         group: task.group,
         sequence: task.sequence,
         pipeline: task.pipeline,
+        codeHealth: buildTaskCodeHealthEnvelope({
+          taskNs, task, tags: entry.tags, statusRevision: entry.updated_at,
+          executionFact: "not_started_refused",
+        }),
         approval: {
           status: "rejected",
           decidedAt: approvalDecision.decidedAt,
@@ -4745,6 +4813,13 @@ async function processApprovalDecisions(): Promise<boolean> {
         group: task.group,
         sequence: task.sequence,
         pipeline: task.pipeline,
+        codeHealth: buildTaskCodeHealthEnvelope({
+          taskNs: result.namespace,
+          task,
+          tags: entry.tags,
+          statusRevision: entry.updated_at,
+          executionFact: "not_started_refused",
+        }),
         approval: {
           status: "rejected",
           requestedAt: approvalRequest?.requestedAt,
@@ -4924,6 +4999,13 @@ async function failTaskWithMessage(
       executor: "dispatcher",
       resultSource: "dispatcher",
       sensitivity: buildTaskSensitivitySnapshot(task?.sensitivityAssessment),
+      codeHealth: buildTaskCodeHealthEnvelope({
+        taskNs,
+        task,
+        tags: entry.tags,
+        statusRevision: entry.updated_at,
+        executionFact: preserveClaimedSchedulerPointer ? "failed" : "not_started_refused",
+      }),
     }),
     classification,
   );
@@ -5259,6 +5341,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
                 sequence: parsedTask.sequence,
                 pipeline: parsedTask.pipeline,
                 sensitivity: buildTaskSensitivitySnapshot(sensitivityAssessment),
+                codeHealth: buildTaskCodeHealthEnvelope({
+                  taskNs, task: parsedTask, tags: entry.tags, statusRevision: entry.updated_at,
+                  executionFact: "not_started_refused",
+                }),
                 runtimeMetadata: {
                   autoRouted: true,
                   routingReason: `routing failed: ${errorMsg}`,
@@ -5320,6 +5406,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           sequence: parsedTask.sequence,
           pipeline: parsedTask.pipeline,
           sensitivity: buildTaskSensitivitySnapshot(sensitivityAssessment),
+          codeHealth: buildTaskCodeHealthEnvelope({
+            taskNs, task: parsedTask, tags: entry.tags, statusRevision: entry.updated_at,
+            executionFact: "not_started_refused",
+          }),
         }),
         classification,
       );
@@ -5386,6 +5476,10 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           sequence: parsedTask.sequence,
           pipeline: parsedTask.pipeline,
           sensitivity: buildTaskSensitivitySnapshot(sensitivityAssessment),
+          codeHealth: buildTaskCodeHealthEnvelope({
+            taskNs, task: parsedTask, tags: entry.tags, statusRevision: entry.updated_at,
+            executionFact: "not_started_refused",
+          }),
         }),
         classification,
       );
@@ -5417,11 +5511,12 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
   // Claim the task with compare-and-swap, attaching worker identity and lease
   // For auto-routed tasks: replace runtime:auto with the resolved runtime and add routing:auto
-  const claimInputTags = parsedTask?.autoRouted && parsedTask.runtime
+  const claimInputTagsRaw = parsedTask?.autoRouted && parsedTask.runtime
     ? entry.tags
         .map((t) => (t === "runtime:auto" ? `runtime:${parsedTask!.runtime}` : t))
         .concat("routing:auto")
     : entry.tags;
+  const claimInputTags = stripCodeHealthAttemptTags(claimInputTagsRaw);
   let schedulerPrediction: SchedulerDecisionPrediction | null = null;
   let schedulerWorkloadSnapshot: SchedulerWorkloadSnapshot | null = null;
   let schedulerClaimAttestation: SchedulerClaimAttestation | null = null;
@@ -5520,6 +5615,13 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         (err instanceof Error ? err.message : String(err)),
     );
   }
+  const codeHealthClaim = buildCodeHealthClaimTags({
+    tags: tagsForClaim,
+    enabled: config.codeHealthCaptureEnabled,
+    context: parsedTask?.context,
+    capabilities: parsedTask?.capabilities,
+  });
+  tagsForClaim = codeHealthClaim.tags;
   const claimTags = buildClaimTags(tagsForClaim, "running", true);
 
   // Rotate the mcp-session-id so all MCP calls for this task execution share
@@ -5877,6 +5979,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // Verdict layer (V8): per-worker outcomes from the orchestrator engine,
     // carried into the structured result below. Empty for every other runtime.
     let orchOutcomes: SubtaskOutcome[] = [];
+    let codeHealthPlannedChildren: CodeHealthPlannedChildInput[] = [];
     // Savings tracker (PR3, S4): per-task savings summary from the orchestrator
     // engine, carried into the structured result below. Null for every other
     // runtime and whenever savings weren't computed for this run.
@@ -6887,6 +6990,16 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           timeoutMs: task.timeoutMs,
           maxOutputChars: config.maxOutputChars,
           injectedContext: task.contextResolution?.content || undefined,
+          ...(codeHealthClaim.attemptId
+            ? {
+                onPlanObservation: (children) => {
+                  codeHealthPlannedChildren = children.map(({ id, taskType }) => ({
+                    plannerId: id,
+                    taskType,
+                  }));
+                },
+              }
+            : {}),
         },
         orchConfig,
         {
@@ -7784,6 +7897,22 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
                 bodyKind: structuredBodyKind,
                 bodyText: structuredBodyText,
                 sensitivity: taskSensitivitySnapshot,
+                codeHealth: buildTaskCodeHealthEnvelope({
+                  taskNs,
+                  task,
+                  tags: claimTags,
+                  statusRevision: claimAcceptedAt,
+                  executionFact: "cancelled",
+                  beforeSha: repositoryOutcome?.baseCommit ?? repositoryChange?.baseCommit,
+                  afterSha: repositoryChange?.headCommit,
+                  plannedChildren: codeHealthPlannedChildren.map((child) => {
+                    const observed = orchOutcomes.find((candidate) => candidate.subtask.id === child.plannerId);
+                    return {
+                      ...child,
+                      outcome: observed ? (observed.result.ok ? "completed" : "failed") : "planned",
+                    };
+                  }),
+                }),
               }),
               taskClassification,
             );
@@ -7897,6 +8026,22 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
                 pipeline: task.pipeline,
                 approval: approvalMetadata,
                 sensitivity: taskSensitivitySnapshot,
+                codeHealth: buildTaskCodeHealthEnvelope({
+                  taskNs,
+                  task,
+                  tags: claimTags,
+                  statusRevision: claimAcceptedAt,
+                  executionFact: ok ? "completed" : isTimeout ? "timed_out" : "failed",
+                  beforeSha: repositoryOutcome?.baseCommit ?? repositoryChange?.baseCommit,
+                  afterSha: repositoryChange?.headCommit,
+                  plannedChildren: codeHealthPlannedChildren.map((child) => {
+                    const observed = orchOutcomes.find((candidate) => candidate.subtask.id === child.plannerId);
+                    return {
+                      ...child,
+                      outcome: observed ? (observed.result.ok ? "completed" : "failed") : "planned",
+                    };
+                  }),
+                }),
                 artifactDelivery: deliveryResult
                   ? {
                       ok: deliveryResult.ok,
@@ -8598,6 +8743,13 @@ async function shutdown(signal: string): Promise<void> {
               group: task?.group,
               sequence: task?.sequence,
               pipeline: task?.pipeline,
+              codeHealth: buildTaskCodeHealthEnvelope({
+                taskNs: currentTask,
+                task,
+                tags: shutdownTags,
+                statusRevision: entry.updated_at,
+                executionFact: "failed",
+              }),
             }
           )
         );
