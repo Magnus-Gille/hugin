@@ -9008,7 +9008,6 @@ export const __test__ = {
   parseTask,
   parseDeclaredRuntime,
   parseSubmittedByField,
-  assessTaskEntrySignature,
   isSubmitterAllowed,
   assessTaskEntrySignature,
   pollOnce,

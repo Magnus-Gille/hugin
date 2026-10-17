@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { signTask } from "../src/task-signing.js";
+import { signTask, setTaskSignature } from "../src/task-signing.js";
 
 const HUGIN_SECRET = "a".repeat(64);
 
@@ -121,16 +121,12 @@ describe("task signature admission", () => {
         taskId: "admission-test",
         submitter: "hugin",
         submittedAt: parsedTask.submittedAt,
-        runtime: "claude",
-        prompt: parsedTask.prompt,
+        taskBody: content,
       },
       "hugin",
       HUGIN_SECRET,
     );
-    const signedContent = content.replace(
-      "### Prompt",
-      `- **Signature:** ${signature}\n\n### Prompt`,
-    );
+    const signedContent = setTaskSignature(content, signature);
     const verdict = __test__.assessTaskEntrySignature(
       "tasks/admission-test",
       signedContent,
