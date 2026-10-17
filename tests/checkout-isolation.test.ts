@@ -66,7 +66,7 @@ beforeEach(() => {
   realpathResults.clear();
 });
 
-const WORKDIR = "/home/magnus/repos/demo";
+const WORKDIR = "/home/magnus/hugin-workspace/demo";
 
 describe("checkout contamination marker (durable, git-native)", () => {
   it("marks contamination via `git config --local` scoped to exactly this working directory", async () => {

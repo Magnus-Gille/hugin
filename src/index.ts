@@ -57,11 +57,14 @@ import {
   DEFAULT_FILES,
   DEFAULT_REPOS_ROOT,
   DEFAULT_SCRATCH,
+  DEFAULT_WORKSPACE,
   MAX_TASK_OUTPUT_TOKENS,
   MAX_TASK_TIMEOUT_MS,
   RESULT_RECORDING_TRACE_ERROR_CLASS,
   parseBoundedPositiveInt,
   PUBLICATION_FAILED_TAG,
+  validateTaskWorkspace,
+  type CanonicalWorkspaceRoots,
 } from "./task-helpers.js";
 import { persistPublicationFailure } from "./publication-recovery.js";
 import { queryAllMuninEntries } from "./munin-pagination.js";
@@ -546,12 +549,16 @@ const config = {
     300_000,
     MAX_TASK_TIMEOUT_MS,
   ),
-  workspace: process.env.HUGIN_WORKSPACE || "/home/magnus/workspace",
-  // Root under which `repo:<name>` aliases resolve and task branches are cut
-  // (#139). Point this at an isolated tree to keep hugin tasks off the
-  // production deploy checkouts under /home/magnus/repos. Default preserves
-  // the historical hardcoded behavior.
+  workspace: process.env.HUGIN_WORKSPACE || DEFAULT_WORKSPACE,
+  // Managed task repositories and their dedicated default/scratch/files
+  // workspaces live under the isolated Hugin tree, away from live checkouts.
   reposRoot: normalizeRoot(process.env.HUGIN_REPOS_ROOT || DEFAULT_REPOS_ROOT),
+  scratch: process.env.HUGIN_SCRATCH || DEFAULT_SCRATCH,
+  files: process.env.HUGIN_FILES || DEFAULT_FILES,
+  additionalProtectedRoots: (process.env.HUGIN_PROTECTED_TASK_ROOTS || "")
+    .split(path.delimiter)
+    .map((value) => value.trim())
+    .filter(Boolean),
   maxOutputChars: parseBoundedPositiveInt(
     process.env.HUGIN_MAX_OUTPUT_CHARS,
     50_000,
@@ -741,12 +748,19 @@ function stopHomeserverCredentialExpiryWarning(): void {
 }
 
 const brokerEnv = readBrokerEnv(process.env);
-const piReadOnlyAllowedRoots = Array.from(new Set([
-  path.resolve(config.reposRoot),
-  path.resolve(config.workspace),
-  path.resolve(DEFAULT_SCRATCH),
-  path.resolve(DEFAULT_FILES),
-]));
+function piReadOnlyRoots(roots: CanonicalWorkspaceRoots): string[] {
+  return Array.from(new Set(Object.values(roots)));
+}
+
+function configuredTaskWorkspaceRoots() {
+  return {
+    reposRoot: config.reposRoot,
+    workspace: config.workspace,
+    scratch: config.scratch,
+    files: config.files,
+    additionalProtectedRoots: config.additionalProtectedRoots,
+  };
+}
 
 if (config.signingPolicy !== "off") {
   const keyIds = Object.keys(config.submitterKeys);
@@ -1001,6 +1015,8 @@ interface TaskConfig {
   prompt: string;
   runtime: "claude" | "codex" | "ollama" | "opencode" | "homeserver" | "orchestrator" | "research";
   workingDir: string;
+  workingDirResolutionError?: string;
+  workspaceRoots?: CanonicalWorkspaceRoots;
   context?: string;
   baseBranch?: string;
   baseBranchError?: string;
@@ -1284,10 +1300,19 @@ function parseTask(content: string): TaskConfig | null {
   if ((!prompt && !canonicalBrokerEnvelope) || (!runtime && !isAutoRoute)) return null;
 
   // Resolution priority: Context > Working dir > config.workspace
-  const resolvedDir = resolveTaskWorkingDirectory(contextRaw, workingDir, {
-    reposRoot: config.reposRoot,
-    workspace: config.workspace,
-  });
+  let resolvedDir = config.workspace;
+  let workingDirResolutionError: string | undefined;
+  try {
+    resolvedDir = resolveTaskWorkingDirectory(
+      contextRaw,
+      workingDir,
+      configuredTaskWorkspaceRoots(),
+    );
+  } catch (error) {
+    workingDirResolutionError = error instanceof Error
+      ? error.message
+      : "Task working directory declaration is invalid";
+  }
 
   // Runtime-owned artefact delivery manifest (issue #68). Parsed unconditionally
   // so submit-time validation can reject a malformed/placeholder-leaking
@@ -1316,6 +1341,7 @@ function parseTask(content: string): TaskConfig | null {
     prompt: canonicalBrokerEnvelope?.prompt ?? prompt!,
     runtime: runtime || "claude",  // temporary for auto — overwritten by router
     workingDir: resolvedDir,
+    workingDirResolutionError,
     context: contextRaw || undefined,
     baseBranch: baseBranchOverride.baseBranch,
     baseBranchError: baseBranchOverride.error,
@@ -1461,17 +1487,98 @@ function isOwnerSubmitter(submittedBy: string | undefined): boolean {
   return isSubmitterAllowed(submittedBy, config.ownerSubmitters);
 }
 
-function getTaskSensitivityAssessment(task: TaskConfig): SensitivityAssessment {
-  const declared = task.declaredSensitivity;
-  const contextSensitivity = classifyContextSensitivity(task.context, task.workingDir);
+function getTaskSensitivityAssessment(
+  task: TaskConfig,
+  options: {
+    forcePrivate?: boolean;
+    trustedSnapshot?: TaskExecutionSensitivity;
+  } = {},
+): SensitivityAssessment {
+  const trustedSnapshot = options.trustedSnapshot;
+  const declared = trustedSnapshot?.declared ?? task.declaredSensitivity;
+  const contextSensitivity = classifyContextSensitivity(
+    task.context,
+    task.workingDir,
+    task.workspaceRoots,
+  );
   const promptDetection = detectPromptSensitivity(task.prompt);
   const refsSensitivity = task.contextResolution?.maxSensitivity;
+  if (trustedSnapshot) {
+    // A checkpoint authenticates the phase's original classification, but its
+    // cwd and context refs are re-evaluated at dispatch/recovery time. Preserve
+    // the authenticated detector evidence and effective floor while adding
+    // those fresh signals; a free-form pipeline field or submitter label never
+    // grants override authority.
+    const detectorMax = maxSensitivity(
+      trustedSnapshot.detectorMax ?? trustedSnapshot.effective,
+      contextSensitivity,
+      promptDetection.sensitivity,
+      refsSensitivity,
+      options.forcePrivate ? "private" : undefined,
+    );
+    const mismatch = trustedSnapshot.mismatch || Boolean(
+      declared && compareSensitivity(detectorMax, declared) > 0,
+    );
+    const freshHardPrivateSignal =
+      contextSensitivity === "private" || refsSensitivity === "private";
+    const authenticatedSoftOverride =
+      !options.forcePrivate &&
+      trustedSnapshot.override?.applied === true &&
+      declared !== undefined &&
+      trustedSnapshot.effective === declared &&
+      !promptDetection.hardPrivate &&
+      !freshHardPrivateSignal;
+    const overrideApplied = authenticatedSoftOverride && mismatch;
+    const effective: Sensitivity = options.forcePrivate
+      ? "private"
+      : overrideApplied
+        ? declared!
+        : maxSensitivity(
+            trustedSnapshot.effective,
+            contextSensitivity,
+            promptDetection.sensitivity,
+            refsSensitivity,
+          );
+    const reasons = [...(trustedSnapshot.reasons ?? [])];
+    const addReason = (reason: string): void => {
+      if (reasons.length < 8 && !reasons.includes(reason)) reasons.push(reason);
+    };
+    if (!trustedSnapshot.reasons?.length && declared) addReason(`declared:${declared}`);
+    if (contextSensitivity) addReason(`context:${contextSensitivity}`);
+    if (promptDetection.sensitivity) addReason(`prompt:${promptDetection.sensitivity}`);
+    if (refsSensitivity) addReason(`context-refs:${refsSensitivity}`);
+    if (options.forcePrivate && !reasons.includes("context:private")) {
+      addReason("context:private");
+    }
+    if (overrideApplied && declared) {
+      addReason(`owner-override:${declared}<${detectorMax}`);
+    } else if (
+      !options.forcePrivate &&
+      trustedSnapshot.override?.applied === true &&
+      (promptDetection.hardPrivate || freshHardPrivateSignal) &&
+      declared &&
+      compareSensitivity(detectorMax, declared) > 0
+    ) {
+      addReason("owner-override-blocked:hard-private");
+    }
+    return {
+      declared,
+      effective,
+      detectorMax,
+      mismatch,
+      reasons,
+      ...(overrideApplied
+        ? { override: { applied: true as const, detectorMax } }
+        : {}),
+    };
+  }
+
   return buildSensitivityAssessment({
     declared,
-    // Any authentic pipeline classification arrives through the HMAC-bound
-    // checkpoint and bypasses this fallback. Free-form pipeline fields are
-    // untrusted here and must never lower the ordinary internal floor.
-    baseline: "internal",
+    // Any authentic pipeline classification is merged above through the
+    // HMAC-bound checkpoint. Free-form pipeline fields are untrusted here and
+    // must never lower the ordinary internal floor.
+    baseline: options.forcePrivate ? "private" : "internal",
     context: contextSensitivity,
     prompt: promptDetection.sensitivity,
     refs: refsSensitivity,
@@ -1479,7 +1586,69 @@ function getTaskSensitivityAssessment(task: TaskConfig): SensitivityAssessment {
     // Pipeline-phase authority is accepted only through the separate,
     // content-hash-bound Hugin checkpoint. Free-form pipeline metadata must
     // never upgrade a task's owner privileges, even when Submitted-by is hugin.
-    allowOwnerOverride: !task.pipeline && isOwnerSubmitter(task.submittedBy),
+    allowOwnerOverride: !options.forcePrivate && !task.pipeline && isOwnerSubmitter(task.submittedBy),
+  });
+}
+
+function refreshTaskSensitivityAssessment(
+  task: TaskConfig,
+  options: { forcePrivate?: boolean; trustedSnapshot?: TaskExecutionSensitivity } = {},
+): SensitivityAssessment {
+  const assessment = getTaskSensitivityAssessment(task, options);
+  task.effectiveSensitivity = assessment.effective;
+  task.sensitivityAssessment = assessment;
+  task.sensitivitySnapshot = buildTaskSensitivitySnapshot(assessment);
+  return assessment;
+}
+
+/**
+ * Hydrate a reparsed task with its canonical workspace identity before
+ * classifying recovery/failure artifacts. It merges an authenticated
+ * checkpoint with fresh workspace and context-ref signals. An unavailable or
+ * rejected path keeps persistence moving but raises the artifact floor to
+ * private without honoring an owner override.
+ */
+async function assessTaskWorkspaceForArtifacts(
+  task: TaskConfig,
+  taskNs: string,
+  taskContent: string,
+  client: MuninClient = munin,
+): Promise<void> {
+  const trustedSnapshot =
+    await readSensitivityCheckpoint(taskNs, taskContent, client) ??
+    task.sensitivitySnapshot;
+  let forcePrivate = Boolean(task.workingDirResolutionError);
+  if (!forcePrivate) {
+    const admission = await validateTaskWorkspace(
+      task.workingDir,
+      configuredTaskWorkspaceRoots(),
+    );
+    if (admission.ok) {
+      task.workingDir = admission.workingDir;
+      task.workspaceRoots = admission.roots;
+    } else {
+      forcePrivate = true;
+    }
+  }
+  if (!forcePrivate && task.contextRefs?.length) {
+    try {
+      task.contextResolution = await resolveContextRefs(
+        task.contextRefs,
+        task.contextBudget,
+        client,
+        { externalPolicy: config.externalPolicy },
+      );
+    } catch (err) {
+      console.warn(
+        `[sensitivity] context reference assessment unavailable for task ${taskNs}; forcing private: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+      forcePrivate = true;
+    }
+  }
+  refreshTaskSensitivityAssessment(task, {
+    forcePrivate,
+    trustedSnapshot,
   });
 }
 
@@ -1501,19 +1670,7 @@ async function assessTaskSecurity(
     );
   }
 
-  const assessment = trustedSnapshot
-    ? {
-        declared: trustedSnapshot.declared,
-        effective: trustedSnapshot.effective,
-        detectorMax: trustedSnapshot.detectorMax ?? trustedSnapshot.effective,
-        mismatch: trustedSnapshot.mismatch,
-        reasons: trustedSnapshot.reasons ?? [],
-        override: trustedSnapshot.override,
-      }
-    : getTaskSensitivityAssessment(task);
-  task.effectiveSensitivity = assessment.effective;
-  task.sensitivityAssessment = assessment;
-  task.sensitivitySnapshot = trustedSnapshot;
+  const assessment = refreshTaskSensitivityAssessment(task, { trustedSnapshot });
 
   if (assessment.override?.applied) {
     // Owner override is visible in logs so we can mine false positives and
@@ -3409,6 +3566,7 @@ async function reconcileDeliveryPending(
   client: MuninClient = munin,
 ): Promise<void> {
   const task = parseTask(entry.content);
+  if (task) await assessTaskWorkspaceForArtifacts(task, taskNs, entry.content, client);
   const classification = getTaskArtifactClassification(
     task || undefined,
     entry.content,
@@ -3418,11 +3576,9 @@ async function reconcileDeliveryPending(
     /^runtime:/,
     "",
   ) as DispatcherRuntime;
-  const recoverySensitivity =
-    await readSensitivityCheckpoint(taskNs, entry.content, client) ??
-    (task
-      ? buildTaskSensitivitySnapshot(getTaskSensitivityAssessment(task))
-      : undefined);
+  const recoverySensitivity = task
+    ? task.sensitivitySnapshot ?? buildTaskSensitivitySnapshot(task.sensitivityAssessment)
+    : undefined;
 
   // Single CAS ownership: reclaim with a fresh lease, keep delivery:pending.
   const reclaimTags = buildClaimTags(
@@ -3959,10 +4115,7 @@ async function reapExpiredLeases(): Promise<void> {
       console.log(`Reaping ${result.namespace} — ${errorMessage}`);
 
       const task = parseTask(entry.content);
-      if (task && !task.sensitivityAssessment) {
-        task.sensitivityAssessment = getTaskSensitivityAssessment(task);
-        task.effectiveSensitivity = task.sensitivityAssessment.effective;
-      }
+      if (task) await assessTaskWorkspaceForArtifacts(task, result.namespace, entry.content, reaperMunin);
       const classification = getTaskArtifactClassification(task || undefined, entry.content);
       const runtime = getRuntimeFromTags(entry.tags);
       try {
@@ -4337,10 +4490,7 @@ async function failBlockedTask(
   client: MuninClient = munin,
 ): Promise<void> {
   const task = parseTask(entry.content);
-  if (task && !task.sensitivityAssessment) {
-    task.sensitivityAssessment = getTaskSensitivityAssessment(task);
-    task.effectiveSensitivity = task.sensitivityAssessment.effective;
-  }
+  if (task) await assessTaskWorkspaceForArtifacts(task, taskNs, entry.content, client);
   const classification = getTaskArtifactClassification(task || undefined, entry.content);
   await client.write(
     taskNs,
@@ -4533,10 +4683,7 @@ async function markTaskCancelled(
   }
 ): Promise<void> {
   const task = parseTask(entry.content);
-  if (task && !task.sensitivityAssessment) {
-    task.sensitivityAssessment = getTaskSensitivityAssessment(task);
-    task.effectiveSensitivity = task.sensitivityAssessment.effective;
-  }
+  if (task) await assessTaskWorkspaceForArtifacts(task, taskNs, entry.content, munin);
   const classification = getTaskArtifactClassification(task || undefined, entry.content);
   const completedAt = options.completedAt || new Date().toISOString();
   const runtime = getRuntimeFromTags(entry.tags);
@@ -5033,10 +5180,7 @@ async function failTaskWithMessage(
     "runtime:claude"
   ).replace(/^runtime:/, "") as DispatcherRuntime;
   const task = parseTask(entry.content);
-  if (task && !task.sensitivityAssessment) {
-    task.sensitivityAssessment = getTaskSensitivityAssessment(task);
-    task.effectiveSensitivity = task.sensitivityAssessment.effective;
-  }
+  if (task) await assessTaskWorkspaceForArtifacts(task, taskNs, entry.content, munin);
   const classification = getTaskArtifactClassification(task || undefined, entry.content);
   await munin.write(
     taskNs,
@@ -5230,6 +5374,34 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     await promoteDependents(extractTaskId(taskNs));
     await refreshPipelineSummaryFromContent(entry.content);
     return pendingTaskDeparted();
+  }
+
+  if (parsedTask?.workingDirResolutionError) {
+    const rejection = `Task workspace rejected: ${parsedTask.workingDirResolutionError}`;
+    console.warn(`Rejecting task ${taskNs}: ${rejection}`);
+    await failTaskWithMessage(taskNs, entry, rejection);
+    await munin.log(taskNs, `Task rejected before execution: ${rejection}`);
+    await promoteDependents(extractTaskId(taskNs));
+    await refreshPipelineSummaryFromContent(entry.content);
+    return pendingTaskDeparted();
+  }
+
+  if (parsedTask) {
+    const admission = await validateTaskWorkspace(
+      parsedTask.workingDir,
+      configuredTaskWorkspaceRoots(),
+    );
+    if (!admission.ok) {
+      const rejection = `Task workspace rejected: ${admission.reason}`;
+      console.warn(`Rejecting task ${taskNs}: ${rejection}`);
+      await failTaskWithMessage(taskNs, entry, rejection);
+      await munin.log(taskNs, `Task rejected before execution: ${rejection}`);
+      await promoteDependents(extractTaskId(taskNs));
+      await refreshPipelineSummaryFromContent(entry.content);
+      return pendingTaskDeparted();
+    }
+    parsedTask.workingDir = admission.workingDir;
+    parsedTask.workspaceRoots = admission.roots;
   }
 
   // Validate submitter against allowlist
@@ -5947,10 +6119,34 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // uncommitted leftovers instead of conflicting.
     let branchResult: Awaited<ReturnType<typeof checkoutTaskBranch>> = { action: "skipped" };
     let checkoutGateRefusalReason: string | undefined;
+    let dispatchSensitivityRefusalReason: string | undefined;
     let checkoutGateDegraded = false;
-    if (task.runtime !== "homeserver" && task.runtime !== "research") {
+    const preCheckoutAdmission = await validateTaskWorkspace(
+      task.workingDir,
+      configuredTaskWorkspaceRoots(),
+    );
+    if (!preCheckoutAdmission.ok) {
+      checkoutGateRefusalReason = `Task workspace rejected before checkout: ${preCheckoutAdmission.reason}`;
+      refreshTaskSensitivityAssessment(task, {
+        forcePrivate: true,
+        trustedSnapshot: task.sensitivitySnapshot,
+      });
+    } else {
+      task.workingDir = preCheckoutAdmission.workingDir;
+      task.workspaceRoots = preCheckoutAdmission.roots;
+      const refreshed = refreshTaskSensitivityAssessment(task, {
+        trustedSnapshot: task.sensitivitySnapshot,
+      });
+      dispatchSensitivityRefusalReason = getSecurityViolationForTask(task, refreshed) || undefined;
+    }
+    if (
+      !checkoutGateRefusalReason &&
+      !dispatchSensitivityRefusalReason &&
+      task.runtime !== "homeserver" &&
+      task.runtime !== "research"
+    ) {
       const gate = await prepareManagedCheckout(task.workingDir, taskId, {
-        reposRoot: config.reposRoot,
+        reposRoot: task.workspaceRoots!.reposRoot,
         baseBranchOverride: task.baseBranch,
         mutationCapable,
       });
@@ -5977,8 +6173,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       deriveRepositoryOutcome(branchResult, undefined, Boolean(checkoutGateRefusalReason));
 
     currentTaskConfig = task;
-    const taskClassification = getTaskArtifactClassification(task);
-    const taskSensitivitySnapshot = task.sensitivitySnapshot ??
+    let taskClassification = getTaskArtifactClassification(task);
+    let taskSensitivitySnapshot = task.sensitivitySnapshot ??
       buildTaskSensitivitySnapshot(task.sensitivityAssessment);
     let approvalMetadata: TaskExecutionApprovalMetadata | undefined;
     if (task.pipeline?.authority === "gated") {
@@ -6075,7 +6271,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
     // worktree, so silently replacing them with a file-editing harness would
     // exceed the submitted authority. Direct Claude/Codex tasks carrying one
     // of #267's canonical bounded-coding task types are the live eligible set.
-    const harnessLaneCheckoutPassed = !checkoutGateRefusalReason;
+    const harnessLaneCheckoutPassed =
+      !checkoutGateRefusalReason && !dispatchSensitivityRefusalReason;
     const harnessLaneTaskType =
       harnessLaneCheckoutPassed &&
       (isClaude || isCodex) &&
@@ -6111,6 +6308,35 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       taskOutcomeRef: harnessLaneTaskOutcomeRef,
       ...extras,
     });
+
+    // The path and configured-root identities are checked again after checkout
+    // and runtime preflights. Use the canonical return value as the cwd passed
+    // to every executor, and always refresh sensitivity because a root symlink
+    // can change the private floor while the cwd string remains unchanged.
+    // Same-UID swaps after this point remain outside this path-based contract.
+    if (!checkoutGateRefusalReason && !dispatchSensitivityRefusalReason) {
+      const dispatchAdmission = await validateTaskWorkspace(
+        task.workingDir,
+        configuredTaskWorkspaceRoots(),
+      );
+      if (!dispatchAdmission.ok) {
+        checkoutGateRefusalReason = `Task workspace rejected before executor dispatch: ${dispatchAdmission.reason}`;
+        refreshTaskSensitivityAssessment(task, {
+          forcePrivate: true,
+          trustedSnapshot: task.sensitivitySnapshot,
+        });
+      } else {
+        task.workingDir = dispatchAdmission.workingDir;
+        task.workspaceRoots = dispatchAdmission.roots;
+        const refreshed = refreshTaskSensitivityAssessment(task, {
+          trustedSnapshot: task.sensitivitySnapshot,
+        });
+        dispatchSensitivityRefusalReason = getSecurityViolationForTask(task, refreshed) || undefined;
+      }
+      taskClassification = getTaskArtifactClassification(task);
+      taskSensitivitySnapshot = task.sensitivitySnapshot ??
+        buildTaskSensitivitySnapshot(task.sensitivityAssessment);
+    }
 
     const executeSampledHarness = async (): Promise<LaneAttemptOutcome> => {
       effectiveExecutor = "opencode-sampled";
@@ -6236,6 +6462,29 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       } catch {
         /* log is best-effort — never fail the task on a log write */
       }
+    } else if (dispatchSensitivityRefusalReason) {
+      exitCode = 1;
+      output = dispatchSensitivityRefusalReason;
+      logFile = path.join(LOG_DIR, `${taskId}.log`);
+      try {
+        fs.writeFileSync(
+          logFile,
+          [
+            "=== Hugin Task Log ===",
+            `Task: ${taskId}`,
+            `Runtime: ${task.runtime}`,
+            "Task refused by the sensitivity policy after workspace revalidation:",
+            dispatchSensitivityRefusalReason,
+            "",
+            "Exit code: 1",
+            "",
+          ].join("\n"),
+          { encoding: "utf-8" },
+        );
+      } catch {
+        /* log is best-effort — never fail the task on a log write */
+      }
+      await munin.log(taskNs, `Task rejected by security policy: ${dispatchSensitivityRefusalReason}`);
     } else if (isResearch) {
     // Dedicated, explicit research lane.  It is intentionally separate from
     // pi-harness/orchestrator: only this executor receives the Hugin-owned
@@ -7021,8 +7270,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
       permissionProfile: task.permissionProfile,
       branchResult,
       workingDir: task.workingDir,
-      reposRoot: config.reposRoot,
-      allowedReadOnlyRoots: piReadOnlyAllowedRoots,
+      reposRoot: task.workspaceRoots!.reposRoot,
+      allowedReadOnlyRoots: piReadOnlyRoots(task.workspaceRoots!),
       checkoutGateRefusalReason,
       checkoutGateDegraded,
     });
@@ -7053,8 +7302,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         workingDirectory: task.workingDir,
         permissionProfile: piHarnessBinding.effectiveWorkerPermissionProfile,
         workerWorktree: piHarnessBinding.binding,
-        configuredManagedRoot: config.reposRoot,
-        allowedReadOnlyRoots: piReadOnlyAllowedRoots,
+        configuredManagedRoot: task.workspaceRoots!.reposRoot,
+        allowedReadOnlyRoots: piReadOnlyRoots(task.workspaceRoots!),
       });
       const orchResult = await runOrchestratorTask(
         {
@@ -7203,6 +7452,8 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
         ? piHarnessAdmissionFailureClassification(piHarnessAdmissionFailureReason)
         : checkoutGateRefusalReason
         ? checkoutGateFailureClassification(checkoutGateRefusalReason)
+        : dispatchSensitivityRefusalReason
+        ? null
         : isCodex && codexPreflightFailureReason
         ? codexSandboxFailureClassification(codexPreflightFailureReason)
         : isClaude || fallbackTriggered

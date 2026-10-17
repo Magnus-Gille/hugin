@@ -80,10 +80,22 @@ Do not invent fields from old plans—confirm parsing in `src/index.ts`,
 
 ### Context and repository rules
 
-- `Context` takes priority over `Working dir`. `repo:<name>` resolves beneath
-  `HUGIN_REPOS_ROOT`; `scratch` and `files` resolve to their configured safe roots.
-  Absolute working paths must remain under `/home/magnus/`. Relative paths,
-  traversal, and normalized paths outside the allowed root fall back safely.
+- `Context` takes priority over `Working dir`. By default, `repo:<name>` resolves beneath
+  `/home/magnus/hugin-workspace`; the default, `scratch`, and `files` contexts use its
+  `_default`, `_scratch`, and `_files` children. `HUGIN_REPOS_ROOT`, `HUGIN_WORKSPACE`,
+  `HUGIN_SCRATCH`, and `HUGIN_FILES` can configure these roots. An absolute legacy path is
+  accepted only inside one of those configured roots. `HUGIN_PROTECTED_TASK_ROOTS` adds
+  path-delimited protected roots; it never replaces Hugin's built-in protections.
+- Hugin canonicalizes all configured roots and the selected working directory, including
+  missing destinations via their nearest existing ancestor. It rejects either ancestor or
+  descendant overlap with the Hugin source tree, `~/repos`, `/home/magnus/repos`,
+  `/home/magnus/hugin`, and `.ssh`, `.config`, `.claude`, `.codex`, or `.hugin` under the
+  service home. Unsafe explicit paths and symlink escapes are rejected before checkout or
+  runtime dispatch; they are not redirected to the default workspace.
+- This is task path admission, not filesystem confinement: runtimes retain their existing
+  broader permissions, and a same-UID process can still swap a path after validation. The
+  dispatcher revalidates before checkout and executor dispatch but does not bind execution
+  to an open directory handle.
 - Point `HUGIN_REPOS_ROOT` at an isolated managed tree, never production deployment
   checkouts. Canonicalized paths—not string prefixes—decide whether Hugin may create
   and publish a task branch.

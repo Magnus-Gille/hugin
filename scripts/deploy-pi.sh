@@ -132,7 +132,10 @@ ssh "$REMOTE" "
 
 echo "==> Installing user-level systemd services..."
 ssh "$REMOTE" "
-  mkdir -p ~/.config/systemd/user ~/.hugin/daily-exam-candidates ~/.hugin/experiment-cadence
+  mkdir -p ~/.config/systemd/user ~/.hugin/daily-exam-candidates ~/.hugin/experiment-cadence \
+    /home/magnus/hugin-workspace/_default \
+    /home/magnus/hugin-workspace/_scratch \
+    /home/magnus/hugin-workspace/_files
   # hugin#272: no candidates.json seed needed -- the cadence CLI's default
   # production candidate-pool assembler scans the #232 registry itself.
   # A leftover file from an older deploy is simply never read.

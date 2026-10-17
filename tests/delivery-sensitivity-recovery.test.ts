@@ -5,7 +5,7 @@ import * as path from "node:path";
 // Delivery recovery lives inside the dispatcher module and is not independently
 // exported. Guard the two durability seams together: the live path must persist
 // the already-computed content-blind snapshot before marking delivery pending,
-// and reconciliation must reuse that exact snapshot in the terminal result.
+// and recovery must merge it with freshly admitted workspace/context signals.
 const SRC = readFileSync(
   path.join(__dirname, "..", "src", "index.ts"),
   "utf8",
@@ -49,7 +49,20 @@ describe("delivery recovery preserves sensitivity and grounding evidence", () =>
       "async function reconcileDeliveryPending(",
       "async function recoverStaleTasks(",
     );
-    expect(recovery).toContain("readSensitivityCheckpoint(");
+    const hydration = sliceBetween(
+      "async function assessTaskWorkspaceForArtifacts(",
+      "function getTaskRuntimeLabel(",
+    );
+    const assessment = sliceBetween(
+      "function getTaskSensitivityAssessment(",
+      "function refreshTaskSensitivityAssessment(",
+    );
+    expect(hydration).toContain("readSensitivityCheckpoint(");
+    expect(hydration).toContain("validateTaskWorkspace(");
+    expect(hydration).toContain("contextResolution");
+    expect(assessment).toContain("contextSensitivity");
+    expect(assessment).toContain("trustedSnapshot");
+    expect(recovery).toContain("assessTaskWorkspaceForArtifacts(task, taskNs, entry.content, client)");
     expect(recovery).toContain("sensitivity: recoverySensitivity");
     expect(recovery).toContain("RESEARCH_GROUNDING_KEY");
     expect(recovery).toContain("parseResearchGroundingAttestation");

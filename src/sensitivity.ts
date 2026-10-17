@@ -1,4 +1,6 @@
 import { z } from "zod";
+import * as path from "node:path";
+import type { CanonicalWorkspaceRoots } from "./task-helpers.js";
 import {
   RUNTIME_REGISTRY,
   getRuntimeMaxSensitivity,
@@ -161,6 +163,7 @@ const CONTEXT_SENSITIVE_PATTERNS = [
 const TECHNICAL_CONTEXT = /\b(?:handling|handled|scanning|scanned|management|managed|rotation|rotated|module|system|API|integration|integrated|processing|processed|calculation|calculated|architecture|endpoint|schema|service|engine|middleware|template|pipeline|detection|detected|verification|verified|authentication|authenticated|authorization|authorized|signing|signed|encryption|encrypted|hashing|hashed|registry|registered|configuration|configured|systemd|SDK|CLI|framework|protocol|required|optional|generated|stored|provided|available)\b/i;
 
 const PRIVATE_PATH_PREFIXES = [
+  "/home/magnus/hugin-workspace/_files",
   "/home/magnus/mimir",
   "/home/magnus/.claude",
   "/home/magnus/.codex",
@@ -169,6 +172,7 @@ const PRIVATE_PATH_PREFIXES = [
 ];
 
 const INTERNAL_PATH_PREFIXES = [
+  "/home/magnus/hugin-workspace",
   "/home/magnus/repos/",
   "/home/magnus/workspace",
   "/home/magnus/scratch",
@@ -396,23 +400,48 @@ export function classifyPromptSensitivity(
 export function classifyContextSensitivity(
   context: string | undefined,
   workingDir: string | undefined,
+  roots?: CanonicalWorkspaceRoots,
 ): Sensitivity | undefined {
   const contextValue = context?.trim();
-  if (contextValue === "files") return "private";
-  if (contextValue === "scratch") return "internal";
-  if (contextValue?.startsWith("repo:")) return "internal";
-
-  const candidate = contextValue || workingDir;
-  if (!candidate) return undefined;
-
-  if (PRIVATE_PATH_PREFIXES.some((prefix) => candidate.startsWith(prefix))) {
-    return "private";
-  }
-  if (INTERNAL_PATH_PREFIXES.some((prefix) => candidate.startsWith(prefix))) {
-    return "internal";
+  // Keep the alias's own floor, then raise it using the admitted canonical
+  // cwd. A repo or scratch alias can resolve through a symlink into `files`,
+  // and roots can overlap; neither lexical label may lower that private floor.
+  let sensitivity: Sensitivity | undefined;
+  if (contextValue === "files") sensitivity = "private";
+  else if (contextValue === "scratch" || contextValue?.startsWith("repo:")) {
+    sensitivity = "internal";
   }
 
-  return undefined;
+  // The dispatcher supplies the canonical admitted cwd for absolute paths,
+  // symlink aliases, and descriptive context labels. If no cwd is available,
+  // retain direct classification for an absolute declaration or known alias.
+  const candidate = workingDir || (contextValue && path.isAbsolute(contextValue)
+    ? contextValue
+    : undefined);
+  if (!candidate) return sensitivity;
+
+  const canonicalCandidate = path.isAbsolute(candidate) ? path.resolve(candidate) : undefined;
+  const within = (root: string | undefined): boolean => {
+    if (!canonicalCandidate || !root) return false;
+    const relative = path.relative(path.resolve(root), canonicalCandidate);
+    return relative === "" ||
+      (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  };
+
+  if (within(roots?.files) || PRIVATE_PATH_PREFIXES.some((prefix) =>
+    canonicalCandidate && within(prefix))) {
+    sensitivity = maxSensitivity(sensitivity, "private");
+  }
+  if (
+    within(roots?.reposRoot) ||
+    within(roots?.workspace) ||
+    within(roots?.scratch) ||
+    INTERNAL_PATH_PREFIXES.some((prefix) => canonicalCandidate && within(prefix))
+  ) {
+    sensitivity = maxSensitivity(sensitivity, "internal");
+  }
+
+  return sensitivity;
 }
 
 export function muninClassificationToSensitivity(
