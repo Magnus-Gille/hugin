@@ -223,7 +223,7 @@ else
   echo "  The post-restart in-service health acceptance will remain authoritative."
 fi
 
-echo "==> Installing CLI update cron job..."
+echo "==> Installing CLI observation cron job..."
 CRON_CMD="0 4 * * * $REMOTE_DIR/scripts/update-cli.sh 2>&1 | logger -t hugin-update"
 ssh "$REMOTE" "crontab -l 2>/dev/null | grep -v 'update-cli.sh' | { cat; echo '$CRON_CMD'; } | crontab -"
 echo "  Cron installed: daily at 04:00"

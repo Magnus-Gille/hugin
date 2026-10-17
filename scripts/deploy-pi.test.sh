@@ -370,6 +370,7 @@ assert_contains "$full_calls" "npm ci --omit=dev" "deployment installs the shipp
 assert_contains "$full_calls" "/home/magnus/hugin-workspace/_default" "deployment creates the dedicated default task workspace"
 assert_contains "$full_calls" "/home/magnus/hugin-workspace/_scratch" "deployment creates the dedicated scratch task workspace"
 assert_contains "$full_calls" "/home/magnus/hugin-workspace/_files" "deployment creates the dedicated files task workspace"
+assert_contains "$full_calls" '0 4 * * * /home/magnus/repos/hugin/scripts/update-cli.sh 2>&1 | logger -t hugin-update' "deployment retains the stable observation schedule and logger tag"
 assert_not_contains "$full_calls" "npm install --omit=dev" "deployment never rewrites the shipped lockfile with npm install"
 assert_not_contains "$full_calls" "npm prefix --global" "deployment no longer depends on npm's unwritable default global prefix (#390)"
 assert_contains "$full_calls" 'NPM_GLOBAL_PREFIX="$HOME/.npm-global"' "deployment installs the research Pi under an explicit user-writable prefix (#390)"

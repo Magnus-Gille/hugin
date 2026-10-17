@@ -1,12 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-# Update Claude Code and Codex CLI tools
+# Observe installed Claude Code and Codex CLI versions and health; never install.
 # Intended to run daily via cron on the Pi
-# Logs version changes and failures to syslog (tag: hugin-update)
+# Logs observations and failures to syslog (stable tag: hugin-update)
 # Writes a one-line version status to Munin (meta/hugin/cli-versions)
 
-export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.npm-global/bin:$PATH"
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
 # Source the Pi .env for MUNIN_API_KEY (best-effort; Munin write is non-fatal)
 if [ -f "$HOME/hugin/.env" ]; then
@@ -18,7 +18,7 @@ fi
 
 MUNIN_URL="${MUNIN_URL:-http://localhost:3030}"
 
-# Tracks whether any package install / smoke test failed
+# Tracks whether either installed CLI health check failed
 # (script exits non-zero at the end if set).
 FAILED=0
 
@@ -40,34 +40,8 @@ installed_version() {
   return 0
 }
 
-update_package() {
-  local pkg="$1"
-  local old_version new_version
-
-  old_version=$(installed_version "$pkg")
-
-  echo "Updating $pkg (current: $old_version)..."
-  # `npm i -g <pkg>@latest` forces cross-major upgrades; `npm update` would
-  # silently stay within the pinned caret range and skip major releases.
-  if ! npm i -g "${pkg}@latest" 2>&1; then
-    echo "FAILED: $pkg install returned non-zero"
-    logger -t hugin-update "FAILED: $pkg install returned non-zero"
-    FAILED=1
-    return
-  fi
-
-  new_version=$(installed_version "$pkg")
-
-  if [ "$old_version" = "$new_version" ]; then
-    echo "$pkg: already up-to-date ($new_version)"
-  else
-    echo "$pkg: updated $old_version -> $new_version"
-    logger -t hugin-update "$pkg updated $old_version -> $new_version"
-  fi
-}
-
-# Post-update smoke test: the CLI must actually run. A corrupt install
-# (truncated tarball, broken bin shim) passes `npm i` but fails --version.
+# Observe the executable resolved by the service PATH. npm-global package
+# metadata and CLI health are separate: a standalone CLI may take precedence.
 # Prints "ok" or "broken" to stdout (captured by the caller); all human/log
 # output goes to stderr so it still reaches the cron log.
 smoke_test() {
@@ -155,12 +129,7 @@ CURLCFG
   echo "Wrote CLI versions to Munin: meta/hugin/cli-versions"
 }
 
-echo "==> Updating CLI tools ($(date))"
-
-update_package "@anthropic-ai/claude-code"
-update_package "@openai/codex"
-
-echo "==> Running post-update smoke tests"
+echo "==> Observing installed CLI tools ($(date))"
 CLAUDE_SMOKE=$(smoke_test "claude" "claude")
 CODEX_SMOKE=$(smoke_test "codex" "codex")
 if [ "$CLAUDE_SMOKE" = "broken" ]; then FAILED=1; fi
@@ -171,13 +140,14 @@ if [ "$CODEX_SMOKE" = "broken" ]; then FAILED=1; fi
 # smoke health is appended as an annotation.
 CLAUDE_PKG_VER=$(installed_version "@anthropic-ai/claude-code")
 CODEX_PKG_VER=$(installed_version "@openai/codex")
-MUNIN_CONTENT="claude-code: ${CLAUDE_PKG_VER} (smoke: ${CLAUDE_SMOKE}) | codex: ${CODEX_PKG_VER} (smoke: ${CODEX_SMOKE}) | updated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+MUNIN_CONTENT="claude-code npm-global: ${CLAUDE_PKG_VER} (smoke: ${CLAUDE_SMOKE}) | codex npm-global: ${CODEX_PKG_VER} (smoke: ${CODEX_SMOKE}) | checked: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "$MUNIN_CONTENT"
 write_munin_status "$MUNIN_CONTENT"
 
 if [ "$FAILED" -ne 0 ]; then
-  echo "==> Update check completed WITH FAILURES"
+  echo "==> CLI observation completed WITH FAILURES"
   logger -t hugin-update "update-cli.sh completed with failures"
   exit 1
 fi
 
-echo "==> Update check complete"
+echo "==> CLI observation complete"

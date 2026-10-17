@@ -224,3 +224,5 @@ scheduling, and pipeline phases.
 - [Quality-efficient agent orchestration](research/quality-efficient-agent-orchestration-2026-08.md):
   Dated research and adversarial debate on allocating differently constrained
   model capacity for quality with limited human intervention.
+
+- [CLI observation and explicit promotion](cli-runtime-promotion.md): daily health/version reporting and the operator-controlled promotion boundary.
