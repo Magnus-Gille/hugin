@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -6,6 +5,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import type { ArtifactManifest } from "./artifact-delivery.js";
+import { spawnOwnedProcess, waitForChildCloseBounded } from "./process-lifecycle.js";
 import { isSovereignGatewayHost, resolveGatewayRootUrl } from "./orchestrator/provider-config.js";
 import {
   canonicalResearchUrl,
@@ -532,10 +532,40 @@ export async function executeResearchSpike(request: ResearchSpikeRunRequest): Pr
     const diagnostic = new BoundedText(MAX_PI_DIAGNOSTIC_CHARS);
     const stderrFallback = new BoundedText(maxResultChars);
     let timedOut = false; let killReason = false;
-    const child = spawn(loaded.config.bwrapCommand, launch.args, { cwd: request.workingDir, stdio: ["ignore", "pipe", "pipe"], env: launch.env });
-    const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, request.timeoutMs);
-    const abort = () => { killReason = true; child.kill("SIGTERM"); };
+    let managed: ReturnType<typeof spawnOwnedProcess>;
+    try {
+      managed = spawnOwnedProcess(loaded.config.bwrapCommand, launch.args, {
+        cwd: request.workingDir,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: launch.env,
+      });
+    } catch (error) {
+      const reason = boundText(
+        `Spawn error: ${error instanceof Error ? error.message : String(error)}`,
+        maxResultChars,
+      );
+      void (async () => {
+        await fs.rm(configDir, { recursive: true, force: true }).catch(() => undefined);
+        await fs.writeFile(base.logFile, boundText(reason, MAX_PI_DIAGNOSTIC_CHARS), { mode: 0o600 })
+          .catch(() => undefined);
+        resolve({
+          exitCode: 1,
+          output: reason,
+          resultText: null,
+          model: loaded.config.model,
+          logFile: base.logFile,
+          error: reason,
+        });
+      })();
+      return;
+    }
+    const { child, lifecycle } = managed;
+    let childClosed = false;
+    let endFinalizer: Promise<void> | null = null;
+    const timer = setTimeout(() => { timedOut = true; void lifecycle.terminate(); }, request.timeoutMs);
+    const abort = () => { killReason = true; void lifecycle.terminate(); };
     request.signal?.addEventListener("abort", abort, { once: true });
+    if (request.signal?.aborted) abort();
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
       parser.feed(text);
@@ -547,18 +577,25 @@ export async function executeResearchSpike(request: ResearchSpikeRunRequest): Pr
       diagnostic.append(text);
     });
     child.on("error", async (error) => {
+      if (endFinalizer) return;
       clearTimeout(timer);
       request.signal?.removeEventListener("abort", abort);
+      const cleanup = await lifecycle.cleanup();
       await fs.rm(configDir, { recursive: true, force: true }).catch(() => undefined);
-      const boundedError = boundText(error.message, maxResultChars);
+      const boundedError = boundText(`${error.message}${cleanup.ok ? "" : `; ${cleanup.error}`}`, maxResultChars);
       await fs.writeFile(base.logFile, boundedError, { mode: 0o600 }).catch(() => undefined);
       resolve({ exitCode: 1, output: boundedError.slice(0, maxResultChars), resultText: null, model: loaded.config.model, logFile: base.logFile, error: boundedError });
     });
-    child.on("close", async (code) => {
+
+    const finishAfterExit = (code: number | null) => {
+      if (endFinalizer) return endFinalizer;
+      endFinalizer = (async () => {
       clearTimeout(timer); request.signal?.removeEventListener("abort", abort);
+      const cleanup = await lifecycle.cleanup();
+      if (cleanup.ok) await waitForChildCloseBounded(child, childClosed);
       parser.finish();
       const parsed = parser.result();
-      const semanticError = parsed.error;
+      const semanticError = parsed.error ?? (cleanup.ok ? undefined : cleanup.error);
       let grounding: ResearchGroundingAttestation | undefined;
       let groundingFailureDiagnostic: string | undefined;
       // The extension records a helper-circuit before requesting Agent Core
@@ -600,6 +637,16 @@ export async function executeResearchSpike(request: ResearchSpikeRunRequest): Pr
         ...(visibleError ? { error: visibleError } : {}),
         grounding,
       });
+      })();
+      return endFinalizer;
+    };
+
+    lifecycle.onCleanupFailure(() => { void finishAfterExit(null); });
+
+    child.on("exit", (code) => { void finishAfterExit(code); });
+    child.on("close", (code) => {
+      childClosed = true;
+      void finishAfterExit(code);
     });
   });
 }

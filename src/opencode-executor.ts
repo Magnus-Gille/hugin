@@ -1,10 +1,11 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 import { isSovereignGatewayHost } from "./orchestrator/provider-config.js";
 import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
+import { spawnOwnedProcess, waitForChildCloseBounded, type OwnedProcessLifecycle } from "./process-lifecycle.js";
 
 export type OpencodePermissionProfile = "read-only" | "trusted-code";
 
@@ -371,8 +372,11 @@ export async function executeOpencodeTask(
   let output = "";
   let jsonLineBuffer = "";
   let child: ChildProcess | null = null;
+  let lifecycle: OwnedProcessLifecycle | null = null;
   let timedOut = false;
   let configDirRemoved = false;
+  let childClosed = false;
+  let endFinalizer: Promise<void> | null = null;
 
   const appendOutput = (text: string) => {
     output += text;
@@ -476,22 +480,30 @@ export async function executeOpencodeTask(
     const timer = setTimeout(() => abortController.abort(), task.timeoutMs);
     abortController.signal.addEventListener("abort", () => {
       timedOut = true;
-      child?.kill("SIGTERM");
-      setTimeout(() => {
-        if (child && !child.killed) child.kill("SIGKILL");
-      }, 5_000).unref();
+      if (lifecycle) void lifecycle.terminate();
     });
 
-    child = spawn(task.opencodeCommand || "opencode", plan.args, {
-      cwd: task.workingDir,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...buildTaskSubprocessEnv(),
-        OPENCODE_CONFIG_DIR: configDir,
-        [PROVIDER_API_KEY_ENV]: task.apiKey,
-        HUGIN_TASK_ID: taskId,
-      },
-    });
+    let managed: ReturnType<typeof spawnOwnedProcess>;
+    try {
+      managed = spawnOwnedProcess(task.opencodeCommand || "opencode", plan.args, {
+        cwd: task.workingDir,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          ...buildTaskSubprocessEnv(),
+          OPENCODE_CONFIG_DIR: configDir,
+          [PROVIDER_API_KEY_ENV]: task.apiKey,
+          HUGIN_TASK_ID: taskId,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      appendOutput(`\n=== Spawn error: ${message} ===\n`);
+      void settle(1);
+      return;
+    }
+    child = managed.child;
+    lifecycle = managed.lifecycle;
+    if (abortController.signal.aborted) void lifecycle.terminate();
 
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf-8");
@@ -500,13 +512,33 @@ export async function executeOpencodeTask(
     });
     child.stderr?.on("data", (chunk: Buffer) => appendOutput(chunk.toString("utf-8")));
 
-    child.on("error", async (err) => {
-      appendOutput(`\n[OpenCode spawn error: ${err.message}]\n`);
-      await settle(1);
-    });
+    const finishAfterExit = (code: number | null) => {
+      if (endFinalizer) return endFinalizer;
+      endFinalizer = (async () => {
+        clearTimeout(timer);
+        const cleanup = await lifecycle!.cleanup();
+        if (cleanup.ok) await waitForChildCloseBounded(child!, childClosed);
+        if (!cleanup.ok) appendOutput(`\n[${cleanup.error}]\n`);
+        await settle(cleanup.ok ? (timedOut ? "TIMEOUT" : code ?? 1) : timedOut ? "TIMEOUT" : 1);
+      })();
+      return endFinalizer;
+    };
 
-    child.on("close", async (code) => {
-      await settle(timedOut ? "TIMEOUT" : code ?? 1);
+    lifecycle.onCleanupFailure(() => { void finishAfterExit(null); });
+
+    child.on("exit", (code) => { void finishAfterExit(code); });
+    child.on("close", (code) => {
+      childClosed = true;
+      void finishAfterExit(code);
+    });
+    child.on("error", (err) => {
+      if (endFinalizer) return;
+      appendOutput(`\n[OpenCode spawn error: ${err.message}]\n`);
+      endFinalizer = (async () => {
+        const cleanup = await lifecycle!.cleanup();
+        if (!cleanup.ok) appendOutput(`\n[${cleanup.error}]\n`);
+        await settle(1);
+      })();
     });
   });
 }

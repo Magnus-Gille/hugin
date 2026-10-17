@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,6 +16,19 @@ import {
 } from "../src/research-spike-executor.js";
 const researchExtension = await import("../scripts/research-pi-extension.mjs");
 
+beforeEach(() => {
+  const realKill = process.kill.bind(process);
+  vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (pid < -1) {
+      if (signal === 0) throw Object.assign(new Error("no fake group"), { code: "ESRCH" });
+      return true;
+    }
+    return realKill(pid, signal);
+  });
+});
+
+afterEach(() => vi.restoreAllMocks());
+
 const env = {
   HUGIN_RESEARCH_M5_URL: "http://100.99.119.52:8080",
   HUGIN_RESEARCH_M5_API_KEY: "test-key",
@@ -26,16 +39,19 @@ const env = {
 function mockPi(stdout: string, stderr = "", code = 0): void {
   spawnMock.mockImplementationOnce(() => {
     const child = new EventEmitter() as EventEmitter & {
+      pid: number;
       stdin: { end: ReturnType<typeof vi.fn> };
       stdout: EventEmitter;
       stderr: EventEmitter;
       kill: ReturnType<typeof vi.fn>;
     };
+    child.pid = 900_001;
     child.stdin = { end: vi.fn() };
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.kill = vi.fn();
     queueMicrotask(() => {
+      child.emit("spawn");
       if (stdout) child.stdout.emit("data", Buffer.from(stdout));
       if (stderr) child.stderr.emit("data", Buffer.from(stderr));
       child.emit("close", code);

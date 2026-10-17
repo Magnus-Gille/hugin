@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { type Server } from "node:http";
 import * as fs from "node:fs";
@@ -76,6 +76,17 @@ import {
   type PendingQueueSnapshot,
 } from "./queue-observability.js";
 import { executeSdkTask, type SdkExecutorResult, type SdkExecutorOptions, type SdkTaskConfig, type TaskPermissionProfile } from "./sdk-executor.js";
+import {
+  closeOwnedProcessAdmission,
+  exitCodeAfterCleanup,
+  spawnOwnedProcess,
+  terminateAllOwnedProcesses,
+  terminateBeforePersistence,
+  waitForChildCloseBounded,
+  waitForPersistenceBounded,
+  __test__ as processLifecycleTestHooks,
+  type OwnedProcessLifecycle,
+} from "./process-lifecycle.js";
 import {
   createCodeHealthTransportDependencies,
   type CodeHealthCaptureConfig,
@@ -842,7 +853,7 @@ let currentTask: string | null = null;
 // may contribute control tags, but never replace this scheduler pointer pair.
 let currentClaimTags: string[] | null = null;
 let currentTaskConfig: TaskConfig | null = null;
-let currentChild: ChildProcess | null = null;
+let currentCodexProcess: OwnedProcessLifecycle | null = null;
 let currentSdkAbort: AbortController | null = null;
 let currentOllamaAbort: AbortController | null = null;
 let currentOpencodeAbort: AbortController | null = null;
@@ -3009,6 +3020,8 @@ function spawnRuntime(
   if (task.runtime !== "codex") {
     throw new Error(`Spawn executor no longer supports runtime "${task.runtime}"`);
   }
+  const stopped = codexSpawnRefusalAfterLifecycleStop(ctx);
+  if (stopped) return Promise.resolve(stopped);
   return new Promise((resolve) => {
     const taskId = extractTaskId(ctx.taskNs);
     const logFile = path.join(LOG_DIR, `${taskId}.log`);
@@ -3034,7 +3047,7 @@ function spawnRuntime(
 
     const cmd = ["codex", ["exec", "--full-auto", task.prompt]];
 
-    const child = spawn(cmd[0] as string, cmd[1] as string[], {
+    const managed = spawnOwnedProcess(cmd[0] as string, cmd[1] as string[], {
       cwd: task.workingDir,
       stdio: ["ignore", "pipe", "pipe"],
       env: {
@@ -3045,7 +3058,8 @@ function spawnRuntime(
       },
     });
 
-    currentChild = child;
+    const { child, lifecycle } = managed;
+    currentCodexProcess = lifecycle;
     let timedOut = false;
 
     // Ring buffer for output capture (kept for Munin result)
@@ -3064,8 +3078,12 @@ function spawnRuntime(
     child.stdout?.on("data", appendOutput);
     child.stderr?.on("data", appendOutput);
 
-    const timer = setTimeout(async () => {
+    let timeoutPersistence: Promise<void> = Promise.resolve();
+    let finishAfterExit!: (code: number | null) => Promise<void>;
+    const timer = setTimeout(() => {
       timedOut = true;
+      // Begin process-group termination synchronously. A slow Munin partial
+      // result write must not consume the task's termination grace period.
       const elapsedS = Math.round((Date.now() - startMs) / 1000);
       console.log(
         `Task timeout (${task.timeoutMs}ms / ${elapsedS}s), sending SIGTERM to child`
@@ -3076,9 +3094,8 @@ function spawnRuntime(
         `\n===\nTIMEOUT after ${elapsedS}s — sending SIGTERM\n===\n`
       );
 
-      // Write partial result to Munin before killing
-      try {
-        await ctx.muninClient.write(ctx.taskNs, "result", [
+      // Persist partial output after termination has already been initiated.
+      const partialPersistence = terminateBeforePersistence(lifecycle, () => ctx.muninClient.write(ctx.taskNs, "result", [
           "## Result (PARTIAL — task timed out)\n",
           `- **Exit code:** TIMEOUT`,
           `- **Started at:** ${startedAt}`,
@@ -3090,18 +3107,17 @@ function spawnRuntime(
           "```",
           output.slice(-config.maxOutputChars) || "(no output captured)",
           "```",
-        ].join("\n"));
-      } catch (err) {
+        ].join("\n"), undefined, undefined, undefined, true, { requestTimeoutMs: 2_000, maxRetries: 0 }), (err) => {
         console.error("Failed to write partial result on timeout:", err);
-      }
-
-      child.kill("SIGTERM");
-      setTimeout(() => {
-        if (!child.killed) child.kill("SIGKILL");
-      }, 10000);
+      });
+      timeoutPersistence = waitForPersistenceBounded(partialPersistence, 2_100, () => {
+        console.error("Timed out waiting for partial result persistence");
+      });
     }, task.timeoutMs);
 
     let logEnded = false;
+    let childClosed = false;
+    let endFinalizer: Promise<void> | null = null;
     function endLog(footer: string): void {
       if (logEnded) return;
       logEnded = true;
@@ -3109,40 +3125,58 @@ function spawnRuntime(
       logStream.end();
     }
 
+    finishAfterExit = (code: number | null) => {
+      if (endFinalizer) return endFinalizer;
+      endFinalizer = (async () => {
+        clearTimeout(timer);
+        const cleanup = await lifecycle.cleanup();
+        if (cleanup.ok) await waitForChildCloseBounded(child, childClosed);
+        await timeoutPersistence;
+        if (currentCodexProcess === lifecycle) currentCodexProcess = null;
+
+        const durationS = Math.round((Date.now() - startMs) / 1000);
+        const finalExitCode = timedOut ? "TIMEOUT" : exitCodeAfterCleanup(code, cleanup);
+        endLog(
+          [
+            "\n===",
+            `Exit code: ${finalExitCode}`,
+            `Duration: ${durationS}s`,
+            `Completed: ${new Date().toISOString()}`,
+            "===\n",
+          ].join("\n")
+        );
+        resolve({
+          exitCode: finalExitCode,
+          output: cleanup.ok
+            ? output.slice(-config.maxOutputChars)
+            : `${output.slice(-config.maxOutputChars)}\n[${cleanup.error}]`,
+          logFile,
+        });
+      })();
+      return endFinalizer;
+    };
+
+    lifecycle.onCleanupFailure(() => { void finishAfterExit(null); });
+
+    child.on("exit", (code) => { void finishAfterExit(code); });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      currentChild = null;
-
-      const durationS = Math.round((Date.now() - startMs) / 1000);
-
-      endLog(
-        [
-          "\n===",
-          `Exit code: ${timedOut ? "TIMEOUT" : (code ?? 1)}`,
-          `Duration: ${durationS}s`,
-          `Completed: ${new Date().toISOString()}`,
-          "===\n",
-        ].join("\n")
-      );
-
-      resolve({
-        exitCode: timedOut ? "TIMEOUT" : (code ?? 1),
-        output: output.slice(-config.maxOutputChars),
-        logFile,
-      });
+      childClosed = true;
+      void finishAfterExit(code);
     });
-
     child.on("error", (err) => {
-      clearTimeout(timer);
-      currentChild = null;
-
-      endLog(`\n=== Spawn error: ${err.message} ===\n`);
-
-      resolve({
-        exitCode: 1,
-        output: `Spawn error: ${err.message}\n${output.slice(-config.maxOutputChars)}`,
-        logFile,
-      });
+      if (endFinalizer) return;
+      endFinalizer = (async () => {
+        clearTimeout(timer);
+        const cleanup = await lifecycle.cleanup();
+        await timeoutPersistence;
+        if (currentCodexProcess === lifecycle) currentCodexProcess = null;
+        endLog(`\n=== Spawn error: ${err.message} ===\n`);
+        resolve({
+          exitCode: 1,
+          output: `Spawn error: ${err.message}\n${output.slice(-config.maxOutputChars)}${cleanup.ok ? "" : `\n[${cleanup.error}]`}`,
+          logFile,
+        });
+      })();
     });
   });
 }
@@ -3193,7 +3227,37 @@ async function executeCodexWithPreflightChecks(
   ctx: SpawnContext,
 ): Promise<SpawnRuntimeResult> {
   const refusal = await runCodexPreflight(task, ctx);
-  return refusal ?? spawnRuntime(task, ctx);
+  if (refusal) return refusal;
+  return codexSpawnRefusalAfterLifecycleStop(ctx) ?? spawnRuntime(task, ctx);
+}
+
+function codexSpawnRefusalAfterLifecycleStop(ctx: SpawnContext): SpawnRuntimeResult | null {
+  if (!shuttingDown && !currentCancellation) return null;
+
+  const reason = shuttingDown
+    ? "Dispatcher shutdown began before Codex could start; no model was invoked."
+    : "Task cancellation arrived before Codex could start; no model was invoked.";
+  const taskId = extractTaskId(ctx.taskNs);
+  const logFile = path.join(LOG_DIR, `${taskId}.log`);
+  try {
+    fs.writeFileSync(
+      logFile,
+      [
+        "=== Hugin Task Log (Codex admission) ===",
+        `Task: ${ctx.taskNs}`,
+        `Started: ${new Date().toISOString()}`,
+        "===",
+        reason,
+        "Exit code: 1",
+        "===",
+        "",
+      ].join("\n"),
+      { encoding: "utf8" },
+    );
+  } catch {
+    /* log is best-effort; lifecycle refusal must remain a normal task result */
+  }
+  return { exitCode: 1, output: reason, logFile };
 }
 
 // --- Lease helpers ---
@@ -3364,9 +3428,7 @@ function requestCancellationForCurrentTask(request: CancellationRequest): void {
   if (currentDeliveryAbort && !currentDeliveryAbort.signal.aborted) {
     currentDeliveryAbort.abort(request.reason);
   }
-  if (currentChild && !currentChild.killed) {
-    currentChild.kill("SIGTERM");
-  }
+  if (currentCodexProcess) void currentCodexProcess.terminate();
 }
 
 async function checkCurrentTaskCancellation(): Promise<void> {
@@ -8957,6 +9019,7 @@ export const __test__ = {
   stopTaskHeartbeat,
   startLeaseRenewal,
   stopLeaseRenewal,
+  executeCodexWithPreflightChecks,
   LEASE_RENEWAL_INTERVAL_MS,
   TASK_HEARTBEAT_INTERVAL_MS,
   inspectState: () => ({
@@ -8966,6 +9029,7 @@ export const __test__ = {
   }),
   resetState: () => {
     shuttingDown = false;
+    processLifecycleTestHooks.resetOwnedProcessAdmission();
     stopTaskHeartbeat();
     stopLeaseRenewal();
     clearCurrentTask();
@@ -8989,7 +9053,24 @@ async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   console.log(`Received ${signal}, shutting down (worker: ${workerId})...`);
   shuttingDown = true;
+  closeOwnedProcessAdmission();
   stopHomeserverCredentialExpiryWarning();
+
+  // Abort/signal executors before Munin persistence: shutdown must not leave a
+  // paid child running while the status write is delayed or unavailable.
+  if (currentSdkAbort) currentSdkAbort.abort();
+  if (currentOllamaAbort) currentOllamaAbort.abort();
+  if (currentOpencodeAbort) currentOpencodeAbort.abort();
+  if (currentOrchestratorAbort) currentOrchestratorAbort.abort();
+  if (currentResearchAbort) currentResearchAbort.abort();
+  if (currentDeliveryAbort) currentDeliveryAbort.abort();
+  if (currentReconcileAbort) currentReconcileAbort.abort();
+  const processCleanupPromise = terminateAllOwnedProcesses().then((results) => {
+    for (const result of results) {
+      if (!result.ok) console.error(`Owned process cleanup failed during shutdown: ${result.error}`);
+    }
+    return results;
+  });
 
   // Hard deadline: force exit after 30s regardless of cleanup state.
   // Unref'd so it doesn't keep the process alive if everything exits cleanly first.
@@ -9094,55 +9175,7 @@ async function shutdown(signal: string): Promise<void> {
     }
   }
 
-  if (currentDeliveryAbort) {
-    console.log("Aborting running artefact delivery...");
-    currentDeliveryAbort.abort();
-  }
-
-  if (currentReconcileAbort) {
-    console.log("Aborting running delivery reconciliation...");
-    currentReconcileAbort.abort();
-  }
-
-  if (currentSdkAbort) {
-    console.log("Aborting running SDK task...");
-    currentSdkAbort.abort();
-  }
-
-  if (currentOllamaAbort) {
-    console.log("Aborting running ollama task...");
-    currentOllamaAbort.abort();
-  }
-
-  if (currentOpencodeAbort) {
-    console.log("Aborting running OpenCode task...");
-    currentOpencodeAbort.abort();
-  }
-
-  if (currentResearchAbort) {
-    console.log("Aborting running research Pi task...");
-    currentResearchAbort.abort();
-  }
-
-  if (currentChild && !currentChild.killed) {
-    console.log("Forwarding signal to running task...");
-    currentChild.kill("SIGTERM");
-    // Wait for child to exit before we do, so it is not orphaned.
-    // SIGKILL after 10s if it ignores SIGTERM; the outer 30s hard timer handles total deadline.
-    await new Promise<void>((resolve) => {
-      const killTimer = setTimeout(() => {
-        if (currentChild && !currentChild.killed) {
-          console.log("Force killing child process");
-          currentChild.kill("SIGKILL");
-        }
-        resolve();
-      }, 10_000);
-      currentChild!.once("exit", () => {
-        clearTimeout(killTimer);
-        resolve();
-      });
-    });
-  }
+  await processCleanupPromise;
 
   clearCurrentTask();
   process.exit(0);

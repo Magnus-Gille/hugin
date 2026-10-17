@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { closeOwnedProcessAdmission, __test__ as processLifecycleTestHooks } from "../src/process-lifecycle.js";
 
 // Mock the agent SDK before importing the executor
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
@@ -202,6 +203,7 @@ let tmpLogDir: string;
 beforeEach(() => {
   tmpLogDir = fs.mkdtempSync(path.join(os.tmpdir(), "hugin-logs-"));
   vi.clearAllMocks();
+  processLifecycleTestHooks.resetOwnedProcessAdmission();
 });
 
 afterEach(() => {
@@ -209,6 +211,53 @@ afterEach(() => {
 });
 
 describe("SDK executor", () => {
+  it("returns before filesystem setup and query when shutdown closes process admission", async () => {
+    const workingDir = path.join(tmpLogDir, "late-sdk-working-dir");
+    const logFile = path.join(tmpLogDir, "late-sdk.log");
+    closeOwnedProcessAdmission();
+
+    const result = await executeSdkTask(
+      makeTaskConfig({ workingDir }),
+      "late-sdk",
+      tmpLogDir,
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toMatch(/shutdown closed owned-process admission/);
+    expect(mockedQuery).not.toHaveBeenCalled();
+    expect(fs.existsSync(workingDir)).toBe(false);
+    expect(fs.existsSync(logFile)).toBe(false);
+  });
+
+  it("returns before filesystem setup and query when the external abort is already signalled", async () => {
+    const workingDir = path.join(tmpLogDir, "pre-aborted-sdk-working-dir");
+    const logFile = path.join(tmpLogDir, "pre-aborted-sdk.log");
+    const abortController = new AbortController();
+    abortController.abort();
+
+    const result = await executeSdkTask(
+      makeTaskConfig({ workingDir }),
+      "pre-aborted-sdk",
+      tmpLogDir,
+      { abortController },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toMatch(/cancellation was already signalled/);
+    expect(mockedQuery).not.toHaveBeenCalled();
+    expect(fs.existsSync(workingDir)).toBe(false);
+    expect(fs.existsSync(logFile)).toBe(false);
+  });
+
+  it("still runs a normal SDK query while process admission is open", async () => {
+    mockedQuery.mockReturnValue(createMockQuery([createMockResultSuccess("ordinary SDK success")]) as ReturnType<typeof query>);
+    const result = await executeSdkTask(makeTaskConfig(), "sdk-admission-open", tmpLogDir);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.resultText).toBe("ordinary SDK success");
+    expect(mockedQuery).toHaveBeenCalledOnce();
+  });
+
   it("keeps capture unavailable unless friction injection, capture gate, and trusted-code are all enabled", async () => {
     const previousFriction = process.env.HUGIN_FRICTION_INJECTION;
     const previousCapture = process.env.HUGIN_CODE_HEALTH_CAPTURE;

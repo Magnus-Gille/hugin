@@ -47,6 +47,9 @@ scheduling, and pipeline phases.
 - [Worker liveness](worker-liveness.md): Deterministic `tasks/_heartbeat`
   staleness contract (`assessWorkerLiveness`, `hugin-liveness` CLI), its
   threshold formula, states, and exit codes for submitters and Heimdall.
+- [Hugin-owned subprocess lifecycle](owned-process-lifecycle.md): POSIX
+  process-group ownership and bounded timeout, cancellation, shutdown, and
+  normal-completion cleanup for Hugin-launched runtimes, including its limits.
 - [M5 gateway-key rotation](m5-key-rotation.md): Local-configured staged key
   rotation, pipe-only secret handling, rollback/abort sequencing, and the
   content-blind `/health` expiry warning.

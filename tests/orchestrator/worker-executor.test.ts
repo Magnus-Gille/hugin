@@ -37,6 +37,7 @@ const realpathResults = new Map<string, { value?: string; error?: Error & { code
 class MockChildProcess extends EventEmitter {
   stdout = new EventEmitter();
   stderr = new EventEmitter();
+  pid: number | undefined;
   killed = false;
   kill(_signal?: string) {
     this.killed = true;
@@ -49,8 +50,10 @@ vi.mock("node:child_process", () => ({
   spawn: (cmd: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => {
     spawnCalls.push({ cmd, args, options });
     const child = new MockChildProcess();
+    child.pid = 900_000 + spawnCallIndex;
     const behavior = spawnBehaviors[spawnCallIndex] ?? { exitCode: 0 };
     spawnCallIndex++;
+    setImmediate(() => child.emit("spawn"));
 
     const fire = () => {
       if (behavior.spawnError) {
@@ -129,6 +132,14 @@ beforeEach(() => {
   realpathResults.clear();
   primeDefaultRealpaths();
   vi.unstubAllEnvs();
+  const realKill = process.kill.bind(process);
+  vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (pid < -1) {
+      if (signal === 0) throw Object.assign(new Error("no fake group"), { code: "ESRCH" });
+      return true;
+    }
+    return realKill(pid, signal);
+  });
 });
 
 afterEach(() => {

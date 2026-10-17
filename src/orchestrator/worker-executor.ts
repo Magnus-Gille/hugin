@@ -14,7 +14,6 @@
  *   - PiHarnessExecutor: Spawns the `pi` CLI and parses its JSON-Lines output.
  */
 
-import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type {
@@ -34,6 +33,7 @@ import {
   verifyManagedTaskWorktreeBinding,
 } from "../task-helpers.js";
 import { buildTaskSubprocessEnv } from "../task-subprocess-env.js";
+import { spawnOwnedProcess, waitForChildCloseBounded, type OwnedProcessLifecycle } from "../process-lifecycle.js";
 import {
   getProviderConfig,
   resolveGatewayRootUrl,
@@ -1232,10 +1232,12 @@ export class PiHarnessExecutor implements WorkerExecutor {
       // timeout or the external abort fires first owns the reported reason, so a
       // later kill of the other kind can't mislabel it before `close` arrives.
       let killReason: "timeout" | "external" | null = null;
+      let childClosed = false;
+      let endFinalizer: Promise<void> | null = null;
 
-      let child: ReturnType<typeof spawn>;
+      let managed: ReturnType<typeof spawnOwnedProcess>;
       try {
-        child = spawn(entry.harnessCmd ?? "pi", args.args, {
+        managed = spawnOwnedProcess(entry.harnessCmd ?? "pi", args.args, {
           cwd: launchCwd.cwd,
           stdio: ["ignore", "pipe", "pipe"],
           env: buildTaskSubprocessEnv(),
@@ -1254,10 +1256,11 @@ export class PiHarnessExecutor implements WorkerExecutor {
         });
         return;
       }
+      const { child, lifecycle } = managed;
 
       const killWith = (reason: "timeout" | "external") => {
         if (killReason === null) killReason = reason;
-        child.kill("SIGTERM");
+        void lifecycle.terminate();
       };
       const killTimer = setTimeout(() => killWith("timeout"), req.timeoutMs);
 
@@ -1265,6 +1268,7 @@ export class PiHarnessExecutor implements WorkerExecutor {
       // signal fires. The reason is recorded first-writer-wins.
       const onExternalAbort = () => killWith("external");
       req.signal?.addEventListener("abort", onExternalAbort, { once: true });
+      if (req.signal?.aborted) onExternalAbort();
 
       child.stdout?.on("data", (chunk: Buffer) => {
         stdout += chunk.toString();
@@ -1273,9 +1277,11 @@ export class PiHarnessExecutor implements WorkerExecutor {
         stderr += chunk.toString();
       });
 
-      child.on("error", (err) => {
+      child.on("error", async (err) => {
+        if (endFinalizer) return;
         clearTimeout(killTimer);
         req.signal?.removeEventListener("abort", onExternalAbort);
+        const cleanup = await lifecycle.cleanup();
         if (boundWorktree) {
           markPiBindingFailedTurn(boundWorktree);
         }
@@ -1288,14 +1294,17 @@ export class PiHarnessExecutor implements WorkerExecutor {
           outputTokens: null,
           costUsd: null,
           latencyMs: Date.now() - start,
-          error: `Child process error: ${err.message}`,
+          error: `Child process error: ${err.message}${cleanup.ok ? "" : `; ${cleanup.error}`}`,
         });
       });
 
-      child.on("close", (code) => {
-        clearTimeout(killTimer);
-        req.signal?.removeEventListener("abort", onExternalAbort);
-
+      const finishAfterExit = (code: number | null) => {
+        if (endFinalizer) return endFinalizer;
+        endFinalizer = (async () => {
+          clearTimeout(killTimer);
+          req.signal?.removeEventListener("abort", onExternalAbort);
+          const cleanup = await lifecycle.cleanup();
+          if (cleanup.ok) await waitForChildCloseBounded(child, childClosed);
         if (killReason !== null) {
           if (boundWorktree) {
             markPiBindingFailedTurn(boundWorktree);
@@ -1310,8 +1319,24 @@ export class PiHarnessExecutor implements WorkerExecutor {
             costUsd: null,
             latencyMs: Date.now() - start,
             error: killReason === "external"
-              ? "Process aborted"
-              : `Process timed out after ${req.timeoutMs}ms`,
+              ? `Process aborted${cleanup.ok ? "" : `; ${cleanup.error}`}`
+              : `Process timed out after ${req.timeoutMs}ms${cleanup.ok ? "" : `; ${cleanup.error}`}`,
+          });
+          return;
+        }
+
+        if (!cleanup.ok) {
+          if (boundWorktree) markPiBindingFailedTurn(boundWorktree);
+          resolve({
+            ok: false,
+            output: stdout.slice(0, maxOutput),
+            provider: req.provider,
+            model: req.model,
+            inputTokens: null,
+            outputTokens: null,
+            costUsd: null,
+            latencyMs: Date.now() - start,
+            error: cleanup.error,
           });
           return;
         }
@@ -1377,6 +1402,16 @@ export class PiHarnessExecutor implements WorkerExecutor {
           costUsd,
           latencyMs: Date.now() - start,
         });
+        })();
+        return endFinalizer;
+      };
+
+      lifecycle.onCleanupFailure(() => { void finishAfterExit(null); });
+
+      child.on("exit", (code) => { void finishAfterExit(code); });
+      child.on("close", (code) => {
+        childClosed = true;
+        void finishAfterExit(code);
       });
     });
   }
