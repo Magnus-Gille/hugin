@@ -1240,7 +1240,7 @@ export class PiHarnessExecutor implements WorkerExecutor {
         managed = spawnOwnedProcess(entry.harnessCmd ?? "pi", args.args, {
           cwd: launchCwd.cwd,
           stdio: ["ignore", "pipe", "pipe"],
-          env: buildTaskSubprocessEnv(),
+          env: buildPiSubprocessEnv(entry),
         });
       } catch (spawnErr) {
         resolve({
@@ -1485,6 +1485,41 @@ function buildPiArgs(
   flags.push("--model", req.model);
   flags.push("-p", req.prompt);
   return { ok: true, args: flags };
+}
+
+/**
+ * Read the provider selected by the trusted Pi registry flags. The task
+ * request and assembled prompt args are deliberately not consulted here.
+ */
+function getPiRegistryProvider(
+  registryEntry: ReturnType<typeof getRegistryEntryById> & {},
+): string | undefined {
+  const flags = registryEntry.harnessFlags ?? [];
+  let provider: string | undefined;
+  for (let i = 0; i < flags.length; i++) {
+    const flag = flags[i];
+    let selected: string | undefined;
+    if (flag === "--provider") selected = flags[++i];
+    else if (flag.startsWith("--provider=")) selected = flag.slice("--provider=".length);
+    else continue;
+    // Refuse ambiguous or incomplete registry selections rather than relying
+    // on whether a CLI happens to honor the first or last duplicate flag.
+    if (provider !== undefined || !selected || selected.startsWith("-")) return undefined;
+    provider = selected;
+  }
+  return provider;
+}
+
+/** Build the Pi env, adding only the credential required by its registry lane. */
+function buildPiSubprocessEnv(
+  registryEntry: ReturnType<typeof getRegistryEntryById> & {},
+): NodeJS.ProcessEnv {
+  const env = buildTaskSubprocessEnv();
+  if (getPiRegistryProvider(registryEntry) === "openrouter") {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (typeof apiKey === "string") env.OPENROUTER_API_KEY = apiKey;
+  }
+  return env;
 }
 
 /**
