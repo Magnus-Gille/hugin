@@ -9,7 +9,7 @@
 # signing a task from the laptop no longer needs a Pi round-trip.
 #
 # Usage:
-#   HUGIN_SIGNING_SECRET=$(hugin-sign) node scripts/sign-task.mjs --task-id … --submitter claude-code …
+#   HUGIN_SIGNING_SECRET=$(hugin-sign) node scripts/sign-task.mjs --task-file /tmp/task.md --task-id …
 #   eval "$(hugin-sign --env)"        # export HUGIN_SIGNING_SECRET for a longer flow
 #
 # The secret is emitted ONLY for an EXACT bare call or an EXACT `--env`. `--help`/`-h`

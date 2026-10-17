@@ -368,7 +368,8 @@ import {
   type ResearchGroundingAttestation,
 } from "./research-grounding.js";
 import {
-  extractSignatureField,
+  extractTaskSigningMetadata,
+  inspectSignatureField,
   buildTaskSubmissionProvenance,
   loadKeyStoreFromEnv,
   parseNonNegativeIntEnv,
@@ -1561,7 +1562,10 @@ function assessTaskEntrySignature(
   isPipeline: boolean,
 ): SigningVerdict {
   const policy = config.signingPolicy;
-  const signatureRaw = extractSignatureField(content);
+  const signatureInspection = inspectSignatureField(content);
+  const signatureRaw = signatureInspection.status === "valid"
+    ? signatureInspection.raw
+    : null;
 
   if (policy === "off") {
     const parsedSignature = parseSignature(signatureRaw);
@@ -1578,18 +1582,16 @@ function assessTaskEntrySignature(
     };
   }
 
-  // Pipeline parent tasks don't produce a TaskConfig here — the HMAC
-  // scheme binds prompt/context-refs, which pipelines express differently
-  // (### Pipeline instead of ### Prompt). Until pipeline signing lands we
-  // cannot accept these under `require`; `warn` passes through.
+  // Pipeline parent admission is outside the v2 verification path. A claimed
+  // Hugin submitter never bypasses the signature requirement.
   if (isPipeline || !parsedTask) {
     const parsedSignature = parseSignature(signatureRaw);
     const result: TaskSignatureAssessment = {
       status: "unverifiable",
       keyId: parsedSignature?.keyId,
       reason: isPipeline
-        ? "pipeline tasks cannot be verified by the v1 scheme"
-        : "task fields required by the v1 scheme could not be parsed",
+        ? "pipeline tasks are not admitted by the v2 verification path"
+        : "task fields required by the v2 scheme could not be parsed",
     };
     if (signingPolicyRejects(policy, result.status)) {
       return {
@@ -1608,22 +1610,17 @@ function assessTaskEntrySignature(
     };
   }
 
-  // Use the runtime *as declared in the task body*, not the resolved
-  // execution runtime. Auto-routed tasks sign with `runtime=auto`; the
-  // dispatcher later overwrites parsedTask.runtime with the router's
-  // pick, so reading it here would break verification.
-  const declaredRuntime = parseDeclaredRuntime(content) ?? parsedTask.runtime;
-
+  const signingMetadata = extractTaskSigningMetadata(content);
   const params = {
     taskId: extractTaskId(taskNs),
     submitter: submittedBy,
-    submittedAt: parsedTask.submittedAt,
-    runtime: declaredRuntime,
-    prompt: parsedTask.prompt,
-    contextRefs: parsedTask.contextRefs,
+    // Never use parseTask's display/runtime fallback for authentication.
+    // A signed task must carry its own Submitted at value in the document.
+    submittedAt: signingMetadata.submittedAt ?? "",
+    taskBody: content,
   };
 
-  const result = verifyTaskSignature(params, signatureRaw, config.submitterKeys, {
+  const result = verifyTaskSignature(params, config.submitterKeys, {
     maxAgeS: config.signingMaxAgeS,
   });
 
@@ -8698,6 +8695,7 @@ export const __test__ = {
   parseTask,
   parseDeclaredRuntime,
   parseSubmittedByField,
+  assessTaskEntrySignature,
   isSubmitterAllowed,
   assessTaskEntrySignature,
   pollOnce,
