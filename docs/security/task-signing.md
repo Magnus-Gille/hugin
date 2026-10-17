@@ -82,7 +82,7 @@ Set `HUGIN_SIGNING_POLICY` on the Pi:
 |--------|--------|
 | `off` (default) | Signature is not verified. Results record `signatureStatus: "unverified"`, `verifiedSubmitter: null`, and any parseable claimed `keyId`; this must never be interpreted as valid identity. Zero-breakage default for the rollout period. |
 | `warn` | Verify when a signature is present; log missing / invalid / unknown-signer / submitter-mismatch / malformed. Never rejects. |
-| `require` | Reject any task that is missing a valid signature from a known signer. Pipeline parent tasks are rejected (v1 cannot bind ### Pipeline bodies yet); internally-generated children (`Submitted by: hugin`) are exempted. |
+| `require` | Reject any task that is missing a valid signature from a known signer. Pipeline parent tasks are rejected because v1 cannot bind `### Pipeline` bodies; unsigned internally-generated pipeline phase children are also rejected. `Submitted by: hugin` is a claim and never grants an exemption. |
 
 An unrecognised value (typo such as `requrie`) fails startup rather
 than silently falling back to `off`: a security control must never
@@ -110,9 +110,11 @@ an additive `provenance` object in `result-structured`:
 ```
 
 `verifiedSubmitter` is non-null only after a valid HMAC check. Policy `off`, a
-missing/invalid/expired/future-skewed/mismatched signature, pipeline-v1
-limitations, and the internal-Hugin exemption all leave it null. Hugin also
-appends the same fields to the task lifecycle log as a `[provenance]` record.
+missing/invalid/expired/future-skewed/mismatched signature, and pipeline-v1
+limitations all leave it null. Historical results may contain the legacy
+`internal-exempt` status; the current dispatcher no longer emits it or treats
+it as authenticated. Hugin also appends the same fields to the task lifecycle
+log as a `[provenance]` record.
 The field is optional in the schema only so historical schemaVersion 1 results
 remain readable; current dispatcher writers always populate it.
 
@@ -245,9 +247,11 @@ Do the thing.
   de-facto nonce; if task-ids ever collide, this breaks.
 - **Pipeline parent tasks.** The v1 canonical payload binds
   `prompt-sha256`; pipelines declare a `### Pipeline` body instead.
-  `require` mode rejects pipeline parents until a pipeline-aware
-  scheme ships. Internally-generated child phase tasks are
-  dispatcher-trusted (exempt via `Submitted by: hugin`).
+  `require` mode rejects pipeline parents until a pipeline-aware signing scheme
+  ships. Hugin-generated child phases have the ordinary `### Prompt` form, but
+  unsigned children are still rejected under `require`. Their literal
+  `Submitted by: hugin` is not authenticated and grants no exemption. Use
+  `warn` or `off` while unsigned pipeline phases are required.
 - **Submitter allowlist bypass.** Signing is checked *after* the
   submitter allowlist; both layers must pass. An invalid submitter
   with a valid signature still fails.

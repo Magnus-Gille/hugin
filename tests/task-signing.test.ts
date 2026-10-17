@@ -289,9 +289,9 @@ describe("structured task submission provenance", () => {
     expect(signingPolicyRejects("off", status)).toBe(false);
   });
 
-  it("require accepts valid and the existing internal Hugin exemption", () => {
+  it("require accepts only valid signatures, including for the hugin submitter", () => {
     expect(signingPolicyRejects("require", "valid")).toBe(false);
-    expect(signingPolicyRejects("require", "internal-exempt")).toBe(false);
+    expect(signingPolicyRejects("require", "internal-exempt")).toBe(true);
   });
 });
 

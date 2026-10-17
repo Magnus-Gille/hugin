@@ -1578,25 +1578,6 @@ function assessTaskEntrySignature(
     };
   }
 
-  // Internally-generated tasks (pipeline phase children, summary tasks,
-  // etc.) are submitted by Hugin itself. They never carry a signature
-  // because there is no external signer — the dispatcher trusts its own
-  // writes. Exempt them so `require` doesn't brick pipeline execution.
-  // When pipeline-aware signing ships (see docs/security/task-signing.md),
-  // this exemption becomes a proper internal signing path.
-  if (submittedBy === "hugin") {
-    const result: TaskSignatureAssessment = {
-      status: "internal-exempt",
-      reason: "internally-generated task is exempt from signature policy",
-    };
-    return {
-      result,
-      provenance: buildTaskSubmissionProvenance(submittedBy, policy, result),
-      reject: false,
-      message: "",
-    };
-  }
-
   // Pipeline parent tasks don't produce a TaskConfig here — the HMAC
   // scheme binds prompt/context-refs, which pipelines express differently
   // (### Pipeline instead of ### Prompt). Until pipeline signing lands we
@@ -8718,6 +8699,7 @@ export const __test__ = {
   parseDeclaredRuntime,
   parseSubmittedByField,
   isSubmitterAllowed,
+  assessTaskEntrySignature,
   pollOnce,
   reconcileDeliveryPending,
   writeResearchSpikeIndexes,

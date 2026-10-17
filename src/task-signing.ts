@@ -54,8 +54,9 @@ export type VerificationStatus =
 /**
  * Status recorded in task provenance. `unverified` is deliberately distinct
  * from `valid`: policy=off means Hugin did not authenticate the signature.
- * `internal-exempt` and `unverifiable` describe policy exceptions, not proof
- * of the claimed identity.
+ * `unverifiable` describes a scheme limitation, not proof of identity.
+ * `internal-exempt` is retained only to parse historical results; the current
+ * dispatcher does not produce or accept it under `require`.
  */
 export const TASK_SIGNATURE_STATUSES = [
   "valid",
@@ -111,12 +112,12 @@ export function buildTaskSubmissionProvenance(
   };
 }
 
-/** `require` accepts a valid signature plus Hugin's existing internal exemption. */
+/** `require` accepts only a valid signature. */
 export function signingPolicyRejects(
   policy: SigningPolicy,
   status: TaskSignatureStatus,
 ): boolean {
-  return policy === "require" && status !== "valid" && status !== "internal-exempt";
+  return policy === "require" && status !== "valid";
 }
 
 export interface VerifyOptions {
