@@ -112,8 +112,9 @@ describe("trusted sensitivity checkpoints", () => {
     const end = dispatcher.indexOf("function getTaskRuntimeLabel(", start);
     const assessment = dispatcher.slice(start, end);
     expect(assessment).toContain(
-      "allowOwnerOverride: !task.pipeline && isOwnerSubmitter(task.submittedBy)",
+      "allowOwnerOverride: !options.forcePrivate && !task.pipeline && isOwnerSubmitter(task.submittedBy)",
     );
+    expect(assessment).toContain('baseline: options.forcePrivate ? "private" : "internal"');
     expect(assessment).not.toContain("task.pipeline?.submittedBy");
   });
 });

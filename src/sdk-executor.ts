@@ -9,6 +9,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { redactCredentialTokens } from "./exfiltration-scanner.js";
 import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
+import { isOwnedProcessAdmissionOpen } from "./process-lifecycle.js";
 import {
   createCodeHealthCaptureTool,
   isCodeHealthCaptureConfigValid,
@@ -167,6 +168,23 @@ export async function executeSdkTask(
   options?: SdkExecutorOptions,
 ): Promise<SdkExecutorResult> {
   const logFile = path.join(logDir, `${taskId}.log`);
+  const { onTimeout, abortController: externalAbort } = options ?? {};
+  const notStartedReason = externalAbort?.signal.aborted
+    ? "Task cancellation was already signalled; the SDK query was not started."
+    : !isOwnedProcessAdmissionOpen()
+      ? "Dispatcher shutdown closed owned-process admission; the SDK query was not started."
+      : null;
+  if (notStartedReason) {
+    return {
+      exitCode: 1,
+      output: notStartedReason,
+      logFile,
+      resultText: null,
+      costUsd: null,
+      numTurns: null,
+      durationApiMs: null,
+    };
+  }
   const startedAt = new Date().toISOString();
 
   // Ensure working directory exists
@@ -187,7 +205,6 @@ export async function executeSdkTask(
     ].join("\n"),
   );
 
-  const { onTimeout, abortController: externalAbort } = options ?? {};
   const abortController = new AbortController();
   let timedOut = false;
   let output = "";

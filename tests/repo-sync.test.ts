@@ -118,7 +118,7 @@ describe("deriveRepositoryOutcome", () => {
 //   4+. resolve + verify the base, then git checkout -b hugin/<taskId> origin/<base>
 
 describe("checkoutTaskBranch", () => {
-  it("skips directories outside /home/magnus/repos/", async () => {
+  it("skips directories outside /home/magnus/hugin-workspace/", async () => {
     const result = await checkoutTaskBranch("/home/magnus/workspace", "test-id");
     expect(result.action).toBe("skipped");
     expect(spawnCalls).toHaveLength(0);
@@ -135,7 +135,7 @@ describe("checkoutTaskBranch", () => {
     spawnBehaviors = [
       { exitCode: 128 }, // git rev-parse --show-toplevel fails
     ];
-    const result = await checkoutTaskBranch("/home/magnus/repos/some-dir", "test-id");
+    const result = await checkoutTaskBranch("/home/magnus/hugin-workspace/some-dir", "test-id");
     expect(result.action).toBe("skipped");
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0].args).toEqual(["rev-parse", "--show-toplevel"]);
@@ -146,7 +146,7 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 0 },   // git rev-parse --git-dir
       { exitCode: 128 }, // git remote get-url origin fails
     ];
-    const result = await checkoutTaskBranch("/home/magnus/repos/no-remote", "test-id");
+    const result = await checkoutTaskBranch("/home/magnus/hugin-workspace/no-remote", "test-id");
     expect(result.action).toBe("skipped");
     expect(spawnCalls).toHaveLength(2);
   });
@@ -158,7 +158,7 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 0 }, // git fetch origin
       { exitCode: 0 }, // git checkout -b hugin/task-123 origin/main
     ];
-    const result = await checkoutTaskBranch("/home/magnus/repos/grimnir", "task-123", {
+    const result = await checkoutTaskBranch("/home/magnus/hugin-workspace/grimnir", "task-123", {
       fetchRetryDelaysMs: [0, 0],
     });
     expect(result.action).toBe("created");
@@ -178,7 +178,7 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 0 },
     ];
     const result = await checkoutTaskBranch(
-      "/home/magnus/repos/grimnir",
+      "/home/magnus/hugin-workspace/grimnir",
       "task-pinned",
       { fetchRetryDelaysMs: [0, 0], captureBaseCommit: true },
     );
@@ -337,7 +337,7 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 0 },   // fetch #2 succeeds (with bypass)
       { exitCode: 0 },   // git checkout -b
     ];
-    const result = await checkoutTaskBranch("/home/magnus/repos/grimnir", "task-456", {
+    const result = await checkoutTaskBranch("/home/magnus/hugin-workspace/grimnir", "task-456", {
       fetchRetryDelaysMs: [0, 0],
     });
     expect(result.action).toBe("created");
@@ -362,7 +362,7 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 128, stderr: "fail 2" },
       { exitCode: 128, stderr: "fail 3" },
     ];
-    const result = await checkoutTaskBranch("/home/magnus/repos/grimnir", "task-789", {
+    const result = await checkoutTaskBranch("/home/magnus/hugin-workspace/grimnir", "task-789", {
       fetchRetryDelaysMs: [0, 0],
     });
     expect(result.action).toBe("fetch-failed");
@@ -377,7 +377,7 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 0 },   // git fetch origin
       { exitCode: 128, stderr: "branch already exists" }, // git checkout -b fails
     ];
-    const result = await checkoutTaskBranch("/home/magnus/repos/grimnir", "task-dup", {
+    const result = await checkoutTaskBranch("/home/magnus/hugin-workspace/grimnir", "task-dup", {
       fetchRetryDelaysMs: [0, 0],
     });
     expect(result.action).toBe("fetch-failed");
@@ -391,7 +391,7 @@ describe("checkoutTaskBranch", () => {
       { exitCode: 0 },
       { exitCode: 0 },
     ];
-    const dir = "/home/magnus/repos/my-project";
+    const dir = "/home/magnus/hugin-workspace/my-project";
     await checkoutTaskBranch(dir, "t1", { fetchRetryDelaysMs: [0, 0] });
     for (const call of spawnCalls) {
       expect(call.opts.cwd).toBe(dir);
@@ -411,7 +411,7 @@ describe("checkoutTaskBranch", () => {
     ];
 
     const result = await checkoutTaskBranch(
-      "/home/magnus/repos/cassette-ai",
+      "/home/magnus/hugin-workspace/cassette-ai",
       "task-master",
       { fetchRetryDelaysMs: [0, 0], captureBaseCommit: true },
     );
@@ -449,7 +449,7 @@ describe("checkoutTaskBranch", () => {
     ];
 
     const result = await checkoutTaskBranch(
-      "/home/magnus/repos/cassette-ai",
+      "/home/magnus/hugin-workspace/cassette-ai",
       "task-remote-head",
       { fetchRetryDelaysMs: [0, 0], captureBaseCommit: true },
     );
@@ -476,7 +476,7 @@ describe("checkoutTaskBranch", () => {
     ];
 
     const result = await checkoutTaskBranch(
-      "/home/magnus/repos/cassette-ai",
+      "/home/magnus/hugin-workspace/cassette-ai",
       "task-explicit",
       {
         fetchRetryDelaysMs: [0, 0],

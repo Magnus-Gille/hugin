@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { FailureClassification } from "./failure-classification.js";
 import {
   buildFrictionContent,
@@ -24,19 +26,37 @@ import { buildTaskSubprocessEnv } from "./task-subprocess-env.js";
  * deploy checkouts under `/home/magnus/repos` — a hugin task can then never
  * re-point a production checkout onto its task branch (grimnir#44 / grimnir#33).
  *
- * Defaults preserve the historical hardcoded behavior.
+ * Defaults deliberately select a separate task tree instead of the historical
+ * live-repository root.
  */
-export const DEFAULT_REPOS_ROOT = "/home/magnus/repos";
-export const DEFAULT_WORKSPACE = "/home/magnus/workspace";
-export const DEFAULT_SCRATCH = "/home/magnus/scratch";
-export const DEFAULT_FILES = "/home/magnus/mimir";
+export const DEFAULT_REPOS_ROOT = "/home/magnus/hugin-workspace";
+export const DEFAULT_WORKSPACE = path.join(DEFAULT_REPOS_ROOT, "_default");
+export const DEFAULT_SCRATCH = path.join(DEFAULT_REPOS_ROOT, "_scratch");
+export const DEFAULT_FILES = path.join(DEFAULT_REPOS_ROOT, "_files");
 
 export interface WorkspaceRoots {
   /** Root for `repo:<name>` resolution. Defaults to {@link DEFAULT_REPOS_ROOT}. */
   reposRoot?: string;
   /** Fallback working dir for unresolvable contexts. Defaults to {@link DEFAULT_WORKSPACE}. */
   workspace?: string;
+  /** Root for the `scratch` context alias. Defaults to {@link DEFAULT_SCRATCH}. */
+  scratch?: string;
+  /** Root for the `files` context alias. Defaults to {@link DEFAULT_FILES}. */
+  files?: string;
+  /** Additional paths to protect in addition to Hugin's built-in protected roots. */
+  additionalProtectedRoots?: string[];
 }
+
+export interface CanonicalWorkspaceRoots {
+  reposRoot: string;
+  workspace: string;
+  scratch: string;
+  files: string;
+}
+
+export type TaskWorkspaceValidation =
+  | { ok: true; workingDir: string; roots: CanonicalWorkspaceRoots }
+  | { ok: false; reason: string };
 
 /** Hard dispatcher resource ceilings for ordinary (non-Broker) task fields. */
 export const MAX_TASK_TIMEOUT_MS = 43_200_000; // 12h
@@ -47,47 +67,60 @@ export function normalizeRoot(root: string): string {
   return root.replace(/\/+$/, "");
 }
 
-/**
- * Resolve a task `Context:` value to an absolute working directory.
- *
- * - `repo:<name>` → `<reposRoot>/<name>` (traversal outside `reposRoot` is
- *   rejected to the workspace fallback).
- * - `scratch` / `files` → fixed non-code locations.
- * - An absolute path under `/home/magnus/` passes through; anything else
- *   (relative paths, absolute paths elsewhere) falls back to `workspace`.
- *
- * `reposRoot`/`workspace` are configurable per #139; omitting them preserves
- * the original hardcoded `/home/magnus/repos` + `/home/magnus/workspace`.
- */
-export function resolveContext(raw: string, roots: WorkspaceRoots = {}): string {
+function isWithinPath(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" ||
+    (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function resolveDeclaredTaskPath(
+  raw: string,
+  roots: WorkspaceRoots,
+  allowDescriptiveContext: boolean,
+): string {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.includes("\0")) {
+    throw new Error("Task working directory declaration is empty or malformed");
+  }
   const reposRoot = path.resolve(normalizeRoot(roots.reposRoot ?? DEFAULT_REPOS_ROOT));
   const workspace = path.resolve(roots.workspace ?? DEFAULT_WORKSPACE);
-  const trimmed = raw.trim();
   if (trimmed.startsWith("repo:")) {
-    const name = trimmed.slice(5);
+    const name = trimmed.slice(5).trim();
+    if (!name || path.isAbsolute(name) || name.includes("\\") ||
+      name.split(/[\\/]/).some((segment) => segment === ".." || segment === "." || segment === "")) {
+      throw new Error("Task repository context is not a valid repository alias");
+    }
     const resolved = path.resolve(reposRoot, name);
-    // Guard against traversal (e.g. repo:../../tmp) escaping the repos root.
-    if (!resolved.startsWith(`${reposRoot}${path.sep}`)) {
-      return workspace;
+    if (!isWithinPath(reposRoot, resolved) || resolved === reposRoot) {
+      throw new Error("Task repository context escapes the configured managed root");
     }
     return resolved;
   }
   switch (trimmed) {
-    case "scratch": return DEFAULT_SCRATCH;
-    case "files": return DEFAULT_FILES;
+    case "scratch": return path.resolve(roots.scratch ?? DEFAULT_SCRATCH);
+    case "files": return path.resolve(roots.files ?? DEFAULT_FILES);
     default: {
-      // Normalize before checking the prefix. A lexical prefix check alone
-      // accepts `/home/magnus/../../etc`, which later filesystem calls resolve
-      // outside the intended workspace boundary.
       if (path.isAbsolute(trimmed)) {
-        const resolved = path.resolve(trimmed);
-        if (resolved.startsWith(`/home/magnus${path.sep}`)) return resolved;
-        console.warn(`Context path outside /home/magnus/ rejected: ${trimmed}`);
-        return workspace;
+        if (trimmed.split(path.sep).includes("..")) {
+          throw new Error("Task working directory must not contain parent traversal");
+        }
+        return path.resolve(trimmed);
       }
-      return workspace;
+      // Human-readable context labels have historically selected the default
+      // workspace. Path-like relative declarations are explicit filesystem
+      // paths and must be rejected instead of reinterpreted as that default.
+      if (trimmed.startsWith(".") || trimmed.includes("/") || trimmed.includes("\\")) {
+        throw new Error("Task working directory must be an approved absolute path or alias");
+      }
+      if (allowDescriptiveContext) return workspace;
+      throw new Error("Legacy Working dir must be an approved absolute path or alias");
     }
   }
+}
+
+/** Resolve a task `Context:` value without treating invalid paths as a fallback. */
+export function resolveContext(raw: string, roots: WorkspaceRoots = {}): string {
+  return resolveDeclaredTaskPath(raw, roots, true);
 }
 
 /** Apply the same path policy to both Context and the legacy Working dir field. */
@@ -97,9 +130,149 @@ export function resolveTaskWorkingDirectory(
   roots: WorkspaceRoots = {},
 ): string {
   const fallback = path.resolve(roots.workspace ?? DEFAULT_WORKSPACE);
-  if (context) return resolveContext(context, roots);
-  if (workingDir) return resolveContext(workingDir, { ...roots, workspace: fallback });
+  if (context !== undefined && context.trim() !== "") {
+    return resolveDeclaredTaskPath(context, roots, true);
+  }
+  if (workingDir !== undefined && workingDir.trim() !== "") {
+    return resolveDeclaredTaskPath(workingDir, { ...roots, workspace: fallback }, false);
+  }
   return fallback;
+}
+
+function overlapsPath(left: string, right: string): boolean {
+  return isWithinPath(left, right) || isWithinPath(right, left);
+}
+
+function protectedTaskPaths(roots: WorkspaceRoots): string[] {
+  const serviceHome = os.homedir();
+  const applicationRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+  return [
+    applicationRoot,
+    path.join(serviceHome, "repos"),
+    "/home/magnus/repos",
+    "/home/magnus/hugin",
+    ...[".ssh", ".config", ".claude", ".codex", ".hugin"].map((name) =>
+      path.join(serviceHome, name),
+    ),
+    ...(roots.additionalProtectedRoots ?? []),
+  ];
+}
+
+async function canonicalizePathWithMissingTail(
+  raw: string,
+): Promise<{ ok: true; path: string } | { ok: false }> {
+  if (!raw.trim() || !path.isAbsolute(raw) || raw.includes("\0")) return { ok: false };
+  let ancestor = path.resolve(raw);
+  const missingTail: string[] = [];
+  while (true) {
+    try {
+      const realAncestor = await fs.realpath(ancestor);
+      return {
+        ok: true,
+        path: path.resolve(realAncestor, ...missingTail),
+      };
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error
+        ? String((error as { code: unknown }).code)
+        : "";
+      if (code !== "ENOENT") return { ok: false };
+
+      // A dangling symlink is not an ordinary missing destination: recursive
+      // mkdir would follow it once its target appears. Fail closed instead.
+      try {
+        const stat = await fs.lstat(ancestor);
+        if (stat.isSymbolicLink()) return { ok: false };
+      } catch (lstatError) {
+        const lstatCode = lstatError && typeof lstatError === "object" && "code" in lstatError
+          ? String((lstatError as { code: unknown }).code)
+          : "";
+        if (lstatCode !== "ENOENT") return { ok: false };
+      }
+
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) return { ok: false };
+      missingTail.unshift(path.basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+/**
+ * Canonicalize task roots and the selected cwd, then reject any overlap with
+ * Hugin's source, live deployment, repository, or service-configuration paths.
+ * Missing destinations are represented by their canonical nearest existing
+ * ancestor plus the missing components; this function never creates paths.
+ */
+async function validateTaskWorkspaceUnchecked(
+  workingDir: string,
+  configuredRoots: WorkspaceRoots = {},
+): Promise<TaskWorkspaceValidation> {
+  const configured = [
+    ["managed repos root", configuredRoots.reposRoot ?? DEFAULT_REPOS_ROOT],
+    ["default workspace root", configuredRoots.workspace ?? DEFAULT_WORKSPACE],
+    ["scratch root", configuredRoots.scratch ?? DEFAULT_SCRATCH],
+    ["files root", configuredRoots.files ?? DEFAULT_FILES],
+  ] as const;
+  const canonicalConfigured = await Promise.all(
+    configured.map(async ([label, value]) => ({ label, result: await canonicalizePathWithMissingTail(value) })),
+  );
+  if (canonicalConfigured.some(({ result }) => !result.ok)) {
+    return { ok: false, reason: "A configured task workspace root could not be canonicalized" };
+  }
+  const [reposEntry, workspaceEntry, scratchEntry, filesEntry] = canonicalConfigured;
+  if (!reposEntry || !workspaceEntry || !scratchEntry || !filesEntry ||
+    !reposEntry.result.ok || !workspaceEntry.result.ok ||
+    !scratchEntry.result.ok || !filesEntry.result.ok) {
+    return { ok: false, reason: "A configured task workspace root could not be canonicalized" };
+  }
+  const canonicalRoots: CanonicalWorkspaceRoots = {
+    reposRoot: reposEntry.result.path,
+    workspace: workspaceEntry.result.path,
+    scratch: scratchEntry.result.path,
+    files: filesEntry.result.path,
+  };
+
+  const protectedResults = await Promise.all(
+    protectedTaskPaths(configuredRoots).map((value) => canonicalizePathWithMissingTail(value)),
+  );
+  if (protectedResults.some((result) => !result.ok)) {
+    return { ok: false, reason: "A protected task path could not be canonicalized" };
+  }
+  const protectedPaths = protectedResults.flatMap((result) => result.ok ? [result.path] : []);
+
+  if (canonicalConfigured.some(({ label, result }) => {
+    if (!result.ok) return true;
+    return protectedPaths.some((protectedPath) => overlapsPath(result.path, protectedPath));
+  })) {
+    return { ok: false, reason: "A configured task workspace root overlaps a protected path" };
+  }
+
+  const selected = await canonicalizePathWithMissingTail(workingDir);
+  if (!selected.ok) {
+    return { ok: false, reason: "The selected task working directory could not be canonicalized" };
+  }
+  if (protectedPaths.some((protectedPath) => overlapsPath(selected.path, protectedPath))) {
+    return { ok: false, reason: "The selected task working directory overlaps a protected path" };
+  }
+  if (!Object.values(canonicalRoots).some((root) => isWithinPath(root, selected.path))) {
+    return { ok: false, reason: "The selected task working directory is outside approved task roots" };
+  }
+
+  return { ok: true, workingDir: selected.path, roots: canonicalRoots };
+}
+
+export async function validateTaskWorkspace(
+  workingDir: string,
+  configuredRoots: WorkspaceRoots = {},
+): Promise<TaskWorkspaceValidation> {
+  try {
+    return await validateTaskWorkspaceUnchecked(workingDir, configuredRoots);
+  } catch {
+    return { ok: false, reason: "Task workspace paths could not be validated" };
+  }
 }
 
 /** Parse a positive integer and clamp it to a caller-owned hard ceiling. */

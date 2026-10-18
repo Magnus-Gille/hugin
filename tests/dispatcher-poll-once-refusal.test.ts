@@ -59,6 +59,7 @@ describe("pollOnce — managed checkout refusal", () => {
 
   it("short-circuits before model spend, classifies as infra failure, and persists checkout-gate friction", async () => {
     const fakeHome = createFakeHome();
+    const managedRoot = path.join(os.tmpdir(), "hugin-test-repos-checkout-refusal");
     fs.mkdirSync(path.join(fakeHome, ".hugin"), { recursive: true });
 
     vi.stubEnv("MUNIN_API_KEY", "test-key");
@@ -69,6 +70,7 @@ describe("pollOnce — managed checkout refusal", () => {
     vi.stubEnv("HUGIN_CODE_HEALTH_CAPTURE", "on");
     vi.stubEnv("HUGIN_VERSION_DRIFT_CHECK", "off");
     vi.stubEnv("HUGIN_SENSITIVITY_CHECKPOINT_SECRET", "x".repeat(32));
+    vi.stubEnv("HUGIN_REPOS_ROOT", managedRoot);
     vi.stubEnv("HOME", fakeHome);
 
     const taskNs = "tasks/task-checkout-refusal";
@@ -82,7 +84,7 @@ describe("pollOnce — managed checkout refusal", () => {
 
 - **Runtime:** claude
 - **Context:** repo:sagascript
-- **Working dir:** /home/magnus/repos/demo
+- **Working dir:** ${managedRoot}/demo
 - **Timeout:** 60000
 - **Capabilities:** code
 - **Permission profile:** trusted-code
@@ -238,10 +240,10 @@ Edit the repository.`;
 
     expect(result).toEqual({ hadTask: true, queueDepth: 1 });
     expect(prepareManagedCheckoutMock).toHaveBeenCalledWith(
-      "/home/magnus/repos/sagascript",
+      path.join(managedRoot, "sagascript"),
       "task-checkout-refusal",
       expect.objectContaining({
-        reposRoot: "/home/magnus/repos",
+        reposRoot: managedRoot,
         mutationCapable: true,
       }),
     );
@@ -320,8 +322,218 @@ Edit the repository.`;
     });
   });
 
+  it("rejects a protected legacy working directory before checkout or process spawn", async () => {
+    const fakeHome = createFakeHome();
+    fs.mkdirSync(path.join(fakeHome, ".hugin"), { recursive: true });
+
+    vi.stubEnv("MUNIN_API_KEY", "test-key");
+    vi.stubEnv("MUNIN_URL", "http://munin.test");
+    vi.stubEnv("HUGIN_ALLOWED_SUBMITTERS", "hugin");
+    vi.stubEnv("HUGIN_SIGNING_POLICY", "off");
+    vi.stubEnv("HUGIN_SCHEDULER_SHADOW", "off");
+    vi.stubEnv("HUGIN_VERSION_DRIFT_CHECK", "off");
+    vi.stubEnv("HUGIN_SENSITIVITY_CHECKPOINT_SECRET", "x".repeat(32));
+    vi.stubEnv("HOME", fakeHome);
+
+    const taskNs = "tasks/task-checkout-refusal";
+    const createdAt = "2026-08-01T10:00:00.000Z";
+    const entries = new Map<string, FakeEntry>();
+    const writes: FakeWrite[] = [];
+    const logs: Array<{ namespace: string; message: string }> = [];
+    let writeCounter = 0;
+
+    const taskContent = `## Task: Protected working directory
+
+- **Runtime:** claude
+- **Working dir:** /home/magnus/repos/demo
+- **Timeout:** 60000
+- **Capabilities:** code
+- **Permission profile:** trusted-code
+- **Submitted by:** hugin
+
+### Prompt
+Edit the repository.`;
+
+    const statusEntry: FakeEntry = {
+      id: "status-0",
+      namespace: taskNs,
+      key: "status",
+      content: taskContent,
+      tags: ["pending", "runtime:claude"],
+      classification: "internal",
+      created_at: createdAt,
+      updated_at: createdAt,
+    };
+    entries.set(`${taskNs}/status`, statusEntry);
+
+    const prepareManagedCheckoutMock = vi.fn().mockResolvedValue({
+      branch: { action: "skipped" },
+    });
+    const executeSdkTaskMock = vi.fn();
+    const spawnMock = vi.fn();
+
+    class FakeMuninClient {
+      private sessionId = "session-0";
+
+      constructor(_config: unknown) {}
+
+      async query(_args: unknown) {
+        return { results: [], total: 0 };
+      }
+
+      async read(namespace: string, key: string) {
+        return entries.get(`${namespace}/${key}`) ?? null;
+      }
+
+      async readBatch(
+        requests: Array<{ namespace: string; key: string }>,
+      ) {
+        return requests.map(({ namespace, key }) => entries.get(`${namespace}/${key}`) ?? null);
+      }
+
+      async write(
+        namespace: string,
+        key: string,
+        content: string,
+        tags?: string[],
+        expectedUpdatedAt?: string,
+        classification?: string,
+        _createOnly?: boolean,
+      ) {
+        writes.push({ namespace, key, content, tags, expectedUpdatedAt, classification });
+        const existing = entries.get(`${namespace}/${key}`);
+        const updatedAt = new Date(Date.parse(createdAt) + ++writeCounter).toISOString();
+        const next: FakeEntry = {
+          id: existing?.id ?? `${namespace}/${key}/${writeCounter}`,
+          namespace,
+          key,
+          content,
+          tags: tags ?? existing?.tags ?? [],
+          classification: classification ?? existing?.classification,
+          created_at: existing?.created_at ?? createdAt,
+          updated_at: updatedAt,
+        };
+        entries.set(`${namespace}/${key}`, next);
+        return { updated_at: updatedAt, status: existing ? "updated" : "created" };
+      }
+
+      async log(namespace: string, message: string) {
+        logs.push({ namespace, message });
+      }
+
+      async health() {
+        return true;
+      }
+
+      setSessionId(sessionId: string) {
+        this.sessionId = sessionId;
+      }
+
+      getSessionId() {
+        return this.sessionId;
+      }
+    }
+
+    vi.doMock("../src/munin-client.js", async () => {
+      const actual = await vi.importActual<typeof import("../src/munin-client.js")>(
+        "../src/munin-client.js",
+      );
+      return {
+        ...actual,
+        MuninClient: FakeMuninClient,
+      };
+    });
+
+    vi.doMock("../src/munin-pagination.js", () => ({
+      queryAllMuninEntries: vi.fn(async (_munin: unknown, options: { tags?: string[] }) => {
+        if (options.tags?.includes("pending")) {
+          return {
+            results: [
+              {
+                id: statusEntry.id,
+                namespace: taskNs,
+                key: "status",
+                entry_type: "state",
+                content_preview: "",
+                tags: [...statusEntry.tags],
+                classification: statusEntry.classification,
+                created_at: statusEntry.created_at,
+                updated_at: statusEntry.updated_at,
+              },
+            ],
+            truncated: false,
+            budgetExhausted: false,
+          };
+        }
+        return { results: [], truncated: false, budgetExhausted: false };
+      }),
+    }));
+
+    vi.doMock("../src/task-helpers.js", async () => {
+      const actual = await vi.importActual<typeof import("../src/task-helpers.js")>(
+        "../src/task-helpers.js",
+      );
+      return {
+        ...actual,
+        prepareManagedCheckout: prepareManagedCheckoutMock,
+      };
+    });
+
+    vi.doMock("../src/sdk-executor.js", async () => {
+      const actual = await vi.importActual<typeof import("../src/sdk-executor.js")>(
+        "../src/sdk-executor.js",
+      );
+      return {
+        ...actual,
+        executeSdkTask: executeSdkTaskMock,
+      };
+    });
+
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn: spawnMock };
+    });
+
+    const { __test__ } = await import("../src/index.js");
+    __test__.resetState();
+
+    const result = await __test__.pollOnce();
+
+    expect(result).toEqual({ hadTask: true, queueDepth: 1 });
+    expect(prepareManagedCheckoutMock.mock.calls.length).toBe(0);
+    expect(executeSdkTaskMock).not.toHaveBeenCalled();
+    expect(spawnMock.mock.calls.length).toBe(0);
+
+    const finalStatus = entries.get(`${taskNs}/status`);
+    expect(finalStatus?.tags).toEqual(expect.arrayContaining(["failed", "runtime:claude"]));
+    expect(finalStatus?.classification).toBe("client-confidential");
+
+    const resultEntry = entries.get(`${taskNs}/result`);
+    expect(resultEntry?.content).toContain("Task workspace rejected");
+
+    const structuredEntry = entries.get(`${taskNs}/result-structured`);
+    expect(structuredEntry).toBeDefined();
+    const structured = JSON.parse(structuredEntry!.content) as {
+      lifecycle: string;
+      outcome: string;
+      exitCode: number;
+      errorMessage?: string;
+    };
+    expect(structured.lifecycle).toBe("failed");
+    expect(structured.outcome).toBe("failed");
+    expect(structured.exitCode).toBe(1);
+    expect(structured.errorMessage).toContain("overlaps a protected path");
+
+    expect(__test__.inspectState()).toEqual({
+      currentTask: null,
+      currentTaskConfig: null,
+      lastPendingQueueSnapshot: expect.objectContaining({ pendingCount: 0 }),
+    });
+  });
+
   it("classifies orchestrator pi-harness admission refusal as infra failure, persists friction, and marks the checkout contaminated", async () => {
     const fakeHome = createFakeHome();
+    const managedRoot = path.join(os.tmpdir(), "hugin-test-repos-pi-admission-refusal");
     fs.mkdirSync(path.join(fakeHome, ".hugin", "logs"), { recursive: true });
 
     vi.stubEnv("MUNIN_API_KEY", "test-key");
@@ -331,6 +543,7 @@ Edit the repository.`;
     vi.stubEnv("HUGIN_SCHEDULER_SHADOW", "off");
     vi.stubEnv("HUGIN_VERSION_DRIFT_CHECK", "off");
     vi.stubEnv("HUGIN_SENSITIVITY_CHECKPOINT_SECRET", "x".repeat(32));
+    vi.stubEnv("HUGIN_REPOS_ROOT", managedRoot);
     vi.stubEnv("HOME", fakeHome);
 
     const taskNs = "tasks/task-pi-harness-admission-refusal";
@@ -343,7 +556,7 @@ Edit the repository.`;
     const taskContent = `## Task: Orchestrator pi-harness admission refusal
 
 - **Runtime:** orchestrator
-- **Working dir:** /home/magnus/repos/demo
+- **Working dir:** ${managedRoot}/demo
 - **Timeout:** 60000
 - **Capabilities:** code
 - **Permission profile:** trusted-code
@@ -523,10 +736,10 @@ Edit the repository.`;
 
     expect(result).toEqual({ hadTask: true, queueDepth: 1 });
     expect(prepareManagedCheckoutMock).toHaveBeenCalledWith(
-      "/home/magnus/repos/demo",
+      path.join(managedRoot, "demo"),
       "task-pi-harness-admission-refusal",
       expect.objectContaining({
-        reposRoot: "/home/magnus/repos",
+        reposRoot: managedRoot,
         mutationCapable: true,
       }),
     );
@@ -594,6 +807,7 @@ Edit the repository.`;
 
   it("marks repositoryOutcome checkout-contaminated when pi-harness binding admission fails after a clean checkout gate", async () => {
     const fakeHome = createFakeHome();
+    const managedRoot = path.join(os.tmpdir(), "hugin-test-repos-pi-builder-refusal");
     fs.mkdirSync(path.join(fakeHome, ".hugin", "logs"), { recursive: true });
 
     vi.stubEnv("MUNIN_API_KEY", "test-key");
@@ -603,6 +817,7 @@ Edit the repository.`;
     vi.stubEnv("HUGIN_SCHEDULER_SHADOW", "off");
     vi.stubEnv("HUGIN_VERSION_DRIFT_CHECK", "off");
     vi.stubEnv("HUGIN_SENSITIVITY_CHECKPOINT_SECRET", "x".repeat(32));
+    vi.stubEnv("HUGIN_REPOS_ROOT", managedRoot);
     vi.stubEnv("HOME", fakeHome);
 
     const taskNs = "tasks/task-pi-harness-builder-refusal";
@@ -615,7 +830,7 @@ Edit the repository.`;
     const taskContent = `## Task: Orchestrator pi-harness builder refusal
 
 - **Runtime:** orchestrator
-- **Working dir:** /home/magnus/repos/demo
+- **Working dir:** ${managedRoot}/demo
 - **Timeout:** 60000
 - **Capabilities:** code
 - **Permission profile:** trusted-code
@@ -809,10 +1024,10 @@ Edit the repository.`;
 
     expect(result).toEqual({ hadTask: true, queueDepth: 1 });
     expect(prepareManagedCheckoutMock).toHaveBeenCalledWith(
-      "/home/magnus/repos/demo",
+      path.join(managedRoot, "demo"),
       "task-pi-harness-builder-refusal",
       expect.objectContaining({
-        reposRoot: "/home/magnus/repos",
+        reposRoot: managedRoot,
         mutationCapable: true,
       }),
     );

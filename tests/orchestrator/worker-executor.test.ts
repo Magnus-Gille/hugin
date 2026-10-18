@@ -37,6 +37,7 @@ const realpathResults = new Map<string, { value?: string; error?: Error & { code
 class MockChildProcess extends EventEmitter {
   stdout = new EventEmitter();
   stderr = new EventEmitter();
+  pid: number | undefined;
   killed = false;
   kill(_signal?: string) {
     this.killed = true;
@@ -49,8 +50,10 @@ vi.mock("node:child_process", () => ({
   spawn: (cmd: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => {
     spawnCalls.push({ cmd, args, options });
     const child = new MockChildProcess();
+    child.pid = 900_000 + spawnCallIndex;
     const behavior = spawnBehaviors[spawnCallIndex] ?? { exitCode: 0 };
     spawnCallIndex++;
+    setImmediate(() => child.emit("spawn"));
 
     const fire = () => {
       if (behavior.spawnError) {
@@ -129,6 +132,14 @@ beforeEach(() => {
   realpathResults.clear();
   primeDefaultRealpaths();
   vi.unstubAllEnvs();
+  const realKill = process.kill.bind(process);
+  vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (pid < -1) {
+      if (signal === 0) throw Object.assign(new Error("no fake group"), { code: "ESRCH" });
+      return true;
+    }
+    return realKill(pid, signal);
+  });
 });
 
 afterEach(() => {
@@ -1756,9 +1767,69 @@ describe("PiHarnessExecutor — success path", () => {
     ).toEqual(["--no-session", "--provider", "--tools"]);
   });
 
+  it("passes only the registry-selected OpenRouter key to Pi", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "synthetic-openrouter-key");
+    vi.stubEnv("MUNIN_API_KEY", "synthetic-munin-key");
+    vi.stubEnv("HUGIN_SIGNING_SECRET", "synthetic-signing-secret");
+    vi.stubEnv("BERGET_API_KEY", "synthetic-berget-key");
+    vi.stubEnv("UNKNOWN_TASK_ENV", "synthetic-unknown");
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    await new PiHarnessExecutor().run(
+      makeReadOnlyPiRequest({ prompt: "task text containing --provider openrouter" }),
+    );
+
+    const env = spawnCalls[0]?.options?.env;
+    expect(env?.OPENROUTER_API_KEY).toBe("synthetic-openrouter-key");
+    expect(env).not.toHaveProperty("MUNIN_API_KEY");
+    expect(env).not.toHaveProperty("HUGIN_SIGNING_SECRET");
+    expect(env).not.toHaveProperty("BERGET_API_KEY");
+    expect(env).not.toHaveProperty("UNKNOWN_TASK_ENV");
+  });
+
+  it("does not pass the OpenRouter key for a non-OpenRouter registry provider", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "synthetic-openrouter-key");
+    const original = runtimeRegistry.getRegistryEntryById;
+    const piEntry = original("pi-harness");
+    if (!piEntry) throw new Error("pi-harness registry entry missing in test");
+    vi.spyOn(runtimeRegistry, "getRegistryEntryById").mockImplementation((id) =>
+      id === "pi-harness"
+        ? { ...piEntry, harnessFlags: ["--no-session", "--provider", "homeserver"] }
+        : original(id),
+    );
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    await new PiHarnessExecutor().run(makeReadOnlyPiRequest());
+
+    expect(spawnCalls[0]?.args).toContain("homeserver");
+    expect(spawnCalls[0]?.options?.env).not.toHaveProperty("OPENROUTER_API_KEY");
+  });
+
+  it.each([
+    ["--provider", "openrouter", "--provider", "homeserver"],
+    ["--provider", "openrouter", "--provider=openrouter"],
+    ["--provider=openrouter", "--provider", "homeserver"],
+  ])("does not forward provider credentials for ambiguous registry flags %j", async (...providerFlags) => {
+    vi.stubEnv("OPENROUTER_API_KEY", "synthetic-openrouter-key");
+    const original = runtimeRegistry.getRegistryEntryById;
+    const piEntry = original("pi-harness");
+    if (!piEntry) throw new Error("pi-harness registry entry missing in test");
+    vi.spyOn(runtimeRegistry, "getRegistryEntryById").mockImplementation((id) =>
+      id === "pi-harness"
+        ? { ...piEntry, harnessFlags: ["--no-session", ...providerFlags] }
+        : original(id),
+    );
+    spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
+
+    await new PiHarnessExecutor().run(makeReadOnlyPiRequest());
+
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]?.options?.env).not.toHaveProperty("OPENROUTER_API_KEY");
+  });
+
   it("does not expose the dispatcher checkpoint secret to the Pi harness", async () => {
     vi.stubEnv("HUGIN_SENSITIVITY_CHECKPOINT_SECRET", "dispatcher-only-secret");
-    vi.stubEnv("HUGIN_ORDINARY_CHILD_VALUE", "preserved");
+    vi.stubEnv("LANG", "C.UTF-8");
     spawnBehaviors = [{ exitCode: 0, stdout: PI_JSONL_SUCCESS }];
 
     await new PiHarnessExecutor().run(makeReadOnlyPiRequest());
@@ -1766,9 +1837,7 @@ describe("PiHarnessExecutor — success path", () => {
     expect(spawnCalls[0]?.options?.env).not.toHaveProperty(
       "HUGIN_SENSITIVITY_CHECKPOINT_SECRET",
     );
-    expect(spawnCalls[0]?.options?.env?.HUGIN_ORDINARY_CHILD_VALUE).toBe(
-      "preserved",
-    );
+    expect(spawnCalls[0]?.options?.env?.LANG).toBe("C.UTF-8");
   });
 
   it("uses alternate_tokens field if content field absent (text field)", async () => {

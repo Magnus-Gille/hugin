@@ -3,14 +3,14 @@
  *
  * Protects against submitter spoofing: the `Submitted by:` field is
  * plain text, so any agent with Munin write access to `tasks/*` can
- * impersonate a trusted submitter. Signing binds the critical task
- * metadata (submitter, runtime, prompt, context-refs) to a shared
- * secret that only the claimed submitter knows.
+ * impersonate a trusted submitter. Signing binds the complete task
+ * document and task identity to a shared secret that only
+ * the claimed submitter knows.
  *
- * v1 design — HMAC-SHA256 with per-submitter shared secrets:
- *   - Signature field embedded in task body: `**Signature:** v1:<keyId>:<hex>`
- *   - Canonical payload: newline-delimited, sorted `key=value` pairs
- *     over the security-critical fields (see CANONICAL_FIELDS below)
+ * v2 design — HMAC-SHA256 with per-submitter shared secrets:
+ *   - Signature field embedded in task body: `**Signature:** v2:<keyId>:<hex>`
+ *   - Canonical payload binds the SHA-256 of the complete task body, the
+ *     task ID, submitter, and submitted-at timestamp.
  *   - Comparison is constant-time via crypto.timingSafeEqual
  *
  * Policy enforcement lives in the dispatcher. This module is pure:
@@ -23,16 +23,24 @@
 import { createHmac, createHash, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs";
 
-export const SIGNATURE_VERSION = "v1" as const;
+export const SIGNATURE_VERSION = "v2" as const;
 
 export interface SigningParams {
   taskId: string;
   submitter: string;
   submittedAt: string;
-  runtime: string;
-  prompt: string;
-  contextRefs?: string[];
+  taskBody: string;
 }
+
+export interface TaskSigningMetadata {
+  submitter: string | null;
+  submittedAt: string | null;
+}
+
+export type SignatureFieldInspection =
+  | { status: "missing" }
+  | { status: "valid"; raw: string }
+  | { status: "malformed"; reason: string };
 
 export interface ParsedSignature {
   version: string;
@@ -54,8 +62,9 @@ export type VerificationStatus =
 /**
  * Status recorded in task provenance. `unverified` is deliberately distinct
  * from `valid`: policy=off means Hugin did not authenticate the signature.
- * `internal-exempt` and `unverifiable` describe policy exceptions, not proof
- * of the claimed identity.
+ * `unverifiable` describes a scheme limitation, not proof of identity.
+ * `internal-exempt` is retained only to parse historical results; the current
+ * dispatcher does not produce or accept it under `require`.
  */
 export const TASK_SIGNATURE_STATUSES = [
   "valid",
@@ -111,12 +120,12 @@ export function buildTaskSubmissionProvenance(
   };
 }
 
-/** `require` accepts a valid signature plus Hugin's existing internal exemption. */
+/** `require` accepts only a valid signature. */
 export function signingPolicyRejects(
   policy: SigningPolicy,
   status: TaskSignatureStatus,
 ): boolean {
-  return policy === "require" && status !== "valid" && status !== "internal-exempt";
+  return policy === "require" && status !== "valid";
 }
 
 export interface VerifyOptions {
@@ -132,25 +141,18 @@ export type KeyStore = Record<string, string>;
 
 /**
  * Canonical payload construction. Ordering and formatting must be stable
- * across submitters and Hugin or signatures will not match.
- *
- * Rules:
- *   - Each value is trimmed and stripped of embedded \n and \r.
- *   - Missing values serialize as an empty string for their field.
- *   - Fields are sorted by key and joined with `\n`.
- *   - Payload ends with a trailing newline (so empty vs. missing-last-field
- *     is unambiguous when inspected as text).
+ * across submitters and Hugin or signatures will not match. The whole task
+ * body is normalized from CRLF to LF, then hashed byte-for-byte as UTF-8.
+ * The value of exactly one well-formed standalone Signature line is replaced
+ * by a fixed marker; its position, spelling, and all other body bytes remain
+ * significant. Unsigned bodies use the deterministic insertion slot exposed
+ * by setTaskSignature.
  */
 export function buildCanonicalPayload(params: SigningParams): string {
-  const promptSha = sha256Hex(canonicalizePrompt(params.prompt));
-  const contextRefsSha = params.contextRefs?.length
-    ? sha256Hex(canonicalizeContextRefs(params.contextRefs))
-    : "";
+  const taskBody = canonicalizeTaskBody(params.taskBody);
 
   const fields: Record<string, string> = {
-    "context-refs-sha256": contextRefsSha,
-    "prompt-sha256": promptSha,
-    runtime: sanitizeValue(params.runtime),
+    "task-body-sha256": sha256Hex(taskBody),
     "submitted-at": sanitizeValue(params.submittedAt),
     submitter: sanitizeValue(params.submitter),
     "task-id": sanitizeValue(params.taskId),
@@ -176,6 +178,14 @@ export function signTask(
   return `${SIGNATURE_VERSION}:${keyId}:${hex}`;
 }
 
+/** Insert or replace the standalone metadata Signature line in its canonical slot. */
+export function setTaskSignature(content: string, signature: string): string {
+  if (!/^\S+$/.test(signature) || !parseSignature(signature)) {
+    throw new Error("signature must be one parseable, whitespace-free value");
+  }
+  return applyTaskSignatureValue(content, signature);
+}
+
 export function parseSignature(raw: string | undefined | null): ParsedSignature | null {
   if (!raw) return null;
   const trimmed = raw.trim();
@@ -189,25 +199,88 @@ export function parseSignature(raw: string | undefined | null): ParsedSignature 
 }
 
 /**
- * Extract a signature line from a task body. Matches:
- *   `- **Signature:** v1:<keyId>:<hex>` or `**Signature:** v1:<keyId>:<hex>`.
- * Returns null when no signature line is present.
+ * Inspect only standalone Signature lines in the metadata prefix before the
+ * first ### Prompt or ### Pipeline marker. Signature-looking prompt text is
+ * never authentication material.
  */
+export function inspectSignatureField(content: string): SignatureFieldInspection {
+  const lines = normalizeTaskBody(content).split("\n");
+  const boundary = findTaskSectionBoundary(lines);
+  if (boundary < 0) {
+    return { status: "malformed", reason: "task body is missing a ### Prompt or ### Pipeline section" };
+  }
+  const prefix = lines.slice(0, boundary);
+  const candidates: string[] = [];
+  for (const line of prefix) {
+    if (/^[ \t]*(?:-[ \t]*)?\*\*Signature(?::\*\*|\*\*)/i.test(line)) {
+      candidates.push(line);
+    }
+  }
+
+  if (candidates.length === 0) return { status: "missing" };
+  if (candidates.length > 1) {
+    return { status: "malformed", reason: "duplicate metadata Signature lines" };
+  }
+
+  const match = candidates[0].match(/^(?:- )?\*\*Signature:\*\* (\S+)$/i);
+  if (!match || !parseSignature(match[1])) {
+    return { status: "malformed", reason: "malformed metadata Signature line" };
+  }
+  return { status: "valid", raw: match[1] };
+}
+
+/** Extract a well-formed standalone metadata signature, or null otherwise. */
 export function extractSignatureField(content: string): string | null {
-  const match = content.match(/\*\*Signature:\*\*\s*(\S+)/i);
-  return match?.[1]?.trim() || null;
+  const inspection = inspectSignatureField(content);
+  return inspection.status === "valid" ? inspection.raw : null;
+}
+
+/** Derive identity and freshness metadata from the same document prefix the dispatcher parses. */
+export function extractTaskSigningMetadata(content: string): TaskSigningMetadata {
+  const lines = normalizeTaskBody(content).split("\n");
+  const boundary = findTaskSectionBoundary(lines);
+  const prefix = lines.slice(0, boundary < 0 ? lines.length : boundary).join("\n");
+  const submitter = prefix.match(
+    /^[ \t]*(?:-[ \t]*)?\*\*Submitted by:\*\*[ \t]*(.+)$/im,
+  )?.[1]?.trim();
+  const submittedAt = prefix.match(
+    /^[ \t]*(?:-[ \t]*)?\*\*Submitted at:\*\*[ \t]*(.+)$/im,
+  )?.[1]?.trim();
+  return {
+    submitter: submitter || null,
+    submittedAt: submittedAt || null,
+  };
 }
 
 export function verifyTaskSignature(
   params: SigningParams,
-  signatureRaw: string | null | undefined,
   keys: KeyStore,
   opts: VerifyOptions = {},
 ): VerificationResult {
-  if (!signatureRaw) return { status: "missing" };
+  const inspection = inspectSignatureField(params.taskBody);
+  if (inspection.status === "missing") return { status: "missing" };
+  if (inspection.status === "malformed") {
+    return { status: "malformed", reason: inspection.reason };
+  }
 
-  const parsed = parseSignature(signatureRaw);
+  const parsed = parseSignature(inspection.raw);
   if (!parsed) return { status: "malformed", reason: "unparseable signature field" };
+
+  const metadata = extractTaskSigningMetadata(params.taskBody);
+  if (!metadata.submitter || !metadata.submittedAt) {
+    return {
+      status: "invalid",
+      keyId: parsed.keyId,
+      reason: "task body is missing Submitted by or Submitted at metadata",
+    };
+  }
+  if (metadata.submitter !== params.submitter || metadata.submittedAt !== params.submittedAt) {
+    return {
+      status: "invalid",
+      keyId: parsed.keyId,
+      reason: "signing metadata does not match the task body",
+    };
+  }
 
   if (parsed.version !== SIGNATURE_VERSION) {
     return {
@@ -286,6 +359,88 @@ export function verifyTaskSignature(
   return { status: "valid", keyId: parsed.keyId };
 }
 
+function normalizeTaskBody(content: string): string {
+  return content.replace(/\r\n/g, "\n");
+}
+
+function findTaskSectionBoundary(lines: string[]): number {
+  return lines.findIndex((line) => /^###[ \t]*(?:Prompt|Pipeline)[ \t]*$/i.test(line));
+}
+
+const SIGNATURE_VALUE_MARKER = "__HUGIN_SIGNATURE_VALUE__";
+
+interface RawTaskLine {
+  text: string;
+  start: number;
+  end: number;
+  terminator: string;
+}
+
+function splitRawTaskLines(content: string): RawTaskLine[] {
+  const lines: RawTaskLine[] = [];
+  let start = 0;
+  while (start < content.length) {
+    const newline = content.indexOf("\n", start);
+    if (newline < 0) {
+      lines.push({ text: content.slice(start), start, end: content.length, terminator: "" });
+      return lines;
+    }
+    const end = newline > start && content[newline - 1] === "\r" ? newline - 1 : newline;
+    lines.push({
+      text: content.slice(start, end),
+      start,
+      end,
+      terminator: content.slice(end, newline + 1),
+    });
+    start = newline + 1;
+  }
+  if (content.length === 0 || content.endsWith("\n")) {
+    lines.push({ text: "", start: content.length, end: content.length, terminator: "" });
+  }
+  return lines;
+}
+
+function applyTaskSignatureValue(content: string, signature: string): string {
+  const inspection = inspectSignatureField(content);
+  if (inspection.status === "malformed") throw new Error(inspection.reason);
+
+  const lines = splitRawTaskLines(content);
+  const lineTexts = lines.map((line) => line.text);
+  const boundary = findTaskSectionBoundary(lineTexts);
+  if (boundary < 0) {
+    throw new Error("task body is missing a ### Prompt or ### Pipeline section");
+  }
+
+  if (inspection.status === "valid") {
+    const signatureLineIndex = lineTexts.findIndex(
+      (line, index) => index < boundary && /^[ \t]*(?:-[ \t]*)?\*\*Signature(?::\*\*|\*\*)/i.test(line),
+    );
+    const line = lines[signatureLineIndex];
+    const match = line?.text.match(/^((?:- )?\*\*Signature:\*\* )(\S+)$/i);
+    if (!line || !match) throw new Error("metadata Signature line could not be replaced");
+    const valueStart = line.start + match[1].length;
+    const valueEnd = line.start + line.text.length;
+    return `${content.slice(0, valueStart)}${signature}${content.slice(valueEnd)}`;
+  }
+
+  // Put the new field immediately before the blank line that separates
+  // metadata from the section marker, when present. Otherwise put it directly
+  // before the marker. This is the only supported insertion slot.
+  const insertionIndex = boundary > 0 && lineTexts[boundary - 1] === ""
+    ? boundary - 1
+    : boundary;
+  const insertionPoint = lines[insertionIndex]?.start ?? content.length;
+  const precedingLine = lines[insertionIndex - 1];
+  const sectionLine = lines[boundary];
+  const newline = precedingLine?.terminator || sectionLine?.terminator || "\n";
+  const inserted = `- **Signature:** ${signature}${newline}`;
+  return `${content.slice(0, insertionPoint)}${inserted}${content.slice(insertionPoint)}`;
+}
+
+function canonicalizeTaskBody(content: string): string {
+  return normalizeTaskBody(applyTaskSignatureValue(content, SIGNATURE_VALUE_MARKER));
+}
+
 /**
  * Load the keystore from HUGIN_SUBMITTER_KEYS (JSON string) or
  * HUGIN_SUBMITTER_KEYS_FILE (path to JSON). File takes precedence if set.
@@ -341,14 +496,6 @@ function sha256Hex(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
 
-function canonicalizeContextRefs(refs: string[]): string {
-  return refs
-    .map((r) => r.trim())
-    .filter(Boolean)
-    .sort()
-    .join("\n");
-}
-
 function sanitizeValue(v: string): string {
   return v.replace(/[\r\n]+/g, " ").trim();
 }
@@ -364,16 +511,6 @@ export function keyIdMatchesSubmitter(keyId: string, submitter: string): boolean
   if (!keyId || !submitter) return false;
   if (keyId === submitter) return true;
   return keyId.startsWith(`${submitter}-`);
-}
-
-/**
- * Normalize a prompt the same way on both sides of the signature. The task
- * body in Munin may carry trailing whitespace from editors or CRLF line
- * endings; the submitter helper reads the prompt from a file. Collapsing to
- * `.trim()` matches what parseTask() uses when extracting the prompt.
- */
-export function canonicalizePrompt(raw: string): string {
-  return raw.trim();
 }
 
 /**
