@@ -226,3 +226,5 @@ scheduling, and pipeline phases.
   model capacity for quality with limited human intervention.
 
 - [CLI observation and explicit promotion](cli-runtime-promotion.md): daily health/version reporting and the operator-controlled promotion boundary.
+
+- [Harness² round-2 preregistration](harness2-round2.md) — draft/frozen manifests, matched cells, and host qualification gates.
