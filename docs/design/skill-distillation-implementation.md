@@ -583,4 +583,4 @@ Runtime (gated by #77):
 
 Docs/ops:
 - [ ] New env vars documented in `AGENTS.md` or a focused operator document (`HUGIN_SKILL_LANE`, retrieval thresholds, semaphore policy).
-- [ ] Open findings filed as GitHub issues, not left as prose.
+- [ ] Open findings filed as Plane tickets (`HUGIN` project), not left as prose.
