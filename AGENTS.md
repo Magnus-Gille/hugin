@@ -252,7 +252,9 @@ metadata as untrusted at their respective boundaries.
   failure and remediation, not sensitive payloads.
 
 Security documents and assessments belong under `docs/security/`. File actionable
-findings as issues; do not leave serious open findings only in prose.
+findings as tickets in the Plane `HUGIN` project (via the `tickets` MCP server or
+`tix new -p HUGIN`; see `~/repos/ticket-system/docs/agent-interface.md`), not GitHub
+Issues; do not leave serious open findings only in prose.
 
 ## Development workflow
 
