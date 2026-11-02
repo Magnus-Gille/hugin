@@ -15,7 +15,7 @@
  */
 
 import express from "express";
-import type { Express } from "express";
+import type { Express, RequestHandler } from "express";
 import type { Server } from "node:http";
 import {
   brokerAuthMiddleware,
@@ -50,7 +50,6 @@ export interface BrokerServerConfig {
 
 export function buildBrokerApp(config: BrokerServerConfig): Express {
   const app = express();
-  app.use(express.json({ limit: "2mb" }));
 
   app.get("/health", (_req, res) => {
     const traceIngress = config.deps.traceIngressCounter?.snapshot();
@@ -72,42 +71,63 @@ export function buildBrokerApp(config: BrokerServerConfig): Express {
   });
 
   const auth = brokerAuthMiddleware(config.keys);
-  app.post("/v1/delegate/submit", auth, createSubmitHandler(config.deps));
-  app.post("/v1/delegate/await", auth, createAwaitHandler(config.deps));
-  app.post("/v1/delegate/rate", auth, createRateHandler(config.deps));
-  app.post("/v1/friction/report", auth, createFrictionHandler(config.deps));
-  app.post("/v1/delegate/list", auth, createListHandler(config.deps));
-  app.get("/v1/delegate/list", auth, createListHandler(config.deps));
+  const protectedMiddleware: RequestHandler[] = [
+    auth,
+    express.json({ limit: "2mb" }),
+  ];
+  const protectedRoute = (handler: RequestHandler): RequestHandler[] => [
+    ...protectedMiddleware,
+    handler,
+  ];
+
+  app.post(
+    "/v1/delegate/submit",
+    ...protectedRoute(createSubmitHandler(config.deps)),
+  );
+  app.post(
+    "/v1/delegate/await",
+    ...protectedRoute(createAwaitHandler(config.deps)),
+  );
+  app.post(
+    "/v1/delegate/rate",
+    ...protectedRoute(createRateHandler(config.deps)),
+  );
+  app.post(
+    "/v1/friction/report",
+    ...protectedRoute(createFrictionHandler(config.deps)),
+  );
+  app.post(
+    "/v1/delegate/list",
+    ...protectedRoute(createListHandler(config.deps)),
+  );
+  app.get(
+    "/v1/delegate/list",
+    ...protectedRoute(createListHandler(config.deps)),
+  );
   app.get(
     "/v1/delegate/models",
-    auth,
-    createModelsHandler(config.deps.executorCapabilities),
+    ...protectedRoute(createModelsHandler(config.deps.executorCapabilities)),
   );
   if (config.learningStore) {
     app.post(
       "/v1/learning/experiments/create",
-      auth,
-      createLearningExperimentHandler(config.learningStore),
+      ...protectedRoute(createLearningExperimentHandler(config.learningStore)),
     );
     app.post(
       "/v1/learning/experiments/observe",
-      auth,
-      createLearningObservationHandler(config.learningStore),
+      ...protectedRoute(createLearningObservationHandler(config.learningStore)),
     );
     app.post(
       "/v1/learning/experiments/rate",
-      auth,
-      createLearningExperimentRateHandler(config.learningStore),
+      ...protectedRoute(createLearningExperimentRateHandler(config.learningStore)),
     );
     app.post(
       "/v1/learning/experiments/status",
-      auth,
-      createLearningExperimentStatusHandler(config.learningStore),
+      ...protectedRoute(createLearningExperimentStatusHandler(config.learningStore)),
     );
     app.post(
       "/v1/learning/experiments/promote",
-      auth,
-      createLearningExperimentPromoteHandler(config.learningStore),
+      ...protectedRoute(createLearningExperimentPromoteHandler(config.learningStore)),
     );
   }
 
