@@ -3045,7 +3045,12 @@ function spawnRuntime(
       ].join("\n")
     );
 
-    const cmd = ["codex", ["exec", "--full-auto", task.prompt]];
+    // Spell out the former full-auto policy; current Codex no longer accepts
+    // that shorthand. Keep task text behind `--` so it cannot become CLI flags.
+    const cmd = ["codex", [
+      "exec", "--sandbox", "workspace-write",
+      "-c", 'approval_policy="on-request"', "--", task.prompt,
+    ]];
 
     const managed = spawnOwnedProcess(cmd[0] as string, cmd[1] as string[], {
       cwd: task.workingDir,
