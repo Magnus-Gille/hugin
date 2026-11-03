@@ -13,6 +13,15 @@ from the npm-global package metadata. Hugin's Claude runtime uses the locked
 project Agent SDK; this observation of the global Claude CLI does not attest to
 the SDK version. Deploying the locked project dependencies remains separate.
 
+The task executor uses `codex exec --sandbox workspace-write -c
+'approval_policy="on-request"' -- <prompt>`. This preserves the former
+`--full-auto` sandbox/approval intent without relying on that removed shorthand.
+The option terminator keeps task text from changing CLI options. The existing
+model-free sandbox preflight still runs before dispatch; it does not prove CLI
+argument compatibility. During promotion, also check the actual service-PATH
+executable with these options followed by `--help` (before the `--` terminator),
+without invoking a model. Do not replace them with approval or sandbox bypasses.
+
 CLI promotion is an explicit operator release, separate from this cron job:
 
 1. Select an exact package version and immutable registry integrity value.
