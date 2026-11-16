@@ -1,5 +1,10 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { MuninClient, MuninCodeHealthRejectedError, MuninWriteRejectedError } from "../src/munin-client.js";
+import {
+  MuninClient,
+  MuninCodeHealthRejectedError,
+  MuninWriteRejectedError,
+  resetSharedMuninBackoffForTests,
+} from "../src/munin-client.js";
 
 function rpcResponse(payload: unknown): Response {
   return new Response(
@@ -27,6 +32,76 @@ describe("MuninClient", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    resetSharedMuninBackoffForTests();
+  });
+
+  it("keeps backing off after a 429 that exhausts its retries", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response('{"error":"Too many requests"}', {
+          status: 429,
+          headers: { "retry-after": "2" },
+        })
+      )
+      .mockResolvedValueOnce(
+        rpcResponse({ found: false, namespace: "tasks/demo", key: "status" })
+      );
+
+    const client = new MuninClient({
+      baseUrl: "http://munin-exhausted.test",
+      apiKey: "test-key",
+      maxRetries: 0,
+      minRequestSpacingMs: 0,
+    });
+
+    await expect(client.read("tasks/demo", "status")).rejects.toThrow("Munin 429");
+    const next = client.read("tasks/demo", "status");
+
+    await vi.advanceTimersByTimeAsync(1_900);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(next).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("slows every client of the same Munin after a 429", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response('{"error":"Too many requests"}', {
+          status: 429,
+          headers: { "retry-after": "3" },
+        })
+      )
+      .mockImplementation(async () =>
+        rpcResponse({ found: false, namespace: "tasks/demo", key: "status" })
+      );
+
+    const config = {
+      baseUrl: "http://munin-shared.test/",
+      apiKey: "test-key",
+      maxRetries: 0,
+      minRequestSpacingMs: 0,
+    };
+    const first = new MuninClient(config);
+    const second = new MuninClient(config);
+    const otherServer = new MuninClient({ ...config, baseUrl: "http://munin-other.test" });
+
+    await expect(first.read("tasks/demo", "status")).rejects.toThrow("Munin 429");
+    const delayed = second.read("tasks/demo", "status");
+    await expect(otherServer.read("tasks/demo", "status")).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(2_900);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(delayed).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("retries 429 responses before succeeding", async () => {
