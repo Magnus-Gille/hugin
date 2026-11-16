@@ -17,11 +17,12 @@
  *      DEFAULT_COLLECT_TTL_MS and the corpus scan is capped.
  */
 
-import type { MuninClient } from "./munin-client.js";
+import type { MuninClient, MuninEntry } from "./munin-client.js";
 import type { LedgerClientLike } from "./orchestrator/ledger-client.js";
 import type { Ledger } from "./orchestrator/ledger-client.js";
 import type { ProductTaskEvidence } from "./learning-loop-health.js";
 import { parseStoredEnvelope } from "./broker/task-store.js";
+import type { DelegationEnvelope } from "./broker/types.js";
 import type { AwaitObservation } from "./broker/await-observation.js";
 import {
   learningExperimentStateSchema,
@@ -39,6 +40,8 @@ import {
 export const DEFAULT_COLLECT_TTL_MS = 300_000;
 /** Cap the corpus walk — trial evidence, not a full audit. */
 export const DEFAULT_MAX_TASKS = 200;
+/** memory_read_batch chunk size; matches MuninClient's default server limit. */
+const READ_BATCH_SIZE = 20;
 
 const LIFECYCLE_TAGS = ["completed", "failed", "cancelled", "running", "pending"] as const;
 
@@ -282,35 +285,85 @@ export class LearningLoopCollector {
       (tagged.ok && tagged.r.truncated) ||
       (homeserver.ok && homeserver.r.truncated);
 
-    const tasks: ProductTaskEvidence[] = [];
+    // HUGIN-414: read in batches. One read per key per task (up to 4 x
+    // maxTasks single reads every TTL) kept Munin's per-caller rate limit
+    // saturated around the clock; batching cuts that ~20x.
     let readFailures = 0;
-    for (const ns of namespaces) {
-      const evidence = await this.collectOne(ns).catch(() => {
+    const statuses = await this.readMany(
+      namespaces.map((namespace) => ({ namespace, key: "status" })),
+    );
+    const brokerTasks: Array<{ namespace: string; status: MuninEntry; envelope: DelegationEnvelope }> = [];
+    namespaces.forEach((namespace, index) => {
+      const status = statuses[index];
+      if (status === undefined) {
         readFailures++;
-        return null;
-      });
-      if (evidence) tasks.push(evidence);
-    }
+        return;
+      }
+      if (!status) return;
+      // The envelope is the definitive broker marker — present and revalidated at
+      // claim time, and unlike the status tag it was never dropped. A task without
+      // one is an ordinary dispatcher task, not part of the #165 corpus.
+      const envelope = parseStoredEnvelope(status.content);
+      if (envelope) brokerTasks.push({ namespace, status, envelope });
+    });
+
+    const detailKeys = ["feedback", "await-observation", "result-structured"] as const;
+    const details = await this.readMany(
+      brokerTasks.flatMap(({ namespace }) => detailKeys.map((key) => ({ namespace, key }))),
+    );
+
+    const tasks: ProductTaskEvidence[] = [];
+    brokerTasks.forEach((task, index) => {
+      const [feedback, observation, structured] = detailKeys.map(
+        (_key, offset) => details[index * detailKeys.length + offset] ?? null,
+      );
+      try {
+        tasks.push(this.buildEvidence(task.namespace, task.status, task.envelope, feedback, observation, structured));
+      } catch {
+        readFailures++;
+      }
+    });
     return { tasks, available: true, readFailures, truncated };
   }
 
-  private async collectOne(namespace: string): Promise<ProductTaskEvidence | null> {
-    const status = await this.munin.read(namespace, "status");
-    if (!status) return null;
+  /**
+   * Read many entries, batched when the client supports it. The result is
+   * index-aligned with `reads`: an entry, null when not found, or undefined
+   * when that read failed (a failed chunk is lost data points, not a broken
+   * panel).
+   */
+  private async readMany(
+    reads: Array<{ namespace: string; key: string }>,
+  ): Promise<Array<MuninEntry | null | undefined>> {
+    const out: Array<MuninEntry | null | undefined> = [];
+    if (typeof this.munin.readBatch !== "function") {
+      for (const { namespace, key } of reads) {
+        out.push(await this.munin.read(namespace, key).catch(() => undefined));
+      }
+      return out;
+    }
+    for (let index = 0; index < reads.length; index += READ_BATCH_SIZE) {
+      const chunk = reads.slice(index, index + READ_BATCH_SIZE);
+      try {
+        const results = await this.munin.readBatch(chunk);
+        out.push(...results.map((entry) => (entry.found ? entry : null)));
+      } catch {
+        out.push(...chunk.map(() => undefined));
+      }
+    }
+    return out;
+  }
 
-    // The envelope is the definitive broker marker — present and revalidated at
-    // claim time, and unlike the status tag it was never dropped. A task without
-    // one is an ordinary dispatcher task, not part of the #165 corpus.
-    const envelope = parseStoredEnvelope(status.content);
-    if (!envelope) return null;
+  private buildEvidence(
+    namespace: string,
+    status: MuninEntry,
+    envelope: DelegationEnvelope,
+    feedback: MuninEntry | null,
+    observation: MuninEntry | null,
+    structured: MuninEntry | null,
+  ): ProductTaskEvidence {
 
     const taskId = namespace.replace(/^tasks\//, "");
-
-    const [feedback, observation, structured] = await Promise.all([
-      this.munin.read(namespace, "feedback").catch(() => null),
-      this.munin.read(namespace, "await-observation").catch(() => null),
-      this.munin.read(namespace, "result-structured").catch(() => null),
-    ]);
 
     let rating: ProductTaskEvidence["rating"] = null;
     let verificationOutcome: string | null = null;
