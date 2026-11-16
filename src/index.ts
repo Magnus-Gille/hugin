@@ -29,6 +29,8 @@ import {
 } from "./egress-policy.js";
 import {
   MuninClient,
+  drainMuninCallStats,
+  formatMuninCallStats,
   type MuninEntry,
   type MuninClientConfig,
   type MuninReadResult,
@@ -966,19 +968,19 @@ const egressPolicy = installFetchEgressPolicy(
   }),
 );
 
-const munin = createMuninClient();
+const munin = createMuninClient({ label: "munin" });
 const learningRegistry = new LearningRegistryStore(munin);
 // Keep lease renewal, active-task cancellation polling, and the independent
 // lease reaper off the main request slot so a long Retry-After on background
 // work cannot delay them past expiry — and so reaper traffic does not queue up
 // behind task-completion writes or contaminate the task-scoped session window.
-const leaseMunin = createMuninClient();
-const cancelWatchMunin = createMuninClient();
-const reaperMunin = createMuninClient();
+const leaseMunin = createMuninClient({ label: "leaseMunin" });
+const cancelWatchMunin = createMuninClient({ label: "cancelWatchMunin" });
+const reaperMunin = createMuninClient({ label: "reaperMunin" });
 // Shadow scheduling evidence is non-authoritative telemetry. A dedicated
 // request queue plus fire-and-forget writes ensures Munin latency cannot hold
 // up execution after the claim CAS.
-const schedulerEvidenceMunin = createMuninClient();
+const schedulerEvidenceMunin = createMuninClient({ label: "schedulerEvidenceMunin" });
 // Only outcomes with a fully authenticated, exact evidence chain enter this
 // bounded cache. Startup hydration verifies every durable row before admission.
 const schedulerRuntimeEstimator = new SchedulerRuntimeEstimatorCache({
@@ -990,12 +992,13 @@ const schedulerRuntimeEstimator = new SchedulerRuntimeEstimatorCache({
 // above: verdict recording is fire-and-forget background work and must never
 // queue behind — or be queued behind by — task-completion writes on the main
 // client's serial request slot.
-const orchVerdictMunin = createMuninClient();
+const orchVerdictMunin = createMuninClient({ label: "orchVerdictMunin" });
 // Champion/challenger observations are operator-plane writes. Keep them off the
 // dispatcher's serial Munin request slot so an experiment upload cannot delay a
 // task claim, completion checkpoint, or lease renewal.
-const learningExperimentMunin = createMuninClient();
+const learningExperimentMunin = createMuninClient({ label: "learningExperimentMunin" });
 const organicMicroExperimentMunin = createMuninClient({
+  label: "organicMicroExperimentMunin",
   requestTimeoutMs: 5_000,
   maxRetries: 0,
 });
@@ -3484,6 +3487,16 @@ function stopCancellationWatch(): void {
     clearInterval(cancelWatchTimer);
     cancelWatchTimer = null;
   }
+}
+
+const MUNIN_CALL_STATS_INTERVAL_MS = 5 * 60 * 1000;
+
+function startMuninCallStatsLogger(): void {
+  const timer = setInterval(() => {
+    const line = formatMuninCallStats(drainMuninCallStats());
+    if (line) console.log(`[munin-calls] last ${MUNIN_CALL_STATS_INTERVAL_MS / 60_000}m: ${line}`);
+  }, MUNIN_CALL_STATS_INTERVAL_MS);
+  timer.unref?.();
 }
 
 // --- Orphan dispatcher cleanup ---
@@ -8868,6 +8881,9 @@ async function pollLoop(): Promise<void> {
   // while pollOnce is blocked on a long-running current task. The poll loop no
   // longer invokes the reaper — this timer is the single source of truth.
   startLeaseReaper();
+  // HUGIN-414: aggregate, content-blind Munin call counts so the source of
+  // sustained rate limiting is visible in the journal.
+  startMuninCallStatsLogger();
   // #72: drive deferred-delivery retries on their own cadence (no-op unless
   // HUGIN_DELIVERY_POLICY=defer).
   startDeliveryRetryReaper();
