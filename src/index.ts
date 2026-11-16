@@ -402,6 +402,8 @@ import {
 const RESEARCH_GROUNDING_KEY = "research-grounding";
 import { consultSkillLane } from "./skill/skill-lane-dispatch.js";
 import { readBrokerEnv, type RunningBroker } from "./broker/server.js";
+import { MaintenanceDrain, runAdmitted } from "./maintenance-drain.js";
+import { registerMaintenanceRoutes } from "./maintenance-routes.js";
 import {
   startBrokerWithRetry,
   computeBrokerHealthField,
@@ -854,6 +856,17 @@ function sleepMs(ms: number): Promise<void> {
 
 let shuttingDown = false;
 let currentTask: string | null = null;
+// HUGIN-417: owner-invoked admission gate for deploy/restart maintenance. The
+// callbacks are read lazily (never at construction), so referencing
+// `currentReconcileAbort`, declared below, is safe.
+const maintenanceDrain = new MaintenanceDrain(
+  () => currentTask,
+  Date.now,
+  () => currentReconcileAbort !== null || !dispatcherLoopStarted,
+);
+// False until startup recovery has finished and the poll loop is running, so a
+// drain arriving during boot reports busy rather than a false `ready`.
+let dispatcherLoopStarted = false;
 // Exact post-CAS status snapshot for the in-process owner. Mutable status reads
 // may contribute control tags, but never replace this scheduler pointer pair.
 let currentClaimTags: string[] | null = null;
@@ -4270,10 +4283,11 @@ async function reapExpiredLeases(): Promise<void> {
 function startLeaseReaper(): void {
   stopLeaseReaper();
   leaseReaperTimer = setInterval(() => {
-    if (leaseReaperInFlight || shuttingDown) return;
+    if (leaseReaperInFlight || shuttingDown || !maintenanceDrain.tryEnterWork()) return;
     leaseReaperInFlight = true;
     void reapExpiredLeases().finally(() => {
       leaseReaperInFlight = false;
+      maintenanceDrain.leaveWork();
     });
   }, LEASE_REAPER_INTERVAL_MS);
 }
@@ -4326,10 +4340,11 @@ function startDeliveryRetryReaper(): void {
   stopDeliveryRetryReaper();
   if (config.deliveryPolicy !== "defer") return;
   deliveryRetryReaperTimer = setInterval(() => {
-    if (deliveryRetryReaperInFlight || shuttingDown) return;
+    if (deliveryRetryReaperInFlight || shuttingDown || !maintenanceDrain.tryEnterWork()) return;
     deliveryRetryReaperInFlight = true;
     void reapDeferredDeliveries().finally(() => {
       deliveryRetryReaperInFlight = false;
+      maintenanceDrain.leaveWork();
     });
   }, config.deliveryRetryIntervalMs);
 }
@@ -8900,32 +8915,45 @@ async function pollLoop(): Promise<void> {
   }
 
   let pollCount = 0;
+  dispatcherLoopStarted = true;
   while (!shuttingDown) {
+    // HUGIN-417: a whole iteration is the unit of admitted work, so a drain
+    // never cuts a claim, terminalisation or reconcile sequence in half. While
+    // draining the loop only keeps the heartbeat alive.
+    let recheckImmediately = false;
     try {
-      pollCount++;
-      await flushVersionDriftFiringState();
-      await maybeResolveVersionDriftAlert();
-      await reconcileTrackedPipelineSummaries();
-      const processedCancellation = await processCancellationRequests();
-      const processedResume = await processResumeRequests();
-      const processedApproval = await processApprovalDecisions();
-      const poll = await pollOnce();
-      if (pollCount % 5 === 0) {
-        await reconcileBlockedTasks();
+      const iteration = await runAdmitted(maintenanceDrain, async () => {
+        pollCount++;
+        await flushVersionDriftFiringState();
+        await maybeResolveVersionDriftAlert();
+        await reconcileTrackedPipelineSummaries();
+        const processedCancellation = await processCancellationRequests();
+        const processedResume = await processResumeRequests();
+        const processedApproval = await processApprovalDecisions();
+        const poll = await pollOnce();
+        if (pollCount % 5 === 0) {
+          await reconcileBlockedTasks();
+        }
+        if (pollCount % 60 === 0) {
+          await runHomeserverLearningRegistryReconciliation();
+          await reconcileOrganicOrphanPlans();
+        }
+        lastBlockedTaskCount = await countTasksWithLifecycle("blocked");
+        // Fire-and-forget heartbeat
+        emitHeartbeat(lastBlockedTaskCount);
+        return processedCancellation || processedResume || processedApproval || poll.hadTask;
+      });
+      if (!iteration.admitted) {
+        emitHeartbeat(lastBlockedTaskCount);
+      } else {
+        recheckImmediately = iteration.value;
       }
-      if (pollCount % 60 === 0) {
-        await runHomeserverLearningRegistryReconciliation();
-        await reconcileOrganicOrphanPlans();
-      }
-      lastBlockedTaskCount = await countTasksWithLifecycle("blocked");
-      // Fire-and-forget heartbeat
-      emitHeartbeat(lastBlockedTaskCount);
-      if ((processedCancellation || processedResume || processedApproval || poll.hadTask) && !shuttingDown) continue; // Check for more immediately
     } catch (err) {
       console.error("Poll error:", err);
       // Still emit heartbeat on error
       emitHeartbeat(lastBlockedTaskCount);
     }
+    if (recheckImmediately && !shuttingDown) continue; // Check for more immediately
 
     // Wait for next poll
     await new Promise<void>((resolve) => {
@@ -8954,6 +8982,9 @@ app.get("/health", (_req, res) => {
     process_instance_id: processInstanceId,
     current_task: currentTask,
     polling: !shuttingDown,
+    // HUGIN-417: non-sensitive admission state; `draining` means new work is
+    // not being admitted. Details live behind the authenticated admin surface.
+    maintenance: { state: maintenanceDrain.snapshot().state },
     homeserver_credential: currentHomeserverCredentialHealth(),
     ...buildQueueObservabilityFields(lastPendingQueueSnapshot),
     blocked_tasks: lastBlockedTaskCount,
@@ -8993,6 +9024,16 @@ app.get("/health", (_req, res) => {
     // `broker.degraded` (or `broker.state`), not top-level `status`.
     broker: computeBrokerHealthField(brokerEnv.enabled, brokerBindStatus),
   });
+});
+
+// HUGIN-417: owner-invoked maintenance drain (disabled unless the token is set;
+// see docs/maintenance-drain.md). The token is read here only and is never part
+// of `config` or the task-subprocess environment allowlist.
+registerMaintenanceRoutes(app, {
+  drain: maintenanceDrain,
+  token: process.env.HUGIN_MAINTENANCE_TOKEN,
+  getProcessInstanceId: () => processInstanceId,
+  isShuttingDown: () => shuttingDown,
 });
 
 // Learning-loop health panels (#164). Its own LedgerClient (cached, fail-open)
@@ -9052,6 +9093,7 @@ export const __test__ = {
   }),
   resetState: () => {
     shuttingDown = false;
+    maintenanceDrain.resume();
     processLifecycleTestHooks.resetOwnedProcessAdmission();
     stopTaskHeartbeat();
     stopLeaseRenewal();

@@ -53,6 +53,10 @@ scheduling, and pipeline phases.
 - [M5 gateway-key rotation](m5-key-rotation.md): Local-configured staged key
   rotation, pipe-only secret handling, rollback/abort sequencing, and the
   content-blind `/health` expiry warning.
+- [Maintenance drain](maintenance-drain.md): Owner-invoked admission gate
+  (`/admin/maintenance`, `HUGIN_MAINTENANCE_TOKEN`) that stops new claims before
+  a service restart, busy/ready semantics, hold lease, and the deploy-consumer
+  contract (HUGIN-417).
 - [Workload contract v1](workload-contract.md): Owner-side requirement
   declaration for moving Hugin across nodes, including drain/verify/restore
   boundaries and the dependency map for Munin, Mimir, and M5.
