@@ -104,6 +104,7 @@ import {
 } from "./failure-classification.js";
 import {
   buildCodexSandboxFrictionEvent,
+  CODEX_EXEC_BASE_ARGS,
   CODEX_SANDBOX_FAILURE_KIND,
   codexSandboxFailureClassification,
   probeCodexSandbox,
@@ -3053,10 +3054,7 @@ function spawnRuntime(
 
     // Spell out the former full-auto policy; current Codex no longer accepts
     // that shorthand. Keep task text behind `--` so it cannot become CLI flags.
-    const cmd = ["codex", [
-      "exec", "--sandbox", "workspace-write",
-      "-c", 'approval_policy="on-request"', "--", task.prompt,
-    ]];
+    const cmd = ["codex", [...CODEX_EXEC_BASE_ARGS, "--", task.prompt]];
 
     const managed = spawnOwnedProcess(cmd[0] as string, cmd[1] as string[], {
       cwd: task.workingDir,
@@ -6182,7 +6180,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
 
     // Mutation-capable per issue #236: whether THIS runtime/permission
     // profile can itself write to the managed working directory, regardless
-    // of what the task's prompt asks for. Codex spawns `--full-auto` (always
+    // of what the task's prompt asks for. Codex spawns `--sandbox workspace-write` (always
     // write-capable). Claude SDK and OpenCode gate writes behind
     // `permissionProfile === "trusted-code"` (sdk-executor.ts,
     // opencode-executor.ts). Ollama has no file-write tool at all. Orchestrator
@@ -6465,7 +6463,7 @@ async function pollOnce(): Promise<{ hadTask: boolean; queueDepth: number }> {
           providerId: opencodeGateway.providerId,
           model: opencodeGateway.defaultModel,
           // Preserve the already-admitted write ceiling. Codex is always
-          // full-auto; Claude only writes under trusted-code.
+          // workspace-write; Claude only writes under trusted-code.
           permissionProfile: isCodex ? "trusted-code" : task.permissionProfile || "read-only",
           opencodeCommand: opencodeGateway.opencodeCommand,
         },

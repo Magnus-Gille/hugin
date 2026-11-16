@@ -16,11 +16,12 @@ the SDK version. Deploying the locked project dependencies remains separate.
 The task executor uses `codex exec --sandbox workspace-write -c
 'approval_policy="on-request"' -- <prompt>`. This preserves the former
 `--full-auto` sandbox/approval intent without relying on that removed shorthand.
-The option terminator keeps task text from changing CLI options. The existing
-model-free sandbox preflight still runs before dispatch; it does not prove CLI
-argument compatibility. During promotion, also check the actual service-PATH
-executable with these options followed by `--help` (before the `--` terminator),
-without invoking a model. Do not replace them with approval or sandbox bypasses.
+The option terminator keeps task text from changing CLI options. The
+model-free preflight run before every Codex task (and for `/health`) checks both
+`codex sandbox -- /bin/true` and the same option list followed by `--help`
+(`CODEX_EXEC_BASE_ARGS` in `src/codex-sandbox.ts`, shared with the executor), so
+an installed CLI that rejects an option is refused before any model call. Do not
+replace the options with approval or sandbox bypasses.
 
 CLI promotion is an explicit operator release, separate from this cron job:
 

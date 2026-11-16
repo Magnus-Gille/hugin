@@ -152,3 +152,37 @@ describe("hugin.service Codex sandbox allowance", () => {
     expect(unit).toMatch(/bubblewrap sandbox[\s\S]*loopback/i);
   });
 });
+
+describe("probeCodexSandbox exec argument self-test", () => {
+  it("checks the executor's exact permission options with --help, model-free", async () => {
+    const calls: string[][] = [];
+    const execFileImpl = vi.fn((_c: string, args: string[], _o: unknown, cb: ExecCallback) => {
+      calls.push(args);
+      cb(null, "", "");
+      return {};
+    }) as unknown as typeof execFile;
+    const result = await probeCodexSandbox({ execFileImpl });
+    expect(result.available).toBe(true);
+    expect(calls).toEqual([
+      ["sandbox", "--", "/bin/true"],
+      ["exec", "--sandbox", "workspace-write", "-c", 'approval_policy="on-request"', "--help"],
+    ]);
+    expect(calls.flat()).not.toContain("--full-auto");
+    expect(calls.flat().join(" ")).not.toMatch(/bypass|danger/);
+  });
+
+  it("refuses pre-model when the CLI rejects the options (obsolete flag)", async () => {
+    const execFileImpl = vi.fn((_c: string, args: string[], _o: unknown, cb: ExecCallback) => {
+      if (args[0] === "exec") {
+        const e = Object.assign(new Error("x"), { code: 2 }) as ExecFileException;
+        cb(e, "", "error: unexpected argument '--sandbox' found");
+      } else cb(null, "", "");
+      return {};
+    }) as unknown as typeof execFile;
+    const result = await probeCodexSandbox({ execFileImpl });
+    expect(result.available).toBe(false);
+    expect(result.failureKind).toBe(CODEX_SANDBOX_FAILURE_KIND);
+    expect(result.reason).toContain("Codex exec argument self-test failed (exit 2)");
+    expect(result.reason).toContain("unexpected argument");
+  });
+});
