@@ -346,6 +346,8 @@ export class LearningLoopCollector {
       const chunk = reads.slice(index, index + READ_BATCH_SIZE);
       try {
         const results = await this.munin.readBatch(chunk);
+        // Never let a short or long batch shift later reads onto other tasks.
+        if (results.length !== chunk.length) throw new Error("readBatch length mismatch");
         out.push(...results.map((entry) => (entry.found ? entry : null)));
       } catch {
         out.push(...chunk.map(() => undefined));
