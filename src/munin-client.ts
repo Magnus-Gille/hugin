@@ -49,6 +49,8 @@ export interface MuninClientConfig {
   retryBaseDelayMs?: number;
   minRequestSpacingMs?: number;
   maxBatchReads?: number;
+  /** Low-cardinality caller label used only in aggregate call statistics. */
+  label?: string;
 }
 
 export interface MuninReadRequest {
@@ -218,6 +220,66 @@ function isRetryableFetchError(err: unknown): boolean {
   );
 }
 
+interface MuninCallStat {
+  calls: number;
+  rateLimited: number;
+}
+
+/** Aggregate per-process Munin call counts (label, tool, namespace bucket). */
+const muninCallStats = new Map<string, MuninCallStat>();
+
+/**
+ * Reduce a namespace to a low-cardinality, content-blind bucket: the first
+ * segment plus `*`, except Hugin's reserved `tasks/_<name>` singletons.
+ */
+export function muninNamespaceBucket(namespace: unknown): string {
+  if (typeof namespace !== "string" || namespace.length === 0) return "-";
+  const [first, second] = namespace.split("/");
+  if (first === "tasks" && second?.startsWith("_")) return `tasks/${second}`;
+  return second === undefined || second === "" ? `${first}/` : `${first}/*`;
+}
+
+export interface MuninCallStatRow {
+  label: string;
+  tool: string;
+  namespace: string;
+  calls: number;
+  rateLimited: number;
+}
+
+/** Return the call counts gathered since the last drain, busiest first, and reset them. */
+export function drainMuninCallStats(): MuninCallStatRow[] {
+  const rows: MuninCallStatRow[] = [];
+  for (const [key, stat] of muninCallStats) {
+    const [label, tool, namespace] = key.split("\0");
+    rows.push({ label, tool, namespace, ...stat });
+  }
+  muninCallStats.clear();
+  return rows.sort((a, b) => b.calls - a.calls || a.label.localeCompare(b.label));
+}
+
+/** One log line summarising the busiest call buckets, or null when idle. */
+export function formatMuninCallStats(rows: MuninCallStatRow[], limit = 15): string | null {
+  if (rows.length === 0) return null;
+  const total = rows.reduce((sum, row) => sum + row.calls, 0);
+  const limited = rows.reduce((sum, row) => sum + row.rateLimited, 0);
+  const top = rows
+    .slice(0, limit)
+    .map((row) => `${row.label}:${row.tool}:${row.namespace}=${row.calls}` +
+      (row.rateLimited > 0 ? `(429x${row.rateLimited})` : ""))
+    .join(" ");
+  const more = rows.length > limit ? ` +${rows.length - limit} more` : "";
+  return `total=${total} rate_limited=${limited} ${top}${more}`;
+}
+
+function recordMuninCall(label: string, tool: string, namespace: unknown, rateLimited: boolean): void {
+  const key = [label, tool, muninNamespaceBucket(namespace)].join("\0");
+  const stat = muninCallStats.get(key) ?? { calls: 0, rateLimited: 0 };
+  stat.calls += 1;
+  if (rateLimited) stat.rateLimited += 1;
+  muninCallStats.set(key, stat);
+}
+
 /**
  * Earliest time (epoch ms) at which any client may call a given Munin base URL.
  *
@@ -245,6 +307,7 @@ export class MuninClient {
   private maxBatchReads: number;
   private requestQueue: Promise<void>;
   private nextRequestAt: number;
+  private label: string;
 
   constructor(config: MuninClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, "");
@@ -257,6 +320,7 @@ export class MuninClient {
     this.maxBatchReads = config.maxBatchReads ?? 20;
     this.requestQueue = Promise.resolve();
     this.nextRequestAt = 0;
+    this.label = config.label ?? "unlabeled";
   }
 
   /**
@@ -368,6 +432,7 @@ export class MuninClient {
             signal: requestAbort.signal,
           });
 
+          recordMuninCall(this.label, name, args.namespace, res.status === 429);
           if (!res.ok) {
             const text = await res.text().catch(() => "");
             const shouldRetry =

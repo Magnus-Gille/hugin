@@ -4,6 +4,9 @@ import {
   MuninCodeHealthRejectedError,
   MuninWriteRejectedError,
   resetSharedMuninBackoffForTests,
+  drainMuninCallStats,
+  formatMuninCallStats,
+  muninNamespaceBucket,
 } from "../src/munin-client.js";
 
 function rpcResponse(payload: unknown): Response {
@@ -784,5 +787,47 @@ describe("MuninClient", () => {
     expect(error).toMatchObject({ errorCode: "access_denied" });
     expect((error as Error).message).not.toContain("private refusal details");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Munin call statistics", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    drainMuninCallStats();
+  });
+
+  it("buckets namespaces without exposing task ids", () => {
+    expect(muninNamespaceBucket("tasks/abc-123")).toBe("tasks/*");
+    expect(muninNamespaceBucket("tasks/_heartbeat")).toBe("tasks/_heartbeat");
+    expect(muninNamespaceBucket("tasks/")).toBe("tasks/");
+    expect(muninNamespaceBucket(undefined)).toBe("-");
+  });
+
+  it("counts calls and 429s per label, tool and namespace bucket", async () => {
+    drainMuninCallStats();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("{}", { status: 429, headers: { "retry-after": "0" } }))
+      .mockImplementation(async () =>
+        rpcResponse({ found: false, namespace: "tasks/demo", key: "status" })
+      );
+    const client = new MuninClient({
+      baseUrl: "http://munin-stats.test",
+      apiKey: "test-key",
+      label: "poll",
+      retryBaseDelayMs: 1,
+      minRequestSpacingMs: 0,
+    });
+
+    await client.read("tasks/one", "status");
+    await client.read("tasks/two", "status");
+
+    const rows = drainMuninCallStats();
+    expect(rows).toEqual([
+      { label: "poll", tool: "memory_read", namespace: "tasks/*", calls: 3, rateLimited: 1 },
+    ]);
+    expect(formatMuninCallStats(rows)).toBe(
+      "total=3 rate_limited=1 poll:memory_read:tasks/*=3(429x1)",
+    );
+    expect(drainMuninCallStats()).toEqual([]);
   });
 });
