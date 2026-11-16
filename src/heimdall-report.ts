@@ -25,6 +25,7 @@ export type PushPanel = { service: string; panel: string; kind: string } & Recor
 const REPORT_INTERVAL_MS = 300_000;
 const PUSH_TIMEOUT_MS = 4_000;
 const SERVICE = "hugin";
+const HEIMDALL_STATUS_STATES: ReadonlySet<string> = new Set(["pass", "warn", "fail"]);
 
 function isNum(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
@@ -52,7 +53,9 @@ export function toPushPanel(p: TypedPanel): PushPanel | null {
   void _fullWidth;
   void _refresh;
   if (kind === "stat" && !isNum((rest as { value?: unknown }).value)) return null;
-  if (kind === "status" && typeof (rest as { state?: unknown }).state !== "string") return null;
+  // Heimdall's validatePanel() hard-rejects any status state outside this set
+  // (HTTP 400), so an out-of-contract state must never reach the wire (HUGIN-419).
+  if (kind === "status" && !HEIMDALL_STATUS_STATES.has((rest as { state?: unknown }).state as string)) return null;
   if (kind === "table" && !Array.isArray((rest as { rows?: unknown }).rows)) return null;
   if (kind === "timeseries" && !Array.isArray((rest as { points?: unknown }).points)) return null;
   return { service: SERVICE, panel: id, kind, ...rest };
