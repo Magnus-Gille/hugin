@@ -44,6 +44,48 @@ const fakeLedgerClient = (ledger: Ledger | null): LedgerClientLike => ({
 });
 
 describe("LearningLoopCollector", () => {
+  // HUGIN-414: one memory_read per key per task kept Munin's per-caller rate
+  // limit saturated. With a batch-capable client the walk must use batches.
+  it("reads the corpus in batches when the client supports readBatch", async () => {
+    const entries: Record<string, { content: string; tags?: string[] }> = {};
+    for (let i = 0; i < 30; i++) {
+      entries[`tasks/mcp-m5-${i}/status`] = { content: ENVELOPE("claude-code"), tags: ["completed"] };
+      entries[`tasks/mcp-m5-${i}/feedback`] = { content: JSON.stringify({ rating: "pass" }) };
+    }
+    entries["tasks/plain/status"] = { content: "## Task: not a broker task", tags: ["completed"] };
+    const readBatch = vi.fn(async (reads: Array<{ namespace: string; key: string }>) =>
+      reads.map(({ namespace, key }) => {
+        const entry = entries[`${namespace}/${key}`];
+        return entry
+          ? { namespace, key, found: true as const, ...entry, tags: entry.tags ?? [] }
+          : { namespace, key, found: false as const };
+      })
+    );
+    const read = vi.fn(async () => null);
+    const munin = {
+      query: vi.fn(async (q: { namespace?: string }) => ({
+        results: q.namespace === "tasks/"
+          ? Object.keys(entries)
+            .filter((k) => k.endsWith("/status"))
+            .map((k) => ({ namespace: k.replace(/\/status$/, ""), key: "status" }))
+          : [],
+        total: 0,
+      })),
+      read,
+      readBatch,
+    } as unknown as MuninClient;
+
+    const evidence = await new LearningLoopCollector({
+      munin, ledgerClient: fakeLedgerClient(null),
+    }).refresh();
+
+    expect(evidence.tasks).toHaveLength(30);
+    expect(evidence.tasks.every((task) => task.rating === "pass")).toBe(true);
+    expect(read).not.toHaveBeenCalled();
+    // 31 statuses -> 2 batches; 30 broker tasks x 3 detail keys = 90 -> 5 batches.
+    expect(readBatch).toHaveBeenCalledTimes(7);
+  });
+
   it("collects versioned experiment decisions for the operator panel", async () => {
     const input = makeExperimentInput();
     const state = {

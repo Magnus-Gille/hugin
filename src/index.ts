@@ -9003,7 +9003,7 @@ app.get("/health", (_req, res) => {
 // heimdall-descriptor.ts) — but the periodic panel push does, so the one
 // cached corpus walk backs both instead of doubling collection cost.
 const learningLoopCollector = new LearningLoopCollector({
-  munin,
+  munin: createMuninClient({ label: "learningLoopMunin" }),
   ledgerClient: new LedgerClient({ env: process.env }),
 });
 const learningTaskPreflightStore = createLearningTaskPreflightStore();
