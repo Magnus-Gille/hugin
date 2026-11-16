@@ -515,7 +515,10 @@ const LOG_DIR = path.join(HUGIN_HOME, "logs");
 const HOOK_RESULT_DIR = path.join(HUGIN_HOME, "hook-results");
 const CANCEL_REQUESTED_TAG = "cancel-requested";
 const RESUME_REQUESTED_TAG = "resume-requested";
-const CANCEL_WATCH_INTERVAL_MS = 2000;
+// Each tick reads one or two Munin entries on the shared bearer. At 2 s this
+// alone drove ~1 request/s into Munin's rate limiter for the whole runtime of
+// every task (HUGIN-414). Operator cancellation tolerates a 15 s latency.
+const CANCEL_WATCH_INTERVAL_MS = 15_000;
 
 // --- Configuration ---
 

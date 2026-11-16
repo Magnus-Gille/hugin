@@ -218,6 +218,22 @@ function isRetryableFetchError(err: unknown): boolean {
   );
 }
 
+/**
+ * Earliest time (epoch ms) at which any client may call a given Munin base URL.
+ *
+ * Munin's rate limiter counts per credential, and the dispatcher runs several
+ * MuninClient instances (main loop, lease, cancel watch, reaper) on the same
+ * bearer. A 429 seen by one of them must therefore slow all of them, not only
+ * the request that was refused (HUGIN-414).
+ */
+const sharedNextRequestAt = new Map<string, number>();
+const MAX_SHARED_BACKOFF_MS = 60_000;
+
+/** Test-only: forget all shared rate-limit backoff. */
+export function resetSharedMuninBackoffForTests(): void {
+  sharedNextRequestAt.clear();
+}
+
 export class MuninClient {
   private baseUrl: string;
   private apiKey: string;
@@ -261,6 +277,16 @@ export class MuninClient {
     this.nextRequestAt = Math.max(this.nextRequestAt, Date.now() + Math.max(0, delayMs));
   }
 
+  /** Back off every client of this Munin after a rate-limit response. */
+  private deferSharedRequests(delayMs: number): void {
+    // Cap so a malformed Retry-After cannot stall the dispatcher for long.
+    const cappedMs = Math.min(Math.max(0, delayMs), MAX_SHARED_BACKOFF_MS);
+    const until = Date.now() + cappedMs;
+    const current = sharedNextRequestAt.get(this.baseUrl) ?? 0;
+    if (until > current) sharedNextRequestAt.set(this.baseUrl, until);
+    this.deferNextRequest(cappedMs);
+  }
+
   private getRetryDelayMs(attempt: number, retryAfterHeader: string | null): number {
     const retryAfterMs = parseRetryAfterMs(retryAfterHeader);
     if (retryAfterMs !== null) {
@@ -289,8 +315,12 @@ export class MuninClient {
     }
 
     try {
-      const waitMs = this.nextRequestAt - Date.now();
-      if (waitMs > 0) {
+      // Re-check after each sleep: a sibling client's 429 may have pushed the
+      // shared deadline further out while this one was waiting.
+      while (true) {
+        const sharedAt = sharedNextRequestAt.get(this.baseUrl) ?? 0;
+        const waitMs = Math.max(this.nextRequestAt, sharedAt) - Date.now();
+        if (waitMs <= 0) break;
         await sleep(waitMs, signal);
       }
       return await fn();
@@ -343,11 +373,16 @@ export class MuninClient {
             const shouldRetry =
               (res.status === 429 || res.status >= 500) &&
               attempt < maxRetries;
+            const retryDelayMs = this.getRetryDelayMs(
+              attempt,
+              res.headers.get("retry-after")
+            );
+            if (res.status === 429) {
+              // Honour Munin's wait even when this request gives up, and
+              // across every client sharing this Munin and credential.
+              this.deferSharedRequests(retryDelayMs);
+            }
             if (shouldRetry) {
-              const retryDelayMs = this.getRetryDelayMs(
-                attempt,
-                res.headers.get("retry-after")
-              );
               this.deferNextRequest(retryDelayMs);
               await sleep(retryDelayMs, options.signal);
               attempt++;
