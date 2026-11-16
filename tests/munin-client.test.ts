@@ -67,6 +67,38 @@ describe("MuninClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("caps a very long Retry-After at 60 seconds", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response('{"error":"Too many requests"}', {
+          status: 429,
+          headers: { "retry-after": "3600" },
+        })
+      )
+      .mockResolvedValueOnce(
+        rpcResponse({ found: false, namespace: "tasks/demo", key: "status" })
+      );
+
+    const client = new MuninClient({
+      baseUrl: "http://munin-capped.test",
+      apiKey: "test-key",
+      maxRetries: 0,
+      minRequestSpacingMs: 0,
+    });
+
+    await expect(client.read("tasks/demo", "status")).rejects.toThrow("Munin 429");
+    const next = client.read("tasks/demo", "status");
+
+    await vi.advanceTimersByTimeAsync(59_900);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(next).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("slows every client of the same Munin after a 429", async () => {
     vi.useFakeTimers();
     const fetchMock = vi

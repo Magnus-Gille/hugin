@@ -280,10 +280,11 @@ export class MuninClient {
   /** Back off every client of this Munin after a rate-limit response. */
   private deferSharedRequests(delayMs: number): void {
     // Cap so a malformed Retry-After cannot stall the dispatcher for long.
-    const until = Date.now() + Math.min(Math.max(0, delayMs), MAX_SHARED_BACKOFF_MS);
+    const cappedMs = Math.min(Math.max(0, delayMs), MAX_SHARED_BACKOFF_MS);
+    const until = Date.now() + cappedMs;
     const current = sharedNextRequestAt.get(this.baseUrl) ?? 0;
     if (until > current) sharedNextRequestAt.set(this.baseUrl, until);
-    this.deferNextRequest(delayMs);
+    this.deferNextRequest(cappedMs);
   }
 
   private getRetryDelayMs(attempt: number, retryAfterHeader: string | null): number {
@@ -314,9 +315,12 @@ export class MuninClient {
     }
 
     try {
-      const sharedAt = sharedNextRequestAt.get(this.baseUrl) ?? 0;
-      const waitMs = Math.max(this.nextRequestAt, sharedAt) - Date.now();
-      if (waitMs > 0) {
+      // Re-check after each sleep: a sibling client's 429 may have pushed the
+      // shared deadline further out while this one was waiting.
+      while (true) {
+        const sharedAt = sharedNextRequestAt.get(this.baseUrl) ?? 0;
+        const waitMs = Math.max(this.nextRequestAt, sharedAt) - Date.now();
+        if (waitMs <= 0) break;
         await sleep(waitMs, signal);
       }
       return await fn();
