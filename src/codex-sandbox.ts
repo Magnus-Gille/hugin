@@ -23,6 +23,17 @@ export const CODEX_SANDBOX_FAILURE_KIND = "CODEX_SANDBOX_UNAVAILABLE";
 export const CODEX_SANDBOX_FAILURE_TAG = "failure:infra";
 export const CODEX_SANDBOX_PROBE_COMMAND = "codex sandbox -- /bin/true";
 
+/**
+ * Permission-bearing options of the task executor's `codex exec` call. The
+ * executor spawns these followed by `--` and the prompt; the argument
+ * self-test runs the very same list followed by `--help`, so the two cannot
+ * drift apart. Never substitute a bypass/unrestricted mode here.
+ */
+export const CODEX_EXEC_BASE_ARGS: readonly string[] = [
+  "exec", "--sandbox", "workspace-write",
+  "-c", 'approval_policy="on-request"',
+];
+
 export interface CodexSandboxProbeResult {
   available: boolean;
   checkedAt: string;
@@ -42,50 +53,66 @@ function boundedDiagnostic(stdout: string, stderr: string): string {
   return combined ? combined.slice(-2_000) : "no diagnostic output";
 }
 
-/** Run the real Codex sandbox launcher without invoking a model. */
-export function probeCodexSandbox(
-  options: CodexSandboxProbeOptions = {},
-): Promise<CodexSandboxProbeResult> {
-  const timeoutMs = options.timeoutMs ?? 10_000;
-  const now = options.now ?? (() => new Date());
-  const exec = options.execFileImpl ?? execFile;
-
+function runProbe(
+  exec: typeof execFile,
+  args: string[],
+  timeoutMs: number,
+): Promise<{ error: ExecFileException | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     exec(
       "codex",
-      ["sandbox", "--", "/bin/true"],
+      args,
       {
         encoding: "utf8",
         timeout: timeoutMs,
         maxBuffer: 16 * 1024,
         env: buildTaskSubprocessEnv(),
       },
-      (error: ExecFileException | null, stdout: string, stderr: string) => {
-        const checkedAt = now().toISOString();
-        if (!error) {
-          resolve({
-            available: true,
-            checkedAt,
-            command: CODEX_SANDBOX_PROBE_COMMAND,
-          });
-          return;
-        }
-
-        const diagnostic = boundedDiagnostic(stdout, stderr);
-        const timedOut = error.killed || error.signal === "SIGTERM";
-        const prefix = timedOut
-          ? `Codex sandbox self-test timed out after ${timeoutMs}ms`
-          : `Codex sandbox self-test failed${error.code !== undefined ? ` (exit ${error.code})` : ""}`;
-        resolve({
-          available: false,
-          checkedAt,
-          command: CODEX_SANDBOX_PROBE_COMMAND,
-          failureKind: CODEX_SANDBOX_FAILURE_KIND,
-          reason: `${prefix}: ${diagnostic}`,
-        });
-      },
+      (error: ExecFileException | null, stdout: string, stderr: string) =>
+        resolve({ error, stdout, stderr }),
     );
   });
+}
+
+/**
+ * Run the real Codex sandbox launcher without invoking a model, then check
+ * that the installed CLI still accepts the executor's permission options
+ * (`codex exec <options> --help` exits before any model call). A removed or
+ * renamed option therefore fails here, pre-model, instead of mid-task.
+ */
+export async function probeCodexSandbox(
+  options: CodexSandboxProbeOptions = {},
+): Promise<CodexSandboxProbeResult> {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const now = options.now ?? (() => new Date());
+  const exec = options.execFileImpl ?? execFile;
+
+  const checks: Array<{ label: string; args: string[] }> = [
+    { label: "Codex sandbox self-test", args: ["sandbox", "--", "/bin/true"] },
+    { label: "Codex exec argument self-test", args: [...CODEX_EXEC_BASE_ARGS, "--help"] },
+  ];
+
+  for (const check of checks) {
+    const { error, stdout, stderr } = await runProbe(exec, check.args, timeoutMs);
+    if (!error) continue;
+    const diagnostic = boundedDiagnostic(stdout, stderr);
+    const timedOut = error.killed || error.signal === "SIGTERM";
+    const prefix = timedOut
+      ? `${check.label} timed out after ${timeoutMs}ms`
+      : `${check.label} failed${error.code !== undefined ? ` (exit ${error.code})` : ""}`;
+    return {
+      available: false,
+      checkedAt: now().toISOString(),
+      command: CODEX_SANDBOX_PROBE_COMMAND,
+      failureKind: CODEX_SANDBOX_FAILURE_KIND,
+      reason: `${prefix}: ${diagnostic}`,
+    };
+  }
+  return {
+    available: true,
+    checkedAt: now().toISOString(),
+    command: CODEX_SANDBOX_PROBE_COMMAND,
+  };
 }
 
 /** Trusted classification for a probe-generated, pre-model refusal. */
