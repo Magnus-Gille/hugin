@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the hugin-gateway-preflight journey every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=hugin-gateway-preflight-journey.service
+
+[Install]
+WantedBy=timers.target
