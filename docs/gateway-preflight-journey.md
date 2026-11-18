@@ -22,6 +22,8 @@ Code: `src/gateway-preflight-journey.ts` (attempt, local contract mirror, delive
 - Runner failure (missing/invalid config, **rejected key on either route**,
   invalid outcome) => `outcome: unknown`, `runner_outcome: failed`, both steps
   `skipped`/`runner-unavailable`. Heimdall does not grade `unknown`, so the unit exits non-zero.
+- `HOMESERVER_GATEWAY_URL` is validated exactly like the dispatcher's (root URL only, no
+  credentials/path/query, loopback/LAN/tailnet host); otherwise `runner-config`, and the key is never sent.
 - Partial evidence never passes: `pass` requires both steps pass in one attempt.
 - Nothing but the closed fields is sent: no prompt, task, alias, model, key, URL, response
   body, advertisement id or trace. `trace_id` is `null` (Hugin has no producer-authored trace here).
@@ -40,7 +42,7 @@ Code: `src/gateway-preflight-journey.ts` (attempt, local contract mirror, delive
 | `HEIMDALL_HUGIN_JOURNEY_TOKEN` | same file; dedicated Hugin journey credential |
 
 `systemd/hugin-gateway-preflight-journey.{service,timer}` run it every five minutes
-(`max_age_seconds` is 900). The service has no `[Install]` section and `deploy-pi.sh`
+(`max_age_seconds` is 900). Heimdall binds only the tailnet address, so the delivery URL must be an `https` front for it (plain `http` is accepted only for loopback). The service has no `[Install]` section and `deploy-pi.sh`
 does not install the units: they stay inert until the owner provisions the credential
 file and enables the timer.
 

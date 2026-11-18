@@ -656,13 +656,14 @@ async function readBoundedJson(res: Response): Promise<unknown> {
 export function verifyLearningTaskPreflightAdvertisement(
   raw: unknown,
   request: LearningTaskPreflightRequest,
-  observedAt: number,
+  observedAt: number | (() => number),
 ): LearningTaskPreflightResponse {
   const parsed = preflightResponseSchema.safeParse(raw);
   if (!parsed.success) {
     throw new LearningTaskHandshakeError("learning-task preflight advertised an unsupported or partial contract");
   }
   const response = parsed.data;
+  const observedAtMs = typeof observedAt === "function" ? observedAt() : observedAt;
   const requestedMs = Date.parse(request.requested_at);
   const advertisedMs = Date.parse(response.advertised_at);
   const expiresMs = Date.parse(response.expires_at);
@@ -671,8 +672,8 @@ export function verifyLearningTaskPreflightAdvertisement(
   // expiry edge is tightened by the same amount so tolerance can never extend the window.
   if (!(
     requestedMs - LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS <= advertisedMs
-    && advertisedMs <= observedAt + LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS
-    && observedAt < expiresMs - LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS
+    && advertisedMs <= observedAtMs + LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS
+    && observedAtMs < expiresMs - LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS
   )) {
     throw new LearningTaskHandshakeError("learning-task preflight freshness does not cover observation time");
   }
@@ -771,7 +772,7 @@ export async function fetchLearningTaskPreflight(
   } finally {
     capabilityRequest.cleanup();
   }
-  const response = verifyLearningTaskPreflightAdvertisement(capabilityRaw, request, now().getTime());
+  const response = verifyLearningTaskPreflightAdvertisement(capabilityRaw, request, () => now().getTime());
   return {
     expectedTransportPrincipalId: principal.data.alias,
     preflight: { request, response },

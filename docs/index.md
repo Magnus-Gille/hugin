@@ -148,6 +148,8 @@ scheduling, and pipeline phases.
   learning registry and the current capture status.
 - [LearningTaskContract producer handshake](learning-task-handshake.md):
   Producer-side handshake and joint live-smoke gate for learning evidence.
+- [Gateway preflight synthetic journey](gateway-preflight-journey.md):
+  Content-free `hugin-gateway-preflight` outcome posted to Heimdall.
 - [Organic micro-experiments](organic-micro-experiments.md): Default-off,
   content-blind plan/result seam for one bounded non-blocking M5 shadow,
   wired only for the narrow authenticated Broker homeserver envelope lane.

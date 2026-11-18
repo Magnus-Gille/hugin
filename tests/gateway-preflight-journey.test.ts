@@ -18,7 +18,7 @@ import { LEARNING_TASK_CAPABILITIES } from "../src/learning-task-handshake.js";
 const KEY = "gateway-key-SECRET-123";
 const TOKEN = "heimdall-token-SECRET-456";
 const T0 = 1_700_000_000_000;
-const BASE = { gatewayUrl: "http://gateway.test:8080", gatewayKey: KEY, version: "hugin@1.2.3" };
+const BASE = { gatewayUrl: "http://127.0.0.1:8080", gatewayKey: KEY, version: "hugin@1.2.3" };
 
 function res(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -125,7 +125,9 @@ describe("runPreflightAttempt", () => {
   });
 
   it("runner failure: missing key or bad URL is runner-failed/unknown and never calls the network", async () => {
-    for (const bad of [{ gatewayKey: undefined }, { gatewayKey: "  " }, { gatewayUrl: undefined }, { gatewayUrl: "ftp://x" }]) {
+    for (const bad of [{ gatewayKey: undefined }, { gatewayKey: "  " }, { gatewayUrl: undefined }, { gatewayUrl: "ftp://x" },
+      { gatewayUrl: "http://example.com" }, { gatewayUrl: "http://127.0.0.1:8080/v1" },
+      { gatewayUrl: "http://user:pw@127.0.0.1:8080" }, { gatewayUrl: "http://127.0.0.1:8080/?k=1" }]) {
       const fetchFn = vi.fn() as unknown as typeof fetch;
       const o = await runPreflightAttempt({ ...BASE, ...bad, now: clock(), fetchFn });
       expect(o.runner_outcome).toBe("failed");
@@ -148,7 +150,7 @@ describe("runPreflightAttempt", () => {
   it("is content-free: no key, alias, advertisement id or response text reaches the outcome", async () => {
     const o = await runPreflightAttempt({ ...BASE, now: clock(), fetchFn: router(healthy) });
     const text = JSON.stringify(o);
-    for (const secret of [KEY, "owner-alias-private", "11111111-1111", "gateway.test", "service:gille-inference"]) {
+    for (const secret of [KEY, "owner-alias-private", "11111111-1111", "127.0.0.1:8080", "service:gille-inference"]) {
       expect(text).not.toContain(secret);
     }
     expect(Object.keys(o).sort()).toEqual([
@@ -253,7 +255,7 @@ describe("deliverOutcome", () => {
 
 describe("runCli exit status", () => {
   const env = {
-    HOMESERVER_GATEWAY_URL: "http://gateway.test:8080", HOMESERVER_GATEWAY_API_KEY: KEY,
+    HOMESERVER_GATEWAY_URL: "http://127.0.0.1:8080", HOMESERVER_GATEWAY_API_KEY: KEY,
     HEIMDALL_SYNTHETIC_JOURNEYS_URL: "https://heimdall.test/api/synthetic-journeys", HEIMDALL_HUGIN_JOURNEY_TOKEN: TOKEN,
   };
   const ok = vi.fn(async () => res(200, {})) as unknown as typeof fetch;

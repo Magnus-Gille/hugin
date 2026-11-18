@@ -27,6 +27,7 @@ import {
   classifyHandshakeFailure,
   verifyLearningTaskPreflightAdvertisement,
 } from "./learning-task-handshake.js";
+import { resolveGatewayRootUrl } from "./orchestrator/provider-config.js";
 
 export const JOURNEY_ID = "hugin-gateway-preflight";
 export const PRODUCER = "hugin";
@@ -215,14 +216,11 @@ export async function runPreflightAttempt(opts: PreflightJourneyOptions): Promis
     steps: STEP_IDS.map((id) => step(id, "skipped", null, "runner-unavailable")),
   });
 
-  let origin: string;
-  try {
-    const parsed = new URL(opts.gatewayUrl ?? "");
-    if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("protocol");
-    origin = parsed.origin;
-  } catch {
-    return runnerFailure("runner-config");
-  }
+  // Same ROOT-URL validation the dispatcher applies (no credentials/path/query, loopback/LAN/
+  // tailnet host only), so the journey never sends the owner key somewhere Hugin would not.
+  const resolved = resolveGatewayRootUrl({ GATEWAY: opts.gatewayUrl }, "GATEWAY");
+  if (!resolved.ok) return runnerFailure("runner-config");
+  const origin = new URL(resolved.baseUrl).origin;
   const key = opts.gatewayKey?.trim();
   if (!key) return runnerFailure("runner-config");
 
@@ -231,11 +229,16 @@ export async function runPreflightAttempt(opts: PreflightJourneyOptions): Promis
 
   // The preflight acceptor judges the advertisement against a request built exactly like the
   // dispatcher's, using Hugin's own verifier. Hugin-host clock is sampled at request/observation.
-  const request = buildLearningTaskPreflightRequest(iso(now()), randomUUID());
+  let request: ReturnType<typeof buildLearningTaskPreflightRequest>;
+  try {
+    request = buildLearningTaskPreflightRequest(iso(now()), randomUUID());
+  } catch {
+    return runnerFailure("runner-invalid-outcome");
+  }
   const acceptPreflight = (status: number, body: unknown): string | null => {
     if (status !== 200) return "dependency-http";
     try {
-      verifyLearningTaskPreflightAdvertisement(body, request, now());
+      verifyLearningTaskPreflightAdvertisement(body, request, now);
       return null;
     } catch (err) {
       return classifyHandshakeFailure(err);
