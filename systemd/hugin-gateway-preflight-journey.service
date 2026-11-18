@@ -1,0 +1,28 @@
+[Unit]
+Description=Report the hugin-gateway-preflight journey outcome to Heimdall (content-free, HUGIN-388)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/magnus/repos/hugin
+ExecStart=/usr/bin/node dist/gateway-preflight-journey-cli.js
+# Gateway URL/key come from Hugin's own .env. The Heimdall URL and the dedicated journey token
+# live in a separate host-owned private file (mode 0600, never committed):
+#   HEIMDALL_SYNTHETIC_JOURNEYS_URL, HEIMDALL_HUGIN_JOURNEY_TOKEN
+EnvironmentFile=/home/magnus/repos/hugin/.env
+EnvironmentFile=/home/magnus/.hugin/gateway-preflight-journey.env
+TimeoutStartSec=60
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+PrivateDevices=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+# No [Install]: inert until the owner installs it together with the timer.

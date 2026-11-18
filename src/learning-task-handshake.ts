@@ -647,6 +647,65 @@ async function readBoundedJson(res: Response): Promise<unknown> {
   }
 }
 
+/**
+ * Validate a gateway learning-task preflight advertisement against the request that
+ * asked for it: closed schema, bounded cross-host freshness, TTL ceiling and exact
+ * capability echo. Throws LearningTaskHandshakeError; shared with the content-free
+ * `hugin-gateway-preflight` synthetic journey so both judge the gateway identically.
+ */
+export function verifyLearningTaskPreflightAdvertisement(
+  raw: unknown,
+  request: LearningTaskPreflightRequest,
+  observedAt: number,
+): LearningTaskPreflightResponse {
+  const parsed = preflightResponseSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new LearningTaskHandshakeError("learning-task preflight advertised an unsupported or partial contract");
+  }
+  const response = parsed.data;
+  const requestedMs = Date.parse(request.requested_at);
+  const advertisedMs = Date.parse(response.advertised_at);
+  const expiresMs = Date.parse(response.expires_at);
+  // `requested_at`/`observedAt` are Hugin-host clocks; `advertised_at`/`expires_at` are
+  // gateway-host clocks. Cross-host orderings carry the bounded skew tolerance (#253); the
+  // expiry edge is tightened by the same amount so tolerance can never extend the window.
+  if (!(
+    requestedMs - LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS <= advertisedMs
+    && advertisedMs <= observedAt + LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS
+    && observedAt < expiresMs - LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS
+  )) {
+    throw new LearningTaskHandshakeError("learning-task preflight freshness does not cover observation time");
+  }
+  if (expiresMs - advertisedMs > LEARNING_TASK_PREFLIGHT_TTL_MS) {
+    throw new LearningTaskHandshakeError("learning-task preflight cache TTL exceeds fifteen minutes");
+  }
+  if (!canonicalEqual(request.requested_capabilities, response.capabilities)
+    || !canonicalEqual(response.capabilities, LEARNING_TASK_CAPABILITIES)) {
+    throw new LearningTaskHandshakeError("learning-task preflight capability downgrade");
+  }
+  return response;
+}
+
+/** Build the exact preflight request the dispatcher sends (also used by the synthetic journey). */
+export function buildLearningTaskPreflightRequest(requestedAt: string, uuid: string): LearningTaskPreflightRequest {
+  return preflightRequestSchema.parse({
+    request_id: opaqueId(uuid),
+    endpoint: LEARNING_TASK_PREFLIGHT_ENDPOINT,
+    protocol_version: LEARNING_TASK_PREFLIGHT_PROTOCOL,
+    requested_at: timestampSchema.parse(requestedAt),
+    requested_capabilities: structuredClone(LEARNING_TASK_CAPABILITIES),
+  });
+}
+
+/** Map a preflight verification failure to a closed, content-free error class. */
+export function classifyHandshakeFailure(err: unknown): string {
+  const message = err instanceof Error ? err.message.toLowerCase() : "";
+  if (message.includes("capability downgrade")) return "capability-downgrade";
+  if (message.includes("unsupported or partial")) return "unsupported-contract";
+  if (message.includes("freshness") || message.includes("ttl")) return "stale-preflight";
+  return "invalid-response";
+}
+
 export async function fetchLearningTaskPreflight(
   options: ReadPreflightOptions,
 ): Promise<{
@@ -712,32 +771,7 @@ export async function fetchLearningTaskPreflight(
   } finally {
     capabilityRequest.cleanup();
   }
-  const parsed = preflightResponseSchema.safeParse(capabilityRaw);
-  if (!parsed.success) {
-    throw new LearningTaskHandshakeError("learning-task preflight advertised an unsupported or partial contract");
-  }
-  const response = parsed.data;
-  const observedAt = now().getTime();
-  const requestedMs = Date.parse(request.requested_at);
-  const advertisedMs = Date.parse(response.advertised_at);
-  const expiresMs = Date.parse(response.expires_at);
-  // `requested_at`/`observedAt` are Hugin-host clocks; `advertised_at`/`expires_at` are
-  // gateway-host clocks. Cross-host orderings carry the bounded skew tolerance (#253); the
-  // expiry edge is tightened by the same amount so tolerance can never extend the window.
-  if (!(
-    requestedMs - LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS <= advertisedMs
-    && advertisedMs <= observedAt + LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS
-    && observedAt < expiresMs - LEARNING_TASK_CLOCK_SKEW_TOLERANCE_MS
-  )) {
-    throw new LearningTaskHandshakeError("learning-task preflight freshness does not cover observation time");
-  }
-  if (expiresMs - advertisedMs > LEARNING_TASK_PREFLIGHT_TTL_MS) {
-    throw new LearningTaskHandshakeError("learning-task preflight cache TTL exceeds fifteen minutes");
-  }
-  if (!canonicalEqual(request.requested_capabilities, response.capabilities)
-    || !canonicalEqual(response.capabilities, LEARNING_TASK_CAPABILITIES)) {
-    throw new LearningTaskHandshakeError("learning-task preflight capability downgrade");
-  }
+  const response = verifyLearningTaskPreflightAdvertisement(capabilityRaw, request, now().getTime());
   return {
     expectedTransportPrincipalId: principal.data.alias,
     preflight: { request, response },
