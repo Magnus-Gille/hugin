@@ -94,7 +94,7 @@ export function buildLearningTaskPreflightPanel(
         label: "Authenticated learning-task preflight",
         kind: "status",
         refresh: 300,
-        state: "unknown",
+        state: "warn",
         message: "Authenticated learning-task preflight observation time is invalid.",
       };
     }
@@ -105,7 +105,7 @@ export function buildLearningTaskPreflightPanel(
         label: "Authenticated learning-task preflight",
         kind: "status",
         refresh: 300,
-        state: "unknown",
+        state: "warn",
         message: `Authenticated learning-task preflight observation is in the future (${snapshot.checkedAt}).`,
       };
     }
@@ -116,7 +116,7 @@ export function buildLearningTaskPreflightPanel(
         label: "Authenticated learning-task preflight",
         kind: "status",
         refresh: 300,
-        state: "unknown",
+        state: "warn",
         message:
           "Authenticated learning-task preflight observation is stale. "
           + formatObservedAt(snapshot.checkedAt, ageSeconds),
@@ -172,7 +172,7 @@ export function buildLearningTaskPreflightPanel(
     label: "Authenticated learning-task preflight",
     kind: "status",
     refresh: 300,
-    state: "unknown",
+    state: "warn",
     message: "Authenticated learning-task preflight has not run yet.",
   };
 }

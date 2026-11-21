@@ -34,6 +34,23 @@ export const CODEX_EXEC_BASE_ARGS: readonly string[] = [
   "-c", 'approval_policy="on-request"',
 ];
 
+/**
+ * Codex refuses to start outside a git repository or trusted directory.
+ * Non-repository task contexts (scratch, files, legacy paths) therefore add
+ * this flag. It only disables that trust check; sandbox and approval options
+ * are unchanged. Managed `repo:<name>` checkouts never receive it.
+ */
+export const CODEX_SKIP_GIT_REPO_CHECK_ARG = "--skip-git-repo-check";
+
+export function codexExecArgs(context: string | undefined, prompt: string): string[] {
+  const managed = typeof context === "string" && context.startsWith("repo:");
+  return [
+    ...CODEX_EXEC_BASE_ARGS,
+    ...(managed ? [] : [CODEX_SKIP_GIT_REPO_CHECK_ARG]),
+    "--", prompt,
+  ];
+}
+
 export interface CodexSandboxProbeResult {
   available: boolean;
   checkedAt: string;
@@ -89,7 +106,7 @@ export async function probeCodexSandbox(
 
   const checks: Array<{ label: string; args: string[] }> = [
     { label: "Codex sandbox self-test", args: ["sandbox", "--", "/bin/true"] },
-    { label: "Codex exec argument self-test", args: [...CODEX_EXEC_BASE_ARGS, "--help"] },
+    { label: "Codex exec argument self-test", args: [...CODEX_EXEC_BASE_ARGS, CODEX_SKIP_GIT_REPO_CHECK_ARG, "--help"] },
   ];
 
   for (const check of checks) {

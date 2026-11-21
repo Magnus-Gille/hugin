@@ -77,6 +77,18 @@ describe("toPushPanel", () => {
     expect(toPushPanel(panel)).toBeNull();
   });
 
+  it("drops a status panel whose state is outside Heimdall's {pass, warn, fail} contract (HUGIN-419)", () => {
+    // Heimdall's validatePanel() hard-rejects any other state with HTTP 400,
+    // so pushing it only produces a recurring journal warning.
+    const panel: TypedPanel = {
+      id: "hugin-learning-task-preflight",
+      label: "Authenticated learning-task preflight",
+      kind: "status",
+      state: "unknown",
+    };
+    expect(toPushPanel(panel)).toBeNull();
+  });
+
   it("drops a table panel whose rows are missing", () => {
     const panel: TypedPanel = {
       id: "broken-table",
