@@ -26,7 +26,7 @@ export const CODEX_SANDBOX_PROBE_COMMAND = "codex sandbox -- /bin/true";
 /**
  * Permission-bearing options of the task executor's `codex exec` call. The
  * executor spawns these followed by `--` and the prompt; the argument
- * self-test runs the very same list followed by `--help`, so the two cannot
+ * self-test runs the executor's option list (derived from `codexExecArgs`) followed by `--help`, so the two cannot
  * drift apart. Never substitute a bypass/unrestricted mode here.
  */
 export const CODEX_EXEC_BASE_ARGS: readonly string[] = [
@@ -49,6 +49,15 @@ export function codexExecArgs(context: string | undefined, prompt: string): stri
     ...(managed ? [] : [CODEX_SKIP_GIT_REPO_CHECK_ARG]),
     "--", prompt,
   ];
+}
+
+/**
+ * Argv of the model-free `--help` self-test: the non-managed executor argv
+ * (a superset of the managed one) with the `-- <prompt>` tail replaced by
+ * `--help`. Derived from `codexExecArgs` so the two cannot drift.
+ */
+export function codexExecProbeArgs(): string[] {
+  return [...codexExecArgs(undefined, "").slice(0, -2), "--help"];
 }
 
 export interface CodexSandboxProbeResult {
@@ -106,7 +115,7 @@ export async function probeCodexSandbox(
 
   const checks: Array<{ label: string; args: string[] }> = [
     { label: "Codex sandbox self-test", args: ["sandbox", "--", "/bin/true"] },
-    { label: "Codex exec argument self-test", args: [...CODEX_EXEC_BASE_ARGS, CODEX_SKIP_GIT_REPO_CHECK_ARG, "--help"] },
+    { label: "Codex exec argument self-test", args: codexExecProbeArgs() },
   ];
 
   for (const check of checks) {
