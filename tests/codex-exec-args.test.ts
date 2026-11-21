@@ -105,7 +105,7 @@ describe("Codex executor argv", () => {
     expect(result.exitCode).toBe(1);
     expect(mocks.spawnCalls).toEqual([{
       command: "codex",
-      args: ["exec", "--sandbox", "workspace-write", "-c", 'approval_policy="on-request"', "--", prompt],
+      args: ["exec", "--sandbox", "workspace-write", "-c", 'approval_policy="on-request"', "--skip-git-repo-check", "--", prompt],
     }]);
     __test__.resetState();
   });
@@ -134,5 +134,19 @@ describe("Codex executor argv", () => {
     expect(result.output).toBe("sandbox unavailable");
     expect(mocks.spawnCalls).toHaveLength(0);
     __test__.resetState();
+  });
+
+  it.each([
+    ["scratch", true],
+    ["files", true],
+    [undefined, true],
+    ["repo:hugin", false],
+  ])("context %s adds --skip-git-repo-check only when not a managed repo: %s", async (context, skip) => {
+    const { codexExecArgs } = await import("../src/codex-sandbox.js");
+    const args = codexExecArgs(context, "p");
+    expect(args.includes("--skip-git-repo-check")).toBe(skip);
+    expect(args).toEqual(expect.arrayContaining(["--sandbox", "workspace-write", "-c", 'approval_policy="on-request"']));
+    expect(args.slice(-2)).toEqual(["--", "p"]);
+    expect(args.join(" ")).not.toMatch(/bypass|danger|full-auto/);
   });
 });
