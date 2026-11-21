@@ -23,6 +23,62 @@ RESEARCH_PI_VERSION="${HUGIN_RESEARCH_PI_VERSION:-0.84.1}"
 # shellcheck source=lib/deploy-pi-remote-blocks.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/deploy-pi-remote-blocks.sh"
 
+# HUGIN-421: optional maintenance drain (docs/maintenance-drain.md). Off by
+# default so existing deploys are unchanged; HUGIN_DEPLOY_DRAIN=1 makes it
+# mandatory and fail-closed: the deploy aborts (and resumes admission) unless
+# Hugin is drained and ready. Requires HUGIN_MAINTENANCE_TOKEN in the Pi .env,
+# provisioned by the owner. Nothing here cancels, fails or replays a task.
+DEPLOY_DRAIN="${HUGIN_DEPLOY_DRAIN:-0}"
+DRAIN_TIMEOUT_MS="${HUGIN_DEPLOY_DRAIN_TIMEOUT_MS:-120000}"
+DRAIN_HOLD_MS="${HUGIN_DEPLOY_DRAIN_HOLD_MS:-900000}"
+DRAIN_MIN_REMAINING_MS="${HUGIN_DEPLOY_DRAIN_MIN_REMAINING_MS:-60000}"
+DRAIN_INSTANCE=""
+DRAIN_ACTIVE=0
+case "$DEPLOY_DRAIN" in 0 | 1) ;; *) echo "ERROR: HUGIN_DEPLOY_DRAIN must be 0 or 1." >&2; exit 1 ;; esac
+if [ "$DEPLOY_DRAIN" = 1 ]; then
+  for drain_value in "$DRAIN_TIMEOUT_MS" "$DRAIN_HOLD_MS" "$DRAIN_MIN_REMAINING_MS"; do
+    [[ "$drain_value" =~ ^[0-9]+$ ]] || { echo "ERROR: drain timings must be non-negative integers." >&2; exit 1; }
+  done
+  if [ "$DRAIN_MIN_REMAINING_MS" -lt 15000 ] || [ "$DRAIN_MIN_REMAINING_MS" -ge "$DRAIN_HOLD_MS" ]; then
+    echo "ERROR: HUGIN_DEPLOY_DRAIN_MIN_REMAINING_MS must be >= 15000 and below the hold." >&2
+    exit 1
+  fi
+  if [ "$DRAIN_TIMEOUT_MS" -gt 600000 ] || [ "$DRAIN_HOLD_MS" -le "$DRAIN_TIMEOUT_MS" ] || [ "$DRAIN_HOLD_MS" -lt 1000 ] || [ "$DRAIN_HOLD_MS" -gt 3600000 ]; then
+    echo "ERROR: need timeout <= 600000 ms and 1000 <= hold <= 3600000 ms with hold > timeout." >&2
+    exit 1
+  fi
+fi
+
+# Reversal recipe for the drain: resume admission. Best effort on any failure
+# exit; a restart or lease expiry reopens admission regardless.
+# Generate a maintenance block first and refuse an empty one: `ssh host ""`
+# would open an interactive shell instead of running anything.
+run_maintenance() {
+  local block
+  block="$(maintenance_remote_block "$@")" || return 1
+  [ -n "$block" ] || return 1
+  ssh -o ConnectTimeout=10 "$REMOTE" "$block"
+}
+drain_resume() {
+  if [ "$DRAIN_ACTIVE" = 1 ]; then
+    DRAIN_ACTIVE=0
+    echo "==> Resuming Hugin task admission..." >&2
+    run_maintenance resume "$REMOTE_DIR" >/dev/null ||
+      echo "  WARNING: could not resume admission; it reopens on restart or hold-lease expiry." >&2
+  fi
+}
+# Resume unconditionally while a drain is outstanding (any exit, including a
+# signal). Success paths clear DRAIN_ACTIVE once admission is confirmed open.
+on_deploy_exit() {
+  local rc=$?
+  drain_resume
+  return "$rc"
+}
+trap on_deploy_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 read_clean_deploy_sha() {
   local repo_root source_status source_sha
   if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
@@ -78,8 +134,42 @@ if [ "$POST_BUILD_SHA" != "$DEPLOY_SHA" ]; then
   exit 1
 fi
 
+if [ "$DEPLOY_DRAIN" = 1 ]; then
+  echo "==> Draining Hugin task admission (wait up to ${DRAIN_TIMEOUT_MS} ms)..."
+  # A failed drain may still have closed admission (409 busy), so mark it
+  # active before the call and let the EXIT trap resume on any failure.
+  DRAIN_ACTIVE=1
+  drain_rc=0
+  DRAIN_JSON="$(run_maintenance drain "$REMOTE_DIR" "$DRAIN_TIMEOUT_MS" "$DRAIN_HOLD_MS")" || drain_rc=$?
+  if [ "$drain_rc" -ne 0 ]; then
+    case "$drain_rc" in
+      11)
+        # 409 means either busy (state draining) or the 60-minute hold cap is
+        # spent (state open, busy true); the response state tells them apart.
+        if printf '%s' "$DRAIN_JSON" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{try{process.exit(JSON.parse(r).state==="open"?0:1)}catch{process.exit(1)}})'; then
+          echo "ERROR: drain refused: the 60-minute hold cap is spent (state open). Run resume or wait for work to be admitted again; deploy aborted, nothing restarted." >&2
+        else
+          echo "ERROR: Hugin busy: admitted work did not finish within ${DRAIN_TIMEOUT_MS} ms; deploy aborted, nothing restarted." >&2
+        fi
+        ;;
+      12)
+        DRAIN_ACTIVE=0 # endpoint disabled or token absent: admission was never closed
+        echo "ERROR: maintenance drain unavailable (HUGIN_MAINTENANCE_TOKEN not provisioned?); unset HUGIN_DEPLOY_DRAIN to deploy without it." >&2
+        ;;
+      *) echo "ERROR: maintenance drain failed (exit $drain_rc); deploy aborted." >&2 ;;
+    esac
+    exit 1
+  fi
+  if ! DRAIN_INSTANCE="$(printf '%s' "$DRAIN_JSON" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{const s=JSON.parse(r);if(s.ready!==true||!s.process_instance_id)process.exit(1);process.stdout.write(String(s.process_instance_id))})')"; then
+    echo "ERROR: drain response was not a ready snapshot; deploy aborted." >&2
+    exit 1
+  fi
+  echo "  Drained; instance $DRAIN_INSTANCE"
+fi
+
 echo "==> Invalidating prior deployment marker..."
-# This is deliberately the first remote mutation. Every later failure leaves
+# This is deliberately the first remote payload mutation (the optional drain
+# above only gates task admission and is reversed by resume). Every later failure leaves
 # the service markerless; only the final accepted health gate may stamp it.
 ssh "$REMOTE" "rm -f '$REMOTE_DIR/.deployed-commit' '$REMOTE_DIR/.deployed-commit.tmp'"
 
@@ -242,8 +332,26 @@ for pid in \$(pgrep -f 'node dist/main.js'); do
   fi
 done"
 
-echo "==> Restarting service..."
-ssh "$REMOTE" "XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart hugin.service && sleep 2 && XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status hugin.service --no-pager"
+if [ "$DEPLOY_DRAIN" = 1 ]; then
+  echo "==> Re-verifying drain and restarting in one remote command..."
+  CHECK_BLOCK="$(maintenance_remote_block check "$REMOTE_DIR" "$DRAIN_INSTANCE" "$DRAIN_MIN_REMAINING_MS")" || exit 1
+  [ -n "$CHECK_BLOCK" ] || { echo "ERROR: empty drain check block." >&2; exit 1; }
+  # One ssh command so no gap exists between the check and the restart; exit 97
+  # means the check refused (nothing restarted).
+  restart_rc=0
+  ssh -o ConnectTimeout=10 "$REMOTE" "( $CHECK_BLOCK
+  ) >/dev/null || exit 97
+  XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart hugin.service && sleep 2 && XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status hugin.service --no-pager" || restart_rc=$?
+  if [ "$restart_rc" -eq 97 ]; then
+    echo "ERROR: drain no longer valid (instance changed, not ready, or hold nearly expired). Payload synced but NOT restarted and the deployment is markerless; rerun the deploy." >&2
+    exit 1
+  elif [ "$restart_rc" -ne 0 ]; then
+    exit "$restart_rc"
+  fi
+else
+  echo "==> Restarting service..."
+  ssh "$REMOTE" "XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart hugin.service && sleep 2 && XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status hugin.service --no-pager"
+fi
 
 echo "==> Health check..."
 ssh "$REMOTE" "
@@ -263,6 +371,20 @@ ssh "$REMOTE" "
   echo 'in-service Codex sandbox self-test unavailable after 15 attempts' >&2
   exit 1
 "
+
+if [ "$DEPLOY_DRAIN" = 1 ]; then
+  # A restart reopens admission (in-memory state) in a NEW process. Require
+  # both state open and a different process_instance_id; otherwise the restart
+  # did not take effect on the drained instance: resume (via the EXIT trap) and
+  # fail markerless.
+  echo "==> Verifying task admission reopened in a new instance..."
+  if run_maintenance status "$REMOTE_DIR" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{try{const s=JSON.parse(r);process.exit(s.state==="open"&&s.process_instance_id&&s.process_instance_id!==process.argv[1]?0:1)}catch{process.exit(1)}})' "$DRAIN_INSTANCE"; then
+    DRAIN_ACTIVE=0
+  else
+    echo "ERROR: admission not confirmed open in a new Hugin instance after restart; failing markerless." >&2
+    exit 1
+  fi
+fi
 
 echo "==> Daily exam factory acceptance..."
 ssh "$REMOTE" "
