@@ -57,6 +57,20 @@ if [[ "$call" == *"curl -fsS http://127.0.0.1:3032/health"* ]]; then
   bash -c "$health_command"
   exit $?
 fi
+if [[ "$call" == *"/admin/maintenance"* ]]; then
+  # HUGIN-421: model the maintenance-drain endpoints at the ssh boundary.
+  if [[ "$call" == *"drain check failed"* ]]; then
+    exit "${FAKE_CHECK_RC:-0}"
+  elif [[ "$call" == *"/admin/maintenance/drain"* ]]; then
+    printf '{"state":"draining","ready":true,"process_instance_id":"inst-1","hold_expires_at":"2099-01-01T00:00:00.000Z"}\n'
+    exit "${FAKE_DRAIN_RC:-0}"
+  elif [[ "$call" == *"/admin/maintenance/resume"* ]]; then
+    exit "${FAKE_RESUME_RC:-0}"
+  else
+    printf '{"state":"%s"}\n' "${FAKE_STATUS_STATE:-open}"
+    exit 0
+  fi
+fi
 exit 0
 EOF
 
@@ -451,6 +465,131 @@ export FAKE_SSH_FAIL_MATCH=""
 cadence_fail_calls="$(cat "$CALL_LOG")"
 assert_contains "$cadence_fail_calls" "start hugin-experiment-cadence.service" "cadence failure reaches the acceptance gate"
 assert_not_contains "$cadence_fail_calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp' '/home/magnus/repos/hugin/.deployed-commit'" "failed cadence acceptance remains markerless"
+
+# HUGIN-421: the maintenance drain is opt-in. Without HUGIN_DEPLOY_DRAIN the
+# deploy must not touch the admin surface at all.
+: >"$CALL_LOG"
+(cd "$FULL_SOURCE" && bash "$DEPLOY_SCRIPT" testhost >/dev/null 2>&1) || fail "default deployment must still pass"
+assert_not_contains "$(cat "$CALL_LOG")" "admin/maintenance" "drain is off by default"
+
+run_drain_deploy() {
+  : >"$CALL_LOG"
+  set +e
+  (cd "$FULL_SOURCE" && HUGIN_DEPLOY_DRAIN=1 bash "$DEPLOY_SCRIPT" testhost >/dev/null 2>&1)
+  drain_rc=$?
+  set -e
+  drain_calls="$(cat "$CALL_LOG")"
+}
+
+# Success path: drain before the first remote mutation, re-verify right before
+# restart, confirm reopening after, and never resume on success.
+run_drain_deploy
+[[ "$drain_rc" -eq 0 ]] || fail "drained deployment should pass"
+assert_order "$drain_calls" "/admin/maintenance/drain" "rm -f '/home/magnus/repos/hugin/.deployed-commit'" "drain precedes marker invalidation"
+assert_order "$drain_calls" "drain check failed" "systemctl --user restart hugin.service" "drain is re-verified before restart"
+assert_order "$drain_calls" "systemctl --user restart hugin.service" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp'" "restart precedes stamp"
+assert_not_contains "$drain_calls" "/admin/maintenance/resume" "successful drained deploy does not resume"
+assert_contains "$drain_calls" "inst-1" "instance id is bound into the pre-restart check"
+assert_contains "$drain_calls" "HUGIN_MAINTENANCE_TOKEN=" "token is read on the host"
+
+# Busy: nothing is mutated, admission is resumed, deploy fails.
+export FAKE_DRAIN_RC=11
+run_drain_deploy
+export FAKE_DRAIN_RC=0
+[[ "$drain_rc" -ne 0 ]] || fail "busy drain must fail deployment"
+assert_not_contains "$drain_calls" "rsync " "busy drain prevents payload sync"
+assert_not_contains "$drain_calls" ".deployed-commit" "busy drain leaves the marker untouched"
+assert_not_contains "$drain_calls" "systemctl --user restart" "busy drain prevents restart"
+assert_contains "$drain_calls" "/admin/maintenance/resume" "busy drain resumes admission"
+
+# Unprovisioned token (exit 12) fails closed when the drain was requested.
+export FAKE_DRAIN_RC=12
+run_drain_deploy
+export FAKE_DRAIN_RC=0
+[[ "$drain_rc" -ne 0 ]] || fail "unavailable drain must fail a deployment that required it"
+assert_not_contains "$drain_calls" "rsync " "unavailable drain prevents payload sync"
+
+# Failed re-verification refuses the restart and resumes admission.
+export FAKE_CHECK_RC=13
+run_drain_deploy
+export FAKE_CHECK_RC=0
+[[ "$drain_rc" -ne 0 ]] || fail "failed drain re-verification must fail deployment"
+assert_not_contains "$drain_calls" "systemctl --user restart" "failed re-verification prevents restart"
+assert_not_contains "$drain_calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp'" "failed re-verification remains markerless"
+assert_contains "$drain_calls" "/admin/maintenance/resume" "failed re-verification resumes admission"
+
+# A still-draining instance after restart is resumed explicitly.
+export FAKE_STATUS_STATE=draining
+run_drain_deploy
+export FAKE_STATUS_STATE=open
+[[ "$drain_rc" -eq 0 ]] || fail "deployment passes when explicit post-restart resume succeeds"
+assert_contains "$drain_calls" "/admin/maintenance/resume" "still-draining instance after restart is resumed"
+
+# Invalid configuration is rejected before any remote command.
+: >"$CALL_LOG"
+set +e
+(cd "$FULL_SOURCE" && HUGIN_DEPLOY_DRAIN=1 HUGIN_DEPLOY_DRAIN_TIMEOUT_MS=900000 bash "$DEPLOY_SCRIPT" testhost >/dev/null 2>&1)
+bad_rc=$?
+set -e
+[[ "$bad_rc" -ne 0 ]] || fail "out-of-range drain timeout must be rejected"
+assert_not_contains "$(cat "$CALL_LOG")" "ssh " "invalid drain config stops before remote commands"
+
+# Execute the real remote block against a fake curl: token from .env reaches
+# curl only on stdin, exit codes map from HTTP status, and check enforces state.
+BLOCK_BIN="$TMP_DIR/block-bin"
+BLOCK_REMOTE="$TMP_DIR/block-remote"
+mkdir -p "$BLOCK_BIN" "$BLOCK_REMOTE"
+BLOCK_TOKEN="0123456789abcdef0123456789abcdef-secret"
+printf 'OTHER=1\nHUGIN_MAINTENANCE_TOKEN="%s"\n' "$BLOCK_TOKEN" >"$BLOCK_REMOTE/.env"
+cat >"$BLOCK_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$BLOCK_ARGV_LOG"
+cat >>"$BLOCK_STDIN_LOG"
+out=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; fi
+  shift
+done
+printf '%s' "$BLOCK_BODY" >"$out"
+printf '%s' "$BLOCK_CODE"
+EOF
+chmod +x "$BLOCK_BIN/curl"
+export BLOCK_ARGV_LOG="$TMP_DIR/block-argv.log" BLOCK_STDIN_LOG="$TMP_DIR/block-stdin.log"
+: >"$BLOCK_ARGV_LOG"
+: >"$BLOCK_STDIN_LOG"
+run_block() {
+  local code="$1" body="$2" block_cmd
+  shift 2
+  # Same substitution as the health test: the Pi's /usr/bin/node is local node here.
+  block_cmd="$(maintenance_remote_block "$@")"
+  block_cmd="${block_cmd//\/usr\/bin\/node/$(command -v node)}"
+  set +e
+  BLOCK_CODE="$code" BLOCK_BODY="$body" PATH="$BLOCK_BIN:$ORIGINAL_PATH" bash -c "$block_cmd" >/dev/null 2>&1
+  block_rc=$?
+  set -e
+}
+run_block 200 '{"ready":true}' drain "$BLOCK_REMOTE" 1000 5000
+[[ "$block_rc" -eq 0 ]] || fail "200 drain maps to exit 0"
+run_block 409 '{"busy":true}' drain "$BLOCK_REMOTE" 1000 5000
+[[ "$block_rc" -eq 11 ]] || fail "409 maps to exit 11 (busy)"
+run_block 404 '' status "$BLOCK_REMOTE"
+[[ "$block_rc" -eq 12 ]] || fail "404 maps to exit 12 (disabled)"
+run_block 500 '' resume "$BLOCK_REMOTE"
+[[ "$block_rc" -eq 1 ]] || fail "other HTTP status maps to exit 1"
+good_status='{"state":"draining","ready":true,"process_instance_id":"inst-9","hold_expires_at":"2099-01-01T00:00:00.000Z"}'
+run_block 200 "$good_status" check "$BLOCK_REMOTE" inst-9 60000
+[[ "$block_rc" -eq 0 ]] || fail "matching ready drain passes check"
+run_block 200 "$good_status" check "$BLOCK_REMOTE" other-instance 60000
+[[ "$block_rc" -eq 13 ]] || fail "changed instance id fails check"
+run_block 200 '{"state":"draining","ready":false,"process_instance_id":"inst-9","hold_expires_at":"2099-01-01T00:00:00.000Z"}' check "$BLOCK_REMOTE" inst-9 60000
+[[ "$block_rc" -eq 13 ]] || fail "not-ready drain fails check"
+run_block 200 '{"state":"draining","ready":true,"process_instance_id":"inst-9","hold_expires_at":"2000-01-01T00:00:00.000Z"}' check "$BLOCK_REMOTE" inst-9 60000
+[[ "$block_rc" -eq 13 ]] || fail "expired hold fails check"
+[[ "$(cat "$BLOCK_STDIN_LOG")" == *"Bearer $BLOCK_TOKEN"* ]] || fail "token is delivered to curl on stdin"
+assert_not_contains "$(cat "$BLOCK_ARGV_LOG")" "$BLOCK_TOKEN" "token never appears in curl argv"
+rm -f "$BLOCK_REMOTE/.env"
+run_block 200 '{}' status "$BLOCK_REMOTE"
+[[ "$block_rc" -eq 12 ]] || fail "missing token maps to exit 12 without calling curl"
 
 if [[ "$failures" -gt 0 ]]; then
   echo "$failures assertion(s) failed" >&2

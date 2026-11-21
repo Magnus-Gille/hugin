@@ -23,6 +23,44 @@ RESEARCH_PI_VERSION="${HUGIN_RESEARCH_PI_VERSION:-0.84.1}"
 # shellcheck source=lib/deploy-pi-remote-blocks.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/deploy-pi-remote-blocks.sh"
 
+# HUGIN-421: optional maintenance drain (docs/maintenance-drain.md). Off by
+# default so existing deploys are unchanged; HUGIN_DEPLOY_DRAIN=1 makes it
+# mandatory and fail-closed: the deploy aborts (and resumes admission) unless
+# Hugin is drained and ready. Requires HUGIN_MAINTENANCE_TOKEN in the Pi .env,
+# provisioned by the owner. Nothing here cancels, fails or replays a task.
+DEPLOY_DRAIN="${HUGIN_DEPLOY_DRAIN:-0}"
+DRAIN_TIMEOUT_MS="${HUGIN_DEPLOY_DRAIN_TIMEOUT_MS:-120000}"
+DRAIN_HOLD_MS="${HUGIN_DEPLOY_DRAIN_HOLD_MS:-900000}"
+DRAIN_MIN_REMAINING_MS="${HUGIN_DEPLOY_DRAIN_MIN_REMAINING_MS:-60000}"
+DRAIN_ACTIVE=0
+case "$DEPLOY_DRAIN" in 0 | 1) ;; *) echo "ERROR: HUGIN_DEPLOY_DRAIN must be 0 or 1." >&2; exit 1 ;; esac
+if [ "$DEPLOY_DRAIN" = 1 ]; then
+  for drain_value in "$DRAIN_TIMEOUT_MS" "$DRAIN_HOLD_MS" "$DRAIN_MIN_REMAINING_MS"; do
+    [[ "$drain_value" =~ ^[0-9]+$ ]] || { echo "ERROR: drain timings must be non-negative integers." >&2; exit 1; }
+  done
+  if [ "$DRAIN_TIMEOUT_MS" -gt 600000 ] || [ "$DRAIN_HOLD_MS" -le "$DRAIN_TIMEOUT_MS" ] || [ "$DRAIN_HOLD_MS" -lt 1000 ] || [ "$DRAIN_HOLD_MS" -gt 3600000 ]; then
+    echo "ERROR: need timeout <= 600000 ms and 1000 <= hold <= 3600000 ms with hold > timeout." >&2
+    exit 1
+  fi
+fi
+
+# Reversal recipe for the drain: resume admission. Best effort on any failure
+# exit; a restart or lease expiry reopens admission regardless.
+drain_resume() {
+  if [ "$DRAIN_ACTIVE" = 1 ]; then
+    DRAIN_ACTIVE=0
+    echo "==> Resuming Hugin task admission..." >&2
+    ssh "$REMOTE" "$(maintenance_remote_block resume "$REMOTE_DIR")" >/dev/null ||
+      echo "  WARNING: could not resume admission; it reopens on restart or hold-lease expiry." >&2
+  fi
+}
+on_deploy_exit() {
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then drain_resume; fi
+  return "$rc"
+}
+trap on_deploy_exit EXIT
+
 read_clean_deploy_sha() {
   local repo_root source_status source_sha
   if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
@@ -76,6 +114,28 @@ fi
 if [ "$POST_BUILD_SHA" != "$DEPLOY_SHA" ]; then
   echo "ERROR: deploy source HEAD changed during build; refusing remote mutation." >&2
   exit 1
+fi
+
+if [ "$DEPLOY_DRAIN" = 1 ]; then
+  echo "==> Draining Hugin task admission (wait up to ${DRAIN_TIMEOUT_MS} ms)..."
+  # A failed drain may still have closed admission (409 busy), so mark it
+  # active before the call and let the EXIT trap resume on any failure.
+  DRAIN_ACTIVE=1
+  drain_rc=0
+  DRAIN_JSON="$(ssh "$REMOTE" "$(maintenance_remote_block drain "$REMOTE_DIR" "$DRAIN_TIMEOUT_MS" "$DRAIN_HOLD_MS")")" || drain_rc=$?
+  if [ "$drain_rc" -ne 0 ]; then
+    case "$drain_rc" in
+      11) echo "ERROR: Hugin busy: admitted work did not finish within ${DRAIN_TIMEOUT_MS} ms; deploy aborted, nothing restarted." >&2 ;;
+      12) echo "ERROR: maintenance drain unavailable (HUGIN_MAINTENANCE_TOKEN not provisioned?); unset HUGIN_DEPLOY_DRAIN to deploy without it." >&2 ;;
+      *) echo "ERROR: maintenance drain failed (exit $drain_rc); deploy aborted." >&2 ;;
+    esac
+    exit 1
+  fi
+  if ! DRAIN_INSTANCE="$(printf '%s' "$DRAIN_JSON" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{const s=JSON.parse(r);if(s.ready!==true||!s.process_instance_id)process.exit(1);process.stdout.write(String(s.process_instance_id))})')"; then
+    echo "ERROR: drain response was not a ready snapshot; deploy aborted." >&2
+    exit 1
+  fi
+  echo "  Drained; instance $DRAIN_INSTANCE"
 fi
 
 echo "==> Invalidating prior deployment marker..."
@@ -242,6 +302,14 @@ for pid in \$(pgrep -f 'node dist/main.js'); do
   fi
 done"
 
+if [ "$DEPLOY_DRAIN" = 1 ]; then
+  echo "==> Re-verifying drain immediately before restart..."
+  if ! ssh "$REMOTE" "$(maintenance_remote_block check "$REMOTE_DIR" "$DRAIN_INSTANCE" "$DRAIN_MIN_REMAINING_MS")" >/dev/null; then
+    echo "ERROR: drain no longer valid (instance changed, not ready, or hold nearly expired); refusing restart." >&2
+    exit 1
+  fi
+fi
+
 echo "==> Restarting service..."
 ssh "$REMOTE" "XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart hugin.service && sleep 2 && XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status hugin.service --no-pager"
 
@@ -263,6 +331,18 @@ ssh "$REMOTE" "
   echo 'in-service Codex sandbox self-test unavailable after 15 attempts' >&2
   exit 1
 "
+
+if [ "$DEPLOY_DRAIN" = 1 ]; then
+  # A restart reopens admission (in-memory state). Confirm it did; if the same
+  # instance is somehow still draining, resume explicitly.
+  echo "==> Verifying task admission reopened..."
+  if ssh "$REMOTE" "$(maintenance_remote_block status "$REMOTE_DIR")" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>process.exit(JSON.parse(r).state==="open"?0:1))'; then
+    DRAIN_ACTIVE=0
+  else
+    drain_resume
+    echo "  Admission was not confirmed open after restart; resume attempted."
+  fi
+fi
 
 echo "==> Daily exam factory acceptance..."
 ssh "$REMOTE" "
