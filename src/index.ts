@@ -104,7 +104,7 @@ import {
 } from "./failure-classification.js";
 import {
   buildCodexSandboxFrictionEvent,
-  CODEX_EXEC_BASE_ARGS,
+  codexExecArgs,
   CODEX_SANDBOX_FAILURE_KIND,
   codexSandboxFailureClassification,
   probeCodexSandbox,
@@ -3067,7 +3067,7 @@ function spawnRuntime(
 
     // Spell out the former full-auto policy; current Codex no longer accepts
     // that shorthand. Keep task text behind `--` so it cannot become CLI flags.
-    const cmd = ["codex", [...CODEX_EXEC_BASE_ARGS, "--", task.prompt]];
+    const cmd = ["codex", codexExecArgs(task.context, task.prompt)];
 
     const managed = spawnOwnedProcess(cmd[0] as string, cmd[1] as string[], {
       cwd: task.workingDir,
