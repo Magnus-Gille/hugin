@@ -87,12 +87,15 @@ unchanged; `HUGIN_DEPLOY_DRAIN=1` makes the drain mandatory and fail-closed:
   `HUGIN_DEPLOY_DRAIN_HOLD_MS`, default 900000, must exceed the timeout) runs after
   the local build and before the marker is invalidated. 409 busy, 404/no token or any
   other error aborts with nothing mutated and admission resumed.
-- Immediately before restart the script re-checks, on the Pi, that the same
-  `process_instance_id` is still draining and ready with at least
-  `HUGIN_DEPLOY_DRAIN_MIN_REMAINING_MS` (default 60000) of hold left; otherwise it
-  refuses the restart and resumes.
-- After restart it requires `state: "open"` and resumes explicitly if not. Any non-zero
-  exit after the drain attempts a best-effort `resume` (EXIT trap).
+- Immediately before restart, in the same remote command as the restart (no gap),
+  the Pi checks that the same `process_instance_id` is still draining and ready with at
+  least `HUGIN_DEPLOY_DRAIN_MIN_REMAINING_MS` (default 60000, minimum 15000, below the
+  hold) left. If not, nothing is restarted: the deploy fails markerless with
+  "payload synced but NOT restarted; rerun the deploy" and admission is resumed.
+- After restart it requires `state: "open"` and a `process_instance_id` different from
+  the drained one; otherwise it fails markerless. Admission is resumed on every exit
+  while a drain is outstanding, including SIGTERM/SIGHUP/SIGINT (EXIT trap). A 409 with
+  `state: "open"` is reported as "hold cap spent", not busy.
 - The token is read on the Pi from `<repo>/.env` and given to curl via `--config -`;
   it never appears in ssh or curl argv. Provisioning `HUGIN_MAINTENANCE_TOKEN` remains an
   owner action.

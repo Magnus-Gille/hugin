@@ -28,6 +28,7 @@ EOF
 cat >"$FAKE_BIN/rsync" <<'EOF'
 #!/usr/bin/env bash
 printf 'rsync %s\n' "$*" >>"$CALL_LOG"
+if [[ -n "${FAKE_RSYNC_SLEEP:-}" ]]; then sleep "$FAKE_RSYNC_SLEEP"; fi
 if [[ "${FAKE_RSYNC_DIRTY_ON_SYNC:-0}" == "1" ]]; then
   printf 'sync dirtied source\n' >>tracked.txt
 fi
@@ -60,14 +61,20 @@ fi
 if [[ "$call" == *"/admin/maintenance"* ]]; then
   # HUGIN-421: model the maintenance-drain endpoints at the ssh boundary.
   if [[ "$call" == *"drain check failed"* ]]; then
-    exit "${FAKE_CHECK_RC:-0}"
+    # Combined check-and-restart command: exit 97 when the check refuses.
+    if [[ "${FAKE_CHECK_RC:-0}" != "0" ]]; then
+      printf 'CHECK_REFUSED\n' >>"$CALL_LOG"
+      exit 97
+    fi
+    printf 'RESTART_EXECUTED\n' >>"$CALL_LOG"
+    exit 0
   elif [[ "$call" == *"/admin/maintenance/drain"* ]]; then
-    printf '{"state":"draining","ready":true,"process_instance_id":"inst-1","hold_expires_at":"2099-01-01T00:00:00.000Z"}\n'
+    printf '{"state":"%s","ready":true,"busy":false,"process_instance_id":"inst-1","hold_expires_at":"2099-01-01T00:00:00.000Z"}\n' "${FAKE_DRAIN_STATE:-draining}"
     exit "${FAKE_DRAIN_RC:-0}"
   elif [[ "$call" == *"/admin/maintenance/resume"* ]]; then
     exit "${FAKE_RESUME_RC:-0}"
   else
-    printf '{"state":"%s"}\n' "${FAKE_STATUS_STATE:-open}"
+    printf '{"state":"%s","process_instance_id":"%s"}\n' "${FAKE_STATUS_STATE:-open}" "${FAKE_STATUS_INSTANCE:-inst-2}"
     exit 0
   fi
 fi
@@ -475,10 +482,11 @@ assert_not_contains "$(cat "$CALL_LOG")" "admin/maintenance" "drain is off by de
 run_drain_deploy() {
   : >"$CALL_LOG"
   set +e
-  (cd "$FULL_SOURCE" && HUGIN_DEPLOY_DRAIN=1 bash "$DEPLOY_SCRIPT" testhost >/dev/null 2>&1)
+  (cd "$FULL_SOURCE" && HUGIN_DEPLOY_DRAIN=1 bash "$DEPLOY_SCRIPT" testhost >"$TMP_DIR/drain.out" 2>&1)
   drain_rc=$?
   set -e
   drain_calls="$(cat "$CALL_LOG")"
+  drain_out="$(cat "$TMP_DIR/drain.out")"
 }
 
 # Success path: drain before the first remote mutation, re-verify right before
@@ -489,6 +497,8 @@ assert_order "$drain_calls" "/admin/maintenance/drain" "rm -f '/home/magnus/repo
 assert_order "$drain_calls" "drain check failed" "systemctl --user restart hugin.service" "drain is re-verified before restart"
 assert_order "$drain_calls" "systemctl --user restart hugin.service" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp'" "restart precedes stamp"
 assert_not_contains "$drain_calls" "/admin/maintenance/resume" "successful drained deploy does not resume"
+assert_contains "$drain_calls" "RESTART_EXECUTED" "successful drained deploy restarts after the check"
+assert_contains "$drain_calls" "ConnectTimeout=10" "maintenance ssh calls bound the connect time"
 assert_contains "$drain_calls" "inst-1" "instance id is bound into the pre-restart check"
 assert_contains "$drain_calls" "HUGIN_MAINTENANCE_TOKEN=" "token is read on the host"
 
@@ -499,7 +509,7 @@ export FAKE_DRAIN_RC=0
 [[ "$drain_rc" -ne 0 ]] || fail "busy drain must fail deployment"
 assert_not_contains "$drain_calls" "rsync " "busy drain prevents payload sync"
 assert_not_contains "$drain_calls" ".deployed-commit" "busy drain leaves the marker untouched"
-assert_not_contains "$drain_calls" "systemctl --user restart" "busy drain prevents restart"
+assert_not_contains "$drain_calls" "RESTART_EXECUTED" "busy drain prevents restart"
 assert_contains "$drain_calls" "/admin/maintenance/resume" "busy drain resumes admission"
 
 # Unprovisioned token (exit 12) fails closed when the drain was requested.
@@ -514,16 +524,83 @@ export FAKE_CHECK_RC=13
 run_drain_deploy
 export FAKE_CHECK_RC=0
 [[ "$drain_rc" -ne 0 ]] || fail "failed drain re-verification must fail deployment"
-assert_not_contains "$drain_calls" "systemctl --user restart" "failed re-verification prevents restart"
+assert_not_contains "$drain_calls" "RESTART_EXECUTED" "failed re-verification prevents restart"
+assert_contains "$drain_calls" "CHECK_REFUSED" "re-verification ran inside the combined check-and-restart command"
+assert_contains "$drain_out" "NOT restarted" "refused restart says the payload is synced but not restarted"
 assert_not_contains "$drain_calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp'" "failed re-verification remains markerless"
 assert_contains "$drain_calls" "/admin/maintenance/resume" "failed re-verification resumes admission"
 
-# A still-draining instance after restart is resumed explicitly.
+# After restart admission must be open in a NEW instance; a still-draining
+# state or an unchanged process_instance_id fails markerless and resumes.
 export FAKE_STATUS_STATE=draining
 run_drain_deploy
 export FAKE_STATUS_STATE=open
-[[ "$drain_rc" -eq 0 ]] || fail "deployment passes when explicit post-restart resume succeeds"
+[[ "$drain_rc" -ne 0 ]] || fail "still-draining instance after restart must fail deployment"
+assert_not_contains "$drain_calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp'" "still-draining restart remains markerless"
 assert_contains "$drain_calls" "/admin/maintenance/resume" "still-draining instance after restart is resumed"
+export FAKE_STATUS_INSTANCE=inst-1
+run_drain_deploy
+export FAKE_STATUS_INSTANCE=inst-2
+[[ "$drain_rc" -ne 0 ]] || fail "unchanged process instance after restart must fail deployment"
+assert_not_contains "$drain_calls" "mv '/home/magnus/repos/hugin/.deployed-commit.tmp'" "unchanged-instance restart remains markerless"
+
+# 409 distinguishes cap-spent (state open) from busy; exit 12 never resumes.
+export FAKE_DRAIN_RC=11 FAKE_DRAIN_STATE=open
+run_drain_deploy
+export FAKE_DRAIN_RC=0 FAKE_DRAIN_STATE=draining
+assert_contains "$drain_out" "hold cap is spent" "cap-spent 409 gets its own message"
+export FAKE_DRAIN_RC=11
+run_drain_deploy
+export FAKE_DRAIN_RC=0
+assert_contains "$drain_out" "Hugin busy" "busy 409 keeps the busy message"
+export FAKE_DRAIN_RC=12
+run_drain_deploy
+export FAKE_DRAIN_RC=0
+assert_not_contains "$drain_calls" "/admin/maintenance/resume" "disabled endpoint (exit 12) never closed admission so no resume"
+
+# Signal path: SIGTERM during the deploy resumes admission.
+: >"$CALL_LOG"
+(cd "$FULL_SOURCE" && FAKE_RSYNC_SLEEP=2 HUGIN_DEPLOY_DRAIN=1 exec bash "$DEPLOY_SCRIPT" testhost >/dev/null 2>&1) &
+sig_pid=$!
+for _ in $(seq 1 50); do
+  grep -q '^rsync ' "$CALL_LOG" && break
+  sleep 0.1
+done
+kill -TERM "$sig_pid" 2>/dev/null || true
+set +e
+wait "$sig_pid"
+sig_rc=$?
+set -e
+[[ "$sig_rc" -eq 143 ]] || fail "SIGTERM exits 143 (got $sig_rc)"
+assert_contains "$(cat "$CALL_LOG")" "/admin/maintenance/resume" "SIGTERM during deploy resumes admission"
+
+# Failed or empty block generation never reaches ssh with an empty command.
+for gen_override in 'return 1' ':'; do
+  GEN_DIR="$TMP_DIR/gen-$RANDOM"
+  mkdir -p "$GEN_DIR/scripts/lib"
+  cp "$DEPLOY_SCRIPT" "$GEN_DIR/scripts/deploy-pi.sh"
+  cp "$REMOTE_BLOCKS" "$GEN_DIR/scripts/lib/deploy-pi-remote-blocks.sh"
+  cp "$SCRIPT_DIR/../hugin.service" "$GEN_DIR/hugin.service"
+  printf 'maintenance_remote_block() { %s; }\n' "$gen_override" >>"$GEN_DIR/scripts/lib/deploy-pi-remote-blocks.sh"
+  : >"$CALL_LOG"
+  set +e
+  (cd "$FULL_SOURCE" && HUGIN_DEPLOY_DRAIN=1 bash "$GEN_DIR/scripts/deploy-pi.sh" testhost >/dev/null 2>&1)
+  gen_rc=$?
+  set -e
+  [[ "$gen_rc" -ne 0 ]] || fail "block generation failure ($gen_override) must fail deployment"
+  if grep -Eq '^ssh( -o ConnectTimeout=10)? testhost *$' "$CALL_LOG"; then
+    fail "empty ssh command executed after block generation failure ($gen_override)"
+  fi
+  assert_not_contains "$(cat "$CALL_LOG")" "rsync " "block generation failure ($gen_override) prevents payload sync"
+done
+
+# The remaining-hold floor protects the pre-restart check.
+: >"$CALL_LOG"
+set +e
+(cd "$FULL_SOURCE" && HUGIN_DEPLOY_DRAIN=1 HUGIN_DEPLOY_DRAIN_MIN_REMAINING_MS=1000 bash "$DEPLOY_SCRIPT" testhost >/dev/null 2>&1)
+floor_rc=$?
+set -e
+[[ "$floor_rc" -ne 0 ]] || fail "remaining-hold floor below 15000 ms must be rejected"
 
 # Invalid configuration is rejected before any remote command.
 : >"$CALL_LOG"
