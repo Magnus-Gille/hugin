@@ -165,7 +165,7 @@ describe("probeCodexSandbox exec argument self-test", () => {
     expect(result.available).toBe(true);
     expect(calls).toEqual([
       ["sandbox", "--", "/bin/true"],
-      ["exec", "--sandbox", "workspace-write", "-c", 'approval_policy="on-request"', "--help"],
+      ["exec", "--sandbox", "workspace-write", "-c", 'approval_policy="on-request"', "--skip-git-repo-check", "--help"],
     ]);
     expect(calls.flat()).not.toContain("--full-auto");
     expect(calls.flat().join(" ")).not.toMatch(/bypass|danger/);

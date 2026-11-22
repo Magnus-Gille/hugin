@@ -14,7 +14,7 @@ project Agent SDK; this observation of the global Claude CLI does not attest to
 the SDK version. Deploying the locked project dependencies remains separate.
 
 The task executor uses `codex exec --sandbox workspace-write -c
-'approval_policy="on-request"' -- <prompt>`. This preserves the former
+'approval_policy="on-request"' [--skip-git-repo-check] -- <prompt>`. The trust-check flag (HUGIN-422) is added only for non-`repo:` contexts, which are not git repositories; it changes neither sandbox nor approval. This preserves the former
 `--full-auto` sandbox/approval intent without relying on that removed shorthand.
 The option terminator keeps task text from changing CLI options. The
 model-free preflight run before every Codex task (and for `/health`) checks both
