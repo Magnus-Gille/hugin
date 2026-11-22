@@ -286,11 +286,13 @@ describe("runCli exit status", () => {
 });
 
 // Cross-check against Heimdall's real validator when a checkout is available.
+// describe.skipIf still runs the describe body, so the module is loaded lazily inside the tests.
 const heimdallPath = resolve(process.env.HEIMDALL_REPO ?? "../heimdall", "src/synthetic-journeys.js");
 describe.skipIf(!existsSync(heimdallPath))("agreement with Heimdall validateJourneyOutcome", () => {
-  const { validateJourneyOutcome } = createRequire(import.meta.url)(heimdallPath) as {
-    validateJourneyOutcome: (v: unknown) => { ok: boolean; errors: string[] };
-  };
+  const validateJourneyOutcome = (v: unknown): { ok: boolean; errors: string[] } =>
+    (createRequire(import.meta.url)(heimdallPath) as {
+      validateJourneyOutcome: (v: unknown) => { ok: boolean; errors: string[] };
+    }).validateJourneyOutcome(v);
   const failing = (over: Record<string, () => Response>) => router({ ...healthy, ...over });
 
   it("accepts every outcome this producer can emit", async () => {
